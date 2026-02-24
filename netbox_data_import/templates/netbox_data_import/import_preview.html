@@ -1,0 +1,138 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Import Preview{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+
+    {# Header #}
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="mdi mdi-eye"></i> Import Preview — Step 2 of 3</h5>
+        <span class="text-muted">{{ filename }}</span>
+      </div>
+      <div class="card-body">
+
+        {# Summary bar #}
+        <div class="d-flex gap-3 flex-wrap mb-3">
+          {% with c=result.counts %}
+          <span class="badge bg-success fs-6">
+            <i class="mdi mdi-plus-circle"></i>
+            {{ c.racks_created|default:0 }} rack{{ c.racks_created|default:0|pluralize }} to create
+          </span>
+          <span class="badge bg-success fs-6">
+            <i class="mdi mdi-plus-circle"></i>
+            {{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} to create
+          </span>
+          {% if c.racks_updated or c.devices_updated %}
+          <span class="badge bg-primary fs-6">
+            <i class="mdi mdi-pencil"></i>
+            {{ c.racks_updated|default:0|add:c.devices_updated|default:0 }} to update
+          </span>
+          {% endif %}
+          {% if c.skipped %}
+          <span class="badge bg-secondary fs-6">
+            <i class="mdi mdi-skip-next"></i>
+            {{ c.skipped }} skipped
+          </span>
+          {% endif %}
+          {% if c.errors %}
+          <span class="badge bg-danger fs-6">
+            <i class="mdi mdi-alert-circle"></i>
+            {{ c.errors }} error{{ c.errors|pluralize }}
+          </span>
+          {% endif %}
+          {% endwith %}
+        </div>
+
+        {# Action buttons #}
+        <div class="d-flex gap-2">
+          <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-secondary">
+            <i class="mdi mdi-arrow-left"></i> Back
+          </a>
+          {% if not result.has_errors or result.counts.errors == 0 %}
+          <form method="post" action="{% url 'plugins:netbox_data_import:import_run' %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-success">
+              <i class="mdi mdi-database-import"></i> Run Import
+            </button>
+          </form>
+          {% else %}
+          <form method="post" action="{% url 'plugins:netbox_data_import:import_run' %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-warning" title="There are errors — some rows will be skipped">
+              <i class="mdi mdi-database-import"></i> Run Anyway (skip errors)
+            </button>
+          </form>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+
+    {# Per-row table #}
+    <div class="card">
+      <div class="card-header">
+        <strong>Row-by-row preview</strong>
+        <span class="text-muted ms-2">({{ result.rows|length }} row{{ result.rows|length|pluralize }})</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover table-sm mb-0">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Source ID</th>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Action</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in result.rows %}
+            <tr class="
+              {% if row.action == 'create' %}table-success
+              {% elif row.action == 'update' %}table-primary
+              {% elif row.action == 'skip' %}table-secondary
+              {% elif row.action == 'error' %}table-danger
+              {% endif %}
+            ">
+              <td class="text-muted">{{ row.row_number }}</td>
+              <td><code>{{ row.source_id|default:"—" }}</code></td>
+              <td>{{ row.name|default:"—" }}</td>
+              <td>
+                {% if row.object_type == 'rack' %}
+                  <span class="badge bg-info">Rack</span>
+                {% elif row.object_type == 'device' %}
+                  <span class="badge bg-secondary">Device</span>
+                {% else %}
+                  <span class="badge bg-light text-dark">{{ row.object_type }}</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if row.action == 'create' %}
+                  <span class="badge bg-success"><i class="mdi mdi-plus"></i> Create</span>
+                {% elif row.action == 'update' %}
+                  <span class="badge bg-primary"><i class="mdi mdi-pencil"></i> Update</span>
+                {% elif row.action == 'skip' %}
+                  <span class="badge bg-secondary">Skip</span>
+                {% elif row.action == 'error' %}
+                  <span class="badge bg-danger"><i class="mdi mdi-alert"></i> Error</span>
+                {% endif %}
+              </td>
+              <td class="{% if row.action == 'error' %}text-danger{% endif %}">
+                {{ row.detail }}
+              </td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="6" class="text-center text-muted">No rows found in file.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

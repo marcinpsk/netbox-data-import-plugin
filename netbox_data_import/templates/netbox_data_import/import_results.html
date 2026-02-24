@@ -1,0 +1,90 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Import Results{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="mdi mdi-check-circle text-success"></i> Import Complete — Step 3 of 3</h5>
+      </div>
+      <div class="card-body">
+        <div class="d-flex gap-3 flex-wrap mb-3">
+          {% with c=result.counts %}
+          <span class="badge bg-success fs-6">{{ c.racks_created|default:0 }} rack{{ c.racks_created|default:0|pluralize }} created</span>
+          <span class="badge bg-success fs-6">{{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} created</span>
+          {% if c.racks_updated or c.devices_updated %}
+          <span class="badge bg-primary fs-6">{{ c.racks_updated|default:0|add:c.devices_updated|default:0 }} updated</span>
+          {% endif %}
+          {% if c.skipped %}<span class="badge bg-secondary fs-6">{{ c.skipped }} skipped</span>{% endif %}
+          {% if c.errors %}<span class="badge bg-danger fs-6">{{ c.errors }} error{{ c.errors|pluralize }}</span>{% endif %}
+          {% endwith %}
+        </div>
+        <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-primary">
+          <i class="mdi mdi-database-import"></i> New Import
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="table-responsive">
+        <table class="table table-hover table-sm mb-0">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Source ID</th>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Action</th>
+              <th>Detail / Link</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in result.rows %}
+            <tr class="
+              {% if row.action == 'create' %}table-success
+              {% elif row.action == 'update' %}table-primary
+              {% elif row.action == 'skip' %}table-secondary
+              {% elif row.action == 'error' %}table-danger
+              {% endif %}
+            ">
+              <td class="text-muted">{{ row.row_number }}</td>
+              <td><code>{{ row.source_id|default:"—" }}</code></td>
+              <td>
+                {% if row.netbox_url %}
+                  <a href="{{ row.netbox_url }}">{{ row.name|default:"—" }}</a>
+                {% else %}
+                  {{ row.name|default:"—" }}
+                {% endif %}
+              </td>
+              <td>
+                {% if row.object_type == 'rack' %}
+                  <span class="badge bg-info">Rack</span>
+                {% elif row.object_type == 'device' %}
+                  <span class="badge bg-secondary">Device</span>
+                {% else %}
+                  <span class="badge bg-light text-dark">{{ row.object_type }}</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if row.action == 'create' %}<span class="badge bg-success">Created</span>
+                {% elif row.action == 'update' %}<span class="badge bg-primary">Updated</span>
+                {% elif row.action == 'skip' %}<span class="badge bg-secondary">Skipped</span>
+                {% elif row.action == 'error' %}<span class="badge bg-danger">Error</span>
+                {% endif %}
+              </td>
+              <td class="{% if row.action == 'error' %}text-danger{% endif %}">{{ row.detail }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="6" class="text-center text-muted">No rows processed.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

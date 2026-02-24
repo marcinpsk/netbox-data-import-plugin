@@ -23,9 +23,9 @@ echo "  - Redis: $(timeout 3 bash -c 'cat < /dev/null > /dev/tcp/redis/6379' 2>/
 echo ""
 echo "🗂️ File System:"
 echo "  - NetBox venv: $(test -f /opt/netbox/venv/bin/activate && echo 'Exists' || echo 'Missing')"
-echo "  - Plugin directory: $(test -d /workspaces/netbox-InterfaceNameRules-plugin && echo 'Exists' || echo 'Missing')"
-echo "  - Plugin config: $(test -f /workspaces/netbox-InterfaceNameRules-plugin/.devcontainer/config/plugin-config.py && echo 'Found' || echo 'Missing (using defaults)')"
-echo "  - Extra plugins config: $(test -f /workspaces/netbox-InterfaceNameRules-plugin/.devcontainer/config/extra-plugins.py && echo 'Found' || echo 'Not configured')"
+echo "  - Plugin directory: $(test -d /workspaces/netbox-data-import-plugin && echo 'Exists' || echo 'Missing')"
+echo "  - Plugin config: $(test -f /workspaces/netbox-data-import-plugin/.devcontainer/config/plugin-config.py && echo 'Found' || echo 'Missing (using defaults)')"
+echo "  - Extra plugins config: $(test -f /workspaces/netbox-data-import-plugin/.devcontainer/config/extra-plugins.py && echo 'Found' || echo 'Not configured')"
 
 echo ""
 echo "🚀 Process Status:"

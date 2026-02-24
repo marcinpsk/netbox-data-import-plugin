@@ -1,0 +1,25 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Confirm Delete{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col col-md-6">
+    <div class="card border-danger">
+      <div class="card-header bg-danger text-white">
+        <strong>Confirm Delete</strong>
+      </div>
+      <div class="card-body">
+        <p>Are you sure you want to delete <strong>{{ object }}</strong>?</p>
+        <form method="post">
+          {% csrf_token %}
+          <div class="d-flex justify-content-between">
+            <a href="{{ return_url }}" class="btn btn-secondary">Cancel</a>
+            <button type="submit" class="btn btn-danger">Delete</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

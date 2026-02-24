@@ -1,0 +1,82 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+<div class="row">
+
+  {# Left column: profile properties #}
+  <div class="col col-md-5">
+    <div class="card">
+      <h5 class="card-header">Import Profile</h5>
+      <div class="card-body">
+        <table class="table table-hover attr-table">
+          <tr><th scope="row">Name</th><td>{{ object.name }}</td></tr>
+          <tr><th scope="row">Description</th><td>{{ object.description|placeholder }}</td></tr>
+          <tr><th scope="row">Sheet Name</th><td><code>{{ object.sheet_name }}</code></td></tr>
+          <tr><th scope="row">Source ID Column</th><td>{{ object.source_id_column|placeholder }}</td></tr>
+          <tr><th scope="row">Custom Field Name</th><td>{{ object.custom_field_name|placeholder }}</td></tr>
+          <tr><th scope="row">Update Existing</th><td>{% if object.update_existing %}<span class="badge bg-success">Yes</span>{% else %}<span class="badge bg-secondary">No</span>{% endif %}</td></tr>
+          <tr><th scope="row">Create Missing Device Types</th><td>{% if object.create_missing_device_types %}<span class="badge bg-success">Yes</span>{% else %}<span class="badge bg-secondary">No</span>{% endif %}</td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="card mt-3">
+      <div class="card-body text-center">
+        <a href="{% url 'plugins:netbox_data_import:import_setup' %}?profile={{ object.pk }}" class="btn btn-primary btn-lg">
+          <i class="mdi mdi-database-import"></i> Run Import with this Profile
+        </a>
+      </div>
+    </div>
+  </div>
+
+  {# Right column: mapping tables #}
+  <div class="col col-md-7">
+
+    {# Column Mappings #}
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Column Mappings</strong>
+        <a href="{% url 'plugins:netbox_data_import:columnmapping_add' object.pk %}" class="btn btn-sm btn-primary">
+          <i class="mdi mdi-plus-thick"></i> Add
+        </a>
+      </div>
+      {% if column_table.rows %}
+        {% include 'inc/table.html' with table=column_table %}
+      {% else %}
+        <div class="card-body text-muted">No column mappings configured.</div>
+      {% endif %}
+    </div>
+
+    {# Class → Role Mappings #}
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Class → Role Mappings</strong>
+        <a href="{% url 'plugins:netbox_data_import:classrolemapping_add' object.pk %}" class="btn btn-sm btn-primary">
+          <i class="mdi mdi-plus-thick"></i> Add
+        </a>
+      </div>
+      {% if class_role_table.rows %}
+        {% include 'inc/table.html' with table=class_role_table %}
+      {% else %}
+        <div class="card-body text-muted">No class→role mappings configured.</div>
+      {% endif %}
+    </div>
+
+    {# Device Type Mappings #}
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Device Type Mappings</strong>
+        <a href="{% url 'plugins:netbox_data_import:devicetypemapping_add' object.pk %}" class="btn btn-sm btn-primary">
+          <i class="mdi mdi-plus-thick"></i> Add
+        </a>
+      </div>
+      {% if device_type_table.rows %}
+        {% include 'inc/table.html' with table=device_type_table %}
+      {% else %}
+        <div class="card-body text-muted">No device type mappings configured.</div>
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+{% endblock %}

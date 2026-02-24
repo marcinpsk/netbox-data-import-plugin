@@ -8,7 +8,7 @@ source "$(dirname "$0")/load-aliases.sh" 2>/dev/null
 echo ""
 echo "🎯 NetBox Interface Name Rules Plugin Development Environment"
 
-if [ ! -f "/workspaces/netbox-InterfaceNameRules-plugin/.devcontainer/config/plugin-config.py" ]; then
+if [ ! -f "/workspaces/netbox-data-import-plugin/.devcontainer/config/plugin-config.py" ]; then
   echo ""
   echo "⚠️  Plugin configuration not found: .devcontainer/config/plugin-config.py"
   echo "   Create it: cp .devcontainer/config/plugin-config.py.example .devcontainer/config/plugin-config.py"

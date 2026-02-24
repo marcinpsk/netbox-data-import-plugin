@@ -9,9 +9,9 @@ Plugin configuration for the NetBox Interface Name Rules Plugin in the dev conta
 """
 
 PLUGINS = [
-    "netbox_interface_name_rules",
+    "netbox_data_import",
 ]
 
 PLUGINS_CONFIG = {
-    "netbox_interface_name_rules": {},
+    "netbox_data_import": {},
 }

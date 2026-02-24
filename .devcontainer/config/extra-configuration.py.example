@@ -24,7 +24,7 @@ BANNER_LOGIN = "Development access only"
 #     'version': 1,
 #     'disable_existing_loggers': False,
 #     'loggers': {
-#         'netbox_interface_name_rules': {
+#         'netbox_data_import': {
 #             'level': 'DEBUG',
 #             'propagate': True,
 #         },

@@ -1,0 +1,31 @@
+{% extends 'base/layout.html' %}
+{% load form_helpers %}
+
+{% block title %}Run Import{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col col-md-6">
+    <div class="card">
+      <div class="card-header">
+        <h5 class="mb-0"><i class="mdi mdi-database-import"></i> Run Import — Step 1 of 3: Setup</h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted">
+          Select an import profile, upload your Excel file, and choose the target site.
+          You will see a full preview before anything is written to NetBox.
+        </p>
+        <form method="post" enctype="multipart/form-data">
+          {% csrf_token %}
+          {% render_form form %}
+          <div class="d-flex justify-content-end mt-3">
+            <button type="submit" class="btn btn-primary">
+              <i class="mdi mdi-eye"></i> Preview Import
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

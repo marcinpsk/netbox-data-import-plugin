@@ -1,0 +1,26 @@
+{% extends 'base/layout.html' %}
+{% load form_helpers %}
+
+{% block title %}{{ profile.name }} — {% if object %}Edit{% else %}Add{% endif %} Device Type Mapping{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col col-md-6">
+    <div class="card">
+      <div class="card-header">
+        <strong><a href="{{ profile.get_absolute_url }}">{{ profile.name }}</a> — {% if object %}Edit{% else %}Add{% endif %} Device Type Mapping</strong>
+      </div>
+      <div class="card-body">
+        <form method="post">
+          {% csrf_token %}
+          {% render_form form %}
+          <div class="d-flex justify-content-between mt-3">
+            <a href="{{ profile.get_absolute_url }}" class="btn btn-secondary">Cancel</a>
+            <button type="submit" class="btn btn-primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

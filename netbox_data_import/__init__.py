@@ -16,7 +16,6 @@ class NetBoxDataImportConfig(PluginConfig):
     min_version = "4.2.0"
 
     def ready(self):
-        from . import signals  # noqa: F401
         super().ready()
 
 

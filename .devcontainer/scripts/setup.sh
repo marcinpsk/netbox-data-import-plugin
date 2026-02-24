@@ -3,7 +3,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 set -e
 
-PLUGIN_NAME="netbox_interface_name_rules"
+PLUGIN_NAME="netbox_data_import"
 PLUGIN_DISPLAY="Interface Name Rules"
 
 echo "🚀 Setting up NetBox ${PLUGIN_DISPLAY} Plugin development environment..."
@@ -15,8 +15,8 @@ echo "📦 Using NetBox Docker image: netboxcommunity/netbox:${NETBOX_VERSION}"
 detect_plugin_workspace() {
   if [ -f "$PWD/pyproject.toml" ]; then
     echo "$PWD"
-  elif [ -d "/workspaces/netbox-InterfaceNameRules-plugin" ] && [ -f "/workspaces/netbox-InterfaceNameRules-plugin/pyproject.toml" ]; then
-    echo "/workspaces/netbox-InterfaceNameRules-plugin"
+  elif [ -d "/workspaces/netbox-data-import-plugin" ] && [ -f "/workspaces/netbox-data-import-plugin/pyproject.toml" ]; then
+    echo "/workspaces/netbox-data-import-plugin"
   else
     local candidate
     candidate=$(find /workspaces -maxdepth 2 -type f -name pyproject.toml 2>/dev/null | head -n1 | xargs -r dirname || true)
@@ -36,7 +36,7 @@ if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
   export HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
 
   PLUGIN_WS_DIR_EARLY="$(detect_plugin_workspace)"
-  [ -z "$PLUGIN_WS_DIR_EARLY" ] && PLUGIN_WS_DIR_EARLY="/workspaces/netbox-InterfaceNameRules-plugin"
+  [ -z "$PLUGIN_WS_DIR_EARLY" ] && PLUGIN_WS_DIR_EARLY="/workspaces/netbox-data-import-plugin"
 
   # Try CA bundles from both plugin workspaces
   CA_BUNDLE_SRC=""

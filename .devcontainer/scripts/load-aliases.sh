@@ -6,7 +6,7 @@
 
 export PATH="/opt/netbox/venv/bin:$PATH"
 export DEBUG="${DEBUG:-True}"
-PLUGIN_DIR="/workspaces/netbox-InterfaceNameRules-plugin"
+PLUGIN_DIR="/workspaces/netbox-data-import-plugin"
 
 netbox-run-bg() {
   "$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh" --background
@@ -61,7 +61,7 @@ netbox-shell() {
 }
 
 netbox-test() {
-  (cd /opt/netbox/netbox && source /opt/netbox/venv/bin/activate && python manage.py test netbox_interface_name_rules "$@")
+  (cd /opt/netbox/netbox && source /opt/netbox/venv/bin/activate && python manage.py test netbox_data_import "$@")
 }
 
 netbox-manage() {
