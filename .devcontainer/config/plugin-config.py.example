@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """
-Plugin configuration for the NetBox Interface Name Rules Plugin in the dev container.
+Plugin configuration for the NetBox Data Import Plugin in the dev container.
 
 - Copy this file to .devcontainer/config/plugin-config.py
 - Edit values as needed.

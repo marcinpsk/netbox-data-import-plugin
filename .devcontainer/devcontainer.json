@@ -1,5 +1,5 @@
 {
-  "name": "NetBox Interface Name Rules Plugin Dev",
+  "name": "NetBox Data Import Plugin Dev",
   "dockerComposeFile": "docker-compose.yml",
   "service": "devcontainer",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
