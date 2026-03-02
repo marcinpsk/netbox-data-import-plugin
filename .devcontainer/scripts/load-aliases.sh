@@ -39,7 +39,7 @@ netbox-stop() {
     local PID
     PID=$(cat /tmp/netbox.pid 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-      if is_expected_pid "$PID" "python.*runserver.*8000"; then
+      if is_expected_pid "$PID" "manage\.py runserver.*8000"; then
         graceful_kill_pid "$PID"
         echo "   Stopped NetBox (PID: $PID)"
       else
@@ -52,7 +52,7 @@ netbox-stop() {
     local PID
     PID=$(cat /tmp/rqworker.pid 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-      if is_expected_pid "$PID" "python.*rqworker"; then
+      if is_expected_pid "$PID" "manage\.py rqworker"; then
         graceful_kill_pid "$PID"
         echo "   Stopped RQ worker (PID: $PID)"
       else
@@ -61,14 +61,14 @@ netbox-stop() {
     fi
     rm -f /tmp/rqworker.pid
   fi
-  if pgrep -f "python.*rqworker" >/dev/null 2>&1; then
+  if pgrep -f "manage\.py rqworker" >/dev/null 2>&1; then
     local ORPHAN_COUNT
-    ORPHAN_COUNT=$(pgrep -cf "python.*rqworker" 2>/dev/null || echo 0)
-    graceful_kill_pattern "python.*rqworker"
+    ORPHAN_COUNT=$(pgrep -cf "manage\.py rqworker" 2>/dev/null || echo 0)
+    graceful_kill_pattern "manage\.py rqworker"
     echo "   Killed $ORPHAN_COUNT orphaned RQ worker(s)"
   fi
-  if pgrep -f "python.*runserver.*8000" >/dev/null 2>&1; then
-    graceful_kill_pattern "python.*runserver.*8000"
+  if pgrep -f "manage\.py runserver.*8000" >/dev/null 2>&1; then
+    graceful_kill_pattern "manage\.py runserver.*8000"
     echo "   Killed orphaned NetBox server(s)"
   fi
   echo "✅ All processes stopped"
@@ -95,7 +95,7 @@ netbox-status() {
   local PID
   if [ -f /tmp/netbox.pid ]; then
     PID=$(cat /tmp/netbox.pid 2>/dev/null)
-    if [ -n "$PID" ] && is_expected_pid "$PID" "python.*runserver.*8000"; then
+    if [ -n "$PID" ] && is_expected_pid "$PID" "manage\.py runserver.*8000"; then
       echo "NetBox is running (PID: $PID)"
     else
       echo "NetBox is not running"
@@ -105,7 +105,7 @@ netbox-status() {
   fi
   if [ -f /tmp/rqworker.pid ]; then
     PID=$(cat /tmp/rqworker.pid 2>/dev/null)
-    if [ -n "$PID" ] && is_expected_pid "$PID" "python.*rqworker"; then
+    if [ -n "$PID" ] && is_expected_pid "$PID" "manage\.py rqworker"; then
       echo "RQ worker is running (PID: $PID)"
     else
       echo "RQ worker is not running"
@@ -119,7 +119,7 @@ rq-status() {
   local PID
   if [ -f /tmp/rqworker.pid ]; then
     PID=$(cat /tmp/rqworker.pid 2>/dev/null)
-    if [ -n "$PID" ] && is_expected_pid "$PID" "python.*rqworker"; then
+    if [ -n "$PID" ] && is_expected_pid "$PID" "manage\.py rqworker"; then
       echo "RQ worker is running (PID: $PID)"
     else
       echo "RQ worker is not running"

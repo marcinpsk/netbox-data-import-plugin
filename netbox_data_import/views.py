@@ -1355,24 +1355,24 @@ def _auto_match_single_device(Device, profile, source_id, device_name, serial, a
     """
     device = None
     if serial:
-        qs = Device.objects.filter(serial=serial)
-        if qs.count() == 1:
-            device = qs.first()
-        elif qs.count() > 1:
+        results = list(Device.objects.filter(serial=serial)[:2])
+        if len(results) == 1:
+            device = results[0]
+        elif len(results) > 1:
             return None, True
 
     if device is None and asset_tag:
-        qs = Device.objects.filter(asset_tag=asset_tag)
-        if qs.count() == 1:
-            device = qs.first()
-        elif qs.count() > 1:
+        results = list(Device.objects.filter(asset_tag=asset_tag)[:2])
+        if len(results) == 1:
+            device = results[0]
+        elif len(results) > 1:
             return None, True
 
     if device is None and device_name:
-        qs = Device.objects.filter(name=device_name)
-        if qs.count() == 1:
-            device = qs.first()
-        elif qs.count() > 1:
+        results = list(Device.objects.filter(name=device_name)[:2])
+        if len(results) == 1:
+            device = results[0]
+        elif len(results) > 1:
             return None, True
 
     return device, False

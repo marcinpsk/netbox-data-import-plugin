@@ -30,21 +30,21 @@ fi
 
 # Kill any orphaned processes (not tracked by PID file)
 echo "🧹 Cleaning up orphaned processes..."
-if pgrep -f "python.*rqworker" >/dev/null 2>&1; then
+if pgrep -f "manage\.py rqworker" >/dev/null 2>&1; then
   echo "   Found orphaned RQ workers, killing..."
-  graceful_kill_pattern "python.*rqworker"
+  graceful_kill_pattern "manage\.py rqworker"
 fi
 
-if pgrep -f "python.*runserver.*8000" >/dev/null 2>&1; then
+if pgrep -f "manage\.py runserver.*8000" >/dev/null 2>&1; then
   echo "   Found orphaned NetBox servers, killing..."
-  graceful_kill_pattern "python.*runserver.*8000"
+  graceful_kill_pattern "manage\.py runserver.*8000"
 fi
 
 # Stop any tracked processes from PID files
 if [ -f /tmp/netbox.pid ]; then
   OLD_PID=$(cat /tmp/netbox.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    if is_expected_pid "$OLD_PID" "python.*runserver.*8000"; then
+    if is_expected_pid "$OLD_PID" "manage\.py runserver.*8000"; then
       graceful_kill_pid "$OLD_PID"
     else
       echo "⚠️  Skipping stale /tmp/netbox.pid (PID $OLD_PID is not NetBox runserver)"
@@ -56,7 +56,7 @@ fi
 if [ -f /tmp/rqworker.pid ]; then
   OLD_PID=$(cat /tmp/rqworker.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    if is_expected_pid "$OLD_PID" "python.*rqworker"; then
+    if is_expected_pid "$OLD_PID" "manage\.py rqworker"; then
       graceful_kill_pid "$OLD_PID"
     else
       echo "⚠️  Skipping stale /tmp/rqworker.pid (PID $OLD_PID is not rqworker)"
@@ -113,5 +113,7 @@ else
   echo "📍 Access NetBox at: $ACCESS_URL"
   echo "💡 If clicking the URL opens 0.0.0.0:8000, manually type: localhost:8000"
   echo ""
+  # Kill the background RQ worker when this script exits (Ctrl-C / SIGTERM)
+  trap 'kill "$RQ_PID" 2>/dev/null; rm -f /tmp/rqworker.pid' EXIT INT TERM
   python manage.py runserver 0.0.0.0:8000
 fi

@@ -145,7 +145,13 @@ def _apply_transform_rules(row_dict: dict, raw_row, raw_headers: dict, transform
         if raw_value is None:
             continue
         raw_str = str(raw_value).strip()
-        m = re.fullmatch(rule.pattern, raw_str)
+        try:
+            m = re.fullmatch(rule.pattern, raw_str)
+        except re.error as exc:
+            raise ParseError(
+                f"Invalid regex pattern '{rule.pattern}' in transform rule for column "
+                f"'{rule.source_column}' (value: {raw_str!r}): {exc}"
+            ) from exc
         if m and rule.group_1_target and len(m.groups()) >= 1:
             row_dict[rule.group_1_target] = m.group(1)
         if m and rule.group_2_target and len(m.groups()) >= 2:
@@ -291,7 +297,8 @@ def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, profile, result, dr
         return
     seen_manufacturers.add(mfg_slug)
     if not dry_run:
-        Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
+        if profile.create_missing_device_types:
+            Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
     elif not Manufacturer.objects.filter(slug=mfg_slug).exists() and profile.create_missing_device_types:
         result.rows.append(
             RowResult(
@@ -631,7 +638,7 @@ def _preview_device_row(
             profile, source_id, site, device_name, serial, asset_tag, Device
         )
         if matched_device is not None:
-            action = "update"
+            action = "update" if profile.update_existing else "skip"
             detail = f"Matched to existing device '{matched_device.name}' (by {match_method})"
         else:
             action = "create"
@@ -701,20 +708,16 @@ def _write_device_row(
         )
 
     rack = rack_map.get(rack_name) if rack_name else None
+    if rack_name and rack is None:
+        rack = Rack.objects.filter(site=site, name=rack_name).first()
 
     device = None
     match_method = "name"
     try:
         device = Device.objects.get(site=site, name=device_name)
     except Device.DoesNotExist:
-        if serial:
-            device = Device.objects.filter(serial=serial).first()
-            if device:
-                match_method = "serial"
-        if device is None and asset_tag:
-            device = Device.objects.filter(asset_tag=asset_tag).first()
-            if device:
-                match_method = "asset tag"
+        # Fall back to source-ID link, serial, and asset_tag (mirrors preview matching)
+        device, match_method = _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device)
 
     if device is not None:
         if profile.update_existing:
