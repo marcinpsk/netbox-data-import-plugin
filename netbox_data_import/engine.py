@@ -627,7 +627,10 @@ def _preview_device_row(
         )
 
     rack_name = str(row.get("rack_name", "")).strip()
-    rack_label = rack_name if rack_name in rack_map else f"{rack_name} (not found)"
+    if rack_name:
+        rack_label = rack_name if rack_name in rack_map else f"{rack_name} (not found)"
+    else:
+        rack_label = "(no rack)"
     position = row.get("u_position")
 
     try:
