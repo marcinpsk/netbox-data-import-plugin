@@ -66,7 +66,7 @@ if [ -f /tmp/rqworker.pid ]; then
 fi
 
 # Activate NetBox virtual environment
-source /opt/netbox/venv/bin/activate
+source /opt/netbox/venv/bin/activate || { echo "ERROR: Failed to activate venv at /opt/netbox/venv" >&2; exit 1; }
 
 # Navigate to NetBox directory
 if ! cd /opt/netbox/netbox; then
@@ -77,7 +77,7 @@ fi
 # Start RQ worker in background
 echo "⚙️  Starting RQ worker..."
 (
-  source /opt/netbox/venv/bin/activate
+  source /opt/netbox/venv/bin/activate || { echo "ERROR: RQ worker subshell: failed to activate venv" >&2; exit 1; }
   if ! cd /opt/netbox/netbox; then
     echo "ERROR: RQ worker subshell: failed to cd into /opt/netbox/netbox" >&2
     exit 1
@@ -93,7 +93,7 @@ if [ "$BACKGROUND" = true ]; then
   echo "🚀 Starting NetBox in background"
   (
     export DEBUG="${DEBUG:-True}"
-    source /opt/netbox/venv/bin/activate
+    source /opt/netbox/venv/bin/activate || { echo "ERROR: NetBox subshell: failed to activate venv" >&2; exit 1; }
     if ! cd /opt/netbox/netbox; then
       echo "ERROR: NetBox subshell: failed to cd into /opt/netbox/netbox" >&2
       exit 1
@@ -113,7 +113,14 @@ else
   echo "📍 Access NetBox at: $ACCESS_URL"
   echo "💡 If clicking the URL opens 0.0.0.0:8000, manually type: localhost:8000"
   echo ""
-  # Kill the background RQ worker when this script exits (Ctrl-C / SIGTERM)
-  trap 'kill "$RQ_PID" 2>/dev/null; rm -f /tmp/rqworker.pid' EXIT INT TERM
+  # Gracefully shut down the background RQ worker when this script exits
+  _cleanup_rq() {
+    kill -15 "$RQ_PID" 2>/dev/null || true
+    local i=0
+    while kill -0 "$RQ_PID" 2>/dev/null && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done
+    kill -0 "$RQ_PID" 2>/dev/null && kill -9 "$RQ_PID" 2>/dev/null || true
+    rm -f /tmp/rqworker.pid
+  }
+  trap '_cleanup_rq' EXIT INT TERM
   python manage.py runserver 0.0.0.0:8000
 fi

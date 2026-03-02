@@ -1347,7 +1347,7 @@ class SearchNetBoxObjectsView(LoginRequiredMixin, View):
         return JsonResponse({"results": results})
 
 
-def _auto_match_single_device(Device, profile, source_id, device_name, serial, asset_tag):
+def _auto_match_single_device(device_model, device_name, serial, asset_tag):
     """Try to match a single device row to an existing NetBox device.
 
     Returns (device_or_None, is_ambiguous).  Matching priority: serial →
@@ -1355,21 +1355,21 @@ def _auto_match_single_device(Device, profile, source_id, device_name, serial, a
     """
     device = None
     if serial:
-        results = list(Device.objects.filter(serial=serial)[:2])
+        results = list(device_model.objects.filter(serial=serial)[:2])
         if len(results) == 1:
             device = results[0]
         elif len(results) > 1:
             return None, True
 
     if device is None and asset_tag:
-        results = list(Device.objects.filter(asset_tag=asset_tag)[:2])
+        results = list(device_model.objects.filter(asset_tag=asset_tag)[:2])
         if len(results) == 1:
             device = results[0]
         elif len(results) > 1:
             return None, True
 
     if device is None and device_name:
-        results = list(Device.objects.filter(name=device_name)[:2])
+        results = list(device_model.objects.filter(name=device_name)[:2])
         if len(results) == 1:
             device = results[0]
         elif len(results) > 1:
@@ -1409,7 +1409,7 @@ class AutoMatchDevicesView(LoginRequiredMixin, View):
                 already += 1
                 continue
 
-            device, is_ambiguous = _auto_match_single_device(Device, profile, source_id, device_name, serial, asset_tag)
+            device, is_ambiguous = _auto_match_single_device(Device, device_name, serial, asset_tag)
             if is_ambiguous:
                 ambiguous += 1
                 continue

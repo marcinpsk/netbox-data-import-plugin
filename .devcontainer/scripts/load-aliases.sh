@@ -225,7 +225,7 @@ dev-help() {
   echo "  diagnose            : Run startup diagnostics"
   echo "  dev-help            : Show this help message"
   echo ""
-  echo "📖 NetBox available at: http://localhost:8000 (${SUPERUSER_NAME:-admin}/${SUPERUSER_PASSWORD:-admin})"
+  echo "📖 NetBox available at: http://localhost:8000 (user: ${SUPERUSER_NAME:-admin}, password: see \$SUPERUSER_PASSWORD)"
 }
 
 echo "✅ Dev helpers loaded! Try: rq-status, rq-stats, rq-recent, dev-help"

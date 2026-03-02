@@ -8,6 +8,12 @@
 graceful_kill_pid() {
   local pid="$1"
   [ -z "$pid" ] && return 1
+  # Reject non-positive-integer PIDs to prevent accidental group kills
+  case "$pid" in
+    ''|*[!0-9]*) echo "graceful_kill_pid: invalid PID '$pid'" >&2; return 1 ;;
+  esac
+  [ "$pid" -le 0 ] 2>/dev/null && { echo "graceful_kill_pid: PID must be > 0" >&2; return 1; }
+  kill -0 "$pid" 2>/dev/null || return 1
   kill -15 "$pid" 2>/dev/null || true
   sleep 2
   kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true

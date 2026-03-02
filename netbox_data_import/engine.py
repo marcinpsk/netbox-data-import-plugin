@@ -10,6 +10,7 @@ run_import(rows, profile, context, dry_run=True)  ->  ImportResult
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -19,6 +20,8 @@ from django.utils.text import slugify
 import openpyxl
 
 from .models import ImportProfile
+
+logger = logging.getLogger(__name__)
 
 
 class ParseError(Exception):
@@ -257,12 +260,6 @@ def _resolve_device_type_slugs(make: str, model: str, profile: ImportProfile) ->
 # ---------------------------------------------------------------------------
 
 # Value-translation maps (shared across passes)
-_SIDE_MAP = {
-    "front": None,  # filled lazily once DeviceFaceChoices is imported
-    "back": None,
-    "rear": None,
-}
-_AIRFLOW_MAP = {}
 _STATUS_MAP = {
     "live": "active",
     "production": "active",
@@ -570,7 +567,7 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
 
     Returns (device, match_method) or (None, None).
     """
-    existing_match = profile.device_matches.filter(source_id=source_id).first()
+    existing_match = profile.device_matches.filter(source_id=source_id).first() if source_id else None
     matched_device = None
     match_method = None
     if existing_match:
@@ -584,15 +581,19 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
         try:
             matched_device = Device.objects.get(serial=serial)
             match_method = "serial"
-        except (Device.DoesNotExist, Device.MultipleObjectsReturned):
+        except Device.DoesNotExist:
             pass
+        except Device.MultipleObjectsReturned:
+            logger.warning("Ambiguous serial match for serial=%r; skipping auto-match", serial)
 
     if matched_device is None and asset_tag:
         try:
             matched_device = Device.objects.get(asset_tag=asset_tag)
             match_method = "asset tag"
-        except (Device.DoesNotExist, Device.MultipleObjectsReturned):
+        except Device.DoesNotExist:
             pass
+        except Device.MultipleObjectsReturned:
+            logger.warning("Ambiguous asset_tag match for asset_tag=%r; skipping auto-match", asset_tag)
 
     return matched_device, match_method
 
