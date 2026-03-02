@@ -1,0 +1,101 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'base/layout.html' %}
+
+{% block title %}Device Type Analysis{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="mdi mdi-magnify"></i> Device Type Analysis</h5>
+        {% if profile %}
+        <span class="text-muted">Profile: <strong>{{ profile.name }}</strong></span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <p class="text-muted mb-2">
+          Shows explicit <strong>Device Type Mappings</strong> and whether each mapped device type
+          exists in NetBox. Use this to identify gaps before running an import.
+        </p>
+
+        {# Profile filter #}
+        <div class="d-flex gap-2 flex-wrap mb-3">
+          <a href="{% url 'plugins:netbox_data_import:device_type_analysis' %}"
+             class="btn btn-sm {% if not profile %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+            All profiles
+          </a>
+          {% for p in profiles %}
+          <a href="{% url 'plugins:netbox_data_import:device_type_analysis_profile' p.pk %}"
+             class="btn btn-sm {% if profile.pk == p.pk %}btn-primary{% else %}btn-outline-secondary{% endif %}">
+            {{ p.name }}
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Explicit Mappings</strong>
+        <span class="text-muted ms-2">{{ entries|length }} mapping{{ entries|length|pluralize }}</span>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover table-sm mb-0">
+          <thead>
+            <tr>
+              <th>Profile</th>
+              <th>Source Make</th>
+              <th>Source Model</th>
+              <th>Manufacturer Slug</th>
+              <th>Device Type Slug</th>
+              <th>In NetBox?</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in entries %}
+            <tr class="{% if e.exists_in_netbox %}table-success{% else %}table-warning{% endif %}">
+              <td>{{ e.profile.name }}</td>
+              <td><code>{{ e.source_make }}</code></td>
+              <td><code>{{ e.source_model }}</code></td>
+              <td><code>{{ e.manufacturer_slug }}</code></td>
+              <td><code>{{ e.device_type_slug }}</code></td>
+              <td>
+                {% if e.exists_in_netbox %}
+                  <span class="badge bg-success"><i class="mdi mdi-check"></i> Yes</span>
+                {% else %}
+                  <span class="badge text-white" style="background:#e6a817;"><i class="mdi mdi-alert"></i> Missing</span>
+                {% endif %}
+              </td>
+              <td class="text-end">
+                <a href="{% url 'plugins:netbox_data_import:devicetypemapping_edit' e.mapping_pk %}"
+                   class="btn btn-sm btn-outline-warning">
+                  <i class="mdi mdi-pencil"></i>
+                </a>
+                <a href="{% url 'plugins:netbox_data_import:devicetypemapping_delete' e.mapping_pk %}"
+                   class="btn btn-sm btn-outline-danger">
+                  <i class="mdi mdi-trash-can-outline"></i>
+                </a>
+              </td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="7" class="text-center text-muted py-3">
+                No explicit device type mappings found.
+                {% if profile %}
+                <a href="{% url 'plugins:netbox_data_import:devicetypemapping_add' profile.pk %}">Add one</a>.
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

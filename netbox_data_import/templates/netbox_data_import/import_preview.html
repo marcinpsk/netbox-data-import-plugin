@@ -1,3 +1,5 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
 {% extends 'base/layout.html' %}
 
 {% block title %}Import Preview{% endblock %}
@@ -17,28 +19,34 @@
         {# Summary bar #}
         <div class="d-flex gap-3 flex-wrap mb-3">
           {% with c=result.counts %}
-          <span class="badge bg-success fs-6">
+          <span class="badge fs-6 text-white" style="background:#198754;">
             <i class="mdi mdi-plus-circle"></i>
             {{ c.racks_created|default:0 }} rack{{ c.racks_created|default:0|pluralize }} to create
           </span>
-          <span class="badge bg-success fs-6">
+          <span class="badge fs-6 text-white" style="background:#198754;">
             <i class="mdi mdi-plus-circle"></i>
             {{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} to create
           </span>
           {% if c.racks_updated or c.devices_updated %}
-          <span class="badge bg-primary fs-6">
+          <span class="badge fs-6 text-white" style="background:#0d6efd;">
             <i class="mdi mdi-pencil"></i>
             {{ c.racks_updated|default:0|add:c.devices_updated|default:0 }} to update
           </span>
           {% endif %}
           {% if c.skipped %}
-          <span class="badge bg-secondary fs-6">
+          <span class="badge fs-6 text-white" style="background:#6c757d;">
             <i class="mdi mdi-skip-next"></i>
             {{ c.skipped }} skipped
           </span>
           {% endif %}
+          {% if c.ignored %}
+          <span class="badge fs-6 text-white" style="background:#495057;">
+            <i class="mdi mdi-eye-off"></i>
+            {{ c.ignored }} ignored
+          </span>
+          {% endif %}
           {% if c.errors %}
-          <span class="badge bg-danger fs-6">
+          <span class="badge fs-6 text-white" style="background:#dc3545;">
             <i class="mdi mdi-alert-circle"></i>
             {{ c.errors }} error{{ c.errors|pluralize }}
           </span>
@@ -47,11 +55,32 @@
         </div>
 
         {# Action buttons #}
-        <div class="d-flex gap-2">
+        <div class="d-flex gap-2 flex-wrap align-items-center">
           <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-secondary">
             <i class="mdi mdi-arrow-left"></i> Back
           </a>
-          {% if not result.has_errors or result.counts.errors == 0 %}
+          {% if view_mode == 'racks' %}
+          <a href="?view=rows" class="btn btn-outline-secondary">
+            <i class="mdi mdi-table"></i> Row view
+          </a>
+          {% else %}
+          <a href="?view=racks" class="btn btn-outline-secondary">
+            <i class="mdi mdi-server"></i> Rack view
+          </a>
+          {% endif %}
+
+          {% if profile_id %}
+          {# Auto-match existing devices #}
+          <form method="post" action="{% url 'plugins:netbox_data_import:auto_match_devices' %}" class="d-inline">
+            {% csrf_token %}
+            <input type="hidden" name="profile_id" value="{{ profile_id }}">
+            <button type="submit" class="btn btn-outline-info" title="Scan all device rows and auto-link by name to existing NetBox devices">
+              <i class="mdi mdi-link-variant"></i> Auto-match existing
+            </button>
+          </form>
+          {% endif %}
+
+          {% if result.counts.errors == 0 %}
           <form method="post" action="{% url 'plugins:netbox_data_import:import_run' %}">
             {% csrf_token %}
             <button type="submit" class="btn btn-success">
@@ -59,23 +88,108 @@
             </button>
           </form>
           {% else %}
-          <form method="post" action="{% url 'plugins:netbox_data_import:import_run' %}">
-            {% csrf_token %}
-            <button type="submit" class="btn btn-warning" title="There are errors — some rows will be skipped">
-              <i class="mdi mdi-database-import"></i> Run Anyway (skip errors)
-            </button>
-          </form>
+          <button class="btn btn-danger" disabled title="Resolve all {{ result.counts.errors }} error{{ result.counts.errors|pluralize }} before importing">
+            <i class="mdi mdi-alert-circle"></i>
+            {{ result.counts.errors }} error{{ result.counts.errors|pluralize }} — resolve before import
+          </button>
           {% endif %}
         </div>
+
+        {% if result.counts.errors %}
+        <div class="alert alert-warning mt-3 mb-0">
+          <i class="mdi mdi-information"></i>
+          <strong>{{ result.counts.errors }} row{{ result.counts.errors|pluralize }} need attention.</strong>
+          Use the buttons in the last column to add mappings, link existing devices, or ignore rows.
+          The preview refreshes automatically after each fix.
+        </div>
+        {% endif %}
 
       </div>
     </div>
 
-    {# Per-row table #}
+    {% if view_mode == 'racks' %}
+    {# Rack view #}
+    <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3">
+      {% for rack_name, group in result.rack_groups.items %}
+      <div class="col">
+        <div class="card h-100">
+          <div class="card-header d-flex justify-content-between align-items-center
+            {% if group.rack_row %}
+              {% if group.rack_row.action == 'create' %}bg-success text-white
+              {% elif group.rack_row.action == 'update' %}bg-primary text-white
+              {% elif group.rack_row.action == 'error' %}bg-danger text-white
+              {% endif %}
+            {% endif %}
+          ">
+            <strong><i class="mdi mdi-server-network"></i> {{ rack_name }}</strong>
+            {% if group.rack_row %}
+              <span class="badge bg-light text-dark">
+                {% if group.rack_row.action == 'create' %}Create
+                {% elif group.rack_row.action == 'update' %}Update
+                {% elif group.rack_row.action == 'skip' %}Existing
+                {% elif group.rack_row.action == 'error' %}Error
+                {% endif %}
+              </span>
+            {% else %}
+              <span class="badge bg-secondary">No rack row</span>
+            {% endif %}
+          </div>
+          <div class="card-body p-2">
+            {% if group.devices %}
+            <ul class="list-group list-group-flush">
+              {% for dev in group.devices %}
+              <li class="list-group-item d-flex justify-content-between align-items-center py-1 px-2
+                {% if dev.action == 'ignore' %}text-decoration-line-through text-muted{% endif %}
+              ">
+                <span>
+                  {% if dev.action == 'create' %}<span class="badge bg-success me-1">+</span>
+                  {% elif dev.action == 'update' %}<span class="badge bg-primary me-1">~</span>
+                  {% elif dev.action == 'skip' %}<span class="badge bg-secondary me-1">—</span>
+                  {% elif dev.action == 'error' %}<span class="badge bg-danger me-1">!</span>
+                  {% elif dev.action == 'ignore' %}<span class="badge bg-dark me-1">✕</span>
+                  {% endif %}
+                  {{ dev.name }}
+                </span>
+                {% if dev.action != 'ignore' %}
+                <small class="text-muted">U{{ dev.detail|truncatechars:20 }}</small>
+                {% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <p class="text-muted mb-0 p-2">No devices</p>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% empty %}
+      <div class="col"><p class="text-muted">No racks found in preview.</p></div>
+      {% endfor %}
+    </div>
+
+    {% else %}
+    {# Per-row table (default) #}
     <div class="card">
-      <div class="card-header">
-        <strong>Row-by-row preview</strong>
-        <span class="text-muted ms-2">({{ result.rows|length }} row{{ result.rows|length|pluralize }})</span>
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div class="d-flex align-items-center gap-2">
+          <strong>Row-by-row preview</strong>
+          <span class="text-muted ms-1">({{ result.rows|length }} row{{ result.rows|length|pluralize }})</span>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+          <div class="input-group input-group-sm" style="width:260px;">
+            <span class="input-group-text"><i class="mdi mdi-magnify"></i></span>
+            <input type="text" id="previewRowFilter" class="form-control" placeholder="Filter rows…" autocomplete="off">
+            <button class="btn btn-outline-secondary" type="button" id="previewRowFilterClear" title="Clear filter" style="display:none;">×</button>
+          </div>
+          <select id="previewActionFilter" class="form-select form-select-sm" style="width:130px;" title="Filter by action">
+            <option value="">All actions</option>
+            <option value="create">Create</option>
+            <option value="update">Update</option>
+            <option value="error">Error</option>
+            <option value="skip">Skip</option>
+            <option value="ignore">Ignore</option>
+          </select>
+        </div>
       </div>
       <div class="table-responsive">
         <table class="table table-hover table-sm mb-0">
@@ -87,52 +201,898 @@
               <th>Type</th>
               <th>Action</th>
               <th>Detail</th>
+              <th></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="previewRowsBody">
             {% for row in result.rows %}
-            <tr class="
-              {% if row.action == 'create' %}table-success
+            <tr data-action="{{ row.action }}" class="
+              {% if row.action == 'create' and row.object_type == 'device' %}table-success
+              {% elif row.action == 'create' and row.object_type == 'rack' %}table-success
+              {% elif row.action == 'create' %}table-warning
               {% elif row.action == 'update' %}table-primary
-              {% elif row.action == 'skip' %}table-secondary
+              {% elif row.action == 'skip' %}
               {% elif row.action == 'error' %}table-danger
+              {% elif row.action == 'ignore' %}
               {% endif %}
             ">
-              <td class="text-muted">{{ row.row_number }}</td>
-              <td><code>{{ row.source_id|default:"—" }}</code></td>
-              <td>{{ row.name|default:"—" }}</td>
+              <td class="text-muted small">{{ row.row_number }}</td>
+              <td><code class="small">{{ row.source_id|default:"—" }}</code></td>
+              <td {% if row.action == 'ignore' %}class="text-muted" style="text-decoration: line-through;"{% elif row.action == 'error' %}class="fw-semibold"{% endif %}>
+                {% if row.netbox_url %}<a href="{{ row.netbox_url }}" target="_blank">{{ row.name|default:"—" }}</a>
+                {% else %}{{ row.name|default:"—" }}{% endif %}
+                {# Show source make/model for device rows #}
+                {% if row.object_type == 'device' and row.extra_data.source_make %}
+                  <div class="text-muted small" style="font-weight:normal;">{{ row.extra_data.source_make }} / {{ row.extra_data.source_model }}</div>
+                {% endif %}
+              </td>
               <td>
                 {% if row.object_type == 'rack' %}
-                  <span class="badge bg-info">Rack</span>
+                  <span class="badge text-white" style="background:#0dcaf0;color:#000!important;">Rack</span>
                 {% elif row.object_type == 'device' %}
-                  <span class="badge bg-secondary">Device</span>
+                  <span class="badge text-white" style="background:#6c757d;">Device</span>
+                {% elif row.object_type == 'manufacturer' %}
+                  <span class="badge" style="background:#fd7e14;color:#fff;">Manufacturer</span>
+                {% elif row.object_type == 'device_type' %}
+                  <span class="badge" style="background:#e6a817;color:#fff;">Device type</span>
                 {% else %}
-                  <span class="badge bg-light text-dark">{{ row.object_type }}</span>
+                  <span class="badge" style="background:#dee2e6;color:#212529;border:1px solid #adb5bd;">{{ row.object_type|default:"?" }}</span>
                 {% endif %}
               </td>
               <td>
                 {% if row.action == 'create' %}
-                  <span class="badge bg-success"><i class="mdi mdi-plus"></i> Create</span>
+                  <span class="badge text-white" style="background:#198754;"><i class="mdi mdi-plus"></i> Create</span>
                 {% elif row.action == 'update' %}
-                  <span class="badge bg-primary"><i class="mdi mdi-pencil"></i> Update</span>
+                  <span class="badge text-white" style="background:#0d6efd;"><i class="mdi mdi-pencil"></i> Update</span>
                 {% elif row.action == 'skip' %}
-                  <span class="badge bg-secondary">Skip</span>
+                  <span class="badge text-white" style="background:#6c757d;">Skip</span>
                 {% elif row.action == 'error' %}
-                  <span class="badge bg-danger"><i class="mdi mdi-alert"></i> Error</span>
+                  <span class="badge text-white" style="background:#dc3545;"><i class="mdi mdi-alert"></i> Error</span>
+                {% elif row.action == 'ignore' %}
+                  <span class="badge text-white" style="background:#495057;"><i class="mdi mdi-eye-off"></i> Ignored</span>
                 {% endif %}
               </td>
-              <td class="{% if row.action == 'error' %}text-danger{% endif %}">
-                {{ row.detail }}
+              <td class="small text-muted">{{ row.detail }}</td>
+              <td class="text-end" style="white-space:nowrap; min-width:180px;">
+
+                {% if row.object_type == 'manufacturer' and row.action == 'create' and profile_id %}
+                  {# Manufacturer: create now OR map to existing #}
+                  <form method="post" action="{% url 'plugins:netbox_data_import:quick_create_manufacturer' %}" class="d-inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                    <input type="hidden" name="mfg_name" value="{{ row.name }}">
+                    <input type="hidden" name="mfg_slug" value="{{ row.extra_data.mfg_slug }}">
+                    <button type="submit" class="btn btn-sm btn-outline-success" title="Create this manufacturer in NetBox now">
+                      <i class="mdi mdi-plus"></i> Create
+                    </button>
+                  </form>
+                  <button type="button" class="btn btn-sm btn-outline-warning ms-1"
+                          data-bs-toggle="modal" data-bs-target="#manufacturerMappingModal"
+                          data-source-make="{{ row.name }}"
+                          data-profile-id="{{ profile_id }}"
+                          title="Map this source manufacturer name to an existing NetBox manufacturer">
+                    <i class="mdi mdi-link-variant"></i> Map
+                  </button>
+
+                {% elif row.object_type == 'device_type' and row.action in 'create,error' and profile_id %}
+                  {# Device type: map to existing OR create now (both open same modal) #}
+                  <button type="button" class="btn btn-sm btn-outline-warning"
+                          data-bs-toggle="modal" data-bs-target="#deviceTypeMappingModal"
+                          data-source-make="{{ row.extra_data.source_make}}"
+                          data-source-model="{{ row.extra_data.source_model}}"
+                          data-mfg-slug="{{ row.extra_data.mfg_slug}}"
+                          data-dt-slug="{{ row.extra_data.dt_slug}}"
+                          data-u-height="{{ row.extra_data.u_height|default:1 }}"
+                          data-profile-id="{{ profile_id }}">
+                    <i class="mdi mdi-link-variant"></i> Map / Create
+                  </button>
+
+                {% elif row.action == 'error' and row.object_type == 'rack' and profile_id %}
+                  {# Rack error — offer ignore #}
+                  <form method="post" action="{% url 'plugins:netbox_data_import:ignore_device' %}" class="d-inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                    <input type="hidden" name="source_id" value="{{ row.source_id }}">
+                    <input type="hidden" name="device_name" value="{{ row.name }}">
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <button type="submit" class="btn btn-sm btn-outline-dark" title="Ignore this row">
+                      <i class="mdi mdi-eye-off"></i> Ignore
+                    </button>
+                  </form>
+
+                {% elif row.action == 'error' and row.object_type == 'device' and profile_id %}
+                  {# Device error — show class mapping button if we have source_class #}
+                  {% if row.extra_data.source_class %}
+                  <button type="button" class="btn btn-sm btn-outline-warning"
+                          data-bs-toggle="modal" data-bs-target="#classMappingModal"
+                          data-source-class="{{ row.extra_data.source_class}}"
+                          data-profile-id="{{ profile_id }}"
+                          title="Add class→role mapping to fix this error">
+                    <i class="mdi mdi-plus-circle"></i> Map class
+                  </button>
+                  {% endif %}
+                  {# Link to existing device #}
+                  <button type="button" class="btn btn-sm btn-outline-info ms-1"
+                          data-bs-toggle="modal" data-bs-target="#deviceMatchModal"
+                          data-source-id="{{ row.source_id}}"
+                          data-source-name="{{ row.name}}"
+                          data-source-asset-tag="{{ row.extra_data.asset_tag|default:''}}"
+                          data-profile-id="{{ profile_id }}"
+                          title="Link to an existing NetBox device">
+                    <i class="mdi mdi-link"></i> Link
+                  </button>
+                  {# Ignore button #}
+                  <form method="post" action="{% url 'plugins:netbox_data_import:ignore_device' %}" class="d-inline ms-1">
+                    {% csrf_token %}
+                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                    <input type="hidden" name="source_id" value="{{ row.source_id }}">
+                    <input type="hidden" name="device_name" value="{{ row.name }}">
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <button type="submit" class="btn btn-sm btn-outline-dark" title="Ignore this device">
+                      <i class="mdi mdi-eye-off"></i>
+                    </button>
+                  </form>
+
+                {% elif row.action == 'create' and row.object_type == 'device' and row.source_id and profile_id %}
+                  {# Device will be created — allow linking to existing device instead #}
+                  <button type="button" class="btn btn-sm btn-outline-info"
+                          data-bs-toggle="modal" data-bs-target="#deviceMatchModal"
+                          data-source-id="{{ row.source_id}}"
+                          data-source-name="{{ row.name}}"
+                          data-source-asset-tag="{{ row.extra_data.asset_tag|default:''}}"
+                          data-profile-id="{{ profile_id }}"
+                          title="Link to an existing NetBox device instead of creating">
+                    <i class="mdi mdi-link"></i> Link
+                  </button>
+                  {# Ignore button #}
+                  <form method="post" action="{% url 'plugins:netbox_data_import:ignore_device' %}" class="d-inline ms-1">
+                    {% csrf_token %}
+                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                    <input type="hidden" name="source_id" value="{{ row.source_id }}">
+                    <input type="hidden" name="device_name" value="{{ row.name }}">
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <button type="submit" class="btn btn-sm btn-outline-dark" title="Ignore this device">
+                      <i class="mdi mdi-eye-off"></i>
+                    </button>
+                  </form>
+
+                {% elif row.action == 'ignore' and row.object_type == 'device' and row.source_id and profile_id %}
+                  {# Unignore button #}
+                  <form method="post" action="{% url 'plugins:netbox_data_import:unignore_device' %}" class="d-inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                    <input type="hidden" name="source_id" value="{{ row.source_id }}">
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <button type="submit" class="btn btn-sm btn-outline-secondary" title="Remove from ignore list">
+                      <i class="mdi mdi-eye"></i> Unignore
+                    </button>
+                  </form>
+                {% endif %}
+
+                {# Split button: show on device rows where name contains ' - ' #}
+                {% if row.object_type == 'device' and row.source_id and profile_id and ' - ' in row.name %}
+                  <button type="button" class="btn btn-sm btn-outline-info ms-1"
+                          data-bs-toggle="modal" data-bs-target="#splitNameModal"
+                          data-source-id="{{ row.source_id}}"
+                          data-source-column="device_name"
+                          data-original-value="{{ row.name}}"
+                          title="Split combined name into separate fields">
+                    ✂
+                  </button>
+                {% endif %}
+
               </td>
             </tr>
             {% empty %}
-            <tr><td colspan="6" class="text-center text-muted">No rows found in file.</td></tr>
+            <tr><td colspan="7" class="text-center text-muted">No rows found in file.</td></tr>
             {% endfor %}
+            <tr id="previewNoFilterResults" style="display:none;">
+              <td colspan="7" class="text-center text-muted py-3">
+                <i class="mdi mdi-filter-remove-outline"></i> No rows match the current filter.
+              </td>
+            </tr>
           </tbody>
         </table>
       </div>
     </div>
+    {% endif %}
 
   </div>
 </div>
+
+{# Improved split-name modal #}
+<div class="modal fade" id="splitNameModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="mdi mdi-content-cut"></i> Split Name — Save Resolution</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}" id="splitForm">
+        {% csrf_token %}
+        <div class="modal-body">
+          <input type="hidden" name="profile_id" id="res_profile_id" value="{{ profile_id }}">
+          <input type="hidden" name="source_id" id="res_source_id">
+          <input type="hidden" name="source_column" id="res_source_column">
+          <input type="hidden" name="original_value" id="res_original_value">
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <input type="hidden" name="resolved_fields" id="res_resolved_fields">
+
+          <div class="mb-3">
+            <label class="form-label text-muted">Original value</label>
+            <div class="form-control-plaintext fw-bold" id="res_original_display"></div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Delimiter</label>
+            <input type="text" class="form-control form-control-sm w-auto d-inline-block"
+                   id="res_delimiter" value=" - " style="min-width:80px;"
+                   oninput="reSplit()">
+          </div>
+
+          <div class="row g-3" id="res_parts_row">
+            {# Dynamically populated parts #}
+          </div>
+
+          <div id="res_existing_notice" class="alert alert-info py-2 mt-3 d-none">
+            <i class="mdi mdi-information"></i> <strong>Previously saved resolution:</strong>
+            <code id="res_existing_display"></code>
+            — values below are pre-filled from that resolution; edit as needed.
+          </div>
+
+          <div id="res_device_check" class="mt-3 d-none">
+            <small class="text-muted" id="res_device_check_msg"></small>
+          </div>
+        </div>
+        <div class="modal-footer justify-content-between">
+          <a id="res_resolutions_link" href="{% if profile_id %}{% url 'plugins:netbox_data_import:source_resolution_list' profile_id|default:0 %}{% else %}#{% endif %}"
+             class="btn btn-sm btn-outline-secondary">
+            <i class="mdi mdi-history"></i> View all resolutions
+          </a>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-primary" onclick="return buildResolvedFields()">
+              <i class="mdi mdi-content-save"></i> Save &amp; Re-run import
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Row filter ──────────────────────────────────────────────────────────────
+(function() {
+  function applyFilters() {
+    var text = (document.getElementById('previewRowFilter')?.value || '').toLowerCase().trim();
+    var action = (document.getElementById('previewActionFilter')?.value || '').toLowerCase();
+    var clearBtn = document.getElementById('previewRowFilterClear');
+    if (clearBtn) clearBtn.style.display = (text || action) ? '' : 'none';
+
+    var rows = document.querySelectorAll('#previewRowsBody tr');
+    var shown = 0;
+    rows.forEach(function(tr) {
+      var rowText = tr.textContent.toLowerCase();
+      var rowAction = (tr.dataset.action || '').toLowerCase();
+      var textMatch = !text || rowText.includes(text);
+      var actionMatch = !action || rowAction === action;
+      var visible = textMatch && actionMatch;
+      tr.style.display = visible ? '' : 'none';
+      if (visible) shown++;
+    });
+
+    var noResults = document.getElementById('previewNoFilterResults');
+    if (noResults) noResults.style.display = shown === 0 ? '' : 'none';
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    var filterInput = document.getElementById('previewRowFilter');
+    var actionSelect = document.getElementById('previewActionFilter');
+    var clearBtn = document.getElementById('previewRowFilterClear');
+    if (filterInput) {
+      filterInput.addEventListener('input', applyFilters);
+      filterInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') { filterInput.value = ''; applyFilters(); }
+      });
+    }
+    if (actionSelect) actionSelect.addEventListener('change', applyFilters);
+    if (clearBtn) clearBtn.addEventListener('click', function() {
+      if (filterInput) filterInput.value = '';
+      if (actionSelect) actionSelect.value = '';
+      applyFilters();
+    });
+  });
+})();
+var TARGET_FIELDS = [
+  ['', '— ignore —'],
+  ['device_name', 'Device name'],
+  ['asset_tag', 'Asset tag'],
+  ['serial', 'Serial number'],
+  ['make', 'Make (manufacturer)'],
+  ['model', 'Model (device type)'],
+  ['rack_name', 'Rack name'],
+  ['source_id', 'Source ID'],
+];
+
+// Existing saved resolutions keyed by source_id → source_column → {original_value, resolved_fields}
+var EXISTING_RESOLUTIONS = {{ existing_resolutions_json|default:"{}" }};
+
+// Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
+document.addEventListener('DOMContentLoaded', function() {
+
+  document.getElementById('splitNameModal').addEventListener('show.bs.modal', function(event) {
+    var btn = event.relatedTarget;
+    var sourceId = btn.dataset.sourceId;
+    var sourceColumn = btn.dataset.sourceColumn;
+    document.getElementById('res_source_id').value = sourceId;
+    document.getElementById('res_source_column').value = sourceColumn;
+    document.getElementById('res_original_value').value = btn.dataset.originalValue;
+    document.getElementById('res_original_display').textContent = btn.dataset.originalValue;
+
+    // Check for existing resolution and pre-populate
+    var existing = (EXISTING_RESOLUTIONS[sourceId] || {})[sourceColumn];
+    document.getElementById('res_existing_notice').classList.toggle('d-none', !existing);
+    if (existing) {
+      document.getElementById('res_existing_display').textContent = JSON.stringify(existing.resolved_fields);
+      // Pre-populate using existing resolved fields instead of auto-split
+      reSplitWithExisting(btn.dataset.originalValue, existing.resolved_fields);
+    } else {
+      reSplit();
+    }
+  });
+
+  document.getElementById('deviceTypeMappingModal').addEventListener('show.bs.modal', function(event) {
+    var btn = event.relatedTarget;
+    document.getElementById('dtm_source_make').value = btn.dataset.sourceMake || '';
+    document.getElementById('dtm_source_model').value = btn.dataset.sourceModel || '';
+    document.getElementById('dtm_profile_id').value = btn.dataset.profileId || '';
+    document.getElementById('dtm_source_display').textContent = (btn.dataset.sourceMake || '') + ' / ' + (btn.dataset.sourceModel || '');
+    document.getElementById('dtm_netbox_mfg_slug').value = btn.dataset.mfgSlug || '';
+    document.getElementById('dtm_netbox_dt_slug').value = btn.dataset.dtSlug || '';
+    document.getElementById('dtm_netbox_dt_name').value = btn.dataset.sourceModel || '';
+    document.getElementById('dtm_u_height').value = btn.dataset.uHeight || '1';
+    document.getElementById('dtm_search_results').innerHTML = '';
+    document.getElementById('dtm_action').value = 'map';
+    _dtmSetMapped(false);
+  });
+
+  document.getElementById('classMappingModal').addEventListener('show.bs.modal', function(event) {
+    var btn = event.relatedTarget;
+    var sourceClass = btn.dataset.sourceClass || '';
+    document.getElementById('cm_source_class').value = sourceClass;
+    document.getElementById('cm_profile_id').value = btn.dataset.profileId || '';
+    document.getElementById('cm_source_class_display').textContent = sourceClass;
+    document.getElementById('cm_role_slug').value = '';
+    document.getElementById('cm_action_ignore').checked = true;
+    document.getElementById('cm_role_row').style.display = 'none';
+    document.getElementById('cm_creates_rack').value = '0';
+    document.getElementById('cm_role_search_results').innerHTML = '';
+  });
+
+  document.getElementById('manufacturerMappingModal').addEventListener('show.bs.modal', function(event) {
+    var btn = event.relatedTarget;
+    document.getElementById('mm_source_make').value = btn.dataset.sourceMake || '';
+    document.getElementById('mm_profile_id').value = btn.dataset.profileId || '';
+    document.getElementById('mm_source_make_display').textContent = btn.dataset.sourceMake || '';
+    document.getElementById('mm_netbox_mfg_slug').value = '';
+    document.getElementById('mm_slug_display').value = '';
+    document.getElementById('mm_search_results').innerHTML = '';
+    // Pre-populate search with source make name
+    document.getElementById('mm_search_q').value = btn.dataset.sourceMake || '';
+    setTimeout(mmSearch, 200);
+  });
+
+  document.getElementById('deviceMatchModal').addEventListener('show.bs.modal', function(event) {
+    var btn = event.relatedTarget;
+    var sourceName = btn.dataset.sourceName || '';
+    document.getElementById('dm_source_id').value = btn.dataset.sourceId || '';
+    document.getElementById('dm_source_asset_tag').value = btn.dataset.sourceAssetTag || '';
+    document.getElementById('dm_profile_id').value = btn.dataset.profileId || '';
+    document.getElementById('dm_source_name_display').textContent = sourceName;
+    document.getElementById('dm_search_q').value = sourceName.split(' - ').pop().trim();
+    document.getElementById('dm_netbox_device_id').value = '';
+    document.getElementById('dm_search_results').innerHTML = '';
+    setTimeout(dmSearch, 200);
+  });
+
+});
+
+function reSplit() {
+  var originalValue = document.getElementById('res_original_value').value;
+  var delimiter = document.getElementById('res_delimiter').value || ' - ';
+  var parts = originalValue.split(delimiter);
+  var container = document.getElementById('res_parts_row');
+  container.innerHTML = '';
+
+  // Default field assignments: left → asset_tag, right → device_name
+  var defaultFields = ['asset_tag', 'device_name'];
+
+  parts.forEach(function(part, idx) {
+    _addResolutionPart(container, idx, part.trim(), defaultFields[idx] || '');
+  });
+}
+
+function reSplitWithExisting(originalValue, resolvedFields) {
+  // Reverse-map: field → value
+  var delimiter = document.getElementById('res_delimiter').value || ' - ';
+  var parts = originalValue.split(delimiter);
+  var container = document.getElementById('res_parts_row');
+  container.innerHTML = '';
+
+  // Build ordered list of resolved entries
+  var entries = Object.entries(resolvedFields);
+  parts.forEach(function(part, idx) {
+    var field = entries[idx] ? entries[idx][0] : '';
+    var val = entries[idx] ? entries[idx][1] : part.trim();
+    _addResolutionPart(container, idx, val, field);
+  });
+}
+
+function _addResolutionPart(container, idx, value, defaultField) {
+  var col = document.createElement('div');
+  col.className = 'col-md-6';
+
+  var label = document.createElement('label');
+  label.className = 'form-label';
+  label.textContent = 'Part ' + (idx + 1);
+
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'form-control mb-1';
+  input.id = 'res_part_val_' + idx;
+  input.value = value;
+
+  var select = document.createElement('select');
+  select.className = 'form-select form-select-sm';
+  select.id = 'res_part_field_' + idx;
+  TARGET_FIELDS.forEach(function(f) {
+    var opt = document.createElement('option');
+    opt.value = f[0];
+    opt.textContent = f[1];
+    if (f[0] === (defaultField || '')) opt.selected = true;
+    select.appendChild(opt);
+  });
+
+  // Check device name existence on change
+  if (idx === 1) {
+    input.addEventListener('input', function() { checkDevice(input.value); });
+    checkDevice(input.value);
+  }
+
+  col.appendChild(label);
+  col.appendChild(input);
+  col.appendChild(select);
+  container.appendChild(col);
+}
+
+function checkDevice(name) {
+  var div = document.getElementById('res_device_check');
+  var msg = document.getElementById('res_device_check_msg');
+  if (!name || name.length < 2) { div.classList.add('d-none'); return; }
+  fetch('{% url "plugins:netbox_data_import:check_device" %}?name=' + encodeURIComponent(name))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      div.classList.remove('d-none');
+      if (data.exists) {
+        msg.innerHTML = '<i class="mdi mdi-check-circle text-success"></i> Device <strong>' + name + '</strong> already exists in NetBox — ' +
+          (data.count > 1 ? data.count + ' matches' : '<a href="' + data.url + '" target="_blank">view it</a>');
+      } else {
+        msg.innerHTML = '<i class="mdi mdi-plus-circle text-muted"></i> Device <strong>' + name + '</strong> not yet in NetBox — will be created on import.';
+      }
+    })
+    .catch(function() { div.classList.add('d-none'); });
+}
+
+function buildResolvedFields() {
+  var container = document.getElementById('res_parts_row');
+  var parts = container.querySelectorAll('.col-md-6');
+  var fields = {};
+  parts.forEach(function(col, idx) {
+    var val = document.getElementById('res_part_val_' + idx).value.trim();
+    var field = document.getElementById('res_part_field_' + idx).value;
+    if (field && val) fields[field] = val;
+  });
+  document.getElementById('res_resolved_fields').value = JSON.stringify(fields);
+  return true;
+}
+
+// ---- Device Type Mapping modal ----
+
+function dtmSearch() {
+  var q = document.getElementById('dtm_search_q').value.trim();
+  var mfgFilter = document.getElementById('dtm_netbox_mfg_slug').value.trim();
+  if (!q) return;
+  fetch('{% url "plugins:netbox_data_import:search_objects" %}?type=device_type&q=' + encodeURIComponent(q) + (mfgFilter ? '&mfg_slug=' + encodeURIComponent(mfgFilter) : ''))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var container = document.getElementById('dtm_search_results');
+      container.innerHTML = '';
+      if (!data.results.length) {
+        container.innerHTML = '<p class="text-muted small">No results.</p>';
+        return;
+      }
+      data.results.forEach(function(dt) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-outline-secondary me-1 mb-1';
+        btn.textContent = dt.name;
+        btn.onclick = function() {
+          document.getElementById('dtm_netbox_mfg_slug').value = dt.mfg_slug || '';
+          document.getElementById('dtm_netbox_dt_slug').value = dt.slug;
+          document.getElementById('dtm_netbox_dt_name').value = dt.name.split(' / ')[1] || dt.name;
+          document.getElementById('dtm_action').value = 'map';
+          container.querySelectorAll('button').forEach(function(b) { b.classList.remove('btn-primary'); b.classList.add('btn-outline-secondary'); });
+          btn.classList.remove('btn-outline-secondary');
+          btn.classList.add('btn-primary');
+          _dtmSetMapped(true);
+        };
+        container.appendChild(btn);
+      });
+    });
+}
+
+// When an existing DT is selected: force action=map, disable create-only fields and the Create button
+function _dtmSetMapped(isMapped) {
+  var uH = document.getElementById('dtm_u_height');
+  var dtName = document.getElementById('dtm_netbox_dt_name');
+  var createNote = document.getElementById('dtm_create_note');
+  var createBtn = document.getElementById('dtm_create_btn');
+  if (isMapped) {
+    document.getElementById('dtm_action').value = 'map';
+    if (uH) uH.disabled = true;
+    if (dtName) dtName.disabled = true;
+    if (createNote) createNote.style.display = '';
+    if (createBtn) createBtn.disabled = true;
+  } else {
+    if (uH) uH.disabled = false;
+    if (dtName) dtName.disabled = false;
+    if (createNote) createNote.style.display = 'none';
+    if (createBtn) createBtn.disabled = false;
+  }
+}
+
+// ---- Class Mapping modal ----
+
+function cmToggleAction() {
+  var isRole = document.getElementById('cm_action_role').checked;
+  var isRack = document.getElementById('cm_action_rack').checked;
+  document.getElementById('cm_role_row').style.display = isRole ? '' : 'none';
+  document.getElementById('cm_creates_rack').value = isRack ? '1' : '0';
+}
+
+function cmSearchRoles() {
+  var q = document.getElementById('cm_role_search_q').value.trim();
+  if (!q) return;
+  fetch('{% url "plugins:netbox_data_import:search_objects" %}?type=role&q=' + encodeURIComponent(q))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var container = document.getElementById('cm_role_search_results');
+      container.innerHTML = '';
+      data.results.forEach(function(role) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-outline-secondary me-1 mb-1';
+        btn.textContent = role.name + ' (' + role.slug + ')';
+        btn.onclick = function() {
+          document.getElementById('cm_role_slug').value = role.slug;
+          container.querySelectorAll('button').forEach(function(b) { b.classList.remove('btn-primary'); b.classList.add('btn-outline-secondary'); });
+          btn.classList.remove('btn-outline-secondary');
+          btn.classList.add('btn-primary');
+        };
+        container.appendChild(btn);
+      });
+    });
+}
+
+// ---- Manufacturer Mapping modal ----
+
+function mmSearch() {
+  var q = document.getElementById('mm_search_q').value.trim();
+  if (!q) return;
+  fetch('{% url "plugins:netbox_data_import:search_objects" %}?type=manufacturer&q=' + encodeURIComponent(q))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var container = document.getElementById('mm_search_results');
+      container.innerHTML = '';
+      if (!data.results.length) {
+        container.innerHTML = '<p class="text-muted small">No manufacturers found.</p>';
+        return;
+      }
+      data.results.forEach(function(mfg) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-outline-secondary me-1 mb-1';
+        btn.textContent = mfg.name + ' (' + mfg.slug + ')';
+        btn.onclick = function() {
+          document.getElementById('mm_netbox_mfg_slug').value = mfg.slug;
+          document.getElementById('mm_slug_display').value = mfg.slug;
+          container.querySelectorAll('button').forEach(function(b) { b.classList.remove('btn-primary'); b.classList.add('btn-outline-secondary'); });
+          btn.classList.remove('btn-outline-secondary');
+          btn.classList.add('btn-primary');
+        };
+        container.appendChild(btn);
+      });
+    });
+}
+
+// ---- Device Match modal ----
+
+function dmSearch() {
+  var q = document.getElementById('dm_search_q').value.trim();
+  if (!q) return;
+  fetch('{% url "plugins:netbox_data_import:search_objects" %}?type=device&q=' + encodeURIComponent(q))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var container = document.getElementById('dm_search_results');
+      container.innerHTML = '';
+      if (!data.results.length) {
+        container.innerHTML = '<p class="text-muted small">No devices found.</p>';
+        return;
+      }
+      data.results.forEach(function(dev) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-outline-secondary me-1 mb-1';
+        btn.textContent = dev.name + (dev.site ? ' (' + dev.site + ')' : '');
+        btn.onclick = function() {
+          document.getElementById('dm_netbox_device_id').value = dev.id;
+          container.querySelectorAll('button').forEach(function(b) { b.classList.remove('btn-primary'); b.classList.add('btn-outline-secondary'); });
+          btn.classList.remove('btn-outline-secondary');
+          btn.classList.add('btn-primary');
+        };
+        container.appendChild(btn);
+      });
+    });
+}
+</script>
+
+{# Device Type Mapping Modal #}
+<div class="modal fade" id="deviceTypeMappingModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="mdi mdi-link-variant"></i> Map Device Type</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_resolve_device_type' %}">
+        {% csrf_token %}
+        <div class="modal-body">
+          <input type="hidden" name="profile_id" id="dtm_profile_id">
+          <input type="hidden" name="source_make" id="dtm_source_make">
+          <input type="hidden" name="source_model" id="dtm_source_model">
+          <input type="hidden" name="action" id="dtm_action" value="map">
+
+          <div class="mb-3">
+            <label class="form-label text-muted">Source (from file)</label>
+            <div class="fw-bold" id="dtm_source_display"></div>
+          </div>
+
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label">NetBox manufacturer slug</label>
+              <div class="input-group">
+                <input type="text" name="netbox_mfg_slug" id="dtm_netbox_mfg_slug" class="form-control" placeholder="e.g. cisco">
+                <button type="button" class="btn btn-outline-secondary" title="Clear manufacturer filter"
+                        onclick="document.getElementById('dtm_netbox_mfg_slug').value=''; document.getElementById('dtm_netbox_mfg_slug').focus();">
+                  <i class="mdi mdi-close"></i>
+                </button>
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">NetBox device type slug</label>
+              <input type="text" name="netbox_dt_slug" id="dtm_netbox_dt_slug" class="form-control" placeholder="e.g. 8201-sys">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Device type name <small class="text-muted">(for Create)</small></label>
+              <input type="text" name="netbox_dt_name" id="dtm_netbox_dt_name" class="form-control" placeholder="e.g. 8201-SYS">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">U-height <small class="text-muted">(for Create)</small></label>
+              <input type="number" name="u_height" id="dtm_u_height" class="form-control" value="1" min="1">
+            </div>
+          </div>
+          <div id="dtm_create_note" class="alert alert-info py-1 small" style="display:none;">
+            <i class="mdi mdi-information"></i> Existing device type selected — will <strong>map only</strong> (no create needed).
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Search existing device types</label>
+            <div class="input-group">
+              <input type="text" id="dtm_search_q" class="form-control" placeholder="Search NetBox device types…">
+              <button type="button" class="btn btn-outline-secondary" onclick="dtmSearch()">
+                <i class="mdi mdi-magnify"></i>
+              </button>
+            </div>
+            <div class="mt-2" id="dtm_search_results"></div>
+          </div>
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-outline-success" id="dtm_create_btn"
+                    onclick="document.getElementById('dtm_action').value='create_now'">
+              <i class="mdi mdi-plus"></i> Save mapping + Create in NetBox
+            </button>
+            <button type="submit" class="btn btn-primary"
+                    onclick="document.getElementById('dtm_action').value='map'">
+              <i class="mdi mdi-link-variant"></i> Save mapping only
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{# Class Mapping Modal #}
+<div class="modal fade" id="classMappingModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="mdi mdi-plus-circle"></i> Add Class Mapping</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_add_class_mapping' %}">
+        {% csrf_token %}
+        <div class="modal-body">
+          <input type="hidden" name="profile_id" id="cm_profile_id">
+          <input type="hidden" name="source_class" id="cm_source_class">
+
+          <div class="mb-3">
+            <label class="form-label text-muted">Source class</label>
+            <div class="fw-bold" id="cm_source_class_display"></div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Action</label>
+            <div class="d-flex gap-3">
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="mapping_action" id="cm_action_ignore" value="ignore" onchange="cmToggleAction()" checked>
+                <label class="form-check-label" for="cm_action_ignore">
+                  <i class="mdi mdi-eye-off"></i> Ignore (skip silently)
+                </label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="mapping_action" id="cm_action_role" value="role" onchange="cmToggleAction()">
+                <label class="form-check-label" for="cm_action_role">
+                  <i class="mdi mdi-server"></i> Map to device role
+                </label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="mapping_action" id="cm_action_rack" value="rack" onchange="cmToggleAction()">
+                <label class="form-check-label" for="cm_action_rack">
+                  <i class="mdi mdi-server-network"></i> Creates rack
+                  <input type="hidden" name="creates_rack" id="cm_creates_rack" value="0">
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div id="cm_role_row" style="display:none;">
+            <div class="mb-3">
+              <label class="form-label">Role slug</label>
+              <input type="text" name="role_slug" id="cm_role_slug" class="form-control" placeholder="e.g. server">
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Search existing roles</label>
+              <div class="input-group">
+                <input type="text" id="cm_role_search_q" class="form-control" placeholder="Search NetBox device roles…">
+                <button type="button" class="btn btn-outline-secondary" onclick="cmSearchRoles()">
+                  <i class="mdi mdi-magnify"></i>
+                </button>
+              </div>
+              <div class="mt-2" id="cm_role_search_results"></div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-content-save"></i> Save mapping
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{# Device Match Modal #}
+<div class="modal fade" id="deviceMatchModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="mdi mdi-link"></i> Link to Existing Device</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'plugins:netbox_data_import:match_existing_device' %}">
+        {% csrf_token %}
+        <div class="modal-body">
+          <input type="hidden" name="profile_id" id="dm_profile_id">
+          <input type="hidden" name="source_id" id="dm_source_id">
+          <input type="hidden" name="source_asset_tag" id="dm_source_asset_tag">
+          <input type="hidden" name="netbox_device_id" id="dm_netbox_device_id">
+
+          <div class="mb-3">
+            <label class="form-label text-muted">Source row name</label>
+            <div class="fw-bold" id="dm_source_name_display"></div>
+          </div>
+          <p class="text-muted small">
+            Search for an existing device in NetBox. Selecting one will mark this source row
+            as "update" instead of "create" — useful when the device already exists without a source ID.
+          </p>
+
+          <div class="mb-3">
+            <div class="input-group">
+              <input type="text" id="dm_search_q" class="form-control" placeholder="Search by device name (substring)…">
+              <button type="button" class="btn btn-outline-secondary" onclick="dmSearch()">
+                <i class="mdi mdi-magnify"></i>
+              </button>
+            </div>
+            <div class="mt-2" id="dm_search_results"></div>
+          </div>
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-link"></i> Link selected device
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{# Manufacturer Mapping Modal #}
+<div class="modal fade" id="manufacturerMappingModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="mdi mdi-factory"></i> Map Manufacturer</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_resolve_manufacturer' %}">
+        {% csrf_token %}
+        <div class="modal-body">
+          <input type="hidden" name="profile_id" id="mm_profile_id">
+          <input type="hidden" name="source_make" id="mm_source_make">
+          <input type="hidden" name="netbox_mfg_slug" id="mm_netbox_mfg_slug">
+
+          <div class="mb-3">
+            <label class="form-label text-muted">Source manufacturer name (from file)</label>
+            <div class="fw-bold" id="mm_source_make_display"></div>
+          </div>
+          <p class="text-muted small">
+            Search for an existing manufacturer in NetBox to map this source name to.
+            Useful when source data uses inconsistent names (e.g. "Dell EMC" → "dell").
+          </p>
+
+          <div class="mb-3">
+            <div class="input-group">
+              <input type="text" id="mm_search_q" class="form-control" placeholder="Search NetBox manufacturers…">
+              <button type="button" class="btn btn-outline-secondary" onclick="mmSearch()">
+                <i class="mdi mdi-magnify"></i>
+              </button>
+            </div>
+            <div class="mt-2" id="mm_search_results"></div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Selected NetBox manufacturer slug</label>
+            <input type="text" id="mm_slug_display" class="form-control"
+                   placeholder="e.g. dell"
+                   oninput="document.getElementById('mm_netbox_mfg_slug').value=this.value">
+          </div>
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-content-save"></i> Save mapping
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 {% endblock %}

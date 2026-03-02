@@ -1,0 +1,66 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'base/layout.html' %}
+
+{% block title %}Bulk YAML Import — {{ profile.name }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="card-header">
+        <h5 class="mb-0"><i class="mdi mdi-file-upload"></i> Bulk YAML Import — {{ profile.name }}</h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted">
+          Upload a YAML file to bulk-create mappings for this profile.
+          Existing records are skipped (no duplicates created).
+        </p>
+
+        <form method="post" enctype="multipart/form-data">
+          {% csrf_token %}
+
+          <div class="mb-3">
+            <label class="form-label">Mapping type</label>
+            <select name="mapping_type" class="form-select">
+              <option value="class_role">Class → Role Mappings</option>
+              <option value="device_type">Device Type Mappings</option>
+            </select>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">YAML file</label>
+            <input type="file" name="yaml_file" class="form-control" accept=".yaml,.yml">
+          </div>
+
+          <div class="alert alert-info">
+            <strong>Class → Role Mapping format:</strong>
+            <pre class="mb-0 mt-2">- source_class: Server
+  creates_rack: false
+  role_slug: server
+- source_class: Cabinet
+  creates_rack: true
+- source_class: Patch Panel
+  ignore: true</pre>
+          </div>
+
+          <div class="alert alert-info">
+            <strong>Device Type Mapping format:</strong>
+            <pre class="mb-0 mt-2">- source_make: Cisco
+  source_model: Catalyst 2960X
+  netbox_manufacturer_slug: cisco
+  netbox_device_type_slug: cisco-catalyst-2960x</pre>
+          </div>
+
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">
+              <i class="mdi mdi-upload"></i> Import
+            </button>
+            <a href="{{ profile.get_absolute_url }}" class="btn btn-secondary">Cancel</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

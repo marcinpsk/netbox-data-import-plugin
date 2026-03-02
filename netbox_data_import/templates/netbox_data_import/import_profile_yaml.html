@@ -1,0 +1,75 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'base/layout.html' %}
+
+{% block title %}Import Profile from YAML{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col col-lg-7">
+    <div class="card">
+      <div class="card-header">
+        <h5 class="mb-0"><i class="mdi mdi-file-import"></i> Import Profile from YAML</h5>
+      </div>
+      <div class="card-body">
+        <p class="text-muted">
+          Upload a full-profile YAML file (as exported via <strong>Export YAML</strong> on a profile page).
+          If the profile name already exists, its mappings are updated/merged; otherwise a new profile is created.
+        </p>
+
+        <form method="post" enctype="multipart/form-data">
+          {% csrf_token %}
+          <div class="mb-3">
+            <label class="form-label">YAML file</label>
+            <input type="file" name="yaml_file" class="form-control" accept=".yaml,.yml" required>
+          </div>
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-primary">
+              <i class="mdi mdi-upload"></i> Import
+            </button>
+            <a href="{% url 'plugins:netbox_data_import:importprofile_list' %}" class="btn btn-secondary">Cancel</a>
+          </div>
+        </form>
+
+        <div class="alert alert-info mt-4">
+          <strong>Expected YAML format:</strong>
+          <pre class="mb-0 mt-2 small">profile:
+  name: My Profile
+  sheet_name: Data
+  source_id_column: Id
+  custom_field_name: cans_id
+  update_existing: true
+  create_missing_device_types: true
+  preview_view_mode: rows
+
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+
+class_role_mappings:
+  - source_class: Server
+    creates_rack: false
+    role_slug: server
+    ignore: false
+
+device_type_mappings:
+  - source_make: Cisco
+    source_model: Catalyst 2960X
+    netbox_manufacturer_slug: cisco
+    netbox_device_type_slug: cisco-catalyst-2960x
+
+manufacturer_mappings:
+  - source_make: Dell EMC
+    netbox_manufacturer_slug: dell
+
+column_transform_rules:
+  - source_column: Name
+    pattern: "^(\\w+) - (.+)$"
+    group_1_target: asset_tag
+    group_2_target: device_name</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

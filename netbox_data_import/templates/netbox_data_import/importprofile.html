@@ -1,3 +1,5 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
 {% extends 'generic/object.html' %}
 {% load helpers %}
 
@@ -15,8 +17,8 @@
           <tr><th scope="row">Sheet Name</th><td><code>{{ object.sheet_name }}</code></td></tr>
           <tr><th scope="row">Source ID Column</th><td>{{ object.source_id_column|placeholder }}</td></tr>
           <tr><th scope="row">Custom Field Name</th><td>{{ object.custom_field_name|placeholder }}</td></tr>
-          <tr><th scope="row">Update Existing</th><td>{% if object.update_existing %}<span class="badge bg-success">Yes</span>{% else %}<span class="badge bg-secondary">No</span>{% endif %}</td></tr>
-          <tr><th scope="row">Create Missing Device Types</th><td>{% if object.create_missing_device_types %}<span class="badge bg-success">Yes</span>{% else %}<span class="badge bg-secondary">No</span>{% endif %}</td></tr>
+          <tr><th scope="row">Update Existing</th><td>{% if object.update_existing %}<span class="badge text-white" style="background:#198754;">Yes</span>{% else %}<span class="badge text-white" style="background:#6c757d;">No</span>{% endif %}</td></tr>
+          <tr><th scope="row">Create Missing Device Types</th><td>{% if object.create_missing_device_types %}<span class="badge text-white" style="background:#198754;">Yes</span>{% else %}<span class="badge text-white" style="background:#6c757d;">No</span>{% endif %}</td></tr>
         </table>
       </div>
     </div>
@@ -24,6 +26,22 @@
       <div class="card-body text-center">
         <a href="{% url 'plugins:netbox_data_import:import_setup' %}?profile={{ object.pk }}" class="btn btn-primary btn-lg">
           <i class="mdi mdi-database-import"></i> Run Import with this Profile
+        </a>
+      </div>
+    </div>
+    <div class="card mt-3">
+      <div class="card-body d-flex flex-wrap gap-2">
+        <a href="{% url 'plugins:netbox_data_import:exportprofile_yaml' object.pk %}" class="btn btn-outline-primary">
+          <i class="mdi mdi-download"></i> Export YAML
+        </a>
+        <a href="{% url 'plugins:netbox_data_import:bulk_yaml_import' object.pk %}" class="btn btn-outline-secondary">
+          <i class="mdi mdi-file-upload"></i> Bulk YAML Import
+        </a>
+        <a href="{% url 'plugins:netbox_data_import:source_resolution_list' object.pk %}" class="btn btn-outline-secondary">
+          <i class="mdi mdi-content-cut"></i> Name Resolutions
+        </a>
+        <a href="{% url 'plugins:netbox_data_import:device_type_analysis_profile' object.pk %}" class="btn btn-outline-secondary">
+          <i class="mdi mdi-magnify"></i> Device Type Analysis
         </a>
       </div>
     </div>
@@ -74,6 +92,21 @@
         {% include 'inc/table.html' with table=device_type_table %}
       {% else %}
         <div class="card-body text-muted">No device type mappings configured.</div>
+      {% endif %}
+    </div>
+
+    {# Column Transform Rules #}
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Column Transform Rules</strong>
+        <a href="{% url 'plugins:netbox_data_import:columntransformrule_add' object.pk %}" class="btn btn-sm btn-primary">
+          <i class="mdi mdi-plus-thick"></i> Add
+        </a>
+      </div>
+      {% if transform_table.rows %}
+        {% include 'inc/table.html' with table=transform_table %}
+      {% else %}
+        <div class="card-body text-muted">No column transform rules configured.</div>
       {% endif %}
     </div>
 

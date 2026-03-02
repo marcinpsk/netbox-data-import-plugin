@@ -1,0 +1,67 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'base/layout.html' %}
+
+{% block title %}Name Resolutions — {{ profile.name }}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">
+          <i class="mdi mdi-content-cut"></i> Saved Name Resolutions — {{ profile.name }}
+        </h5>
+        <a href="{{ profile.get_absolute_url }}" class="btn btn-sm btn-secondary">
+          <i class="mdi mdi-arrow-left"></i> Back to Profile
+        </a>
+      </div>
+      <div class="card-body pb-0">
+        <p class="text-muted">
+          These resolutions are applied automatically during <em>parse_file</em> on re-import
+          (like <code>git rerere</code>). Delete a record to stop replaying that split.
+        </p>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-hover table-sm mb-0">
+          <thead>
+            <tr>
+              <th>Source ID</th>
+              <th>Column</th>
+              <th>Original value</th>
+              <th>Resolved fields</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for res in resolutions %}
+            <tr>
+              <td><code>{{ res.source_id }}</code></td>
+              <td><code>{{ res.source_column }}</code></td>
+              <td>{{ res.original_value }}</td>
+              <td>
+                {% for field, val in res.resolved_fields.items %}
+                <span class="badge bg-secondary me-1" style="background:#6c757d!important;color:#fff;">{{ field }}: {{ val }}</span>
+                {% endfor %}
+              </td>
+              <td class="text-end">
+                <a href="{% url 'plugins:netbox_data_import:source_resolution_delete' res.pk %}"
+                   class="btn btn-sm btn-outline-danger">
+                  <i class="mdi mdi-trash-can-outline"></i>
+                </a>
+              </td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="5" class="text-center text-muted py-3">
+                No saved resolutions. Use the ✂ Split button on the preview page to create some.
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

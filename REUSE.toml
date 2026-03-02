@@ -10,6 +10,7 @@ path = [
     "*.egg-info/**",
     "contrib/**",
     "netbox_data_import/migrations/**",
+    "netbox_data_import/tests/fixtures/**",
     ".gitignore",
     ".envrc",
     ".devcontainer/devcontainer.json",

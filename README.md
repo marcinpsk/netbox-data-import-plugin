@@ -4,6 +4,12 @@ Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 -->
 # NetBox Data Import Plugin
 
+[![CI](https://img.shields.io/github/actions/workflow/status/marcinpsk/netbox-data-import-plugin/test.yaml?branch=main&label=tests)](https://github.com/marcinpsk/netbox-data-import-plugin/actions/workflows/test.yaml)
+[![Coverage](https://img.shields.io/endpoint?url=https://marcinpsk.github.io/netbox-data-import-plugin/coverage/badge.json)](https://marcinpsk.github.io/netbox-data-import-plugin/coverage/)
+[![License](https://img.shields.io/github/license/marcinpsk/netbox-data-import-plugin)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
+[![NetBox](https://img.shields.io/badge/NetBox-%E2%89%A54.3.0-blue)](https://github.com/netbox-community/netbox)
+
 A NetBox plugin for importing device inventory and rack layouts from external DCIM systems via configurable field mappings.
 
 ## Overview

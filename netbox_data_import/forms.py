@@ -5,10 +5,12 @@ from dcim.models import Site, Location
 from tenancy.models import Tenant
 from netbox.forms import NetBoxModelForm
 from utilities.forms.fields import DynamicModelChoiceField
-from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping
+from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
 
 
 class ImportProfileForm(NetBoxModelForm):
+    """Form for creating and editing ImportProfile instances."""
+
     class Meta:
         model = ImportProfile
         fields = [
@@ -19,11 +21,14 @@ class ImportProfileForm(NetBoxModelForm):
             "custom_field_name",
             "update_existing",
             "create_missing_device_types",
+            "preview_view_mode",
             "tags",
         ]
 
 
 class ColumnMappingForm(forms.ModelForm):
+    """Form for creating and editing ColumnMapping instances."""
+
     class Meta:
         model = ColumnMapping
         fields = ["profile", "source_column", "target_field"]
@@ -31,13 +36,17 @@ class ColumnMappingForm(forms.ModelForm):
 
 
 class ClassRoleMappingForm(forms.ModelForm):
+    """Form for creating and editing ClassRoleMapping instances."""
+
     class Meta:
         model = ClassRoleMapping
-        fields = ["profile", "source_class", "creates_rack", "role_slug"]
+        fields = ["profile", "source_class", "creates_rack", "role_slug", "ignore"]
         widgets = {"profile": forms.HiddenInput()}
 
 
 class DeviceTypeMappingForm(forms.ModelForm):
+    """Form for creating and editing DeviceTypeMapping instances."""
+
     class Meta:
         model = DeviceTypeMapping
         fields = [
@@ -50,10 +59,23 @@ class DeviceTypeMappingForm(forms.ModelForm):
         widgets = {"profile": forms.HiddenInput()}
 
 
+class ColumnTransformRuleForm(forms.ModelForm):
+    """Form for creating and editing ColumnTransformRule instances."""
+
+    class Meta:
+        model = ColumnTransformRule
+        fields = ["profile", "source_column", "pattern", "group_1_target", "group_2_target"]
+        widgets = {"profile": forms.HiddenInput()}
+
+
 class ImportSetupForm(forms.Form):
-    profile = DynamicModelChoiceField(
+    """Form for the import wizard step 1: select profile, upload file, choose site/location/tenant."""
+
+    # ImportProfile has no REST API endpoint yet, so use a plain select
+    profile = forms.ModelChoiceField(
         queryset=ImportProfile.objects.all(),
         label="Import Profile",
+        empty_label="— Select a profile —",
     )
     excel_file = forms.FileField(
         label="Excel File",

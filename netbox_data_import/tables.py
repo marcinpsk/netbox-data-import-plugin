@@ -2,10 +2,12 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
-from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping
+from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
 
 
 class ImportProfileTable(NetBoxTable):
+    """Table for listing ImportProfile objects."""
+
     name = tables.Column(linkify=True)
     sheet_name = tables.Column()
     column_mappings = tables.Column(
@@ -49,6 +51,8 @@ class ImportProfileTable(NetBoxTable):
 
 
 class ColumnMappingTable(tables.Table):
+    """Table for displaying ColumnMapping objects inline on the profile detail page."""
+
     source_column = tables.Column()
     target_field = tables.Column()
     actions = tables.TemplateColumn(
@@ -70,9 +74,12 @@ class ColumnMappingTable(tables.Table):
 
 
 class ClassRoleMappingTable(tables.Table):
+    """Table for displaying ClassRoleMapping objects inline on the profile detail page."""
+
     source_class = tables.Column()
     creates_rack = tables.BooleanColumn()
     role_slug = tables.Column()
+    ignore = tables.BooleanColumn()
     actions = tables.TemplateColumn(
         template_code="""
         <a href="{% url 'plugins:netbox_data_import:classrolemapping_edit' record.pk %}" class="btn btn-sm btn-warning">
@@ -88,10 +95,12 @@ class ClassRoleMappingTable(tables.Table):
 
     class Meta:
         model = ClassRoleMapping
-        fields = ("source_class", "creates_rack", "role_slug", "actions")
+        fields = ("source_class", "creates_rack", "role_slug", "ignore", "actions")
 
 
 class DeviceTypeMappingTable(tables.Table):
+    """Table for displaying DeviceTypeMapping objects inline on the profile detail page."""
+
     source_make = tables.Column()
     source_model = tables.Column()
     netbox_manufacturer_slug = tables.Column()
@@ -118,3 +127,28 @@ class DeviceTypeMappingTable(tables.Table):
             "netbox_device_type_slug",
             "actions",
         )
+
+
+class ColumnTransformRuleTable(tables.Table):
+    """Table for displaying ColumnTransformRule objects inline on the profile detail page."""
+
+    source_column = tables.Column()
+    pattern = tables.Column()
+    group_1_target = tables.Column()
+    group_2_target = tables.Column()
+    actions = tables.TemplateColumn(
+        template_code="""
+        <a href="{% url 'plugins:netbox_data_import:columntransformrule_edit' record.pk %}" class="btn btn-sm btn-warning">
+            <i class="mdi mdi-pencil"></i>
+        </a>
+        <a href="{% url 'plugins:netbox_data_import:columntransformrule_delete' record.pk %}" class="btn btn-sm btn-danger">
+            <i class="mdi mdi-trash-can-outline"></i>
+        </a>
+        """,
+        verbose_name="",
+        orderable=False,
+    )
+
+    class Meta:
+        model = ColumnTransformRule
+        fields = ("source_column", "pattern", "group_1_target", "group_2_target", "actions")

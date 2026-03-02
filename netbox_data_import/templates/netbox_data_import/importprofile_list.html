@@ -1,19 +1,10 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
 {% extends 'generic/object_list.html' %}
 {% load buttons %}
 
-{% block content_wrapper %}
-<div class="row">
-  <div class="col col-md-12">
-    <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <strong>Import Profiles</strong>
-        <a href="{% url 'plugins:netbox_data_import:importprofile_add' %}" class="btn btn-sm btn-primary">
-          <i class="mdi mdi-plus-thick"></i> Add
-        </a>
-      </div>
-      {% include 'inc/table.html' with table=table %}
-      {% include 'inc/paginator.html' with paginator=paginator page=page %}
-    </div>
-  </div>
-</div>
+{% block extra_controls %}
+  <a href="{% url 'plugins:netbox_data_import:import_profile_yaml' %}" class="btn btn-sm btn-outline-secondary">
+    <i class="mdi mdi-file-import"></i> Import Profile YAML
+  </a>
 {% endblock %}

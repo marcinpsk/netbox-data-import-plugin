@@ -1,3 +1,5 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
 {% extends 'base/layout.html' %}
 
 {% block title %}Import Results{% endblock %}
@@ -13,13 +15,13 @@
       <div class="card-body">
         <div class="d-flex gap-3 flex-wrap mb-3">
           {% with c=result.counts %}
-          <span class="badge bg-success fs-6">{{ c.racks_created|default:0 }} rack{{ c.racks_created|default:0|pluralize }} created</span>
-          <span class="badge bg-success fs-6">{{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} created</span>
+          <span class="badge fs-6 text-white" style="background:#198754;">{{ c.racks_created|default:0 }} rack{{ c.racks_created|default:0|pluralize }} created</span>
+          <span class="badge fs-6 text-white" style="background:#198754;">{{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} created</span>
           {% if c.racks_updated or c.devices_updated %}
-          <span class="badge bg-primary fs-6">{{ c.racks_updated|default:0|add:c.devices_updated|default:0 }} updated</span>
+          <span class="badge fs-6 text-white" style="background:#0d6efd;">{{ c.racks_updated|default:0|add:c.devices_updated|default:0 }} updated</span>
           {% endif %}
-          {% if c.skipped %}<span class="badge bg-secondary fs-6">{{ c.skipped }} skipped</span>{% endif %}
-          {% if c.errors %}<span class="badge bg-danger fs-6">{{ c.errors }} error{{ c.errors|pluralize }}</span>{% endif %}
+          {% if c.skipped %}<span class="badge fs-6 text-white" style="background:#6c757d;">{{ c.skipped }} skipped</span>{% endif %}
+          {% if c.errors %}<span class="badge fs-6 text-white" style="background:#dc3545;">{{ c.errors }} error{{ c.errors|pluralize }}</span>{% endif %}
           {% endwith %}
         </div>
         <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-primary">
@@ -61,18 +63,18 @@
               </td>
               <td>
                 {% if row.object_type == 'rack' %}
-                  <span class="badge bg-info">Rack</span>
+                  <span class="badge text-white" style="background:#0dcaf0;color:#000!important;">Rack</span>
                 {% elif row.object_type == 'device' %}
-                  <span class="badge bg-secondary">Device</span>
+                  <span class="badge text-white" style="background:#6c757d;">Device</span>
                 {% else %}
-                  <span class="badge bg-light text-dark">{{ row.object_type }}</span>
+                  <span class="badge" style="background:#dee2e6;color:#212529;border:1px solid #adb5bd;">{{ row.object_type }}</span>
                 {% endif %}
               </td>
               <td>
-                {% if row.action == 'create' %}<span class="badge bg-success">Created</span>
-                {% elif row.action == 'update' %}<span class="badge bg-primary">Updated</span>
-                {% elif row.action == 'skip' %}<span class="badge bg-secondary">Skipped</span>
-                {% elif row.action == 'error' %}<span class="badge bg-danger">Error</span>
+                {% if row.action == 'create' %}<span class="badge text-white" style="background:#198754;">Created</span>
+                {% elif row.action == 'update' %}<span class="badge text-white" style="background:#0d6efd;">Updated</span>
+                {% elif row.action == 'skip' %}<span class="badge text-white" style="background:#6c757d;">Skipped</span>
+                {% elif row.action == 'error' %}<span class="badge text-white" style="background:#dc3545;">Error</span>
                 {% endif %}
               </td>
               <td class="{% if row.action == 'error' %}text-danger{% endif %}">{{ row.detail }}</td>

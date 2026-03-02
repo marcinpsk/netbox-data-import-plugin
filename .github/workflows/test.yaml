@@ -2,16 +2,14 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 name: Test with supported NetBox and Python versions
 
-# DISABLED: tests not yet implemented for this plugin
-# on:
-#   push:
-#     branches:
-#       - main
-#   pull_request:
-#     branches:
-#       - main
-#       - develop
 on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+      - develop
   workflow_dispatch:
 
 concurrency:
@@ -76,7 +74,7 @@ jobs:
         working-directory: netbox-data-import-plugin
         run: |
           uv pip install --system -r ../netbox/requirements.txt
-          uv pip install --system pytest pytest-django tblib
+          uv pip install --system pytest pytest-django tblib coverage
           uv pip install --system -e .
 
       - name: Set up NetBox configuration
@@ -102,9 +100,28 @@ jobs:
           PLUGINS = ['netbox_data_import']
           EOF
 
-      - name: Run tests
+      - name: Run tests with coverage
         working-directory: netbox/netbox
         env:
           NETBOX_CONFIGURATION: netbox.configuration
+          COVERAGE_RCFILE: ../../netbox-data-import-plugin/pyproject.toml
         run: |
-          python manage.py test netbox_data_import --verbosity=2
+          coverage run manage.py test netbox_data_import --verbosity=2
+          coverage report
+
+      - name: Generate coverage report
+        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.5.3'
+        working-directory: netbox/netbox
+        env:
+          COVERAGE_RCFILE: ../../netbox-data-import-plugin/pyproject.toml
+        run: |
+          coverage json -o ../../coverage-report/coverage.json
+          coverage html -d ../../coverage-report/htmlcov
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.5.3'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: coverage-report
+          path: coverage-report/
+          retention-days: 7

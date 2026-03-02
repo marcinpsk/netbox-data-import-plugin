@@ -19,6 +19,10 @@ menu = PluginMenu(
                         ),
                     ),
                 ),
+                PluginMenuItem(
+                    link="plugins:netbox_data_import:importjob_list",
+                    link_text="Import History",
+                ),
             ),
         ),
         (
@@ -34,6 +38,10 @@ menu = PluginMenu(
                             icon_class="mdi mdi-plus-thick",
                         ),
                     ),
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_data_import:device_type_analysis",
+                    link_text="Device Type Analysis",
                 ),
             ),
         ),

@@ -6,6 +6,8 @@ from .models import ImportProfile
 
 
 class ImportProfileFilterSet(NetBoxModelFilterSet):
+    """FilterSet for ImportProfile, supporting name substring search."""
+
     q = django_filters.CharFilter(method="search", label="Search")
 
     class Meta:
@@ -13,4 +15,5 @@ class ImportProfileFilterSet(NetBoxModelFilterSet):
         fields = ["name", "sheet_name", "update_existing", "create_missing_device_types"]
 
     def search(self, queryset, name, value):
+        """Filter profiles by name substring."""
         return queryset.filter(name__icontains=value)

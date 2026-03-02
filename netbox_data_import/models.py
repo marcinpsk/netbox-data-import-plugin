@@ -4,21 +4,26 @@ from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
+PREVIEW_VIEW_CHOICES = [
+    ("rows", "Row view"),
+    ("racks", "Rack view"),
+]
+
 
 TARGET_FIELD_CHOICES = [
-    ("rack_name",    "Rack name"),
-    ("device_name",  "Device name"),
+    ("rack_name", "Rack name"),
+    ("device_name", "Device name"),
     ("device_class", "Device class (maps to role/rack)"),
-    ("face",         "Face (Front/Back)"),
-    ("airflow",      "Airflow"),
-    ("u_position",   "U position"),
-    ("status",       "Status"),
-    ("make",         "Make (manufacturer)"),
-    ("model",        "Model (device type)"),
-    ("u_height",     "U height"),
-    ("serial",       "Serial number"),
-    ("asset_tag",    "Asset tag"),
-    ("source_id",    "Source ID (stored in custom field)"),
+    ("face", "Face (Front/Back)"),
+    ("airflow", "Airflow"),
+    ("u_position", "U position"),
+    ("status", "Status"),
+    ("make", "Make (manufacturer)"),
+    ("model", "Model (device type)"),
+    ("u_height", "U height"),
+    ("serial", "Serial number"),
+    ("asset_tag", "Asset tag"),
+    ("source_id", "Source ID (stored in custom field)"),
 ]
 
 
@@ -50,6 +55,12 @@ class ImportProfile(NetBoxModel):
         default=True,
         help_text="Auto-create manufacturers and device types that don't exist in NetBox",
     )
+    preview_view_mode = models.CharField(
+        max_length=10,
+        choices=PREVIEW_VIEW_CHOICES,
+        default="rows",
+        help_text="How to display the import preview (row table or rack diagrams)",
+    )
 
     # Override tags reverse accessor to avoid clashes with other plugins
     tags = models.ManyToManyField(
@@ -67,6 +78,7 @@ class ImportProfile(NetBoxModel):
         return self.name
 
     def get_absolute_url(self):
+        """Return the detail URL for this import profile."""
         return reverse("plugins:netbox_data_import:importprofile", args=[self.pk])
 
 
@@ -94,6 +106,7 @@ class ColumnMapping(models.Model):
         return f"{self.source_column} → {self.get_target_field_display()}"
 
     def get_absolute_url(self):
+        """Return the edit URL for this column mapping."""
         return reverse("plugins:netbox_data_import:columnmapping_edit", args=[self.pk])
 
 
@@ -118,6 +131,10 @@ class ClassRoleMapping(models.Model):
         blank=True,
         help_text="NetBox device role slug (ignored when 'creates rack' is checked)",
     )
+    ignore = models.BooleanField(
+        default=False,
+        help_text="If checked, rows with this class are silently skipped (not shown as errors)",
+    )
 
     class Meta:
         ordering = ["profile", "source_class"]
@@ -131,7 +148,38 @@ class ClassRoleMapping(models.Model):
         return f"{self.source_class} → {self.role_slug}"
 
     def get_absolute_url(self):
+        """Return the edit URL for this class→role mapping."""
         return reverse("plugins:netbox_data_import:classrolemapping_edit", args=[self.pk])
+
+
+class ImportJob(models.Model):
+    """Records a completed import run with its results."""
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="import_jobs",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+    input_filename = models.CharField(max_length=255, blank=True)
+    dry_run = models.BooleanField(default=False)
+    site_name = models.CharField(max_length=100, blank=True)
+    result_counts = models.JSONField(default=dict)
+    result_rows = models.JSONField(default=list)
+
+    class Meta:
+        ordering = ["-created"]
+        verbose_name = "Import Job"
+        verbose_name_plural = "Import Jobs"
+
+    def __str__(self):
+        return f"Import {self.pk} — {self.created:%Y-%m-%d %H:%M} ({self.input_filename})"
+
+    def get_absolute_url(self):
+        """Return the detail URL for this import job."""
+        return reverse("plugins:netbox_data_import:importjob", args=[self.pk])
 
 
 class DeviceTypeMapping(models.Model):
@@ -154,7 +202,195 @@ class DeviceTypeMapping(models.Model):
         verbose_name_plural = "Device Type Mappings"
 
     def __str__(self):
-        return f"{self.source_make} / {self.source_model} → {self.netbox_manufacturer_slug}/{self.netbox_device_type_slug}"
+        return (
+            f"{self.source_make} / {self.source_model} → {self.netbox_manufacturer_slug}/{self.netbox_device_type_slug}"
+        )
 
     def get_absolute_url(self):
+        """Return the edit URL for this device type mapping."""
         return reverse("plugins:netbox_data_import:devicetypemapping_edit", args=[self.pk])
+
+
+class ManufacturerMapping(models.Model):
+    """Maps a source 'make' value to an existing NetBox manufacturer slug."""
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="manufacturer_mappings",
+    )
+    source_make = models.CharField(
+        max_length=200,
+        help_text="Exact source make value (e.g. 'Dell EMC')",
+    )
+    netbox_manufacturer_slug = models.CharField(
+        max_length=100,
+        help_text="NetBox manufacturer slug to map this make to (e.g. 'dell')",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_make"]
+        unique_together = [("profile", "source_make")]
+        verbose_name = "Manufacturer Mapping"
+        verbose_name_plural = "Manufacturer Mappings"
+
+    def __str__(self):
+        return f"{self.source_make} → {self.netbox_manufacturer_slug}"
+
+
+class IgnoredDevice(models.Model):
+    """Per-device ignore record — prevents a specific source device from being imported."""
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="ignored_devices",
+    )
+    source_id = models.CharField(
+        max_length=200,
+        help_text="Source ID value that identifies this device",
+    )
+    device_name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Original device name (for display only)",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_id"]
+        unique_together = [("profile", "source_id")]
+        verbose_name = "Ignored Device"
+        verbose_name_plural = "Ignored Devices"
+
+    def __str__(self):
+        return f"{self.device_name or self.source_id} (ignored)"
+
+
+class ColumnTransformRule(models.Model):
+    r"""Regex-based transform applied to a source column during parse.
+
+    Example: source_column='Name', pattern='^(\w{4,8}) - (.+)$',
+    group_1_target='asset_tag', group_2_target='device_name'
+    transforms "59AH76 - PROD-LAB03-SW1" into asset_tag="59AH76", device_name="PROD-LAB03-SW1".
+    """
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="column_transform_rules",
+    )
+    source_column = models.CharField(
+        max_length=200,
+        help_text="Source Excel column to transform (exact header name)",
+    )
+    pattern = models.CharField(
+        max_length=500,
+        help_text=r"Python regex with capture groups (re.fullmatch). E.g. ^(\w+) - (.+)$",
+    )
+    group_1_target = models.CharField(
+        max_length=50,
+        blank=True,
+        choices=TARGET_FIELD_CHOICES,
+        help_text="Target field for capture group 1 (leave blank to ignore)",
+    )
+    group_2_target = models.CharField(
+        max_length=50,
+        blank=True,
+        choices=TARGET_FIELD_CHOICES,
+        help_text="Target field for capture group 2 (leave blank to ignore)",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_column"]
+        unique_together = [("profile", "source_column")]
+        verbose_name = "Column Transform Rule"
+        verbose_name_plural = "Column Transform Rules"
+
+    def __str__(self):
+        return f"{self.source_column}: {self.pattern}"
+
+    def get_absolute_url(self):
+        """Return the edit URL for this column transform rule."""
+        return reverse("plugins:netbox_data_import:columntransformrule_edit", args=[self.pk])
+
+
+class SourceResolution(models.Model):
+    """Saved manual resolution for a specific source cell value.
+
+    When a user manually splits "59AH76 - PROD-LAB03-SW1" into asset_tag=59AH76
+    and device_name=PROD-LAB03-SW1, that resolution is saved here. On re-import,
+    parse_file applies it automatically (like git rerere).
+    """
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="source_resolutions",
+    )
+    source_id = models.CharField(
+        max_length=200,
+        help_text="Source ID of the row this resolution applies to",
+    )
+    source_column = models.CharField(
+        max_length=200,
+        help_text="Column name this resolution applies to",
+    )
+    original_value = models.TextField(
+        help_text="Original cell value before resolution",
+    )
+    resolved_fields = models.JSONField(
+        default=dict,
+        help_text="Dict of target_field -> resolved_value (e.g. {'device_name': 'SW1', 'asset_tag': '59AH76'})",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_id"]
+        unique_together = [("profile", "source_id", "source_column")]
+        verbose_name = "Source Resolution"
+        verbose_name_plural = "Source Resolutions"
+
+    def __str__(self):
+        return f"{self.source_id}/{self.source_column}: {self.original_value!r}"
+
+
+class DeviceExistingMatch(models.Model):
+    """Explicit match between a source row and an existing NetBox device.
+
+    When a user clicks "Link existing" on a device preview row, this record is saved.
+    On re-import, the engine uses this to emit action='update' against the matched device
+    instead of action='create', even if the device has no source-ID custom field yet.
+    """
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="device_matches",
+    )
+    source_id = models.CharField(
+        max_length=200,
+        help_text="Source ID value that identifies this row",
+    )
+    source_asset_tag = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text="Asset tag from source row (for display / lookup; may become stale)",
+    )
+    netbox_device_id = models.PositiveIntegerField(
+        help_text="Primary key of the matched NetBox Device",
+    )
+    device_name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="NetBox device name (for display only; may become stale)",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_id"]
+        unique_together = [("profile", "source_id")]
+        verbose_name = "Device Existing Match"
+        verbose_name_plural = "Device Existing Matches"
+
+    def __str__(self):
+        tag = f" / {self.source_asset_tag}" if self.source_asset_tag else ""
+        return f"{self.source_id}{tag} → Device #{self.netbox_device_id} ({self.device_name})"
