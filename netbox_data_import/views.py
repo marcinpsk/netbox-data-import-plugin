@@ -1347,6 +1347,37 @@ class SearchNetBoxObjectsView(LoginRequiredMixin, View):
         return JsonResponse({"results": results})
 
 
+def _auto_match_single_device(Device, profile, source_id, device_name, serial, asset_tag):
+    """Try to match a single device row to an existing NetBox device.
+
+    Returns (device_or_None, is_ambiguous).  Matching priority: serial →
+    asset_tag → exact name.  Multiple matches on any field → ambiguous.
+    """
+    device = None
+    if serial:
+        qs = Device.objects.filter(serial=serial)
+        if qs.count() == 1:
+            device = qs.first()
+        elif qs.count() > 1:
+            return None, True
+
+    if device is None and asset_tag:
+        qs = Device.objects.filter(asset_tag=asset_tag)
+        if qs.count() == 1:
+            device = qs.first()
+        elif qs.count() > 1:
+            return None, True
+
+    if device is None and device_name:
+        qs = Device.objects.filter(name=device_name)
+        if qs.count() == 1:
+            device = qs.first()
+        elif qs.count() > 1:
+            return None, True
+
+    return device, False
+
+
 class AutoMatchDevicesView(LoginRequiredMixin, View):
     """Scan all device rows in the session and auto-match to existing NetBox devices.
 
@@ -1378,33 +1409,10 @@ class AutoMatchDevicesView(LoginRequiredMixin, View):
                 already += 1
                 continue
 
-            device = None
-            # 1. Match by serial
-            if serial:
-                qs = Device.objects.filter(serial=serial)
-                if qs.count() == 1:
-                    device = qs.first()
-                elif qs.count() > 1:
-                    ambiguous += 1
-                    continue
-
-            # 2. Match by asset_tag
-            if device is None and asset_tag:
-                qs = Device.objects.filter(asset_tag=asset_tag)
-                if qs.count() == 1:
-                    device = qs.first()
-                elif qs.count() > 1:
-                    ambiguous += 1
-                    continue
-
-            # 3. Exact name match
-            if device is None and device_name:
-                qs = Device.objects.filter(name=device_name)
-                if qs.count() == 1:
-                    device = qs.first()
-                elif qs.count() > 1:
-                    ambiguous += 1
-                    continue
+            device, is_ambiguous = _auto_match_single_device(Device, profile, source_id, device_name, serial, asset_tag)
+            if is_ambiguous:
+                ambiguous += 1
+                continue
 
             if device is not None:
                 DeviceExistingMatch.objects.create(

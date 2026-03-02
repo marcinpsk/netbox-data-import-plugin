@@ -152,7 +152,12 @@ plugin-install() {
 
 plugins-install() {
   if [ -f "$PLUGIN_DIR/.devcontainer/extra-requirements.txt" ]; then
-    source /opt/netbox/venv/bin/activate && pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt"
+    source /opt/netbox/venv/bin/activate
+    if command -v uv >/dev/null 2>&1; then
+      uv pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt"
+    else
+      pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt"
+    fi
   else
     echo "No .devcontainer/extra-requirements.txt found"
   fi
@@ -220,7 +225,7 @@ dev-help() {
   echo "  diagnose            : Run startup diagnostics"
   echo "  dev-help            : Show this help message"
   echo ""
-  echo "📖 NetBox available at: http://localhost:8000 (admin/admin)"
+  echo "📖 NetBox available at: http://localhost:8000 (${SUPERUSER_NAME:-admin}/${SUPERUSER_PASSWORD:-admin})"
 }
 
 echo "✅ Dev helpers loaded! Try: rq-status, rq-stats, rq-recent, dev-help"

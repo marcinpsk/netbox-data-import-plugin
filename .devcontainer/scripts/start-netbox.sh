@@ -69,13 +69,19 @@ fi
 source /opt/netbox/venv/bin/activate
 
 # Navigate to NetBox directory
-cd /opt/netbox/netbox
+if ! cd /opt/netbox/netbox; then
+  echo "ERROR: Failed to cd into /opt/netbox/netbox" >&2
+  exit 1
+fi
 
 # Start RQ worker in background
 echo "⚙️  Starting RQ worker..."
 (
   source /opt/netbox/venv/bin/activate
-  cd /opt/netbox/netbox
+  if ! cd /opt/netbox/netbox; then
+    echo "ERROR: RQ worker subshell: failed to cd into /opt/netbox/netbox" >&2
+    exit 1
+  fi
   python manage.py rqworker --verbosity=1
 ) > /tmp/rqworker.log 2>&1 &
 
@@ -88,7 +94,10 @@ if [ "$BACKGROUND" = true ]; then
   (
     export DEBUG="${DEBUG:-True}"
     source /opt/netbox/venv/bin/activate
-    cd /opt/netbox/netbox
+    if ! cd /opt/netbox/netbox; then
+      echo "ERROR: NetBox subshell: failed to cd into /opt/netbox/netbox" >&2
+      exit 1
+    fi
     python manage.py runserver 0.0.0.0:8000 --verbosity=0
   ) > /tmp/netbox.log 2>&1 &
 

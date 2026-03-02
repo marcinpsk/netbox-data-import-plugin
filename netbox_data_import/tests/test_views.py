@@ -1221,6 +1221,171 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         resp = self.client.post(url, {"profile_id": self.profile.pk})
         self.assertEqual(resp.status_code, 302)
 
+    def test_post_automatch_by_asset_tag(self):
+        """POST with a row matching only by asset_tag creates a DeviceExistingMatch."""
+        from dcim.models import Manufacturer, DeviceType, DeviceRole, Device
+        from netbox_data_import.models import DeviceExistingMatch
+
+        mfg = Manufacturer.objects.create(name="TagMfg", slug="tag-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="TagModel", slug="tag-model")
+        role = DeviceRole.objects.create(name="TagRole", slug="tag-role")
+        device = Device.objects.create(
+            name="tag-device-01", asset_tag="ASSET-TAG-01", device_type=dt, role=role, site=self.site
+        )
+
+        session = self.client.session
+        session["import_rows"] = [
+            {
+                "_row_number": 1,
+                "source_id": "TAG-001",
+                "device_name": "tag-device-01",
+                "serial": "",
+                "asset_tag": "ASSET-TAG-01",
+            }
+        ]
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:auto_match_devices")
+        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(
+            DeviceExistingMatch.objects.filter(
+                profile=self.profile, source_id="TAG-001", netbox_device_id=device.pk
+            ).exists()
+        )
+
+    def test_post_automatch_by_exact_name(self):
+        """POST with a row matching only by exact device name creates a DeviceExistingMatch."""
+        from dcim.models import Manufacturer, DeviceType, DeviceRole, Device
+        from netbox_data_import.models import DeviceExistingMatch
+
+        mfg = Manufacturer.objects.create(name="NameMfg", slug="name-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="NameModel", slug="name-model")
+        role = DeviceRole.objects.create(name="NameRole", slug="name-role")
+        device = Device.objects.create(name="name-device-01", device_type=dt, role=role, site=self.site)
+
+        session = self.client.session
+        session["import_rows"] = [
+            {"_row_number": 1, "source_id": "NAME-001", "device_name": "name-device-01", "serial": "", "asset_tag": ""}
+        ]
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:auto_match_devices")
+        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(
+            DeviceExistingMatch.objects.filter(
+                profile=self.profile, source_id="NAME-001", netbox_device_id=device.pk
+            ).exists()
+        )
+
+    def test_post_automatch_ambiguous_serial_skips(self):
+        """POST with ambiguous serial (multiple devices) does NOT create a match."""
+        from dcim.models import Manufacturer, DeviceType, DeviceRole, Device
+        from netbox_data_import.models import DeviceExistingMatch
+
+        mfg = Manufacturer.objects.create(name="AmbMfg", slug="amb-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="AmbModel", slug="amb-model")
+        role = DeviceRole.objects.create(name="AmbRole", slug="amb-role")
+        # Two devices sharing a serial (unusual but tested for robustness)
+        Device.objects.create(name="amb-device-01", serial="AMBSERIAL-01", device_type=dt, role=role, site=self.site)
+        Device.objects.create(name="amb-device-02", serial="AMBSERIAL-01", device_type=dt, role=role, site=self.site)
+
+        session = self.client.session
+        session["import_rows"] = [
+            {
+                "_row_number": 1,
+                "source_id": "AMB-001",
+                "device_name": "amb-device-01",
+                "serial": "AMBSERIAL-01",
+                "asset_tag": "",
+            }
+        ]
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:auto_match_devices")
+        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AMB-001").exists())
+
+    def test_post_automatch_already_matched_skips(self):
+        """POST with a row that already has a DeviceExistingMatch increments 'already' counter but does not create a duplicate."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="ALREADY-001",
+            netbox_device_id=self.device.pk,
+            device_name=self.device.name,
+        )
+
+        session = self.client.session
+        session["import_rows"] = [
+            {
+                "_row_number": 1,
+                "source_id": "ALREADY-001",
+                "device_name": "automatch-device-01",
+                "serial": "SERIAL-AM-01",
+                "asset_tag": "",
+            }
+        ]
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:auto_match_devices")
+        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        self.assertEqual(resp.status_code, 302)
+        # Still exactly one match
+        self.assertEqual(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="ALREADY-001").count(), 1)
+
+    def test_post_automatch_no_source_id_skips(self):
+        """Rows without source_id are silently skipped."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        session = self.client.session
+        session["import_rows"] = [
+            {
+                "_row_number": 1,
+                "source_id": "",
+                "device_name": "automatch-device-01",
+                "serial": "SERIAL-AM-01",
+                "asset_tag": "",
+            }
+        ]
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:auto_match_devices")
+        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
+
+    def test_post_automatch_probable_name_match_no_link(self):
+        """POST with a name substring match does NOT create a DeviceExistingMatch (probable only)."""
+        from dcim.models import Manufacturer, DeviceType, DeviceRole, Device
+        from netbox_data_import.models import DeviceExistingMatch
+
+        mfg = Manufacturer.objects.create(name="ProbMfg", slug="prob-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="ProbModel", slug="prob-model")
+        role = DeviceRole.objects.create(name="ProbRole", slug="prob-role")
+        Device.objects.create(name="probable-device", device_type=dt, role=role, site=self.site)
+
+        session = self.client.session
+        session["import_rows"] = [
+            {
+                "_row_number": 1,
+                "source_id": "PROB-001",
+                "device_name": "prefix - probable-device",
+                "serial": "",
+                "asset_tag": "",
+            }
+        ]
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:auto_match_devices")
+        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        self.assertEqual(resp.status_code, 302)
+        # Probable match doesn't auto-link
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="PROB-001").exists())
+
 
 class ImportRunViewTest(BaseViewTestCase):
     """Tests for ImportRunView (executes the actual import)."""
