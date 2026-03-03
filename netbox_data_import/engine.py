@@ -389,7 +389,7 @@ def _pass1_ensure_types(rows, profile, class_role_map, result, dry_run):
     for row in rows:
         device_class = str(row.get("device_class", "")).strip()
         crm = class_role_map.get(device_class)
-        if crm and (crm.creates_rack or crm.ignore):
+        if crm is None or crm.creates_rack or crm.ignore:
             continue
 
         make = " ".join(str(row.get("make", "Unknown")).split()) or "Unknown"
@@ -777,13 +777,15 @@ def _write_device_row(
         tenant=tenant,
     )
     _store_source_id(device, profile, source_id)
+    _rack_label = rack_name if rack_name else "(no rack)"
+    _pos_label = f" U{position}" if position is not None else ""
     return RowResult(
         row_number=row["_row_number"],
         source_id=source_id,
         name=device_name,
         action="create",
         object_type="device",
-        detail=f"Created device '{device_name}' in {rack_name} U{position}",
+        detail=f"Created device '{device_name}' in {_rack_label}{_pos_label}",
         netbox_url=device.get_absolute_url(),
         rack_name=rack_name,
         extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},

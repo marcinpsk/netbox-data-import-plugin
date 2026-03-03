@@ -6,7 +6,17 @@ import os
 
 from django.test import TestCase
 
-from netbox_data_import.engine import ImportResult, RowResult, _resolve_device_type_slugs, parse_file, run_import
+from netbox_data_import.engine import (
+    ImportResult,
+    RowResult,
+    _apply_transform_rules,
+    _find_existing_device,
+    _resolve_device_type_slugs,
+    _write_device_row,
+    _write_rack_to_db,
+    parse_file,
+    run_import,
+)
 from netbox_data_import.models import (
     ClassRoleMapping,
     ColumnMapping,
@@ -458,3 +468,643 @@ class ManufacturerMappingInEngineTest(TestCase):
             rows = parse_file(f, self.profile)
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
         self.assertIsInstance(result, ImportResult)
+
+
+# ---------------------------------------------------------------------------
+# New tests: ApplyTransformRulesTest
+# ---------------------------------------------------------------------------
+
+
+class ApplyTransformRulesTest(TestCase):
+    """Tests for _apply_transform_rules direct-call behaviour."""
+
+    def setUp(self):
+        """Create a minimal profile for transform rule tests."""
+        self.profile = ImportProfile.objects.create(name="ATRTest", sheet_name="Data", source_id_column="Id")
+
+    def test_group_1_target_set_on_match(self):
+        """When the pattern matches, group_1_target is written to row_dict."""
+        rule = ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="ColA",
+            pattern=r"^(\w+) - .+$",
+            group_1_target="asset_tag",
+            group_2_target="",
+        )
+        row_dict = {}
+        raw_headers = {"ColA": 0}
+        raw_row = ("AT9876 - description",)
+        _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
+        self.assertEqual(row_dict.get("asset_tag"), "AT9876")
+
+    def test_both_groups_set_on_match(self):
+        """When the pattern matches and both group targets are set, both fields are written."""
+        rule = ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="ColB",
+            pattern=r"^(\w+) - (.+)$",
+            group_1_target="asset_tag",
+            group_2_target="device_name",
+        )
+        row_dict = {}
+        raw_headers = {"ColB": 0}
+        raw_row = ("AT0001 - my-device",)
+        _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
+        self.assertEqual(row_dict.get("asset_tag"), "AT0001")
+        self.assertEqual(row_dict.get("device_name"), "my-device")
+
+    def test_no_match_leaves_row_dict_unchanged(self):
+        """When the pattern does not match, row_dict is left unchanged."""
+        rule = ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="ColC",
+            pattern=r"^\d{10}$",
+            group_1_target="asset_tag",
+            group_2_target="",
+        )
+        row_dict = {"device_name": "original"}
+        raw_headers = {"ColC": 0}
+        raw_row = ("not-ten-digits",)
+        _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
+        self.assertNotIn("asset_tag", row_dict)
+        self.assertEqual(row_dict["device_name"], "original")
+
+    def test_missing_column_header_skips_rule(self):
+        """When the source_column is absent from raw_headers, the rule is skipped silently."""
+        rule = ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="ColD",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        row_dict = {"device_name": "unchanged"}
+        raw_headers = {}  # ColD not present
+        raw_row = ("some value",)
+        _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
+        self.assertEqual(row_dict["device_name"], "unchanged")
+
+    def test_none_raw_value_skips_rule(self):
+        """When the raw cell value is None, the rule is skipped silently."""
+        rule = ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="ColE",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        row_dict = {"device_name": "unchanged"}
+        raw_headers = {"ColE": 0}
+        raw_row = (None,)  # None value at index 0
+        _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
+        self.assertEqual(row_dict["device_name"], "unchanged")
+
+
+# ---------------------------------------------------------------------------
+# New tests: FindExistingDeviceTest
+# ---------------------------------------------------------------------------
+
+
+class FindExistingDeviceTest(TestCase):
+    """Unit tests for _find_existing_device matching logic."""
+
+    def setUp(self):
+        """Create a site, device type, role, and profile for matching tests."""
+        from dcim.models import Site, DeviceType, Manufacturer, DeviceRole
+
+        self.site = Site.objects.create(name="FEDSite", slug="fed-site")
+        mfg = Manufacturer.objects.create(name="FED Corp", slug="fed-corp")
+        self.dt = DeviceType.objects.create(manufacturer=mfg, model="FED Model", slug="fed-model")
+        self.role = DeviceRole.objects.create(name="FED Role", slug="fed-role")
+        self.profile = ImportProfile.objects.create(name="FEDProfile", sheet_name="Data", source_id_column="Id")
+
+    def test_source_id_link_match(self):
+        """_find_existing_device returns (device, 'source ID link') when a DeviceExistingMatch exists."""
+        from dcim.models import Device
+        from netbox_data_import.models import DeviceExistingMatch
+
+        device = Device.objects.create(name="fed-dev-01", site=self.site, device_type=self.dt, role=self.role)
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="FED001",
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+        matched, method = _find_existing_device(self.profile, "FED001", self.site, "other-name", None, None, Device)
+        self.assertEqual(matched, device)
+        self.assertEqual(method, "source ID link")
+
+    def test_serial_match(self):
+        """_find_existing_device returns (device, 'serial') when a device with that serial exists."""
+        from dcim.models import Device
+
+        device = Device.objects.create(
+            name="fed-dev-02",
+            site=self.site,
+            device_type=self.dt,
+            role=self.role,
+            serial="SN_UNIQUE_TEST_99",
+        )
+        matched, method = _find_existing_device(
+            self.profile, None, self.site, "other-name", "SN_UNIQUE_TEST_99", None, Device
+        )
+        self.assertEqual(matched, device)
+        self.assertEqual(method, "serial")
+
+    def test_serial_multiple_objects_returns_none(self):
+        """_find_existing_device returns (None, None) when serial matches multiple devices."""
+        from dcim.models import Device
+        from unittest.mock import patch
+
+        with patch.object(Device.objects, "get", side_effect=Device.MultipleObjectsReturned):
+            matched, method = _find_existing_device(
+                self.profile, None, self.site, "any-name", "AMBIG-SERIAL", None, Device
+            )
+        self.assertIsNone(matched)
+        self.assertIsNone(method)
+
+    def test_asset_tag_match(self):
+        """_find_existing_device returns (device, 'asset tag') when a device with that asset_tag exists."""
+        from dcim.models import Device
+
+        device = Device.objects.create(
+            name="fed-dev-03",
+            site=self.site,
+            device_type=self.dt,
+            role=self.role,
+            asset_tag="AT_UNIQUE_TEST_88",
+        )
+        matched, method = _find_existing_device(
+            self.profile, None, self.site, "other-name", None, "AT_UNIQUE_TEST_88", Device
+        )
+        self.assertEqual(matched, device)
+        self.assertEqual(method, "asset tag")
+
+    def test_asset_tag_multiple_objects_returns_none(self):
+        """_find_existing_device returns (None, None) when asset_tag matches multiple devices."""
+        from dcim.models import Device
+        from unittest.mock import patch
+
+        with patch.object(Device.objects, "get", side_effect=Device.MultipleObjectsReturned):
+            matched, method = _find_existing_device(self.profile, None, self.site, "any-name", None, "AMBIG-AT", Device)
+        self.assertIsNone(matched)
+        self.assertIsNone(method)
+
+    def test_no_match_returns_none(self):
+        """_find_existing_device returns (None, None) when no match is found."""
+        from dcim.models import Device
+
+        matched, method = _find_existing_device(
+            self.profile, None, self.site, "no-such-dev", "SN_NOSUCH", "AT_NOSUCH", Device
+        )
+        self.assertIsNone(matched)
+        self.assertIsNone(method)
+
+
+# ---------------------------------------------------------------------------
+# New tests: WriteRackToDbTest
+# ---------------------------------------------------------------------------
+
+
+class WriteRackToDbTest(TestCase):
+    """Unit tests for _write_rack_to_db: create, update (with location+tenant), and skip."""
+
+    def setUp(self):
+        """Create a site and profile for rack DB write tests."""
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="WRSite", slug="wr-site")
+        self.profile = ImportProfile.objects.create(name="WRProfile", sheet_name="Data", source_id_column="Id")
+
+    def test_create_new_rack(self):
+        """_write_rack_to_db creates a new Rack and records action='create'."""
+        from dcim.models import Rack
+
+        rack_map = {}
+        result = ImportResult()
+        row = {"_row_number": 1}
+        _write_rack_to_db(
+            "NewRack",
+            self.site,
+            None,
+            None,
+            42,
+            "",
+            self.profile,
+            "SRC1",
+            row,
+            rack_map,
+            result,
+            True,
+            Rack,
+        )
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(result.rows[0].action, "create")
+        self.assertTrue(Rack.objects.filter(site=self.site, name="NewRack").exists())
+
+    def test_update_existing_rack_with_location_and_tenant(self):
+        """_write_rack_to_db updates an existing rack and sets location and tenant."""
+        from dcim.models import Rack, Location
+        from tenancy.models import Tenant
+
+        rack = Rack.objects.create(site=self.site, name="ExistRack", u_height=42)
+        loc = Location.objects.create(name="WRLoc", slug="wr-loc", site=self.site)
+        tenant = Tenant.objects.create(name="WRTenant", slug="wr-tenant")
+
+        rack_map = {}
+        result = ImportResult()
+        row = {"_row_number": 2}
+        _write_rack_to_db(
+            "ExistRack",
+            self.site,
+            loc,
+            tenant,
+            24,
+            "SN002",
+            self.profile,
+            "SRC2",
+            row,
+            rack_map,
+            result,
+            True,
+            Rack,
+        )
+        self.assertEqual(result.rows[0].action, "update")
+        rack.refresh_from_db()
+        self.assertEqual(rack.location, loc)
+        self.assertEqual(rack.tenant, tenant)
+        self.assertEqual(rack.u_height, 24)
+
+    def test_skip_existing_rack_when_update_existing_false(self):
+        """_write_rack_to_db records action='skip' when update_existing=False and rack exists."""
+        from dcim.models import Rack
+
+        Rack.objects.create(site=self.site, name="SkipRack", u_height=42)
+        rack_map = {}
+        result = ImportResult()
+        row = {"_row_number": 3}
+        _write_rack_to_db(
+            "SkipRack",
+            self.site,
+            None,
+            None,
+            42,
+            "",
+            self.profile,
+            "SRC3",
+            row,
+            rack_map,
+            result,
+            False,
+            Rack,
+        )
+        self.assertEqual(result.rows[0].action, "skip")
+        self.assertIn("SkipRack", rack_map)
+
+
+# ---------------------------------------------------------------------------
+# New tests: WriteDeviceRowTest
+# ---------------------------------------------------------------------------
+
+
+class WriteDeviceRowTest(TestCase):
+    """Unit tests for _write_device_row: error, create, update, skip paths."""
+
+    def setUp(self):
+        """Create site, manufacturer, device type, device role, profile and CRM."""
+        from dcim.models import Site, Manufacturer, DeviceType, DeviceRole
+
+        self.site = Site.objects.create(name="WDSite", slug="wd-site")
+        self.mfg = Manufacturer.objects.create(name="WD Corp", slug="wd-corp")
+        self.dt = DeviceType.objects.create(manufacturer=self.mfg, model="WD Model", slug="wd-model")
+        self.role = DeviceRole.objects.create(name="WD Role", slug="wd-role")
+        self.profile = ImportProfile.objects.create(
+            name="WDProfile", sheet_name="Data", source_id_column="Id", update_existing=True
+        )
+        self.crm = ClassRoleMapping.objects.create(profile=self.profile, source_class="Server", role_slug="wd-role")
+
+    def _base_row(self, num=1, device_name=None):
+        """Return a minimal synthetic row dict."""
+        return {
+            "_row_number": num,
+            "source_id": f"WD{num:03d}",
+            "device_name": device_name or f"wd-dev-{num:02d}",
+            "device_class": "Server",
+            "make": "WD Corp",
+            "model": "WD Model",
+            "u_height": "1",
+            "rack_name": "",
+            "u_position": "1",
+            "serial": "",
+            "asset_tag": "",
+            "status": "active",
+        }
+
+    def test_device_type_not_found_returns_error(self):
+        """_write_device_row returns action='error' when DeviceType does not exist."""
+        from dcim.models import Device, DeviceType, DeviceRole, Rack
+
+        row = self._base_row(1)
+        result = _write_device_row(
+            row,
+            self.profile,
+            self.site,
+            None,
+            None,
+            {},
+            "WD Corp",
+            "WD Model",
+            self.crm,
+            "nonexistent-mfg",
+            "nonexistent-dt",
+            "WD001",
+            "wd-dev-01",
+            "",
+            None,
+            1,
+            None,
+            None,
+            "active",
+            DeviceType,
+            DeviceRole,
+            Rack,
+            Device,
+        )
+        self.assertEqual(result.action, "error")
+        self.assertIn("not found", result.detail)
+
+    def test_device_role_not_found_returns_error(self):
+        """_write_device_row returns action='error' when DeviceRole does not exist."""
+        from dcim.models import Device, DeviceType, DeviceRole, Rack
+
+        crm_bad = ClassRoleMapping.objects.create(
+            profile=self.profile, source_class="BadRole", role_slug="nonexistent-role"
+        )
+        row = self._base_row(2)
+        result = _write_device_row(
+            row,
+            self.profile,
+            self.site,
+            None,
+            None,
+            {},
+            "WD Corp",
+            "WD Model",
+            crm_bad,
+            "wd-corp",
+            "wd-model",
+            "WD002",
+            "wd-dev-02",
+            "",
+            None,
+            1,
+            None,
+            None,
+            "active",
+            DeviceType,
+            DeviceRole,
+            Rack,
+            Device,
+        )
+        self.assertEqual(result.action, "error")
+        self.assertIn("not found", result.detail)
+
+    def test_create_device_successfully(self):
+        """_write_device_row creates a Device and returns action='create' with correct detail."""
+        from dcim.models import Device, DeviceType, DeviceRole, Rack
+
+        row = self._base_row(3)
+        result = _write_device_row(
+            row,
+            self.profile,
+            self.site,
+            None,
+            None,
+            {},
+            "WD Corp",
+            "WD Model",
+            self.crm,
+            "wd-corp",
+            "wd-model",
+            "WD003",
+            "wd-dev-03",
+            "",
+            None,
+            1,
+            None,
+            None,
+            "active",
+            DeviceType,
+            DeviceRole,
+            Rack,
+            Device,
+        )
+        self.assertEqual(result.action, "create")
+        self.assertNotIn("  ", result.detail)  # no double space
+        self.assertTrue(Device.objects.filter(site=self.site, name="wd-dev-03").exists())
+
+    def test_update_existing_device_with_asset_tag(self):
+        """_write_device_row updates an existing device and sets asset_tag."""
+        from dcim.models import Device, DeviceType, DeviceRole, Rack
+
+        Device.objects.create(name="wd-dev-04", site=self.site, device_type=self.dt, role=self.role)
+        row = self._base_row(4, device_name="wd-dev-04")
+        result = _write_device_row(
+            row,
+            self.profile,
+            self.site,
+            None,
+            None,
+            {},
+            "WD Corp",
+            "WD Model",
+            self.crm,
+            "wd-corp",
+            "wd-model",
+            "WD004",
+            "wd-dev-04",
+            "",
+            "AT001",
+            1,
+            None,
+            None,
+            "active",
+            DeviceType,
+            DeviceRole,
+            Rack,
+            Device,
+        )
+        self.assertEqual(result.action, "update")
+        dev = Device.objects.get(site=self.site, name="wd-dev-04")
+        self.assertEqual(dev.asset_tag, "AT001")
+
+    def test_skip_existing_device_when_update_existing_false(self):
+        """_write_device_row returns action='skip' when update_existing=False and device exists."""
+        from dcim.models import Device, DeviceType, DeviceRole, Rack
+
+        self.profile.update_existing = False
+        self.profile.save()
+        Device.objects.create(name="wd-dev-05", site=self.site, device_type=self.dt, role=self.role)
+        row = self._base_row(5, device_name="wd-dev-05")
+        result = _write_device_row(
+            row,
+            self.profile,
+            self.site,
+            None,
+            None,
+            {},
+            "WD Corp",
+            "WD Model",
+            self.crm,
+            "wd-corp",
+            "wd-model",
+            "WD005",
+            "wd-dev-05",
+            "",
+            None,
+            1,
+            None,
+            None,
+            "active",
+            DeviceType,
+            DeviceRole,
+            Rack,
+            Device,
+        )
+        self.assertEqual(result.action, "skip")
+        self.assertIn("update_existing=False", result.detail)
+
+
+# ---------------------------------------------------------------------------
+# New tests: Pass3EdgeCasesTest
+# ---------------------------------------------------------------------------
+
+
+class Pass3EdgeCasesTest(TestCase):
+    """Integration tests for pass-3 edge cases exercised via run_import."""
+
+    def setUp(self):
+        """Create a site and full profile for pass-3 integration tests."""
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="P3Site", slug="p3-site")
+        self.profile = _make_profile("P3Test")
+
+    def _device_row(self, **overrides):
+        """Return a synthetic device row dict with sensible defaults."""
+        base = {
+            "_row_number": 1,
+            "source_id": "P3001",
+            "device_name": "p3-dev-01",
+            "device_class": "Server",
+            "make": "Dell",
+            "model": "PowerEdge R640",
+            "u_height": "1",
+            "rack_name": "",
+            "u_position": "1",
+            "serial": "",
+            "asset_tag": "",
+            "status": "active",
+        }
+        base.update(overrides)
+        return base
+
+    def test_position_less_than_1_produces_skip(self):
+        """A row with u_position < 1 results in action='skip' for the device row."""
+        rows = [self._device_row(u_position="-1", source_id="P3001")]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        skip_rows = [r for r in result.rows if r.action == "skip" and r.object_type == "device"]
+        self.assertGreater(len(skip_rows), 0)
+        self.assertIn("position", skip_rows[0].detail.lower())
+
+    def test_missing_device_name_produces_error(self):
+        """A row with empty device_name results in action='error'."""
+        rows = [self._device_row(device_name="", source_id="P3002")]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        error_rows = [r for r in result.rows if r.action == "error" and "Missing device name" in r.detail]
+        self.assertGreater(len(error_rows), 0)
+
+    def test_unmapped_device_class_produces_error(self):
+        """A row with a device_class that has no ClassRoleMapping results in action='error'."""
+        rows = [self._device_row(device_class="UnknownClass", source_id="P3003")]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        error_rows = [r for r in result.rows if r.action == "error" and "No class\u2192role mapping" in r.detail]
+        self.assertGreater(len(error_rows), 0)
+
+    def test_crm_ignore_true_produces_ignore(self):
+        """A row whose ClassRoleMapping has ignore=True results in action='ignore'."""
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="Ignored", ignore=True)
+        rows = [self._device_row(device_class="Ignored", source_id="P3004")]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        ignore_rows = [r for r in result.rows if r.action == "ignore"]
+        self.assertGreater(len(ignore_rows), 0)
+
+    def test_preview_matched_device_update_when_update_existing_true(self):
+        """In dry-run, a device matched by name with update_existing=True yields action='update'."""
+        from dcim.models import Device, Manufacturer, DeviceType, DeviceRole
+
+        mfg = Manufacturer.objects.create(name="P3 Corp", slug="p3-corp")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="P3 Model", slug="p3-model")
+        role = DeviceRole.objects.create(name="P3 Role", slug="server")
+        Device.objects.create(name="p3-existing", site=self.site, device_type=dt, role=role)
+        self.profile.update_existing = True
+        self.profile.save()
+        rows = [self._device_row(device_name="p3-existing", source_id="P3005")]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        update_rows = [r for r in result.rows if r.action == "update" and r.object_type == "device"]
+        self.assertGreater(len(update_rows), 0)
+
+    def test_preview_matched_device_skip_when_update_existing_false(self):
+        """In dry-run, a device matched by name with update_existing=False yields action='skip'."""
+        from dcim.models import Device, Manufacturer, DeviceType, DeviceRole
+
+        mfg = Manufacturer.objects.create(name="P3B Corp", slug="p3b-corp")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="P3B Model", slug="p3b-model")
+        role = DeviceRole.objects.create(name="P3B Role", slug="server-p3b")
+        Device.objects.create(name="p3b-existing", site=self.site, device_type=dt, role=role)
+        self.profile.update_existing = False
+        self.profile.save()
+        rows = [self._device_row(device_name="p3b-existing", source_id="P3006")]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        skip_rows = [r for r in result.rows if r.action == "skip" and r.object_type == "device"]
+        self.assertGreater(len(skip_rows), 0)
+
+
+# ---------------------------------------------------------------------------
+# New tests: Pass1UnmappedClassTest
+# ---------------------------------------------------------------------------
+
+
+class Pass1UnmappedClassTest(TestCase):
+    """Verify that rows with unmapped device_class are skipped in pass 1 (no manufacturer created)."""
+
+    def setUp(self):
+        """Create site and full profile for pass-1 tests."""
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="P1Site", slug="p1-site")
+        self.profile = _make_profile("P1Test")
+
+    def test_unmapped_class_does_not_create_manufacturer(self):
+        """A row whose device_class has no ClassRoleMapping does not trigger manufacturer creation."""
+        from dcim.models import Manufacturer
+
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "P1001",
+                "device_name": "p1-dev-01",
+                "device_class": "UnmappedClassP1",  # no ClassRoleMapping for this class
+                "make": "UniqueMfgP1",
+                "model": "UniqueModelP1",
+                "u_height": "1",
+                "rack_name": "",
+                "u_position": "1",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            }
+        ]
+        before = Manufacturer.objects.count()
+        run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self.assertEqual(Manufacturer.objects.count(), before)

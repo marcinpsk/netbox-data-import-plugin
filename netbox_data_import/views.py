@@ -4,6 +4,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
 from .models import (
@@ -32,6 +33,16 @@ from .tables import (
     ColumnTransformRuleTable,
 )
 from .filters import ImportProfileFilterSet
+
+
+def _safe_next_url(request, fallback: str) -> str:
+    """Return a validated same-host redirect URL from POST or the fallback view name."""
+    url = request.POST.get("next", "")
+    if url and url_has_allowed_host_and_scheme(
+        url, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return url
+    return reverse(fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +584,7 @@ class IgnoreDeviceView(LoginRequiredMixin, View):
         profile_id = request.POST.get("profile_id")
         source_id = request.POST.get("source_id")
         device_name = request.POST.get("device_name", "")
-        next_url = request.POST.get("next", reverse("plugins:netbox_data_import:import_preview"))
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         if profile_id and source_id:
             profile = get_object_or_404(ImportProfile, pk=profile_id)
@@ -595,7 +606,7 @@ class UnignoreDeviceView(LoginRequiredMixin, View):
 
         profile_id = request.POST.get("profile_id")
         source_id = request.POST.get("source_id")
-        next_url = request.POST.get("next", reverse("plugins:netbox_data_import:import_preview"))
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         if profile_id and source_id:
             IgnoredDevice.objects.filter(
@@ -624,7 +635,7 @@ class SaveResolutionView(LoginRequiredMixin, View):
         source_column = request.POST.get("source_column")
         original_value = request.POST.get("original_value")
         resolved_fields_json = request.POST.get("resolved_fields", "{}")
-        next_url = request.POST.get("next", reverse("plugins:netbox_data_import:import_preview"))
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         try:
             resolved_fields = json.loads(resolved_fields_json)
