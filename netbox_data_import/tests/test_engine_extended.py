@@ -1708,3 +1708,92 @@ class PreviewMatchedBySerialTest(TestCase):
         if device_rows:
             self.assertEqual(device_rows[0].action, "update")
             self.assertIn("serial", device_rows[0].detail)
+
+
+class DeviceExistingMatchPrecedenceTest(TestCase):
+    """Regression test: DeviceExistingMatch (source_id link) must take precedence
+    over a coincidental same-name device in the same site (engine.py lookup order fix)."""
+
+    def setUp(self):
+        """Create two devices: one linked via DeviceExistingMatch, one with the same name as the source row."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        from netbox_data_import.models import DeviceExistingMatch
+
+        self.site = Site.objects.create(name="DEMPSite", slug="demp-site")
+        mfg = Manufacturer.objects.create(name="DEMPMfg", slug="dempmfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="DEMPModel", slug="dempmfg-dempmodel", u_height=1)
+        role = DeviceRole.objects.create(name="DEMPRole", slug="demp-role")
+
+        # Device the source row SHOULD be linked to (via DeviceExistingMatch)
+        self.linked_device = Device.objects.create(name="linked-prod-server", device_type=dt, role=role, site=self.site)
+        # Device that coincidentally shares the source row's device_name
+        self.coincidental_device = Device.objects.create(
+            name="source-row-name", device_type=dt, role=role, site=self.site
+        )
+
+        self.profile = _make_profile("DEMPProfile")
+        self.profile.update_existing = True
+        self.profile.save()
+        # update_or_create: _make_profile already creates source_class="Server"
+        ClassRoleMapping.objects.update_or_create(
+            profile=self.profile,
+            source_class="Server",
+            defaults={"creates_rack": False, "role_slug": "demp-role"},
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="DEMP-SRC001",
+            netbox_device_id=self.linked_device.pk,
+            device_name=self.linked_device.name,
+        )
+
+    def test_preview_prefers_explicit_match_over_name(self):
+        """run_import dry_run must report the DeviceExistingMatch device, not the coincidental name match."""
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "DEMP-SRC001",
+                "device_name": "source-row-name",  # matches coincidental_device by name
+                "device_class": "Server",
+                "make": "DEMPMfg",
+                "model": "DEMPModel",
+                "u_height": "1",
+                "rack_name": "",
+                "u_position": "",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            }
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertEqual(len(device_rows), 1)
+        # Must be linked to linked_device via explicit DeviceExistingMatch, NOT coincidental name
+        self.assertIn("linked-prod-server", device_rows[0].detail)
+        self.assertIn("source ID link", device_rows[0].detail)
+
+    def test_execute_prefers_explicit_match_over_name(self):
+        """run_import (execute mode) must update the DeviceExistingMatch device, not the coincidental name match."""
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "DEMP-SRC001",
+                "device_name": "source-row-name",  # matches coincidental_device by name
+                "device_class": "Server",
+                "make": "DEMPMfg",
+                "model": "DEMPModel",
+                "u_height": "1",
+                "rack_name": "",
+                "u_position": "",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            }
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertEqual(len(device_rows), 1)
+        self.assertEqual(device_rows[0].action, "update")
+        # The updated device must be linked_device, not coincidental_device
+        self.assertIn("linked-prod-server", device_rows[0].detail)

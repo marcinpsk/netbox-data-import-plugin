@@ -179,6 +179,8 @@ class ImportJob(models.Model):
 
     def get_absolute_url(self):
         """Return the associated profile's URL (no per-job detail view exists)."""
+        if not self.profile_id:
+            return reverse("plugins:netbox_data_import:importprofile_list")
         return reverse("plugins:netbox_data_import:importprofile", args=[self.profile_id])
 
 

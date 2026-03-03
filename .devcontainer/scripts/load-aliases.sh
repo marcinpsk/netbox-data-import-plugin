@@ -26,7 +26,7 @@ unset _ca_var _val
 # Load shared process management helpers
 if ! source "$PLUGIN_DIR/.devcontainer/scripts/process-helpers.sh"; then
   printf '%s\n' "Failed to load process-helpers.sh" >&2
-  return 1
+  return 1 2>/dev/null || exit 1
 fi
 
 netbox-run-bg() { "$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh" --background; }
@@ -80,7 +80,7 @@ netbox-restart() {
 
 netbox-reload() {
   cd "$PLUGIN_DIR" || return 1
-  source /opt/netbox/venv/bin/activate
+  source /opt/netbox/venv/bin/activate || return 1
   if command -v uv >/dev/null 2>&1; then
     uv pip install -e . || return 1
   else
@@ -144,7 +144,7 @@ netbox-manage() {
 
 plugin-install() {
   cd "$PLUGIN_DIR" || return 1
-  source /opt/netbox/venv/bin/activate
+  source /opt/netbox/venv/bin/activate || return 1
   if command -v uv >/dev/null 2>&1; then
     uv pip install -e .
   else
@@ -154,7 +154,7 @@ plugin-install() {
 
 plugins-install() {
   if [ -f "$PLUGIN_DIR/.devcontainer/extra-requirements.txt" ]; then
-    source /opt/netbox/venv/bin/activate
+    source /opt/netbox/venv/bin/activate || return 1
     if command -v uv >/dev/null 2>&1; then
       uv pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt"
     else
@@ -165,9 +165,9 @@ plugins-install() {
   fi
 }
 
-ruff-check() { cd "$PLUGIN_DIR" && command ruff check .; }
-ruff-format() { cd "$PLUGIN_DIR" && command ruff format .; }
-ruff-fix()    { cd "$PLUGIN_DIR" && command ruff check --fix .; }
+ruff-check() { (cd "$PLUGIN_DIR" && command ruff check .); }
+ruff-format() { (cd "$PLUGIN_DIR" && command ruff format .); }
+ruff-fix()    { (cd "$PLUGIN_DIR" && command ruff check --fix .); }
 
 diagnose() { "$PLUGIN_DIR/.devcontainer/scripts/diagnose.sh"; }
 

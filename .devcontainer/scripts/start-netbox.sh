@@ -86,6 +86,11 @@ echo "⚙️  Starting RQ worker..."
 ) > /tmp/rqworker.log 2>&1 &
 
 RQ_PID=$!
+sleep 0.3
+if ! kill -0 "$RQ_PID" 2>/dev/null; then
+  echo "ERROR: RQ worker failed to start; check /tmp/rqworker.log" >&2
+  exit 1
+fi
 echo $RQ_PID > /tmp/rqworker.pid
 echo "✅ RQ worker started (PID: $RQ_PID)"
 
@@ -102,6 +107,11 @@ if [ "$BACKGROUND" = true ]; then
   ) > /tmp/netbox.log 2>&1 &
 
   NETBOX_PID=$!
+  sleep 0.3
+  if ! kill -0 "$NETBOX_PID" 2>/dev/null; then
+    echo "ERROR: NetBox failed to start; check /tmp/netbox.log" >&2
+    exit 1
+  fi
   echo $NETBOX_PID > /tmp/netbox.pid
   echo "✅ NetBox started in background (PID: $NETBOX_PID)"
   echo "📍 Access NetBox at: $ACCESS_URL"

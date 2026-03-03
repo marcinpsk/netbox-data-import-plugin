@@ -3,7 +3,10 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 
 # Ensure aliases are available in the postAttach terminal session
-source "$(dirname "$0")/load-aliases.sh" 2>/dev/null
+_ALIASES_OK=1
+if ! source "$(dirname "$0")/load-aliases.sh" 2>/dev/null; then
+  _ALIASES_OK=0
+fi
 
 echo ""
 echo "🎯 NetBox Data Import Plugin Development Environment"
@@ -52,4 +55,8 @@ echo "   • Type 'netbox-run' to start the development server"
 echo "   • Type 'netbox-restart' to restart NetBox (after config changes)"
 echo "   • Type 'dev-help' to see all available commands"
 echo "   • Edit code in the workspace - auto-reload is enabled"
+if [ "${_ALIASES_OK:-1}" = "0" ]; then
+  echo ""
+  echo "⚠️  Shell aliases failed to load — run commands via .devcontainer/scripts/ directly"
+fi
 echo ""

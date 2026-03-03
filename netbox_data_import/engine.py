@@ -652,21 +652,21 @@ def _preview_device_row(
     except (TypeError, ValueError):
         position = None
 
-    try:
-        Device.objects.get(site=site, name=device_name)
+    # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
+    # ensuring explicit operator mappings always take precedence over coincidental name matches.
+    matched_device, match_method = _find_existing_device(
+        profile, source_id, site, device_name, serial, asset_tag, Device
+    )
+    if matched_device is not None:
         action = "update" if profile.update_existing else "skip"
-        detail = f"Device '{device_name}' already exists"
-    except Device.DoesNotExist:
-        matched_device, match_method = _find_existing_device(
-            profile, source_id, site, device_name, serial, asset_tag, Device
-        )
-        if matched_device is not None:
-            action = "update" if profile.update_existing else "skip"
-            detail = f"Matched to existing device '{matched_device.name}' (by {match_method})"
+        if match_method == "name":
+            detail = f"Device '{device_name}' already exists"
         else:
-            action = "create"
-            _pos_label = f" U{position}" if position is not None else ""
-            detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
+            detail = f"Matched to existing device '{matched_device.name}' (by {match_method})"
+    else:
+        action = "create"
+        _pos_label = f" U{position}" if position is not None else ""
+        detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
 
     return RowResult(
         row_number=row["_row_number"],
@@ -735,13 +735,9 @@ def _write_device_row(
     if rack_name and rack is None:
         rack = Rack.objects.filter(site=site, name=rack_name).first()
 
-    device = None
-    match_method = "name"
-    try:
-        device = Device.objects.get(site=site, name=device_name)
-    except Device.DoesNotExist:
-        # Fall back to source-ID link, serial, and asset_tag (mirrors preview matching)
-        device, match_method = _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device)
+    # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
+    # ensuring explicit operator mappings always take precedence over coincidental name matches.
+    device, match_method = _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device)
 
     if device is not None:
         if profile.update_existing:
