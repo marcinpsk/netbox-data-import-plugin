@@ -563,9 +563,12 @@ def _pass2_process_racks(rows, profile, site, location, tenant, class_role_map, 
 
 
 def _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device):
-    """Look up a pre-existing NetBox device by source-ID link, serial, or asset_tag.
+    """Look up a pre-existing NetBox device by source-ID link, serial, asset_tag, or name.
 
     Returns (device, match_method) or (None, None).
+    Matching priority: source-ID link → serial → asset_tag → name.
+    When *site* is provided the name lookup is scoped to that site; without a
+    site the name is matched globally (any site).
     """
     existing_match = profile.device_matches.filter(source_id=source_id).first() if source_id else None
     matched_device = None
@@ -594,6 +597,18 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
             pass
         except Device.MultipleObjectsReturned:
             logger.warning("Ambiguous asset_tag match for asset_tag=%r; skipping auto-match", asset_tag)
+
+    if matched_device is None and device_name:
+        name_filter = {"name": device_name}
+        if site is not None:
+            name_filter["site"] = site
+        try:
+            matched_device = Device.objects.get(**name_filter)
+            match_method = "name"
+        except Device.DoesNotExist:
+            pass
+        except Device.MultipleObjectsReturned:
+            logger.warning("Ambiguous name match for device_name=%r; skipping auto-match", device_name)
 
     return matched_device, match_method
 
@@ -631,7 +646,11 @@ def _preview_device_row(
         rack_label = rack_name if rack_name in rack_map else f"{rack_name} (not found)"
     else:
         rack_label = "(no rack)"
-    position = row.get("u_position")
+    raw_position = row.get("u_position")
+    try:
+        position = int(float(raw_position)) if raw_position is not None and str(raw_position).strip() != "" else None
+    except (TypeError, ValueError):
+        position = None
 
     try:
         Device.objects.get(site=site, name=device_name)
@@ -646,7 +665,8 @@ def _preview_device_row(
             detail = f"Matched to existing device '{matched_device.name}' (by {match_method})"
         else:
             action = "create"
-            detail = f"Would create device '{device_name}' in {rack_label} U{position}"
+            _pos_label = f" U{position}" if position is not None else ""
+            detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
 
     return RowResult(
         row_number=row["_row_number"],

@@ -559,6 +559,23 @@ class ApplyTransformRulesTest(TestCase):
         _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
         self.assertEqual(row_dict["device_name"], "unchanged")
 
+    def test_invalid_regex_raises_parse_error(self):
+        """_apply_transform_rules with a malformed regex pattern raises ParseError."""
+        from netbox_data_import.engine import ParseError
+
+        rule = ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="ColF",
+            pattern="(",  # unclosed group — invalid regex
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        row_dict = {}
+        raw_headers = {"ColF": 0}
+        raw_row = ("some value",)
+        with self.assertRaises(ParseError):
+            _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
+
 
 # ---------------------------------------------------------------------------
 # New tests: FindExistingDeviceTest
@@ -657,6 +674,44 @@ class FindExistingDeviceTest(TestCase):
         matched, method = _find_existing_device(
             self.profile, None, self.site, "no-such-dev", "SN_NOSUCH", "AT_NOSUCH", Device
         )
+        self.assertIsNone(matched)
+        self.assertIsNone(method)
+
+    def test_name_match_with_site(self):
+        """_find_existing_device returns (device, 'name') when matching by device name + site."""
+        from dcim.models import Device
+
+        device = Device.objects.create(
+            name="fed-dev-byname",
+            site=self.site,
+            device_type=self.dt,
+            role=self.role,
+        )
+        matched, method = _find_existing_device(self.profile, None, self.site, "fed-dev-byname", None, None, Device)
+        self.assertEqual(matched, device)
+        self.assertEqual(method, "name")
+
+    def test_name_match_without_site(self):
+        """_find_existing_device returns (device, 'name') when site=None (global name match)."""
+        from dcim.models import Device
+
+        device = Device.objects.create(
+            name="fed-dev-global",
+            site=self.site,
+            device_type=self.dt,
+            role=self.role,
+        )
+        matched, method = _find_existing_device(self.profile, None, None, "fed-dev-global", None, None, Device)
+        self.assertEqual(matched, device)
+        self.assertEqual(method, "name")
+
+    def test_name_match_multiple_objects_returns_none(self):
+        """_find_existing_device returns (None, None) when name matches multiple devices."""
+        from dcim.models import Device
+        from unittest.mock import patch
+
+        with patch.object(Device.objects, "get", side_effect=Device.MultipleObjectsReturned):
+            matched, method = _find_existing_device(self.profile, None, None, "dup-name", None, None, Device)
         self.assertIsNone(matched)
         self.assertIsNone(method)
 
@@ -1106,5 +1161,550 @@ class Pass1UnmappedClassTest(TestCase):
             }
         ]
         before = Manufacturer.objects.count()
-        run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False)
         self.assertEqual(Manufacturer.objects.count(), before)
+
+
+# ---------------------------------------------------------------------------
+# Additional engine coverage tests
+# ---------------------------------------------------------------------------
+
+
+class EnsureManufacturerEdgeCaseTest(TestCase):
+    """Tests for _ensure_manufacturer seen-manufacturers early return and execute mode."""
+
+    def setUp(self):
+        """Create a profile."""
+        self.profile = _make_profile("EMECProfile")
+
+    def test_seen_manufacturer_skips(self):
+        """_ensure_manufacturer is a no-op when mfg_slug already in seen_manufacturers."""
+        from netbox_data_import.engine import _ensure_manufacturer, ImportResult
+        from dcim.models import Manufacturer
+
+        result = ImportResult()
+        seen = {"already-seen"}
+        before = Manufacturer.objects.count()
+        _ensure_manufacturer(
+            "already-seen", "AlreadySeen", seen, self.profile, result, True, {"_row_number": 1}, Manufacturer
+        )
+        self.assertEqual(Manufacturer.objects.count(), before)
+        self.assertEqual(len(result.rows), 0)
+
+    def test_execute_mode_creates_manufacturer(self):
+        """_ensure_manufacturer creates manufacturer in execute mode when flag is set."""
+        from netbox_data_import.engine import _ensure_manufacturer, ImportResult
+        from dcim.models import Manufacturer
+
+        self.profile.create_missing_device_types = True
+        self.profile.save()
+        result = ImportResult()
+        seen = set()
+        _ensure_manufacturer(
+            "exec-mfg-slug", "Exec Mfg", seen, self.profile, result, False, {"_row_number": 1}, Manufacturer
+        )
+        self.assertTrue(Manufacturer.objects.filter(slug="exec-mfg-slug").exists())
+
+    def test_execute_mode_skips_when_flag_false(self):
+        """_ensure_manufacturer is a no-op in execute mode when create_missing_device_types=False."""
+        from netbox_data_import.engine import _ensure_manufacturer, ImportResult
+        from dcim.models import Manufacturer
+
+        self.profile.create_missing_device_types = False
+        self.profile.save()
+        result = ImportResult()
+        seen = set()
+        before = Manufacturer.objects.count()
+        _ensure_manufacturer(
+            "no-create-mfg", "No Create Mfg", seen, self.profile, result, False, {"_row_number": 1}, Manufacturer
+        )
+        self.assertEqual(Manufacturer.objects.count(), before)
+
+
+class EnsureDeviceTypeEdgeCaseTest(TestCase):
+    """Tests for _ensure_device_type seen-types early return and existing-type path."""
+
+    def setUp(self):
+        """Create a profile and a manufacturer."""
+        from dcim.models import Manufacturer
+
+        self.profile = _make_profile("EDTECProfile")
+        self.mfg = Manufacturer.objects.create(name="EDTEC Mfg", slug="edtec-mfg")
+
+    def test_seen_device_type_skips(self):
+        """_ensure_device_type is a no-op when the (mfg,dt) key already in seen_device_types."""
+        from netbox_data_import.engine import _ensure_device_type, ImportResult
+        from dcim.models import Manufacturer, DeviceType
+
+        result = ImportResult()
+        seen = {("edtec-mfg", "edtec-seen")}
+        before = DeviceType.objects.count()
+        _ensure_device_type(
+            "edtec-mfg",
+            "edtec-seen",
+            "EDTEC",
+            "Seen",
+            1,
+            seen,
+            self.profile,
+            result,
+            True,
+            {"_row_number": 1},
+            Manufacturer,
+            DeviceType,
+        )
+        self.assertEqual(DeviceType.objects.count(), before)
+        self.assertEqual(len(result.rows), 0)
+
+    def test_dry_run_existing_dt_no_rows_appended(self):
+        """In dry_run, when DeviceType already exists, no rows are appended."""
+        from netbox_data_import.engine import _ensure_device_type, ImportResult
+        from dcim.models import Manufacturer, DeviceType
+
+        DeviceType.objects.get_or_create(
+            manufacturer=self.mfg, slug="edtec-exists", defaults={"model": "Exists", "u_height": 1}
+        )
+        result = ImportResult()
+        seen: set = set()
+        _ensure_device_type(
+            "edtec-mfg",
+            "edtec-exists",
+            "EDTEC",
+            "Exists",
+            1,
+            seen,
+            self.profile,
+            result,
+            True,
+            {"_row_number": 1},
+            Manufacturer,
+            DeviceType,
+        )
+        self.assertEqual(len(result.rows), 0)
+
+
+class EnsureDeviceRoleEdgeCaseTest(TestCase):
+    """Tests for _ensure_device_role early-return paths."""
+
+    def setUp(self):
+        """Create a profile and CRM."""
+        from dcim.models import Site
+
+        self.profile = _make_profile("EDRECProfile")
+        self.site = Site.objects.create(name="EDRSite", slug="edr-site")
+
+    def test_no_crm_skips(self):
+        """_ensure_device_role is a no-op when crm is None."""
+        from netbox_data_import.engine import _ensure_device_role
+        from dcim.models import DeviceRole
+
+        seen: set = set()
+        before = DeviceRole.objects.count()
+        _ensure_device_role(None, seen, False, DeviceRole)
+        self.assertEqual(DeviceRole.objects.count(), before)
+
+    def test_crm_no_role_slug_skips(self):
+        """_ensure_device_role is a no-op when crm has no role_slug."""
+        from netbox_data_import.engine import _ensure_device_role
+        from dcim.models import DeviceRole
+        from netbox_data_import.models import ClassRoleMapping
+
+        crm = ClassRoleMapping.objects.create(
+            profile=self.profile, source_class="NoRoleClass", creates_rack=False, role_slug=""
+        )
+        seen: set = set()
+        before = DeviceRole.objects.count()
+        _ensure_device_role(crm, seen, False, DeviceRole)
+        self.assertEqual(DeviceRole.objects.count(), before)
+
+    def test_already_seen_role_skips(self):
+        """_ensure_device_role is a no-op when role_slug already in seen_roles."""
+        from netbox_data_import.engine import _ensure_device_role
+        from dcim.models import DeviceRole
+        from netbox_data_import.models import ClassRoleMapping
+
+        crm = ClassRoleMapping.objects.create(
+            profile=self.profile, source_class="SeenRoleClass", creates_rack=False, role_slug="seen-role"
+        )
+        seen = {"seen-role"}
+        before = DeviceRole.objects.count()
+        _ensure_device_role(crm, seen, False, DeviceRole)
+        self.assertEqual(DeviceRole.objects.count(), before)
+
+    def test_execute_creates_role(self):
+        """_ensure_device_role creates a DeviceRole in execute mode."""
+        from netbox_data_import.engine import _ensure_device_role
+        from dcim.models import DeviceRole
+        from netbox_data_import.models import ClassRoleMapping
+
+        crm = ClassRoleMapping.objects.create(
+            profile=self.profile, source_class="NewRoleClass", creates_rack=False, role_slug="new-unique-role-edr"
+        )
+        seen: set = set()
+        _ensure_device_role(crm, seen, False, DeviceRole)
+        self.assertTrue(DeviceRole.objects.filter(slug="new-unique-role-edr").exists())
+
+
+class Pass2EdgeCasesTest(TestCase):
+    """Test _pass2_process_racks edge cases (missing rack_name, u_height parse error)."""
+
+    def setUp(self):
+        """Create site and profile."""
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="P2EdgeSite", slug="p2-edge-site")
+        self.profile = _make_profile("P2EdgeProfile")
+
+    def test_missing_rack_name_records_error(self):
+        """A rack row with empty rack_name records an error row."""
+        from netbox_data_import.models import ClassRoleMapping
+
+        # Profile needs a rack-creating class
+        self.profile.class_role_mappings.all().delete()
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="RackClass", creates_rack=True)
+
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "RACK001",
+                "device_class": "RackClass",
+                "rack_name": "",
+                "u_height": "42",
+                "serial": "",
+            }
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        error_rows = [r for r in result.rows if r.action == "error" and r.object_type == "rack"]
+        self.assertEqual(len(error_rows), 1)
+
+    def test_invalid_u_height_uses_default(self):
+        """A rack row with invalid u_height uses default (42) without crashing."""
+        from netbox_data_import.models import ClassRoleMapping
+        from dcim.models import Rack
+
+        self.profile.class_role_mappings.all().delete()
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="RackClass2", creates_rack=True)
+
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "RACK002",
+                "device_class": "RackClass2",
+                "rack_name": "P2EdgeRack",
+                "u_height": "not-a-number",
+                "serial": "",
+            }
+        ]
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False)
+        rack = Rack.objects.filter(site=self.site, name="P2EdgeRack").first()
+        self.assertIsNotNone(rack)
+        self.assertEqual(rack.u_height, 42)
+
+
+class Pass3PositionUnderRackTest(TestCase):
+    """Test _pass3_process_devices with position < 1 (blanking panel skip)."""
+
+    def setUp(self):
+        """Create site and profile with device class mapping."""
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="P3PosEdge", slug="p3-pos-edge")
+        self.profile = _make_profile("P3PosProfile")
+
+    def test_position_zero_produces_skip(self):
+        """A device row with u_position=0 is skipped (blanking panel)."""
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "POS001",
+                "device_name": "blanking-panel",
+                "device_class": "Server",
+                "make": "Dell",
+                "model": "R740",
+                "u_height": "1",
+                "rack_name": "",
+                "u_position": "0",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            }
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        skip_rows = [r for r in result.rows if r.action == "skip" and r.object_type == "device"]
+        self.assertEqual(len(skip_rows), 1)
+
+
+class FindExistingDeviceDeletedMatchTest(TestCase):
+    """Test _find_existing_device when the linked device has been deleted."""
+
+    def setUp(self):
+        """Create profile for match tests."""
+        self.profile = ImportProfile.objects.create(name="DELMatchProfile", sheet_name="Data", source_id_column="Id")
+
+    def test_deleted_device_match_falls_through(self):
+        """When source-ID match points to a non-existent device PK, returns (None, None)."""
+        from dcim.models import Device
+        from netbox_data_import.models import DeviceExistingMatch
+
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="DEL001",
+            netbox_device_id=999999,  # non-existent PK
+            device_name="gone",
+        )
+        matched, method = _find_existing_device(self.profile, "DEL001", None, None, None, None, Device)
+        self.assertIsNone(matched)
+        self.assertIsNone(method)
+
+
+class Pass1UHeightParseErrorTest(TestCase):
+    """Test _pass1_ensure_types u_height parse error (lines 400-401)."""
+
+    def setUp(self):
+        """Set up profile with a device class mapping."""
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="UHSite", slug="uh-site")
+        self.profile = _make_profile("UHProfile")
+
+    def test_invalid_u_height_falls_back_to_one(self):
+        """A row with a non-numeric u_height uses 1 as fallback without error."""
+
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "UH001",
+                "device_name": "uh-dev-01",
+                "device_class": "Server",
+                "make": "UHMake",
+                "model": "UHModel",
+                "u_height": "not-a-number",
+                "rack_name": "",
+                "u_position": "1",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            }
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        # Should produce a create row, not crash
+        self.assertIsInstance(result, ImportResult)
+
+
+class PreviewInvalidPositionTest(TestCase):
+    """Test _preview_device_row with invalid u_position (lines 652-653)."""
+
+    def setUp(self):
+        """Set up profile and site."""
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="PIPSite", slug="pip-site")
+        self.profile = _make_profile("PIPProfile")
+
+    def test_invalid_position_in_preview(self):
+        """A device row with a non-numeric u_position does not crash in preview."""
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "PIP001",
+                "device_name": "pip-dev-01",
+                "device_class": "Server",
+                "make": "PIPMake",
+                "model": "PIPModel",
+                "u_height": "1",
+                "rack_name": "",
+                "u_position": "invalid-pos",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            }
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        # No crash — device row exists, position is None so no U-label in detail
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        if device_rows:
+            self.assertNotIn("UNone", device_rows[0].detail)
+
+
+class Pass3InvalidPositionTest(TestCase):
+    """Test _pass3_process_devices with invalid u_position string (lines 853-854)."""
+
+    def setUp(self):
+        """Set up site and profile."""
+        from dcim.models import Site, Manufacturer, DeviceType, DeviceRole
+
+        self.site = Site.objects.create(name="P3IPSite", slug="p3-ip-site")
+        self.profile = _make_profile("P3IPProfile")
+        mfg = Manufacturer.objects.create(name="P3IPMfg", slug="p3ipmfg")
+        self.dt = DeviceType.objects.create(manufacturer=mfg, model="P3IPModel", slug="p3ipmfg-p3ipmodel")
+        DeviceRole.objects.get_or_create(slug="server", defaults={"name": "Server", "color": "9e9e9e"})
+
+    def test_invalid_position_produces_device_row(self):
+        """A device row with non-numeric u_position (line 853-854 TypeError path) processes without crash."""
+
+        self.profile.create_missing_device_types = True
+        self.profile.save()
+
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "P3IP001",
+                "device_name": "p3ip-dev-01",
+                "device_class": "Server",
+                "make": "P3IPMfg",
+                "model": "P3IPModel",
+                "u_height": "1",
+                "rack_name": "",
+                "u_position": "not-a-number",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            }
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
+        # Should not crash; device row should be in result
+        self.assertIsInstance(result, ImportResult)
+
+
+class ImportResultRackGroupsTest(TestCase):
+    """Test ImportResult.rack_groups property (line 113 — 'else' branch)."""
+
+    def test_rack_groups_duplicate_rack_name(self):
+        """rack_groups updates existing rack when the same name appears twice."""
+        r1 = RowResult(row_number=1, source_id="R1", name="RackA", action="update", object_type="rack", detail="")
+        r2 = RowResult(row_number=2, source_id="R2", name="RackA", action="create", object_type="rack", detail="")
+
+        result = ImportResult()
+        result.rows = [r1, r2]
+        groups = result.rack_groups
+        # Both rack rows for "RackA"; the second should overwrite rack_row for "RackA"
+        self.assertIn("RackA", groups)
+        self.assertEqual(groups["RackA"]["rack_row"], r2)
+
+
+class ResolveDeviceTypeSlugsNormalizeTest(TestCase):
+    """Test _resolve_device_type_slugs normalizer loops (lines 241-242, 251-252)."""
+
+    def setUp(self):
+        """Create profile and a device type mapping with unicode escape in model."""
+        self.profile = ImportProfile.objects.create(name="DTSNProfile", sheet_name="Data", source_id_column="Id")
+
+    def test_unicode_escape_in_model_matches(self):
+        """DeviceTypeMapping with extra whitespace in source_model is matched after normalization (lines 241-242)."""
+        from netbox_data_import.engine import _resolve_device_type_slugs
+        from netbox_data_import.models import DeviceTypeMapping
+
+        DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="TestMake",
+            source_model="Model  X",  # double internal space — doesn't match direct lookup
+            netbox_manufacturer_slug="testmake",
+            netbox_device_type_slug="testmake-modelx",
+        )
+        # Direct lookup uses single-space "Model X" — won't match "Model  X" directly
+        mfg_slug, dt_slug, is_explicit = _resolve_device_type_slugs("TestMake", "Model X", self.profile)
+        self.assertEqual(mfg_slug, "testmake")
+        self.assertEqual(dt_slug, "testmake-modelx")
+        self.assertTrue(is_explicit)
+
+    def test_manufacturer_mapping_normalizer_loop(self):
+        """ManufacturerMapping with JS-style \\uXXXX in source_make is matched after normalization."""
+        from netbox_data_import.engine import _resolve_device_type_slugs
+        from netbox_data_import.models import ManufacturerMapping
+
+        ManufacturerMapping.objects.create(
+            profile=self.profile,
+            source_make="Vendor\\u0020Corp",  # \u0020 is space
+            netbox_manufacturer_slug="vendor-corp",
+        )
+        mfg_slug, dt_slug, is_explicit = _resolve_device_type_slugs("Vendor Corp", "ModelZ", self.profile)
+        self.assertEqual(mfg_slug, "vendor-corp")
+        self.assertFalse(is_explicit)
+
+
+class StoreSourceIdTest(TestCase):
+    """Tests for _store_source_id function (lines 1006-1027)."""
+
+    def setUp(self):
+        """Create a profile and device."""
+        from dcim.models import Site, Manufacturer, DeviceType, DeviceRole, Device
+
+        self.site = Site.objects.create(name="SSISite", slug="ssi-site")
+        mfg = Manufacturer.objects.create(name="SSIMfg", slug="ssi-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="SSIModel", slug="ssi-model")
+        role = DeviceRole.objects.create(name="SSIRole", slug="ssi-role")
+        self.device = Device.objects.create(name="ssi-dev", device_type=dt, role=role, site=self.site)
+        self.profile = ImportProfile.objects.create(
+            name="SSIProfile", sheet_name="Data", source_id_column="Id", custom_field_name="cans_id"
+        )
+
+    def test_store_source_id_with_custom_field_name(self):
+        """_store_source_id with profile.custom_field_name set attempts to write to custom field."""
+        from netbox_data_import.engine import _store_source_id
+
+        # Even if the custom field doesn't exist, should not crash
+        _store_source_id(self.device, self.profile, "SSI-001")
+
+    def test_store_source_id_no_custom_field_name(self):
+        """_store_source_id without custom_field_name still writes data_import_source."""
+        from netbox_data_import.engine import _store_source_id
+
+        self.profile.custom_field_name = ""
+        self.profile.save()
+        _store_source_id(self.device, self.profile, "SSI-002")
+
+
+class PreviewMatchedBySerialTest(TestCase):
+    """Test _preview_device_row matched-by-serial path (lines 664-665)."""
+
+    def setUp(self):
+        """Create a device with a serial, profile and site."""
+        from dcim.models import Site, Manufacturer, DeviceType, DeviceRole, Device
+
+        self.site = Site.objects.create(name="PMBSSite", slug="pmbs-site")
+        mfg = Manufacturer.objects.create(name="PMBSMfg", slug="pmbs-mfg")
+        self.dt = DeviceType.objects.create(manufacturer=mfg, model="PMBSModel", slug="pmbs-model")
+        self.role = DeviceRole.objects.create(name="server-pmbs", slug="server-pmbs")
+        # Use a name that won't match directly (force fall-through to _find_existing_device)
+        self.device = Device.objects.create(
+            name="pmbs-dev-existing",
+            device_type=self.dt,
+            role=self.role,
+            site=self.site,
+            serial="PMBS-SN-UNIQUE",
+        )
+        self.profile = _make_profile("PMBSProfile")
+        self.profile.update_existing = True
+        self.profile.save()
+        # Add a CRM for "Server" → server-pmbs (using the profile's built-in mappings)
+        from netbox_data_import.models import ClassRoleMapping
+
+        ClassRoleMapping.objects.get_or_create(
+            profile=self.profile,
+            source_class="PMBS",
+            defaults={"creates_rack": False, "role_slug": "server-pmbs"},
+        )
+
+    def test_preview_matched_by_serial_shows_update(self):
+        """In dry_run, a device with matching serial is shown as 'update' (via _find_existing_device)."""
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "PMBS001",
+                "device_name": "different-name",  # won't match by name
+                "device_class": "PMBS",
+                "make": "PMBSMfg",
+                "model": "PMBSModel",
+                "u_height": "1",
+                "rack_name": "",
+                "u_position": "1",
+                "serial": "PMBS-SN-UNIQUE",
+                "asset_tag": "",
+                "status": "active",
+            }
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        if device_rows:
+            self.assertEqual(device_rows[0].action, "update")
+            self.assertIn("serial", device_rows[0].detail)

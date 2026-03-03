@@ -1460,3 +1460,674 @@ column_transform_rules:
         profile = ImportProfile.objects.filter(name="TransformImportProfile").first()
         self.assertIsNotNone(profile)
         self.assertTrue(ColumnTransformRule.objects.filter(profile=profile, source_column="Name").exists())
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage tests
+# ---------------------------------------------------------------------------
+
+
+class ColumnMappingInvalidPostTest(BaseViewTestCase):
+    """Test ColumnMappingAddView with invalid form data (covers error path)."""
+
+    def setUp(self):
+        """Set up profile."""
+        super().setUp()
+        self.profile = _make_profile("CMInvalidProfile")
+
+    def test_post_invalid_form_rerenders(self):
+        """POST with invalid data (missing source_column) re-renders the form."""
+        url = reverse("plugins:netbox_data_import:columnmapping_add", kwargs={"profile_pk": self.profile.pk})
+        resp = self.client.post(url, {"profile": self.profile.pk, "target_field": "device_name"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_edit_post_invalid_rerenders(self):
+        """Edit POST with invalid data re-renders the form."""
+        mapping = ColumnMapping.objects.create(profile=self.profile, source_column="ColXInvalid", target_field="tenant")
+        url = reverse("plugins:netbox_data_import:columnmapping_edit", kwargs={"pk": mapping.pk})
+        resp = self.client.post(url, {"profile": self.profile.pk, "target_field": ""})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_delete_get_renders_confirmation(self):
+        """GET delete shows confirmation page."""
+        mapping = ColumnMapping.objects.create(profile=self.profile, source_column="ColYDelete", target_field="tenant")
+        url = reverse("plugins:netbox_data_import:columnmapping_delete", kwargs={"pk": mapping.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+
+
+class ColumnTransformRuleCRUDTest(BaseViewTestCase):
+    """Coverage tests for ColumnTransformRule add/edit/delete views."""
+
+    def setUp(self):
+        """Set up profile."""
+        super().setUp()
+        from netbox_data_import.models import ColumnTransformRule
+
+        self.ColumnTransformRule = ColumnTransformRule
+        self.profile = _make_profile("CTRCRUDProfile")
+
+    def test_get_add_view(self):
+        """GET column-transform-rule-add returns 200."""
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_post_add_creates_rule(self):
+        """POST valid data creates a new ColumnTransformRule."""
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+        resp = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": "CTRColZNew",
+                "pattern": r"^(.+)$",
+                "group_1_target": "device_name",
+                "group_2_target": "",
+            },
+        )
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(
+            self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="CTRColZNew").exists()
+        )
+
+    def test_post_add_invalid_rerenders(self):
+        """POST with missing data re-renders with 200."""
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+        resp = self.client.post(url, {"profile": self.profile.pk})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_get_edit_view(self):
+        """GET edit view returns 200."""
+        rule = self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="EditColCTR",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_edit", kwargs={"pk": rule.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_post_edit_updates_rule(self):
+        """POST edit with valid data saves the rule."""
+        rule = self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="EditColCTR2",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_edit", kwargs={"pk": rule.pk})
+        resp = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": "EditColCTR2",
+                "pattern": r"^(\w+)$",
+                "group_1_target": "asset_tag",
+                "group_2_target": "",
+            },
+        )
+        self.assertIn(resp.status_code, [200, 302])
+
+    def test_post_edit_invalid_rerenders(self):
+        """POST edit with invalid data re-renders with 200."""
+        rule = self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="EditColCTR3",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_edit", kwargs={"pk": rule.pk})
+        resp = self.client.post(url, {"profile": self.profile.pk})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_get_delete_view(self):
+        """GET delete view returns 200."""
+        rule = self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="DelColCTR",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_delete", kwargs={"pk": rule.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_post_delete_removes_rule(self):
+        """POST delete removes the rule."""
+        rule = self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="DelColCTR2",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_delete", kwargs={"pk": rule.pk})
+        resp = self.client.post(url, {})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertFalse(self.ColumnTransformRule.objects.filter(pk=rule.pk).exists())
+
+
+class CheckDeviceNameEdgeCasesTest(BaseViewTestCase):
+    """Cover CheckDeviceNameView empty-name path."""
+
+    def test_check_empty_name_returns_false(self):
+        """GET with empty name returns exists=False."""
+        import json
+
+        url = reverse("plugins:netbox_data_import:check_device")
+        resp = self.client.get(url + "?name=")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertFalse(data["exists"])
+
+
+class ModelsStrTest(BaseViewTestCase):
+    """Coverage tests for __str__ and get_absolute_url on model classes."""
+
+    def setUp(self):
+        """Create model instances for __str__ tests."""
+        super().setUp()
+        self.profile = _make_profile("StrTestProfile")
+
+    def test_column_mapping_str(self):
+        """ColumnMapping.__str__ returns 'source -> target' string."""
+        m = ColumnMapping.objects.get(profile=self.profile, source_column="Id")
+        self.assertIn("→", str(m))
+
+    def test_column_mapping_absolute_url(self):
+        """ColumnMapping.get_absolute_url returns a valid URL."""
+        m = ColumnMapping.objects.get(profile=self.profile, source_column="Id")
+        url = m.get_absolute_url()
+        self.assertIn(str(m.pk), url)
+
+    def test_class_role_mapping_str_rack(self):
+        """ClassRoleMapping.__str__ for creates_rack=True shows 'Rack'."""
+        crm = self.profile.class_role_mappings.get(source_class="Cabinet")
+        self.assertIn("Rack", str(crm))
+
+    def test_class_role_mapping_str_role(self):
+        """ClassRoleMapping.__str__ for device role shows role_slug."""
+        crm = self.profile.class_role_mappings.get(source_class="Server")
+        self.assertIn("server", str(crm))
+
+    def test_class_role_mapping_absolute_url(self):
+        """ClassRoleMapping.get_absolute_url returns a valid URL."""
+        crm = self.profile.class_role_mappings.get(source_class="Cabinet")
+        url = crm.get_absolute_url()
+        self.assertIn(str(crm.pk), url)
+
+    def test_device_type_mapping_str(self):
+        """DeviceTypeMapping.__str__ returns make/model -> mfg/dt string."""
+        dtm = DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="AristaStr",
+            source_model="7050X",
+            netbox_manufacturer_slug="arista-str",
+            netbox_device_type_slug="arista-7050x",
+        )
+        self.assertIn("AristaStr", str(dtm))
+        self.assertIn("arista-7050x", str(dtm))
+
+    def test_device_type_mapping_absolute_url(self):
+        """DeviceTypeMapping.get_absolute_url returns a valid URL."""
+        dtm = DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="AristaStr2",
+            source_model="7050X2",
+            netbox_manufacturer_slug="arista-str2",
+            netbox_device_type_slug="arista-7050x2",
+        )
+        self.assertIn(str(dtm.pk), dtm.get_absolute_url())
+
+    def test_manufacturer_mapping_str(self):
+        """ManufacturerMapping.__str__ shows source_make -> netbox_slug."""
+        mm = ManufacturerMapping.objects.create(
+            profile=self.profile, source_make="Dell EMC Str", netbox_manufacturer_slug="dell-str"
+        )
+        s = str(mm)
+        self.assertIn("Dell EMC Str", s)
+        self.assertIn("dell-str", s)
+
+    def test_import_job_str(self):
+        """ImportJob.__str__ contains the pk."""
+        from netbox_data_import.models import ImportJob
+
+        job = ImportJob.objects.create(profile=self.profile, dry_run=True, input_filename="test.xlsx")
+        s = str(job)
+        self.assertIn(str(job.pk), s)
+
+    def test_import_job_absolute_url(self):
+        """ImportJob.get_absolute_url returns the associated profile's URL."""
+        from netbox_data_import.models import ImportJob
+
+        job = ImportJob.objects.create(profile=self.profile, dry_run=True)
+        url = job.get_absolute_url()
+        self.assertIn(str(self.profile.pk), url)
+
+    def test_ignored_device_str(self):
+        """IgnoredDevice.__str__ includes device_name."""
+        from netbox_data_import.models import IgnoredDevice
+
+        ig = IgnoredDevice.objects.create(profile=self.profile, source_id="STR-IGN-UNIQUE", device_name="test-dev-str")
+        self.assertIn("test-dev-str", str(ig))
+        self.assertIn("ignored", str(ig))
+
+    def test_column_transform_rule_str(self):
+        """ColumnTransformRule.__str__ shows column and pattern."""
+        from netbox_data_import.models import ColumnTransformRule
+
+        rule = ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="StrColUniq",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        s = str(rule)
+        self.assertIn("StrColUniq", s)
+
+    def test_column_transform_rule_absolute_url(self):
+        """ColumnTransformRule.get_absolute_url returns a valid URL."""
+        from netbox_data_import.models import ColumnTransformRule
+
+        rule = ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="UrlColUniq",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        self.assertIn(str(rule.pk), rule.get_absolute_url())
+
+    def test_source_resolution_str(self):
+        """SourceResolution.__str__ includes source_id and column."""
+        res = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="STR-SRC-UNIQ",
+            source_column="Name",
+            original_value="old",
+            resolved_fields={},
+        )
+        s = str(res)
+        self.assertIn("STR-SRC-UNIQ", s)
+        self.assertIn("Name", s)
+
+    def test_device_existing_match_str(self):
+        """DeviceExistingMatch.__str__ includes source_id."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        dem = DeviceExistingMatch.objects.create(
+            profile=self.profile, source_id="DEM-UNIQ-001", netbox_device_id=1, device_name="dev-x"
+        )
+        s = str(dem)
+        self.assertIn("DEM-UNIQ-001", s)
+
+
+class SafeNextUrlTest(BaseViewTestCase):
+    """Tests for _safe_next_url helper."""
+
+    def test_safe_url_fallback_for_external(self):
+        """_safe_next_url falls back when next is an external URL."""
+        from netbox_data_import.views import _safe_next_url
+        from django.test import RequestFactory
+
+        factory = RequestFactory()
+        req = factory.post("/", {"next": "http://evil.example.com/phish"})
+        result = _safe_next_url(req, "plugins:netbox_data_import:importprofile_list")
+        self.assertNotIn("evil.example.com", result)
+
+    def test_safe_url_fallback_for_empty(self):
+        """_safe_next_url returns fallback when next is empty."""
+        from netbox_data_import.views import _safe_next_url
+        from django.test import RequestFactory
+
+        factory = RequestFactory()
+        req = factory.post("/", {})
+        result = _safe_next_url(req, "plugins:netbox_data_import:importprofile_list")
+        self.assertIn("import", result)
+
+
+class BulkYamlImportExtendedTest(BaseViewTestCase):
+    """Test BulkYamlImportView with class_role mapping type and error cases."""
+
+    def setUp(self):
+        """Set up profile."""
+        super().setUp()
+        self.profile = _make_profile("BulkYamlCRMProfileX")
+
+    def test_no_yaml_file_shows_error(self):
+        """POST without file returns 200 with error."""
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        resp = self.client.post(url, {"mapping_type": "class_role"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_invalid_yaml_shows_error(self):
+        """POST with unparseable YAML shows error."""
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        bad = BytesIO(b": {{{ invalid")
+        bad.name = "bad.yaml"
+        resp = self.client.post(url, {"mapping_type": "class_role", "yaml_file": bad})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_non_list_yaml_shows_error(self):
+        """POST with YAML dict (not list) shows error."""
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        f = BytesIO(b"key: value")
+        f.name = "notalist.yaml"
+        resp = self.client.post(url, {"mapping_type": "class_role", "yaml_file": f})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_class_role_yaml_creates_mapping(self):
+        """POST with valid class_role YAML creates ClassRoleMapping."""
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        yaml_content = b"""
+- source_class: StorageArrayX
+  creates_rack: false
+  role_slug: storage
+  ignore: false
+"""
+        f = BytesIO(yaml_content)
+        f.name = "cr.yaml"
+        resp = self.client.post(url, {"mapping_type": "class_role", "yaml_file": f})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(ClassRoleMapping.objects.filter(profile=self.profile, source_class="StorageArrayX").exists())
+
+
+class SourceResolutionDeleteViewTest(BaseViewTestCase):
+    """Tests for SourceResolutionDeleteView GET."""
+
+    def setUp(self):
+        """Set up a resolution to delete."""
+        super().setUp()
+        self.profile = _make_profile("DelResProfileX")
+        self.res = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="DELRES-UNIQ-001",
+            source_column="Name",
+            original_value="old-val",
+            resolved_fields={},
+        )
+
+    def test_get_delete_page_returns_200(self):
+        """GET delete confirmation page returns 200."""
+        url = reverse("plugins:netbox_data_import:source_resolution_delete", kwargs={"pk": self.res.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_post_delete_removes_resolution(self):
+        """POST delete removes the resolution."""
+        url = reverse("plugins:netbox_data_import:source_resolution_delete", kwargs={"pk": self.res.pk})
+        resp = self.client.post(url)
+        self.assertIn(resp.status_code, [200, 302])
+        if resp.status_code == 302:
+            self.assertFalse(SourceResolution.objects.filter(pk=self.res.pk).exists())
+
+
+class ClassRoleMappingInvalidPostTest(BaseViewTestCase):
+    """Cover ClassRoleMappingAddView and EditView invalid POST paths."""
+
+    def setUp(self):
+        """Set up profile and a mapping."""
+        super().setUp()
+        self.profile = _make_profile("CRMInvalidProfile")
+        self.crm = ClassRoleMapping.objects.create(
+            profile=self.profile, source_class="CRMTestClass", creates_rack=False, role_slug="crm-role"
+        )
+
+    def test_add_invalid_rerenders(self):
+        """POST with missing source_class re-renders ClassRoleMappingAddView."""
+        url = reverse("plugins:netbox_data_import:classrolemapping_add", kwargs={"profile_pk": self.profile.pk})
+        resp = self.client.post(url, {"profile": self.profile.pk, "creates_rack": "false"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_edit_invalid_rerenders(self):
+        """POST with missing source_class re-renders ClassRoleMappingEditView."""
+        url = reverse("plugins:netbox_data_import:classrolemapping_edit", kwargs={"pk": self.crm.pk})
+        resp = self.client.post(url, {"profile": self.profile.pk})
+        self.assertEqual(resp.status_code, 200)
+
+
+class DeviceTypeMappingInvalidPostTest(BaseViewTestCase):
+    """Cover DeviceTypeMappingAddView and EditView invalid POST paths."""
+
+    def setUp(self):
+        """Set up profile and a mapping."""
+        super().setUp()
+        self.profile = _make_profile("DTMInvalidProfile")
+        self.dtm = DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="DTMInvalidMake",
+            source_model="DTMInvalidModel",
+            netbox_manufacturer_slug="dtm-mfg",
+            netbox_device_type_slug="dtm-dt",
+        )
+
+    def test_add_invalid_rerenders(self):
+        """POST with missing required fields re-renders DeviceTypeMappingAddView."""
+        url = reverse("plugins:netbox_data_import:devicetypemapping_add", kwargs={"profile_pk": self.profile.pk})
+        resp = self.client.post(url, {"profile": self.profile.pk})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_edit_invalid_rerenders(self):
+        """POST with missing required fields re-renders DeviceTypeMappingEditView."""
+        url = reverse("plugins:netbox_data_import:devicetypemapping_edit", kwargs={"pk": self.dtm.pk})
+        resp = self.client.post(url, {"profile": self.profile.pk})
+        self.assertEqual(resp.status_code, 200)
+
+
+class CheckDeviceMultipleResultsTest(BaseViewTestCase):
+    """Cover CheckDeviceNameView MultipleObjectsReturned path (lines 1025-1028)."""
+
+    def setUp(self):
+        """Create two devices with identical names (different sites)."""
+        super().setUp()
+        from dcim.models import Site, Manufacturer, DeviceType, DeviceRole, Device
+
+        site1 = Site.objects.create(name="MDSite1", slug="md-site-1")
+        site2 = Site.objects.create(name="MDSite2", slug="md-site-2")
+        mfg = Manufacturer.objects.create(name="MDMfg", slug="md-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="MDModel", slug="md-model")
+        role = DeviceRole.objects.create(name="MDRole", slug="md-role")
+        Device.objects.create(name="md-shared-name", device_type=dt, role=role, site=site1)
+        Device.objects.create(name="md-shared-name", device_type=dt, role=role, site=site2)
+
+    def test_multiple_devices_same_name_returns_exists_true(self):
+        """GET with a name matching multiple devices returns exists=True with count>1."""
+        import json
+
+        url = reverse("plugins:netbox_data_import:check_device")
+        resp = self.client.get(url + "?name=md-shared-name")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertTrue(data["exists"])
+        self.assertGreater(data.get("count", 1), 1)
+
+
+class QuickResolveDeviceTypeMissingFieldsTest(BaseViewTestCase):
+    """Cover QuickResolveDeviceTypeView missing make/model and auto-slugify paths."""
+
+    def setUp(self):
+        """Set up profile."""
+        super().setUp()
+        self.profile = _make_profile("QRDTMissingProfile")
+
+    def test_missing_source_make_redirects(self):
+        """POST without source_make shows error and redirects."""
+        url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_make": "",
+                "source_model": "SomeModel",
+                "netbox_mfg_slug": "",
+                "netbox_dt_slug": "",
+                "action": "map",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+
+    def test_auto_slugify_when_slugs_empty(self):
+        """POST without explicit slugs auto-slugifies from source_make/source_model."""
+        url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_make": "Auto Mfg",
+                "source_model": "Auto Model",
+                "netbox_mfg_slug": "",  # will be auto-slugified
+                "netbox_dt_slug": "",  # will be auto-slugified
+                "action": "map",
+            },
+        )
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(
+            DeviceTypeMapping.objects.filter(
+                profile=self.profile, source_make="Auto Mfg", source_model="Auto Model"
+            ).exists()
+        )
+
+    def test_create_now_invalid_u_height_defaults_to_one(self):
+        """POST action=create_now with invalid u_height defaults to 1."""
+        from dcim.models import DeviceType
+
+        url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
+        self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_make": "UHMfg2",
+                "source_model": "UHModel2",
+                "netbox_mfg_slug": "uh-mfg2",
+                "netbox_dt_slug": "uh-model2",
+                "u_height": "not-a-number",
+                "action": "create_now",
+            },
+        )
+        dt = DeviceType.objects.filter(slug="uh-model2").first()
+        self.assertIsNotNone(dt)
+        self.assertEqual(dt.u_height, 1)
+
+
+class AutoMatchAmbiguousNameTest(BaseViewTestCase):
+    """Cover _auto_match_single_device ambiguous name path (line 1387)."""
+
+    def setUp(self):
+        """Set up profile and two devices with the same name (different sites)."""
+        super().setUp()
+        from dcim.models import Site, Manufacturer, DeviceType, DeviceRole, Device
+
+        self.site = Site.objects.create(name="AmbNameSite", slug="amb-name-site")
+        site2 = Site.objects.create(name="AmbNameSite2", slug="amb-name-site2")
+        mfg = Manufacturer.objects.create(name="AmbNameMfg", slug="amb-name-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="AmbNameModel", slug="amb-name-model")
+        role = DeviceRole.objects.create(name="AmbNameRole", slug="amb-name-role")
+        Device.objects.create(name="ambname-shared", device_type=dt, role=role, site=self.site)
+        Device.objects.create(name="ambname-shared", device_type=dt, role=role, site=site2)
+        self.profile = _make_profile("AmbNameProfile")
+
+    def test_ambiguous_name_match_no_link(self):
+        """Rows with ambiguous name match (multiple devices) do NOT create DeviceExistingMatch."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        session = self.client.session
+        session["import_rows"] = [
+            {
+                "_row_number": 1,
+                "source_id": "AMBNAME-001",
+                "device_name": "ambname-shared",
+                "serial": "",
+                "asset_tag": "",
+            }
+        ]
+        session.save()
+        url = reverse("plugins:netbox_data_import:auto_match_devices")
+        resp = self.client.post(url, {"profile_id": self.profile.pk})
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AMBNAME-001").exists())
+
+
+class SerializeRowsTest(BaseViewTestCase):
+    """Cover _serialize_rows datetime handling (line 1470)."""
+
+    def test_serialize_rows_with_datetime(self):
+        """_serialize_rows converts datetime values to ISO format strings."""
+        import datetime
+        from netbox_data_import.views import _serialize_rows
+
+        rows = [{"_row_number": 1, "device_name": "test", "created_at": datetime.datetime(2025, 1, 1, 12, 0, 0)}]
+        result = _serialize_rows(rows)
+        self.assertEqual(result[0]["created_at"], "2025-01-01T12:00:00")
+
+    def test_serialize_rows_with_date(self):
+        """_serialize_rows converts date values to ISO format strings."""
+        import datetime
+        from netbox_data_import.views import _serialize_rows
+
+        rows = [{"_row_number": 1, "created_at": datetime.date(2025, 6, 1)}]
+        result = _serialize_rows(rows)
+        self.assertEqual(result[0]["created_at"], "2025-06-01")
+
+
+class SaveResolutionJsonErrorTest(BaseViewTestCase):
+    """Test SaveResolutionView with malformed JSON (lines 642-643)."""
+
+    def setUp(self):
+        """Set up profile."""
+        super().setUp()
+        self.profile = _make_profile("SaveResJsonProfile")
+
+    def test_malformed_json_defaults_to_empty_dict(self):
+        """POST with malformed resolved_fields JSON silently defaults to empty dict."""
+        url = reverse("plugins:netbox_data_import:save_resolution")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "JSONERR-001",
+                "source_column": "Name",
+                "original_value": "old",
+                "resolved_fields": "THIS IS NOT JSON {{{{",
+            },
+        )
+        self.assertIn(resp.status_code, [200, 302])
+        # Resolution should still be saved (with empty resolved_fields)
+        from netbox_data_import.models import SourceResolution
+
+        res = SourceResolution.objects.filter(profile=self.profile, source_id="JSONERR-001").first()
+        self.assertIsNotNone(res)
+        self.assertEqual(res.resolved_fields, {})
+
+
+class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
+    """Cover _auto_match_single_device ambiguous asset_tag path (lines 1379-1380)."""
+
+    def setUp(self):
+        """Set up profile."""
+        super().setUp()
+        self.profile = _make_profile("AmbATProfile")
+
+    def test_ambiguous_asset_tag_returns_none_is_ambiguous(self):
+        """_auto_match_single_device returns (None, True) when asset_tag matches multiple devices."""
+        from unittest.mock import MagicMock
+        from netbox_data_import.views import _auto_match_single_device
+
+        mock_dev_model = MagicMock()
+        # Return 2 results for asset_tag filter (ambiguous)
+        mock_dev_model.objects.filter.return_value.__getitem__ = lambda self, s: [MagicMock(), MagicMock()]
+
+        # Use a sliceable mock: filter(...)[:2] returns list of 2
+        qs_mock = MagicMock()
+        qs_mock.__getitem__ = MagicMock(return_value=[MagicMock(), MagicMock()])
+        mock_dev_model.objects.filter.return_value = qs_mock
+
+        device, is_ambiguous = _auto_match_single_device(mock_dev_model, "any-name", "", "SHARED-TAG")
+        self.assertIsNone(device)
+        self.assertTrue(is_ambiguous)

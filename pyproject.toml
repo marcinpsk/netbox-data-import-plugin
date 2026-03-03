@@ -77,7 +77,7 @@ source = ["netbox_data_import"]
 omit = ["*/migrations/*", "*/tests/*"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 98
 show_missing = true
 
 [tool.semantic_release]

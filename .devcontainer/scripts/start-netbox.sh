@@ -115,10 +115,9 @@ else
   echo ""
   # Gracefully shut down the background RQ worker when this script exits
   _cleanup_rq() {
-    kill -15 "$RQ_PID" 2>/dev/null || true
-    local i=0
-    while kill -0 "$RQ_PID" 2>/dev/null && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done
-    kill -0 "$RQ_PID" 2>/dev/null && kill -9 "$RQ_PID" 2>/dev/null || true
+    if is_expected_pid "$RQ_PID" "manage\.py rqworker"; then
+      graceful_kill_pid "$RQ_PID"
+    fi
     rm -f /tmp/rqworker.pid
   }
   trap '_cleanup_rq' EXIT INT TERM

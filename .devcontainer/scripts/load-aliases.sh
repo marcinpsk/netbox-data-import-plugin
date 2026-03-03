@@ -80,6 +80,7 @@ netbox-restart() {
 
 netbox-reload() {
   cd "$PLUGIN_DIR" || return 1
+  source /opt/netbox/venv/bin/activate
   if command -v uv >/dev/null 2>&1; then
     uv pip install -e . || return 1
   else
@@ -143,6 +144,7 @@ netbox-manage() {
 
 plugin-install() {
   cd "$PLUGIN_DIR" || return 1
+  source /opt/netbox/venv/bin/activate
   if command -v uv >/dev/null 2>&1; then
     uv pip install -e .
   else

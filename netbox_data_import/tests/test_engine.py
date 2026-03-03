@@ -371,3 +371,67 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
         device_type_rows = [r for r in result.rows if r.object_type == "device_type"]
         self.assertEqual(len(device_type_rows), 1)
         self.assertEqual(device_type_rows[0].action, "error")
+
+
+class ParseFileEdgeCasesTest(TestCase):
+    """Tests for parse_file edge cases: empty rows and missing column headers."""
+
+    def test_empty_rows_are_skipped(self):
+        """parse_file skips fully-empty data rows (line 192 coverage)."""
+        import openpyxl
+        from io import BytesIO
+
+        profile = _make_profile("EmptyRowTest")
+
+        # Build an xlsx with one data row and one empty row
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(
+            [
+                "Id",
+                "Rack",
+                "Name",
+                "Class",
+                "Make",
+                "Model",
+                "UHeight",
+                "UPosition",
+                "Serial Number",
+                "Asset Tag",
+                "Status",
+            ]
+        )
+        ws.append(["SRC001", "Rack-01", "dev-01", "Server", "Dell", "R740", "1", "1", "", "", "active"])
+        ws.append([None, None, None, None, None, None, None, None, None, None, None])  # empty row
+        ws.append(["SRC002", "Rack-01", "dev-02", "Server", "Dell", "R740", "1", "2", "", "", "active"])
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        rows = parse_file(buf, profile)
+        # Only 2 non-empty rows
+        self.assertEqual(len(rows), 2)
+
+    def test_mapping_with_missing_source_column_skips(self):
+        """parse_file silently skips column mappings whose header doesn't exist in the file (line 198)."""
+        import openpyxl
+        from io import BytesIO
+
+        profile = _make_profile("MissingColTest")
+        # Add a mapping for a column that doesn't exist in the file
+        ColumnMapping.objects.create(profile=profile, source_column="NonExistentCol", target_field="tenant")
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(["Id", "Name", "Class"])
+        ws.append(["SRC001", "dev-01", "Server"])
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        rows = parse_file(buf, profile)
+        self.assertEqual(len(rows), 1)
+        # tenant should be absent (no mapping target applied since column didn't exist)
+        self.assertNotIn("tenant", rows[0])

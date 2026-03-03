@@ -32,7 +32,7 @@ else
 fi
 
 echo ""
-if [ -n "$CODESPACES" ]; then
+if [ "$CODESPACES" = "true" ]; then
   echo "🌐 GitHub Codespaces Environment:"
   echo "   NetBox will be available via automatic port forwarding"
   echo "   Check the 'Ports' panel for the forwarded port labeled 'NetBox Web Interface'"

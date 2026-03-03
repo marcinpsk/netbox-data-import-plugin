@@ -31,5 +31,9 @@ graceful_kill_pattern() {
 is_expected_pid() {
   local pid="$1" pattern="$2"
   [ -z "$pid" ] || [ -z "$pattern" ] && return 1
+  case "$pid" in
+    ''|*[!0-9]*) echo "is_expected_pid: invalid PID '$pid'" >&2; return 1 ;;
+  esac
+  [ "$pid" -le 0 ] 2>/dev/null && { echo "is_expected_pid: PID must be > 0" >&2; return 1; }
   ps -p "$pid" -o args= 2>/dev/null | grep -Eq "$pattern"
 }

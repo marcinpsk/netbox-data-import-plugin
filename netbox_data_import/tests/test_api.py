@@ -9,6 +9,7 @@ from netbox_data_import.models import (
     ClassRoleMapping,
     ColumnMapping,
     DeviceTypeMapping,
+    IgnoredDevice,
     ImportProfile,
     ManufacturerMapping,
 )
@@ -196,8 +197,6 @@ class IgnoredDeviceAPITest(BaseAPITestCase):
     def setUp(self):
         """Create two profiles each with one IgnoredDevice."""
         super().setUp()
-        from netbox_data_import.models import IgnoredDevice
-
         self.p1 = _make_profile("APIIgnoredP1")
         self.p2 = _make_profile("APIIgnoredP2")
         IgnoredDevice.objects.create(profile=self.p1, source_id="IGN-001", device_name="dev-p1")
