@@ -113,10 +113,8 @@ if [ "$BACKGROUND" = true ]; then
     # Clean up the already-started RQ worker before exiting
     if [ -f /tmp/rqworker.pid ]; then
       _rq_cleanup_pid=$(cat /tmp/rqworker.pid 2>/dev/null)
-      if [ -n "$_rq_cleanup_pid" ]; then
-        kill "$_rq_cleanup_pid" 2>/dev/null
-        sleep 0.5
-        kill -0 "$_rq_cleanup_pid" 2>/dev/null && kill -9 "$_rq_cleanup_pid" 2>/dev/null
+      if [ -n "$_rq_cleanup_pid" ] && is_expected_pid "$_rq_cleanup_pid" "manage\.py rqworker"; then
+        graceful_kill_pid "$_rq_cleanup_pid"
       fi
       rm -f /tmp/rqworker.pid
     fi

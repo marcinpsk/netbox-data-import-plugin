@@ -258,9 +258,12 @@ class ResolveDeviceTypeSlugsTest(TestCase):
         )
         # Extra spaces in source
         mfg_slug, dt_slug, explicit = _resolve_device_type_slugs("HP", "ProLiant  DL360", self.profile)
-        # May or may not match depending on normalization; just verify no crash
-        self.assertIsInstance(mfg_slug, str)
-        self.assertIsInstance(dt_slug, str)
+        # The fallback normalization only normalizes the stored value, not the input,
+        # so the double-space input won't find the explicit mapping — it falls back to auto-slug.
+        # Coincidentally slugify("HP") == "hp" and slugify("HP-ProLiant  DL360") == "hp-proliant-dl360".
+        self.assertEqual(mfg_slug, "hp")
+        self.assertEqual(dt_slug, "hp-proliant-dl360")
+        self.assertFalse(explicit)  # no explicit mapping found due to un-normalized input
 
 
 class ColumnTransformRuleTest(TestCase):
@@ -1462,13 +1465,15 @@ class Pass1UHeightParseErrorTest(TestCase):
 
     def setUp(self):
         """Set up profile with a device class mapping."""
-        from dcim.models import Site
+        from dcim.models import DeviceRole, Site
 
         self.site = Site.objects.create(name="UHSite", slug="uh-site")
         self.profile = _make_profile("UHProfile")
+        DeviceRole.objects.get_or_create(slug="server", defaults={"name": "Server", "color": "9e9e9e"})
 
     def test_invalid_u_height_falls_back_to_one(self):
         """A row with a non-numeric u_height uses 1 as fallback without error."""
+        from dcim.models import DeviceType
 
         rows = [
             {
@@ -1486,9 +1491,12 @@ class Pass1UHeightParseErrorTest(TestCase):
                 "status": "active",
             }
         ]
-        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
-        # Should produce a create row, not crash
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
         self.assertIsInstance(result, ImportResult)
+        # Verify the DeviceType was created with u_height=1 (the fallback value)
+        dt = DeviceType.objects.filter(slug="uhmake-uhmodel").first()
+        self.assertIsNotNone(dt, "DeviceType should have been created")
+        self.assertEqual(dt.u_height, 1)
 
 
 class PreviewInvalidPositionTest(TestCase):
@@ -1562,8 +1570,11 @@ class Pass3InvalidPositionTest(TestCase):
             }
         ]
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
-        # Should not crash; device row should be in result
+        # Should not crash; device row should be in result with the expected source_id
         self.assertIsInstance(result, ImportResult)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertGreater(len(device_rows), 0, "Expected at least one device row in result")
+        self.assertEqual(device_rows[0].source_id, "P3IP001")
 
 
 class ImportResultRackGroupsTest(TestCase):
@@ -1639,11 +1650,12 @@ class StoreSourceIdTest(TestCase):
         )
 
     def test_store_source_id_with_custom_field_name(self):
-        """_store_source_id with profile.custom_field_name set attempts to write to custom field."""
+        """_store_source_id with profile.custom_field_name set writes to that custom field."""
         from netbox_data_import.engine import _store_source_id
 
-        # Even if the custom field doesn't exist, should not crash
         _store_source_id(self.device, self.profile, "SSI-001")
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.custom_field_data.get("cans_id"), "SSI-001")
 
     def test_store_source_id_no_custom_field_name(self):
         """_store_source_id without custom_field_name still writes data_import_source."""
@@ -1652,6 +1664,9 @@ class StoreSourceIdTest(TestCase):
         self.profile.custom_field_name = ""
         self.profile.save()
         _store_source_id(self.device, self.profile, "SSI-002")
+        self.device.refresh_from_db()
+        dis = self.device.custom_field_data.get("data_import_source", {})
+        self.assertEqual(dis.get("source_id"), "SSI-002")
 
 
 class PreviewMatchedBySerialTest(TestCase):

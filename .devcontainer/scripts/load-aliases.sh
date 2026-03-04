@@ -34,9 +34,9 @@ netbox-run()    { "$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh"; }
 
 # Robust stop command that kills both tracked and orphaned processes
 netbox-stop() {
+  local PID ORPHAN_COUNT
   echo "🛑 Stopping NetBox and RQ workers..."
   if [ -f /tmp/netbox.pid ]; then
-    local PID
     PID=$(cat /tmp/netbox.pid 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
       if is_expected_pid "$PID" "manage\.py runserver.*8000"; then
@@ -49,7 +49,6 @@ netbox-stop() {
     rm -f /tmp/netbox.pid
   fi
   if [ -f /tmp/rqworker.pid ]; then
-    local PID
     PID=$(cat /tmp/rqworker.pid 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
       if is_expected_pid "$PID" "manage\.py rqworker"; then
@@ -62,7 +61,6 @@ netbox-stop() {
     rm -f /tmp/rqworker.pid
   fi
   if pgrep -f "manage\.py rqworker" >/dev/null 2>&1; then
-    local ORPHAN_COUNT
     ORPHAN_COUNT=$(pgrep -cf "manage\.py rqworker" 2>/dev/null || echo 0)
     graceful_kill_pattern "manage\.py rqworker"
     echo "   Killed $ORPHAN_COUNT orphaned RQ worker(s)"
@@ -98,11 +96,14 @@ _check_rq_status() {
     PID=$(cat /tmp/rqworker.pid 2>/dev/null)
     if [ -n "$PID" ] && is_expected_pid "$PID" "manage\.py rqworker"; then
       echo "RQ worker is running (PID: $PID)"
+      return 0
     else
       echo "RQ worker is not running"
+      return 1
     fi
   else
     echo "RQ worker is not running"
+    return 1
   fi
 }
 
@@ -141,9 +142,9 @@ plugin-install() {
   cd "$PLUGIN_DIR" || return 1
   source /opt/netbox/venv/bin/activate || return 1
   if command -v uv >/dev/null 2>&1; then
-    uv pip install -e .
+    uv pip install -e . || return 1
   else
-    pip install -e .
+    pip install -e . || return 1
   fi
 }
 
@@ -151,9 +152,9 @@ plugins-install() {
   if [ -f "$PLUGIN_DIR/.devcontainer/extra-requirements.txt" ]; then
     source /opt/netbox/venv/bin/activate || return 1
     if command -v uv >/dev/null 2>&1; then
-      uv pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt"
+      uv pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt" || return 1
     else
-      pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt"
+      pip install -r "$PLUGIN_DIR/.devcontainer/extra-requirements.txt" || return 1
     fi
   else
     echo "No .devcontainer/extra-requirements.txt found"
