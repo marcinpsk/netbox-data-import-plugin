@@ -4,6 +4,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
 from .models import (
@@ -32,6 +33,16 @@ from .tables import (
     ColumnTransformRuleTable,
 )
 from .filters import ImportProfileFilterSet
+
+
+def _safe_next_url(request, fallback: str) -> str:
+    """Return a validated same-host redirect URL from POST or the fallback view name."""
+    url = request.POST.get("next", "")
+    if url and url_has_allowed_host_and_scheme(
+        url, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return url
+    return reverse(fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +584,7 @@ class IgnoreDeviceView(LoginRequiredMixin, View):
         profile_id = request.POST.get("profile_id")
         source_id = request.POST.get("source_id")
         device_name = request.POST.get("device_name", "")
-        next_url = request.POST.get("next", reverse("plugins:netbox_data_import:import_preview"))
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         if profile_id and source_id:
             profile = get_object_or_404(ImportProfile, pk=profile_id)
@@ -595,7 +606,7 @@ class UnignoreDeviceView(LoginRequiredMixin, View):
 
         profile_id = request.POST.get("profile_id")
         source_id = request.POST.get("source_id")
-        next_url = request.POST.get("next", reverse("plugins:netbox_data_import:import_preview"))
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         if profile_id and source_id:
             IgnoredDevice.objects.filter(
@@ -624,7 +635,7 @@ class SaveResolutionView(LoginRequiredMixin, View):
         source_column = request.POST.get("source_column")
         original_value = request.POST.get("original_value")
         resolved_fields_json = request.POST.get("resolved_fields", "{}")
-        next_url = request.POST.get("next", reverse("plugins:netbox_data_import:import_preview"))
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         try:
             resolved_fields = json.loads(resolved_fields_json)
@@ -1347,6 +1358,37 @@ class SearchNetBoxObjectsView(LoginRequiredMixin, View):
         return JsonResponse({"results": results})
 
 
+def _auto_match_single_device(device_model, device_name, serial, asset_tag):
+    """Try to match a single device row to an existing NetBox device.
+
+    Returns (device_or_None, is_ambiguous).  Matching priority: serial →
+    asset_tag → exact name.  Multiple matches on any field → ambiguous.
+    """
+    device = None
+    if serial:
+        results = list(device_model.objects.filter(serial=serial)[:2])
+        if len(results) == 1:
+            device = results[0]
+        elif len(results) > 1:
+            return None, True
+
+    if device is None and asset_tag:
+        results = list(device_model.objects.filter(asset_tag=asset_tag)[:2])
+        if len(results) == 1:
+            device = results[0]
+        elif len(results) > 1:
+            return None, True
+
+    if device is None and device_name:
+        results = list(device_model.objects.filter(name=device_name)[:2])
+        if len(results) == 1:
+            device = results[0]
+        elif len(results) > 1:
+            return None, True
+
+    return device, False
+
+
 class AutoMatchDevicesView(LoginRequiredMixin, View):
     """Scan all device rows in the session and auto-match to existing NetBox devices.
 
@@ -1378,33 +1420,10 @@ class AutoMatchDevicesView(LoginRequiredMixin, View):
                 already += 1
                 continue
 
-            device = None
-            # 1. Match by serial
-            if serial:
-                qs = Device.objects.filter(serial=serial)
-                if qs.count() == 1:
-                    device = qs.first()
-                elif qs.count() > 1:
-                    ambiguous += 1
-                    continue
-
-            # 2. Match by asset_tag
-            if device is None and asset_tag:
-                qs = Device.objects.filter(asset_tag=asset_tag)
-                if qs.count() == 1:
-                    device = qs.first()
-                elif qs.count() > 1:
-                    ambiguous += 1
-                    continue
-
-            # 3. Exact name match
-            if device is None and device_name:
-                qs = Device.objects.filter(name=device_name)
-                if qs.count() == 1:
-                    device = qs.first()
-                elif qs.count() > 1:
-                    ambiguous += 1
-                    continue
+            device, is_ambiguous = _auto_match_single_device(Device, device_name, serial, asset_tag)
+            if is_ambiguous:
+                ambiguous += 1
+                continue
 
             if device is not None:
                 DeviceExistingMatch.objects.create(

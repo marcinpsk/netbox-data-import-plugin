@@ -213,3 +213,225 @@ class RowResultSerializationTest(TestCase):
         self.assertEqual(len(restored.rows), 2)
         self.assertEqual(restored.counts.get("racks_created"), 1)
         self.assertEqual(restored.counts.get("devices_created"), 1)
+
+
+class PreviewDeviceRowTest(TestCase):
+    """Unit tests for _preview_device_row internals."""
+
+    def setUp(self):
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="Preview Site", slug="preview-site")
+        self.profile = _make_profile("Preview")
+
+    def test_rack_label_empty_rack_name(self):
+        """An empty rack_name produces '(no rack)' — no leading space in detail."""
+        from dcim.models import Device, DeviceType
+
+        from netbox_data_import.engine import _preview_device_row
+
+        row = {
+            "_row_number": 1,
+            "rack_name": "",
+            "u_position": 3,
+        }
+        result_row = _preview_device_row(
+            row=row,
+            profile=self.profile,
+            rack_map={},
+            site=self.site,
+            mfg_slug="test-mfg",
+            dt_slug="test-dt",
+            make="TestMake",
+            model="TestModel",
+            source_id="1",
+            device_name="test-device-01",
+            serial="",
+            asset_tag="",
+            DeviceType=DeviceType,
+            Device=Device,
+        )
+        # Should use '(no rack)' placeholder, not '  (not found)' with leading space
+        self.assertNotIn("  ", result_row.detail, "Detail should not contain double space")
+        self.assertIn("(no rack)", result_row.detail)
+
+    def test_rack_label_unknown_rack(self):
+        """A non-empty rack_name not in rack_map produces 'rack-X (not found)'."""
+        from dcim.models import Device, DeviceType
+
+        from netbox_data_import.engine import _preview_device_row
+
+        row = {
+            "_row_number": 2,
+            "rack_name": "RACK-99",
+            "u_position": 5,
+        }
+        result_row = _preview_device_row(
+            row=row,
+            profile=self.profile,
+            rack_map={},
+            site=self.site,
+            mfg_slug="test-mfg",
+            dt_slug="test-dt",
+            make="TestMake",
+            model="TestModel",
+            source_id="2",
+            device_name="test-device-02",
+            serial="",
+            asset_tag="",
+            DeviceType=DeviceType,
+            Device=Device,
+        )
+        self.assertIn("RACK-99 (not found)", result_row.detail)
+
+
+class EnsureDeviceTypeExecuteModeTest(TestCase):
+    """Tests that _ensure_device_type never appends RowResult rows in execute mode."""
+
+    def setUp(self):
+        self.profile = _make_profile("EnsureDT")
+
+    def test_execute_mode_no_row_results_create_missing_false(self):
+        """Execute mode with create_missing_device_types=False appends no RowResult rows."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import ImportResult, _ensure_device_type
+
+        self.profile.create_missing_device_types = False
+        result = ImportResult()
+        row = {"_row_number": 1, "source_id": "1"}
+        _ensure_device_type(
+            "unknown-mfg",
+            "unknown-dt",
+            "Unknown Make",
+            "Unknown Model",
+            1,
+            set(),
+            self.profile,
+            result,
+            dry_run=False,
+            row=row,
+            Manufacturer=Manufacturer,
+            DeviceType=DeviceType,
+        )
+        device_type_rows = [r for r in result.rows if r.object_type == "device_type"]
+        self.assertEqual(device_type_rows, [], "Execute mode must not append device_type RowResult rows")
+
+    def test_execute_mode_no_row_results_create_missing_true(self):
+        """Execute mode with create_missing_device_types=True appends no RowResult rows (creates silently)."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import ImportResult, _ensure_device_type
+
+        self.profile.create_missing_device_types = True
+        result = ImportResult()
+        row = {"_row_number": 1, "source_id": "1"}
+        _ensure_device_type(
+            "silent-mfg",
+            "silent-dt",
+            "Silent Make",
+            "Silent Model",
+            1,
+            set(),
+            self.profile,
+            result,
+            dry_run=False,
+            row=row,
+            Manufacturer=Manufacturer,
+            DeviceType=DeviceType,
+        )
+        device_type_rows = [r for r in result.rows if r.object_type == "device_type"]
+        self.assertEqual(device_type_rows, [], "Execute mode must not append device_type RowResult rows")
+        # Verify the device type was actually created in DB
+        self.assertTrue(DeviceType.objects.filter(manufacturer__slug="silent-mfg", slug="silent-dt").exists())
+
+    def test_dry_run_appends_error_row_when_create_missing_false(self):
+        """Dry-run with create_missing_device_types=False does append an error RowResult."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import ImportResult, _ensure_device_type
+
+        self.profile.create_missing_device_types = False
+        result = ImportResult()
+        row = {"_row_number": 1, "source_id": "1"}
+        _ensure_device_type(
+            "dry-mfg",
+            "dry-dt",
+            "Dry Make",
+            "Dry Model",
+            1,
+            set(),
+            self.profile,
+            result,
+            dry_run=True,
+            row=row,
+            Manufacturer=Manufacturer,
+            DeviceType=DeviceType,
+        )
+        device_type_rows = [r for r in result.rows if r.object_type == "device_type"]
+        self.assertEqual(len(device_type_rows), 1)
+        self.assertEqual(device_type_rows[0].action, "error")
+
+
+class ParseFileEdgeCasesTest(TestCase):
+    """Tests for parse_file edge cases: empty rows and missing column headers."""
+
+    def test_empty_rows_are_skipped(self):
+        """parse_file skips fully-empty data rows (line 192 coverage)."""
+        import openpyxl
+        from io import BytesIO
+
+        profile = _make_profile("EmptyRowTest")
+
+        # Build an xlsx with one data row and one empty row
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(
+            [
+                "Id",
+                "Rack",
+                "Name",
+                "Class",
+                "Make",
+                "Model",
+                "UHeight",
+                "UPosition",
+                "Serial Number",
+                "Asset Tag",
+                "Status",
+            ]
+        )
+        ws.append(["SRC001", "Rack-01", "dev-01", "Server", "Dell", "R740", "1", "1", "", "", "active"])
+        ws.append([None, None, None, None, None, None, None, None, None, None, None])  # empty row
+        ws.append(["SRC002", "Rack-01", "dev-02", "Server", "Dell", "R740", "1", "2", "", "", "active"])
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        rows = parse_file(buf, profile)
+        # Only 2 non-empty rows
+        self.assertEqual(len(rows), 2)
+
+    def test_mapping_with_missing_source_column_skips(self):
+        """parse_file silently skips column mappings whose header doesn't exist in the file (line 198)."""
+        import openpyxl
+        from io import BytesIO
+
+        profile = _make_profile("MissingColTest")
+        # Add a mapping for a column that doesn't exist in the file
+        ColumnMapping.objects.create(profile=profile, source_column="NonExistentCol", target_field="tenant")
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(["Id", "Name", "Class"])
+        ws.append(["SRC001", "dev-01", "Server"])
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        rows = parse_file(buf, profile)
+        self.assertEqual(len(rows), 1)
+        # tenant should be absent (no mapping target applied since column didn't exist)
+        self.assertNotIn("tenant", rows[0])

@@ -16,7 +16,7 @@ ALLOWED_HOSTS = ["*"]
 
 # Dev banners
 BANNER_TOP = "Development Environment"
-BANNER_BOTTOM = "NetBox Interface Name Rules Plugin Dev Container"
+BANNER_BOTTOM = "NetBox Data Import Plugin Dev Container"
 BANNER_LOGIN = "Development access only"
 
 # Example: Custom logging

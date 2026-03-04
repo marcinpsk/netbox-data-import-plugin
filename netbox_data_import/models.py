@@ -178,8 +178,10 @@ class ImportJob(models.Model):
         return f"Import {self.pk} — {self.created:%Y-%m-%d %H:%M} ({self.input_filename})"
 
     def get_absolute_url(self):
-        """Return the detail URL for this import job."""
-        return reverse("plugins:netbox_data_import:importjob", args=[self.pk])
+        """Return the associated profile's URL (no per-job detail view exists)."""
+        if not self.profile_id:
+            return reverse("plugins:netbox_data_import:importprofile_list")
+        return reverse("plugins:netbox_data_import:importprofile", args=[self.profile_id])
 
 
 class DeviceTypeMapping(models.Model):

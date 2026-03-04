@@ -10,51 +10,134 @@ fi
 
 echo "🌐 Starting NetBox development server..."
 
+# Set required environment variables
 export DEBUG="${DEBUG:-True}"
 
+# Detect Codespaces and set access URL
 if [ "$CODESPACES" = "true" ] && [ -n "$CODESPACE_NAME" ]; then
   GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN="${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
   ACCESS_URL="https://${CODESPACE_NAME}-8000.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}"
+  echo "🔗 GitHub Codespaces detected"
 else
   ACCESS_URL="http://localhost:8000"
 fi
 
-# Clean up orphaned processes
-echo "🧹 Cleaning up orphaned processes..."
-if pgrep -f "python.*runserver.*8000" >/dev/null 2>&1; then
-  pkill -9 -f "python.*runserver.*8000" 2>/dev/null
-  sleep 1
+# Load shared process management helpers
+if ! source "$(dirname "$0")/process-helpers.sh"; then
+  echo "ERROR: Failed to load process-helpers.sh" >&2
+  exit 1
 fi
 
+# Kill any orphaned processes (not tracked by PID file)
+echo "🧹 Cleaning up orphaned processes..."
+if pgrep -f "manage\.py rqworker" >/dev/null 2>&1; then
+  echo "   Found orphaned RQ workers, killing..."
+  graceful_kill_pattern "manage\.py rqworker"
+fi
+
+if pgrep -f "manage\.py runserver.*8000" >/dev/null 2>&1; then
+  echo "   Found orphaned NetBox servers, killing..."
+  graceful_kill_pattern "manage\.py runserver.*8000"
+fi
+
+# Stop any tracked processes from PID files
 if [ -f /tmp/netbox.pid ]; then
   OLD_PID=$(cat /tmp/netbox.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    kill "$OLD_PID" 2>/dev/null || kill -9 "$OLD_PID" 2>/dev/null
+    if is_expected_pid "$OLD_PID" "manage\.py runserver.*8000"; then
+      graceful_kill_pid "$OLD_PID"
+    else
+      echo "⚠️  Skipping stale /tmp/netbox.pid (PID $OLD_PID is not NetBox runserver)"
+    fi
   fi
   rm -f /tmp/netbox.pid
 fi
 
-source /opt/netbox/venv/bin/activate
-cd /opt/netbox/netbox
+if [ -f /tmp/rqworker.pid ]; then
+  OLD_PID=$(cat /tmp/rqworker.pid 2>/dev/null)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    if is_expected_pid "$OLD_PID" "manage\.py rqworker"; then
+      graceful_kill_pid "$OLD_PID"
+    else
+      echo "⚠️  Skipping stale /tmp/rqworker.pid (PID $OLD_PID is not rqworker)"
+    fi
+  fi
+  rm -f /tmp/rqworker.pid
+fi
+
+# Activate NetBox virtual environment
+source /opt/netbox/venv/bin/activate || { echo "ERROR: Failed to activate venv at /opt/netbox/venv" >&2; exit 1; }
+
+# Navigate to NetBox directory
+if ! cd /opt/netbox/netbox; then
+  echo "ERROR: Failed to cd into /opt/netbox/netbox" >&2
+  exit 1
+fi
+
+# Start RQ worker in background
+echo "⚙️  Starting RQ worker..."
+(
+  source /opt/netbox/venv/bin/activate || { echo "ERROR: RQ worker subshell: failed to activate venv" >&2; exit 1; }
+  if ! cd /opt/netbox/netbox; then
+    echo "ERROR: RQ worker subshell: failed to cd into /opt/netbox/netbox" >&2
+    exit 1
+  fi
+  python manage.py rqworker --verbosity=1
+) > /tmp/rqworker.log 2>&1 &
+
+RQ_PID=$!
+sleep 0.3
+if ! kill -0 "$RQ_PID" 2>/dev/null; then
+  echo "ERROR: RQ worker failed to start; check /tmp/rqworker.log" >&2
+  exit 1
+fi
+echo $RQ_PID > /tmp/rqworker.pid
+echo "✅ RQ worker started (PID: $RQ_PID)"
 
 if [ "$BACKGROUND" = true ]; then
   echo "🚀 Starting NetBox in background"
   (
     export DEBUG="${DEBUG:-True}"
-    source /opt/netbox/venv/bin/activate
-    cd /opt/netbox/netbox
+    source /opt/netbox/venv/bin/activate || { echo "ERROR: NetBox subshell: failed to activate venv" >&2; exit 1; }
+    if ! cd /opt/netbox/netbox; then
+      echo "ERROR: NetBox subshell: failed to cd into /opt/netbox/netbox" >&2
+      exit 1
+    fi
     python manage.py runserver 0.0.0.0:8000 --verbosity=0
   ) > /tmp/netbox.log 2>&1 &
 
   NETBOX_PID=$!
+  sleep 0.3
+  if ! kill -0 "$NETBOX_PID" 2>/dev/null; then
+    echo "ERROR: NetBox failed to start; check /tmp/netbox.log" >&2
+    # Clean up the already-started RQ worker before exiting
+    if [ -f /tmp/rqworker.pid ]; then
+      _rq_cleanup_pid=$(cat /tmp/rqworker.pid 2>/dev/null)
+      if [ -n "$_rq_cleanup_pid" ] && is_expected_pid "$_rq_cleanup_pid" "manage\.py rqworker"; then
+        graceful_kill_pid "$_rq_cleanup_pid"
+      fi
+      rm -f /tmp/rqworker.pid
+    fi
+    exit 1
+  fi
   echo $NETBOX_PID > /tmp/netbox.pid
   echo "✅ NetBox started in background (PID: $NETBOX_PID)"
   echo "📍 Access NetBox at: $ACCESS_URL"
+  echo "💡 If clicking the URL opens 0.0.0.0:8000, manually type: localhost:8000"
   echo "📄 View logs with: netbox-logs"
-  echo "🛑 Stop with: netbox-stop"
+  echo "🛑 Stop NetBox with: netbox-stop"
 else
   echo "🌍 Starting NetBox in foreground"
   echo "📍 Access NetBox at: $ACCESS_URL"
+  echo "💡 If clicking the URL opens 0.0.0.0:8000, manually type: localhost:8000"
   echo ""
+  # Gracefully shut down the background RQ worker when this script exits
+  _cleanup_rq() {
+    if is_expected_pid "$RQ_PID" "manage\.py rqworker"; then
+      graceful_kill_pid "$RQ_PID"
+    fi
+    rm -f /tmp/rqworker.pid
+  }
+  trap '_cleanup_rq' EXIT INT TERM
   python manage.py runserver 0.0.0.0:8000
 fi
