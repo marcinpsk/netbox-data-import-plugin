@@ -1522,8 +1522,8 @@ class PreviewInvalidPositionTest(TestCase):
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
         # No crash — device row exists, position is None so no U-label in detail
         device_rows = [r for r in result.rows if r.object_type == "device"]
-        if device_rows:
-            self.assertNotIn("UNone", device_rows[0].detail)
+        self.assertGreater(len(device_rows), 0, "Expected at least one device row in result")
+        self.assertNotIn("UNone", device_rows[0].detail)
 
 
 class Pass3InvalidPositionTest(TestCase):
@@ -1705,9 +1705,9 @@ class PreviewMatchedBySerialTest(TestCase):
         ]
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
         device_rows = [r for r in result.rows if r.object_type == "device"]
-        if device_rows:
-            self.assertEqual(device_rows[0].action, "update")
-            self.assertIn("serial", device_rows[0].detail)
+        self.assertGreater(len(device_rows), 0, "Expected at least one device row in result")
+        self.assertEqual(device_rows[0].action, "update")
+        self.assertIn("serial", device_rows[0].detail)
 
 
 class DeviceExistingMatchPrecedenceTest(TestCase):

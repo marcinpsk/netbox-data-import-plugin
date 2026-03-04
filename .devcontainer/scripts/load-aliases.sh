@@ -92,18 +92,8 @@ netbox-reload() {
 alias netbox-logs="tail -f /tmp/netbox.log"
 alias rq-logs="tail -f /tmp/rqworker.log"
 
-netbox-status() {
+_check_rq_status() {
   local PID
-  if [ -f /tmp/netbox.pid ]; then
-    PID=$(cat /tmp/netbox.pid 2>/dev/null)
-    if [ -n "$PID" ] && is_expected_pid "$PID" "manage\.py runserver.*8000"; then
-      echo "NetBox is running (PID: $PID)"
-    else
-      echo "NetBox is not running"
-    fi
-  else
-    echo "NetBox is not running"
-  fi
   if [ -f /tmp/rqworker.pid ]; then
     PID=$(cat /tmp/rqworker.pid 2>/dev/null)
     if [ -n "$PID" ] && is_expected_pid "$PID" "manage\.py rqworker"; then
@@ -116,18 +106,23 @@ netbox-status() {
   fi
 }
 
-rq-status() {
+netbox-status() {
   local PID
-  if [ -f /tmp/rqworker.pid ]; then
-    PID=$(cat /tmp/rqworker.pid 2>/dev/null)
-    if [ -n "$PID" ] && is_expected_pid "$PID" "manage\.py rqworker"; then
-      echo "RQ worker is running (PID: $PID)"
+  if [ -f /tmp/netbox.pid ]; then
+    PID=$(cat /tmp/netbox.pid 2>/dev/null)
+    if [ -n "$PID" ] && is_expected_pid "$PID" "manage\.py runserver.*8000"; then
+      echo "NetBox is running (PID: $PID)"
     else
-      echo "RQ worker is not running"
+      echo "NetBox is not running"
     fi
   else
-    echo "RQ worker is not running"
+    echo "NetBox is not running"
   fi
+  _check_rq_status
+}
+
+rq-status() {
+  _check_rq_status
 }
 
 netbox-shell() {

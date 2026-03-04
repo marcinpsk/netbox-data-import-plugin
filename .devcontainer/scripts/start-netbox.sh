@@ -110,6 +110,16 @@ if [ "$BACKGROUND" = true ]; then
   sleep 0.3
   if ! kill -0 "$NETBOX_PID" 2>/dev/null; then
     echo "ERROR: NetBox failed to start; check /tmp/netbox.log" >&2
+    # Clean up the already-started RQ worker before exiting
+    if [ -f /tmp/rqworker.pid ]; then
+      _rq_cleanup_pid=$(cat /tmp/rqworker.pid 2>/dev/null)
+      if [ -n "$_rq_cleanup_pid" ]; then
+        kill "$_rq_cleanup_pid" 2>/dev/null
+        sleep 0.5
+        kill -0 "$_rq_cleanup_pid" 2>/dev/null && kill -9 "$_rq_cleanup_pid" 2>/dev/null
+      fi
+      rm -f /tmp/rqworker.pid
+    fi
     exit 1
   fi
   echo $NETBOX_PID > /tmp/netbox.pid
