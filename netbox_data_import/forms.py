@@ -71,6 +71,8 @@ class ColumnTransformRuleForm(forms.ModelForm):
 class ImportSetupForm(forms.Form):
     """Form for the import wizard step 1: select profile, upload file, choose site/location/tenant."""
 
+    MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
+
     # ImportProfile has no REST API endpoint yet, so use a plain select
     profile = forms.ModelChoiceField(
         queryset=ImportProfile.objects.all(),
@@ -79,7 +81,7 @@ class ImportSetupForm(forms.Form):
     )
     excel_file = forms.FileField(
         label="Excel File",
-        help_text="Upload the Excel file to import (.xlsx)",
+        help_text="Upload the Excel file to import (.xlsx, max 10 MB)",
     )
     site = DynamicModelChoiceField(
         queryset=Site.objects.all(),
@@ -96,3 +98,13 @@ class ImportSetupForm(forms.Form):
         label="Tenant (optional)",
         required=False,
     )
+
+    def clean_excel_file(self):
+        """Reject files that exceed the maximum upload size."""
+        f = self.cleaned_data.get("excel_file")
+        if f and f.size > self.MAX_UPLOAD_SIZE:
+            limit_mb = self.MAX_UPLOAD_SIZE // (1024 * 1024)
+            raise forms.ValidationError(
+                f"File too large: {f.size // (1024 * 1024)} MB. Maximum allowed is {limit_mb} MB."
+            )
+        return f

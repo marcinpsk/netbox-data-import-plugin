@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 from django.contrib import messages
-from django.contrib.auth.mixins import LoginRequiredMixin
+from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -96,8 +96,10 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
 # ---------------------------------------------------------------------------
 
 
-class ColumnMappingAddView(LoginRequiredMixin, View):
+class ColumnMappingAddView(PermissionRequiredMixin, View):
     """Add a column mapping to an existing ImportProfile."""
+
+    permission_required = "netbox_data_import.add_columnmapping"
 
     def get(self, request, profile_pk):
         """Render the add form for a new column mapping."""
@@ -116,8 +118,10 @@ class ColumnMappingAddView(LoginRequiredMixin, View):
         return render(request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": profile})
 
 
-class ColumnMappingEditView(LoginRequiredMixin, View):
+class ColumnMappingEditView(PermissionRequiredMixin, View):
     """Edit an existing column mapping."""
+
+    permission_required = "netbox_data_import.change_columnmapping"
 
     def get(self, request, pk):
         """Render the edit form for an existing column mapping."""
@@ -140,8 +144,10 @@ class ColumnMappingEditView(LoginRequiredMixin, View):
         )
 
 
-class ColumnMappingDeleteView(LoginRequiredMixin, View):
+class ColumnMappingDeleteView(PermissionRequiredMixin, View):
     """Delete a column mapping."""
+
+    permission_required = "netbox_data_import.delete_columnmapping"
 
     def get(self, request, pk):
         """Render the delete confirmation page for a column mapping."""
@@ -166,8 +172,10 @@ class ColumnMappingDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ClassRoleMappingAddView(LoginRequiredMixin, View):
+class ClassRoleMappingAddView(PermissionRequiredMixin, View):
     """Add a class→role mapping to an existing ImportProfile."""
+
+    permission_required = "netbox_data_import.add_classrolemapping"
 
     def get(self, request, profile_pk):
         """Render the add form for a new class→role mapping."""
@@ -186,8 +194,10 @@ class ClassRoleMappingAddView(LoginRequiredMixin, View):
         return render(request, "netbox_data_import/classrolemapping_edit.html", {"form": form, "profile": profile})
 
 
-class ClassRoleMappingEditView(LoginRequiredMixin, View):
+class ClassRoleMappingEditView(PermissionRequiredMixin, View):
     """Edit an existing class→role mapping."""
+
+    permission_required = "netbox_data_import.change_classrolemapping"
 
     def get(self, request, pk):
         """Render the edit form for an existing class→role mapping."""
@@ -214,8 +224,10 @@ class ClassRoleMappingEditView(LoginRequiredMixin, View):
         )
 
 
-class ClassRoleMappingDeleteView(LoginRequiredMixin, View):
+class ClassRoleMappingDeleteView(PermissionRequiredMixin, View):
     """Delete a class→role mapping."""
+
+    permission_required = "netbox_data_import.delete_classrolemapping"
 
     def get(self, request, pk):
         """Render the delete confirmation page for a class→role mapping."""
@@ -240,8 +252,10 @@ class ClassRoleMappingDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class DeviceTypeMappingAddView(LoginRequiredMixin, View):
+class DeviceTypeMappingAddView(PermissionRequiredMixin, View):
     """Add a device type mapping to an existing ImportProfile."""
+
+    permission_required = "netbox_data_import.add_devicetypemapping"
 
     def get(self, request, profile_pk):
         """Render the add form for a new device type mapping."""
@@ -260,8 +274,10 @@ class DeviceTypeMappingAddView(LoginRequiredMixin, View):
         return render(request, "netbox_data_import/devicetypemapping_edit.html", {"form": form, "profile": profile})
 
 
-class DeviceTypeMappingEditView(LoginRequiredMixin, View):
+class DeviceTypeMappingEditView(PermissionRequiredMixin, View):
     """Edit an existing device type mapping."""
+
+    permission_required = "netbox_data_import.change_devicetypemapping"
 
     def get(self, request, pk):
         """Render the edit form for an existing device type mapping."""
@@ -288,8 +304,10 @@ class DeviceTypeMappingEditView(LoginRequiredMixin, View):
         )
 
 
-class DeviceTypeMappingDeleteView(LoginRequiredMixin, View):
+class DeviceTypeMappingDeleteView(PermissionRequiredMixin, View):
     """Delete a device type mapping."""
+
+    permission_required = "netbox_data_import.delete_devicetypemapping"
 
     def get(self, request, pk):
         """Render the delete confirmation page for a device type mapping."""
@@ -314,8 +332,10 @@ class DeviceTypeMappingDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ImportSetupView(LoginRequiredMixin, View):
+class ImportSetupView(PermissionRequiredMixin, View):
     """Step 1: select profile, upload file, choose site/location/tenant."""
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Render the import setup form."""
@@ -362,8 +382,10 @@ class ImportSetupView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class ImportPreviewView(LoginRequiredMixin, View):
+class ImportPreviewView(PermissionRequiredMixin, View):
     """Step 2: show dry-run results, let user confirm or go back."""
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Re-run the dry-run import and render the preview template."""
@@ -417,8 +439,10 @@ class ImportPreviewView(LoginRequiredMixin, View):
         )
 
 
-class ImportRunView(LoginRequiredMixin, View):
+class ImportRunView(PermissionRequiredMixin, View):
     """Step 3: run the real import (dry_run=False)."""
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Execute the real import and redirect to the results page."""
@@ -465,8 +489,10 @@ class ImportRunView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_results"))
 
 
-class ImportResultsView(LoginRequiredMixin, View):
+class ImportResultsView(PermissionRequiredMixin, View):
     """Step 4: show final results with links to created objects."""
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request):
         """Render the results page for the most recent import."""
@@ -486,8 +512,10 @@ class ImportResultsView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ImportJobListView(LoginRequiredMixin, View):
+class ImportJobListView(PermissionRequiredMixin, View):
     """List all past import jobs for audit / history."""
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request):
         """Render the import job history list."""
@@ -505,8 +533,10 @@ class ImportJobListView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ColumnTransformRuleAddView(LoginRequiredMixin, View):
+class ColumnTransformRuleAddView(PermissionRequiredMixin, View):
     """Add a column transform rule to an existing ImportProfile."""
+
+    permission_required = "netbox_data_import.add_columntransformrule"
 
     def get(self, request, profile_pk):
         """Render the add form for a new column transform rule."""
@@ -525,8 +555,10 @@ class ColumnTransformRuleAddView(LoginRequiredMixin, View):
         return render(request, "netbox_data_import/columntransformrule_edit.html", {"form": form, "profile": profile})
 
 
-class ColumnTransformRuleEditView(LoginRequiredMixin, View):
+class ColumnTransformRuleEditView(PermissionRequiredMixin, View):
     """Edit an existing column transform rule."""
+
+    permission_required = "netbox_data_import.change_columntransformrule"
 
     def get(self, request, pk):
         """Render the edit form for an existing column transform rule."""
@@ -553,8 +585,10 @@ class ColumnTransformRuleEditView(LoginRequiredMixin, View):
         )
 
 
-class ColumnTransformRuleDeleteView(LoginRequiredMixin, View):
+class ColumnTransformRuleDeleteView(PermissionRequiredMixin, View):
     """Delete a column transform rule."""
+
+    permission_required = "netbox_data_import.delete_columntransformrule"
 
     def get(self, request, pk):
         """Render the delete confirmation page for a column transform rule."""
@@ -579,8 +613,10 @@ class ColumnTransformRuleDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class IgnoreDeviceView(LoginRequiredMixin, View):
+class IgnoreDeviceView(PermissionRequiredMixin, View):
     """Mark a specific device (by source_id) as ignored for a profile."""
+
+    permission_required = "netbox_data_import.add_ignoreddevice"
 
     def post(self, request):
         """Add the specified device to the profile's ignore list."""
@@ -602,8 +638,10 @@ class IgnoreDeviceView(LoginRequiredMixin, View):
         return redirect(next_url)
 
 
-class UnignoreDeviceView(LoginRequiredMixin, View):
+class UnignoreDeviceView(PermissionRequiredMixin, View):
     """Remove a device from the ignore list."""
+
+    permission_required = "netbox_data_import.delete_ignoreddevice"
 
     def post(self, request):
         """Remove the specified device from the profile's ignore list."""
@@ -627,8 +665,10 @@ class UnignoreDeviceView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class SaveResolutionView(LoginRequiredMixin, View):
+class SaveResolutionView(PermissionRequiredMixin, View):
     """Save a manual field resolution for rerere replay."""
+
+    permission_required = "netbox_data_import.add_sourceresolution"
 
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
@@ -667,11 +707,13 @@ class SaveResolutionView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class DeviceTypeAnalysisView(LoginRequiredMixin, View):
+class DeviceTypeAnalysisView(PermissionRequiredMixin, View):
     """Show all unique (make, model) pairs across import jobs and profiles.
 
     Highlights which ones have explicit DeviceTypeMapping vs auto-slugified.
     """
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request, profile_pk=None):
         """Render the device type analysis page for the given profile."""
@@ -724,11 +766,13 @@ class DeviceTypeAnalysisView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class BulkYamlImportView(LoginRequiredMixin, View):
+class BulkYamlImportView(PermissionRequiredMixin, View):
     """Accept a YAML file and bulk-create ClassRoleMappings or DeviceTypeMappings for a profile.
 
     Useful for bootstrapping from contrib/ definition files.
     """
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request, profile_pk):
         """Render the bulk YAML import form."""
@@ -812,8 +856,10 @@ class BulkYamlImportView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ExportProfileYamlView(LoginRequiredMixin, View):
+class ExportProfileYamlView(PermissionRequiredMixin, View):
     """Download all profile configuration as a single YAML file."""
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request, pk):
         """Serialize the profile and all its mappings to YAML and return as a file download."""
@@ -883,11 +929,13 @@ class ExportProfileYamlView(LoginRequiredMixin, View):
         )
 
 
-class ImportProfileYamlView(LoginRequiredMixin, View):
+class ImportProfileYamlView(PermissionRequiredMixin, View):
     """Import a full profile YAML (as exported by ExportProfileYamlView).
 
     If the profile already exists (by name), merges/updates its mappings.
     """
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Render the profile YAML import form."""
@@ -989,11 +1037,13 @@ class ImportProfileYamlView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class CheckDeviceNameView(LoginRequiredMixin, View):
+class CheckDeviceNameView(PermissionRequiredMixin, View):
     """AJAX endpoint: check if a device with the given name exists in NetBox.
 
     Returns JSON: {"exists": bool, "url": str|null, "id": int|null}.
     """
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request):
         """Return JSON indicating whether a device with the given name exists."""
@@ -1033,8 +1083,10 @@ class CheckDeviceNameView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class SourceResolutionListView(LoginRequiredMixin, View):
+class SourceResolutionListView(PermissionRequiredMixin, View):
     """List all saved name-split resolutions for a profile."""
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request, profile_pk):
         """Render the list of saved source resolutions for the given profile."""
@@ -1052,8 +1104,10 @@ class SourceResolutionListView(LoginRequiredMixin, View):
         )
 
 
-class SourceResolutionDeleteView(LoginRequiredMixin, View):
+class SourceResolutionDeleteView(PermissionRequiredMixin, View):
     """Delete a saved source resolution."""
+
+    permission_required = "netbox_data_import.delete_sourceresolution"
 
     def get(self, request, pk):
         """Render the delete confirmation page for a source resolution."""
@@ -1085,11 +1139,13 @@ class SourceResolutionDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class QuickCreateManufacturerView(LoginRequiredMixin, View):
+class QuickCreateManufacturerView(PermissionRequiredMixin, View):
     """Immediately create a Manufacturer in NetBox from the preview page.
 
     Redirects back to preview so the row changes from 'create' to a device action.
     """
+
+    permission_required = "netbox_data_import.add_devicetypemapping"
 
     def post(self, request):
         """Create the manufacturer in NetBox and redirect back to preview."""
@@ -1111,12 +1167,14 @@ class QuickCreateManufacturerView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickResolveManufacturerView(LoginRequiredMixin, View):
+class QuickResolveManufacturerView(PermissionRequiredMixin, View):
     """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page.
 
     Used when a source has inconsistent naming (e.g. 'Dell EMC' → 'dell').
     Redirects back to preview which re-runs with the mapping applied.
     """
+
+    permission_required = "netbox_data_import.add_devicetypemapping"
 
     def post(self, request):
         """Save the manufacturer mapping and redirect back to preview."""
@@ -1137,12 +1195,14 @@ class QuickResolveManufacturerView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickResolveDeviceTypeView(LoginRequiredMixin, View):
+class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
     """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page.
 
     Optionally also creates the manufacturer and/or device type in NetBox right now.
     Redirects back to preview which re-runs and shows the resolved rows.
     """
+
+    permission_required = "netbox_data_import.add_devicetypemapping"
 
     def post(self, request):
         """Save the device type mapping (and optionally create objects) then redirect."""
@@ -1205,11 +1265,13 @@ class QuickResolveDeviceTypeView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickAddClassRoleMappingView(LoginRequiredMixin, View):
+class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
     """Quickly add a ClassRoleMapping (ignore / role) directly from an error row in preview.
 
     Redirects back to preview; error rows for that class disappear on re-run.
     """
+
+    permission_required = "netbox_data_import.add_classrolemapping"
 
     def post(self, request):
         """Save the class→role mapping and redirect back to preview."""
@@ -1244,11 +1306,13 @@ class QuickAddClassRoleMappingView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class MatchExistingDeviceView(LoginRequiredMixin, View):
+class MatchExistingDeviceView(PermissionRequiredMixin, View):
     """Link a source row to an existing NetBox device (by device ID).
 
     Saves a DeviceExistingMatch; on next preview re-run the row shows action='update'.
     """
+
+    permission_required = "netbox_data_import.add_deviceexistingmatch"
 
     def post(self, request):
         """Save the device match and redirect back to preview."""
@@ -1282,12 +1346,14 @@ class MatchExistingDeviceView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class SearchNetBoxObjectsView(LoginRequiredMixin, View):
+class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
     GET params: type (manufacturer|device_type|device|role), q (search string).
     Returns JSON list of {id, name, slug, url} dicts.
     """
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request):
         """Return a JSON list of matching NetBox objects for the given type and query."""
@@ -1382,12 +1448,14 @@ def _auto_match_single_device(device_model, device_name, serial, asset_tag):
     return device, False
 
 
-class AutoMatchDevicesView(LoginRequiredMixin, View):
+class AutoMatchDevicesView(PermissionRequiredMixin, View):
     """Scan all device rows in the session and auto-match to existing NetBox devices.
 
     Priority: serial > asset_tag > exact name match.
     Name substring matches are recorded as probable_matches only (not auto-linked).
     """
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Run auto-matching and redirect back to preview with a summary message."""

@@ -4,6 +4,7 @@
 
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import viewsets, permissions
+from rest_framework.permissions import DjangoModelPermissions
 
 from ..models import (
     ImportProfile,
@@ -42,7 +43,7 @@ class ImportProfileViewSet(NetBoxModelViewSet):
 class _PluginModelViewSet(viewsets.ModelViewSet):
     """Base class for plain-model viewsets in this plugin."""
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissions]
 
 
 class ColumnMappingViewSet(_PluginModelViewSet):
@@ -140,7 +141,7 @@ class ImportJobViewSet(viewsets.ReadOnlyModelViewSet):
 
     queryset = ImportJob.objects.select_related("profile")
     serializer_class = ImportJobSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissions]
 
     def get_queryset(self):
         """Filter by profile_id query param if provided."""
