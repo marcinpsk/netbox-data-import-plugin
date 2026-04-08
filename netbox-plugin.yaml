@@ -1,0 +1,12 @@
+# Format: https://github.com/netbox-community/netbox/wiki/Plugin-Certification-Program
+# To register in the NetBox Labs plugin catalog, email: plugincatalog@netboxlabs.com
+# Include: plugin name, email, GitHub repo, PyPI link, config name (netbox_data_import)
+version: 0.1
+package_name: netbox-data-import
+compatibility:
+  - release: 1.0.1
+    netbox_min: 4.2.0
+    netbox_max: 4.5.3
+  - release: 1.0.0
+    netbox_min: 4.2.0
+    netbox_max: 4.5.3

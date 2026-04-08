@@ -24,8 +24,16 @@ dependencies = [
     "openpyxl>=3.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/marcinpsk/netbox-data-import-plugin"
+Repository = "https://github.com/marcinpsk/netbox-data-import-plugin"
+Changelog = "https://github.com/marcinpsk/netbox-data-import-plugin/blob/main/CHANGELOG.md"
+
 [tool.setuptools.packages.find]
 include = ["netbox_data_import*"]
+
+[tool.setuptools.package-data]
+netbox_data_import = ["templates/**/*.html"]
 
 [dependency-groups]
 dev = [
