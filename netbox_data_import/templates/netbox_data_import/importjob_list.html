@@ -64,6 +64,27 @@
           </tbody>
         </table>
       </div>
+      {% if jobs.has_other_pages %}
+      <div class="card-footer">
+        <nav>
+          <ul class="pagination pagination-sm mb-0 justify-content-center">
+            {% if jobs.has_previous %}
+            <li class="page-item"><a class="page-link" href="?page={{ jobs.previous_page_number }}">Previous</a></li>
+            {% endif %}
+            {% for num in jobs.paginator.page_range %}
+              {% if jobs.number == num %}
+              <li class="page-item active"><span class="page-link">{{ num }}</span></li>
+              {% elif num > jobs.number|add:"-3" and num < jobs.number|add:"3" %}
+              <li class="page-item"><a class="page-link" href="?page={{ num }}">{{ num }}</a></li>
+              {% endif %}
+            {% endfor %}
+            {% if jobs.has_next %}
+            <li class="page-item"><a class="page-link" href="?page={{ jobs.next_page_number }}">Next</a></li>
+            {% endif %}
+          </ul>
+        </nav>
+      </div>
+      {% endif %}
     </div>
   </div>
 </div>

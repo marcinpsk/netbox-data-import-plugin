@@ -185,6 +185,11 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
     # Pre-fetch transform rules for efficiency
     transform_rules = list(profile.column_transform_rules.all())
 
+    # Pre-fetch all saved resolutions for this profile (avoids N+1 queries)
+    resolutions_by_source_id: dict[str, list] = {}
+    for res in profile.source_resolutions.all():
+        resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
+
     rows = []
     for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         # Skip fully empty rows
@@ -206,7 +211,7 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
         # Apply saved resolutions (rerere)
         source_id = row_dict.get("source_id", "")
         if source_id:
-            for res in profile.source_resolutions.filter(source_id=str(source_id)):
+            for res in resolutions_by_source_id.get(str(source_id), []):
                 row_dict.update(res.resolved_fields)
 
         rows.append(row_dict)
@@ -225,11 +230,10 @@ def _resolve_device_type_slugs(make: str, model: str, profile: ImportProfile) ->
     Check DeviceTypeMapping first; fall back to auto-slugify.
     Both make and model are expected to be whitespace-normalized.
     """
-    import re as _re
 
     def _normalize(s: str) -> str:
         r"""Normalize whitespace and decode JS-style \uXXXX escape sequences."""
-        s = _re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
+        s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
         return " ".join(s.split())
 
     # Direct lookup (fast path — matches normalized stored records)
@@ -815,6 +819,9 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
 
     side_map, airflow_map, status_map = _get_translation_maps()
 
+    # Pre-fetch ignored source IDs to avoid per-row queries
+    ignored_source_ids = set(IgnoredDevice.objects.filter(profile=profile).values_list("source_id", flat=True))
+
     for row in rows:
         device_class = str(row.get("device_class", "")).strip()
         crm = class_role_map.get(device_class)
@@ -862,7 +869,7 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
             )
             continue
 
-        if IgnoredDevice.objects.filter(profile=profile, source_id=source_id).exists():
+        if source_id in ignored_source_ids:
             result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -1003,7 +1010,7 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str):
             obj.custom_field_data[profile.custom_field_name] = source_id
             changed = True
         except (AttributeError, KeyError):
-            pass
+            logger.warning("Failed to set custom field '%s' on %s", profile.custom_field_name, obj)
 
     # Plugin-managed JSON field: data_import_source
     try:
@@ -1014,10 +1021,10 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str):
         }
         changed = True
     except (AttributeError, KeyError):
-        pass
+        logger.warning("Failed to set data_import_source on %s", obj)
 
     if changed:
         try:
             obj.save(update_fields=["custom_field_data"])
         except Exception:
-            pass
+            logger.exception("Failed to save custom_field_data on %s (source_id=%s)", obj, source_id)

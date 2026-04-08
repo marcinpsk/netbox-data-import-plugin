@@ -491,7 +491,12 @@ class ImportJobListView(LoginRequiredMixin, View):
 
     def get(self, request):
         """Render the import job history list."""
-        jobs = ImportJob.objects.select_related("profile").all()
+        from django.core.paginator import Paginator
+
+        jobs_qs = ImportJob.objects.select_related("profile").all()
+        paginator = Paginator(jobs_qs, 50)
+        page = request.GET.get("page")
+        jobs = paginator.get_page(page)
         return render(request, "netbox_data_import/importjob_list.html", {"jobs": jobs})
 
 
@@ -673,19 +678,7 @@ class DeviceTypeAnalysisView(LoginRequiredMixin, View):
         profile = get_object_or_404(ImportProfile, pk=profile_pk) if profile_pk else None
         profiles = ImportProfile.objects.all()
 
-        # Collect unique (make, model) pairs from all recent import jobs
-        job_qs = ImportJob.objects.all()
-        if profile:
-            job_qs = job_qs.filter(profile=profile)
-
-        for job in job_qs.order_by("-created")[:50]:
-            for row in job.result_rows:
-                if row.get("object_type") in ("manufacturer", "device_type"):
-                    continue
-                # We don't store make/model in result_rows, so skip
-                pass
-
-        # Better: build analysis from DeviceTypeMapping + auto-slugify check
+        # Build analysis from DeviceTypeMapping + auto-slugify check
         if profile:
             dt_mappings = DeviceTypeMapping.objects.filter(profile=profile)
         else:

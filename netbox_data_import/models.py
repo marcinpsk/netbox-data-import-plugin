@@ -308,6 +308,17 @@ class ColumnTransformRule(models.Model):
         verbose_name = "Column Transform Rule"
         verbose_name_plural = "Column Transform Rules"
 
+    def clean(self):
+        """Validate that the regex pattern compiles."""
+        import re
+
+        from django.core.exceptions import ValidationError
+
+        try:
+            re.compile(self.pattern)
+        except re.error as exc:
+            raise ValidationError({"pattern": f"Invalid regex pattern: {exc}"})
+
     def __str__(self):
         return f"{self.source_column}: {self.pattern}"
 

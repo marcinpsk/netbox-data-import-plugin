@@ -703,21 +703,22 @@ function dtmSearch() {
   var q = document.getElementById('dtm_search_q').value.trim();
   var mfgFilter = document.getElementById('dtm_netbox_mfg_slug').value.trim();
   if (!q) return;
+  var container = document.getElementById('dtm_search_results');
   var baseUrl = '{% url "plugins:netbox_data_import:search_objects" %}?type=device_type&q=' + encodeURIComponent(q);
   var url = baseUrl + (mfgFilter ? '&mfg_slug=' + encodeURIComponent(mfgFilter) : '');
   fetch(url)
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      if (!data.results.length && mfgFilter) {
+      var initialResults = data && Array.isArray(data.results) ? data.results : [];
+      if (!initialResults.length && mfgFilter) {
         // Manufacturer filter yielded nothing — retry without it so the user sees results
         return fetch(baseUrl).then(function(r) { return r.json(); }).then(function(d2) {
-          return { results: d2.results, usedFallback: true };
+          return { results: d2 && Array.isArray(d2.results) ? d2.results : [], usedFallback: true };
         });
       }
-      return { results: data.results, usedFallback: false };
+      return { results: initialResults, usedFallback: false };
     })
     .then(function(result) {
-      var container = document.getElementById('dtm_search_results');
       container.innerHTML = '';
       if (result.usedFallback && result.results.length) {
         container.innerHTML = '<p class="text-muted small">No results for current manufacturer filter — showing all matches:</p>';
@@ -743,6 +744,9 @@ function dtmSearch() {
         };
         container.appendChild(btn);
       });
+    })
+    .catch(function() {
+      container.innerHTML = '<p class="text-muted small">Search failed. Please try again.</p>';
     });
 }
 
