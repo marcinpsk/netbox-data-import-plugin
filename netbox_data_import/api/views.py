@@ -28,6 +28,22 @@ from .serializers import (
 )
 
 
+class DjangoModelPermissionsWithView(DjangoModelPermissions):
+    """Extends DjangoModelPermissions to require view_* permission for GET requests.
+
+    The stock DjangoModelPermissions does not map GET to any model permission,
+    so list/retrieve endpoints are accessible to any authenticated user.  This
+    subclass closes that gap.
+    """
+
+    perms_map = {
+        **DjangoModelPermissions.perms_map,
+        "GET": ["%(app_label)s.view_%(model_name)s"],
+        "HEAD": ["%(app_label)s.view_%(model_name)s"],
+        "OPTIONS": [],
+    }
+
+
 class ImportProfileViewSet(NetBoxModelViewSet):
     """CRUD viewset for ImportProfile (NetBoxModel)."""
 
@@ -43,7 +59,7 @@ class ImportProfileViewSet(NetBoxModelViewSet):
 class _PluginModelViewSet(viewsets.ModelViewSet):
     """Base class for plain-model viewsets in this plugin."""
 
-    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissions]
+    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
 
 class ColumnMappingViewSet(_PluginModelViewSet):
@@ -141,7 +157,7 @@ class ImportJobViewSet(viewsets.ReadOnlyModelViewSet):
 
     queryset = ImportJob.objects.select_related("profile")
     serializer_class = ImportJobSerializer
-    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissions]
+    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
     def get_queryset(self):
         """Filter by profile_id query param if provided."""

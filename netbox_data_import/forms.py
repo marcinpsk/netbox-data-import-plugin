@@ -103,8 +103,8 @@ class ImportSetupForm(forms.Form):
         """Reject files that exceed the maximum upload size."""
         f = self.cleaned_data.get("excel_file")
         if f and f.size > self.MAX_UPLOAD_SIZE:
-            limit_mb = self.MAX_UPLOAD_SIZE // (1024 * 1024)
+            limit_mb = self.MAX_UPLOAD_SIZE / (1024 * 1024)
             raise forms.ValidationError(
-                f"File too large: {f.size // (1024 * 1024)} MB. Maximum allowed is {limit_mb} MB."
+                f"File too large: {f.size / (1024 * 1024):.1f} MB. Maximum allowed is {limit_mb:.0f} MB."
             )
         return f

@@ -135,6 +135,7 @@ class ImportContext:
     dry_run: bool
     result: ImportResult
     rack_map: dict = field(default_factory=dict)
+    pending_device_roles: set = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +394,9 @@ def _ensure_device_role(crm, seen_roles, ctx, DeviceRole):
     if not (crm and crm.role_slug and crm.role_slug not in seen_roles):
         return
     seen_roles.add(crm.role_slug)
-    if not ctx.dry_run:
+    if ctx.dry_run:
+        ctx.pending_device_roles.add(crm.role_slug)
+    else:
         DeviceRole.objects.get_or_create(
             slug=crm.role_slug,
             defaults={"name": crm.role_slug.replace("-", " ").title(), "color": "9e9e9e"},
@@ -614,6 +617,7 @@ def _preview_device_row(
     asset_tag,
     DeviceType,
     Device,
+    Rack,
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     dt_exists = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists()
@@ -629,7 +633,13 @@ def _preview_device_row(
 
     rack_name = str(row.get("rack_name", "")).strip()
     if rack_name:
-        rack_label = rack_name if rack_name in ctx.rack_map else f"{rack_name} (not found)"
+        if rack_name in ctx.rack_map:
+            rack_label = rack_name
+        elif Rack.objects.filter(site=ctx.site, name=rack_name).exists():
+            ctx.rack_map[rack_name] = rack_name  # cache to avoid repeated queries
+            rack_label = rack_name
+        else:
+            rack_label = f"{rack_name} (not found)"
     else:
         rack_label = "(no rack)"
     raw_position = row.get("u_position")
@@ -916,6 +926,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 asset_tag,
                 DeviceType,
                 Device,
+                Rack,
             )
         else:
             row_result = _write_device_row(
@@ -970,6 +981,8 @@ def run_import(rows: list[dict], profile: ImportProfile, context: dict, dry_run:
     _pass3_process_devices(rows, ctx, class_role_map)
 
     ctx.result._recompute_counts()
+    if ctx.pending_device_roles:
+        ctx.result.counts["device_roles_pending"] = len(ctx.pending_device_roles)
     return ctx.result
 
 

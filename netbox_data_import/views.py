@@ -1050,6 +1050,11 @@ class CheckDeviceNameView(PermissionRequiredMixin, View):
         from django.http import JsonResponse
         from dcim.models import Device
 
+        if not request.user.has_perm("dcim.view_device"):
+            from django.http import HttpResponseForbidden
+
+            return HttpResponseForbidden()
+
         name = request.GET.get("name", "").strip()
         if not name:
             return JsonResponse({"exists": False, "url": None, "id": None})
@@ -1174,7 +1179,7 @@ class QuickResolveManufacturerView(PermissionRequiredMixin, View):
     Redirects back to preview which re-runs with the mapping applied.
     """
 
-    permission_required = "netbox_data_import.add_devicetypemapping"
+    permission_required = "netbox_data_import.add_manufacturermapping"
 
     def post(self, request):
         """Save the manufacturer mapping and redirect back to preview."""
@@ -1363,6 +1368,16 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
         obj_type = request.GET.get("type", "device")
         q = request.GET.get("q", "").strip()
         limit = 20
+
+        _perm_map = {
+            "manufacturer": "dcim.view_manufacturer",
+            "device_type": "dcim.view_devicetype",
+            "device": "dcim.view_device",
+            "role": "dcim.view_devicerole",
+        }
+        required_perm = _perm_map.get(obj_type)
+        if required_perm and not request.user.has_perm(required_perm):
+            return JsonResponse({"results": [], "error": "permission_denied"}, status=403)
 
         if not q:
             return JsonResponse({"results": []})
