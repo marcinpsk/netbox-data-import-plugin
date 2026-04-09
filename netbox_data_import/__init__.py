@@ -31,7 +31,7 @@ def _ensure_import_custom_fields(sender, **kwargs):
         )
         if created:
             cf.object_types.set([device_ct])
-    except Exception:
+    except Exception:  # pragma: no cover
         logger.warning("Failed to auto-create data_import_source custom field", exc_info=True)
 
 

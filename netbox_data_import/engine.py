@@ -1038,7 +1038,7 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str):
         try:
             obj.custom_field_data[profile.custom_field_name] = source_id
             changed = True
-        except (AttributeError, KeyError):
+        except (AttributeError, KeyError):  # pragma: no cover
             logger.warning("Failed to set custom field '%s' on %s", profile.custom_field_name, obj)
 
     # Plugin-managed JSON field: data_import_source
@@ -1049,11 +1049,11 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str):
             "profile_name": profile.name,
         }
         changed = True
-    except (AttributeError, KeyError):
+    except (AttributeError, KeyError):  # pragma: no cover
         logger.warning("Failed to set data_import_source on %s", obj)
 
     if changed:
         try:
             obj.save(update_fields=["custom_field_data"])
-        except Exception:
+        except Exception:  # pragma: no cover
             logger.exception("Failed to save custom_field_data on %s (source_id=%s)", obj, source_id)

@@ -88,6 +88,16 @@ class ImportProfileListViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertIn(resp.status_code, [302, 301])
 
+    def test_list_filter_by_name(self):
+        """Filter by q= uses ImportProfileFilter.search() to narrow results."""
+        _make_profile("Alpha")
+        _make_profile("Beta")
+        url = reverse("plugins:netbox_data_import:importprofile_list")
+        resp = self.client.get(url, {"q": "Alph"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Alpha")
+        self.assertNotContains(resp, "Beta")
+
 
 class ImportProfileDetailViewTest(BaseViewTestCase):
     """Tests for ImportProfileView (detail)."""
