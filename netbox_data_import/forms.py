@@ -3,13 +3,31 @@
 from django import forms
 from dcim.models import Site, Location
 from tenancy.models import Tenant
-from netbox.forms import NetBoxModelForm
+from netbox.forms import NetBoxModelForm, NetBoxModelImportForm
 from utilities.forms.fields import DynamicModelChoiceField
 from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
 
 
 class ImportProfileForm(NetBoxModelForm):
     """Form for creating and editing ImportProfile instances."""
+
+    class Meta:
+        model = ImportProfile
+        fields = [
+            "name",
+            "description",
+            "sheet_name",
+            "source_id_column",
+            "custom_field_name",
+            "update_existing",
+            "create_missing_device_types",
+            "preview_view_mode",
+            "tags",
+        ]
+
+
+class ImportProfileImportForm(NetBoxModelImportForm):
+    """CSV/YAML bulk-import form for ImportProfile objects (profile metadata only)."""
 
     class Meta:
         model = ImportProfile

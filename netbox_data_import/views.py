@@ -20,6 +20,7 @@ from .models import (
 )
 from .forms import (
     ImportProfileForm,
+    ImportProfileImportForm,
     ColumnMappingForm,
     ClassRoleMappingForm,
     DeviceTypeMappingForm,
@@ -91,6 +92,18 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
     """Delete an ImportProfile and all its child mappings."""
 
     queryset = ImportProfile.objects.all()
+
+
+class ImportProfileBulkImportView(generic.BulkImportView):
+    """Import ImportProfile objects from CSV/YAML using NetBox's built-in import UI.
+
+    This handles flat profile metadata (name, description, settings).
+    For a full hierarchical import (including column mappings, class-role
+    mappings, etc.), use the "Import Full Profile YAML" button instead.
+    """
+
+    queryset = ImportProfile.objects.all()
+    model_form = ImportProfileImportForm
 
 
 # ---------------------------------------------------------------------------
