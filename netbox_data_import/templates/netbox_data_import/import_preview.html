@@ -703,16 +703,31 @@ function dtmSearch() {
   var q = document.getElementById('dtm_search_q').value.trim();
   var mfgFilter = document.getElementById('dtm_netbox_mfg_slug').value.trim();
   if (!q) return;
-  fetch('{% url "plugins:netbox_data_import:search_objects" %}?type=device_type&q=' + encodeURIComponent(q) + (mfgFilter ? '&mfg_slug=' + encodeURIComponent(mfgFilter) : ''))
+  var container = document.getElementById('dtm_search_results');
+  var baseUrl = '{% url "plugins:netbox_data_import:search_objects" %}?type=device_type&q=' + encodeURIComponent(q);
+  var url = baseUrl + (mfgFilter ? '&mfg_slug=' + encodeURIComponent(mfgFilter) : '');
+  fetch(url)
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      var container = document.getElementById('dtm_search_results');
+      var initialResults = data && Array.isArray(data.results) ? data.results : [];
+      if (!initialResults.length && mfgFilter) {
+        // Manufacturer filter yielded nothing — retry without it so the user sees results
+        return fetch(baseUrl).then(function(r) { return r.json(); }).then(function(d2) {
+          return { results: d2 && Array.isArray(d2.results) ? d2.results : [], usedFallback: true };
+        });
+      }
+      return { results: initialResults, usedFallback: false };
+    })
+    .then(function(result) {
       container.innerHTML = '';
-      if (!data.results.length) {
+      if (result.usedFallback && result.results.length) {
+        container.innerHTML = '<p class="text-muted small">No results for current manufacturer filter — showing all matches:</p>';
+      }
+      if (!result.results.length) {
         container.innerHTML = '<p class="text-muted small">No results.</p>';
         return;
       }
-      data.results.forEach(function(dt) {
+      result.results.forEach(function(dt) {
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'btn btn-sm btn-outline-secondary me-1 mb-1';
@@ -729,6 +744,9 @@ function dtmSearch() {
         };
         container.appendChild(btn);
       });
+    })
+    .catch(function() {
+      container.innerHTML = '<p class="text-muted small">Search failed. Please try again.</p>';
     });
 }
 

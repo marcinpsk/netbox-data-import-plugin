@@ -88,6 +88,16 @@ class ImportProfileListViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertIn(resp.status_code, [302, 301])
 
+    def test_list_filter_by_name(self):
+        """Filter by q= uses ImportProfileFilter.search() to narrow results."""
+        _make_profile("Alpha")
+        _make_profile("Beta")
+        url = reverse("plugins:netbox_data_import:importprofile_list")
+        resp = self.client.get(url, {"q": "Alph"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Alpha")
+        self.assertNotContains(resp, "Beta")
+
 
 class ImportProfileDetailViewTest(BaseViewTestCase):
     """Tests for ImportProfileView (detail)."""
@@ -265,7 +275,7 @@ class ClassRoleMappingViewTest(BaseViewTestCase):
             profile=self.profile, source_class="ToDeleteRouter", creates_rack=False, role_slug="router"
         )
         url = reverse("plugins:netbox_data_import:classrolemapping_delete", kwargs={"pk": m.pk})
-        resp = self.client.post(url)
+        resp = self.client.post(url, {"confirm": "true"})
         self.assertEqual(resp.status_code, 302)
         self.assertFalse(ClassRoleMapping.objects.filter(pk=m.pk).exists())
 
@@ -339,7 +349,7 @@ class DeviceTypeMappingViewTest(BaseViewTestCase):
     def test_delete_dtm_post(self):
         """POST to delete DTM removes it."""
         url = reverse("plugins:netbox_data_import:devicetypemapping_delete", kwargs={"pk": self.dtm.pk})
-        resp = self.client.post(url)
+        resp = self.client.post(url, {"confirm": "true"})
         self.assertEqual(resp.status_code, 302)
         self.assertFalse(DeviceTypeMapping.objects.filter(pk=self.dtm.pk).exists())
 
@@ -1608,8 +1618,8 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
             group_2_target="",
         )
         url = reverse("plugins:netbox_data_import:columntransformrule_delete", kwargs={"pk": rule.pk})
-        resp = self.client.post(url, {})
-        self.assertIn(resp.status_code, [200, 302])
+        resp = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(resp.status_code, 302)
         self.assertFalse(self.ColumnTransformRule.objects.filter(pk=rule.pk).exists())
 
 

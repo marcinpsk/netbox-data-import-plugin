@@ -1,6 +1,7 @@
 {# SPDX-License-Identifier: Apache-2.0 #}
 {# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
 {% extends 'base/layout.html' %}
+{% load django_tables2 %}
 
 {% block title %}Import History{% endblock %}
 
@@ -14,55 +15,8 @@
           <i class="mdi mdi-database-import"></i> New Import
         </a>
       </div>
-      <div class="table-responsive">
-        <table class="table table-hover table-sm mb-0">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Date</th>
-              <th>Profile</th>
-              <th>File</th>
-              <th>Site</th>
-              <th>Created</th>
-              <th>Updated</th>
-              <th>Errors</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for job in jobs %}
-            <tr>
-              <td>{{ job.pk }}</td>
-              <td>{{ job.created }}</td>
-              <td>
-                {% if job.profile %}
-                  <a href="{{ job.profile.get_absolute_url }}">{{ job.profile.name }}</a>
-                {% else %}
-                  <span class="text-muted">(deleted)</span>
-                {% endif %}
-              </td>
-              <td><code>{{ job.input_filename|default:"—" }}</code></td>
-              <td>{{ job.site_name|default:"—" }}</td>
-              <td>
-                {% with c=job.result_counts %}
-                {{ c.racks_created|default:0 }} racks, {{ c.devices_created|default:0 }} devices
-                {% endwith %}
-              </td>
-              <td>
-                {% with c=job.result_counts %}
-                {{ c.racks_updated|default:0|add:c.devices_updated|default:0 }}
-                {% endwith %}
-              </td>
-              <td>
-                {% with c=job.result_counts %}
-                {% if c.errors %}<span class="badge bg-danger">{{ c.errors }}</span>{% else %}—{% endif %}
-                {% endwith %}
-              </td>
-            </tr>
-            {% empty %}
-            <tr><td colspan="8" class="text-center text-muted py-3">No imports yet.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      <div class="card-body p-0">
+        {% render_table table %}
       </div>
     </div>
   </div>

@@ -7,10 +7,15 @@ import os
 from django.test import TestCase
 
 from netbox_data_import.engine import (
+    ImportContext,
     ImportResult,
     RowResult,
     _apply_transform_rules,
+    _ensure_device_role,
+    _ensure_device_type,
+    _ensure_manufacturer,
     _find_existing_device,
+    _perm_denied_row,
     _resolve_device_type_slugs,
     _write_device_row,
     _write_rack_to_db,
@@ -27,6 +32,20 @@ from netbox_data_import.models import (
 )
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
+
+
+class _MockUserNoPerm:
+    """Mock user that denies all permissions — used for engine permission-denied tests."""
+
+    def has_perm(self, perm, obj=None):
+        return False
+
+
+class _MockUserMfgOnly:
+    """Mock user that has only dcim.add_manufacturer permission."""
+
+    def has_perm(self, perm, obj=None):
+        return perm == "dcim.add_manufacturer"
 
 
 def _make_profile(name="EngineTest2") -> ImportProfile:
@@ -738,55 +757,41 @@ class WriteRackToDbTest(TestCase):
         """_write_rack_to_db creates a new Rack and records action='create'."""
         from dcim.models import Rack
 
-        rack_map = {}
         result = ImportResult()
-        row = {"_row_number": 1}
-        _write_rack_to_db(
-            "NewRack",
-            self.site,
-            None,
-            None,
-            42,
-            "",
-            self.profile,
-            "SRC1",
-            row,
-            rack_map,
-            result,
-            True,
-            Rack,
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=result,
         )
+        row = {"_row_number": 1}
+        _write_rack_to_db("NewRack", 42, "", "SRC1", row, ctx, Rack)
         self.assertEqual(len(result.rows), 1)
         self.assertEqual(result.rows[0].action, "create")
         self.assertTrue(Rack.objects.filter(site=self.site, name="NewRack").exists())
 
     def test_update_existing_rack_with_location_and_tenant(self):
         """_write_rack_to_db updates an existing rack and sets location and tenant."""
-        from dcim.models import Rack, Location
+        from dcim.models import Location, Rack
         from tenancy.models import Tenant
 
         rack = Rack.objects.create(site=self.site, name="ExistRack", u_height=42)
         loc = Location.objects.create(name="WRLoc", slug="wr-loc", site=self.site)
         tenant = Tenant.objects.create(name="WRTenant", slug="wr-tenant")
 
-        rack_map = {}
         result = ImportResult()
-        row = {"_row_number": 2}
-        _write_rack_to_db(
-            "ExistRack",
-            self.site,
-            loc,
-            tenant,
-            24,
-            "SN002",
-            self.profile,
-            "SRC2",
-            row,
-            rack_map,
-            result,
-            True,
-            Rack,
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=loc,
+            tenant=tenant,
+            dry_run=False,
+            result=result,
         )
+        row = {"_row_number": 2}
+        _write_rack_to_db("ExistRack", 24, "SN002", "SRC2", row, ctx, Rack)
         self.assertEqual(result.rows[0].action, "update")
         rack.refresh_from_db()
         self.assertEqual(rack.location, loc)
@@ -798,26 +803,21 @@ class WriteRackToDbTest(TestCase):
         from dcim.models import Rack
 
         Rack.objects.create(site=self.site, name="SkipRack", u_height=42)
-        rack_map = {}
+        self.profile.update_existing = False
+        self.profile.save()
         result = ImportResult()
-        row = {"_row_number": 3}
-        _write_rack_to_db(
-            "SkipRack",
-            self.site,
-            None,
-            None,
-            42,
-            "",
-            self.profile,
-            "SRC3",
-            row,
-            rack_map,
-            result,
-            False,
-            Rack,
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=result,
         )
+        row = {"_row_number": 3}
+        _write_rack_to_db("SkipRack", 42, "", "SRC3", row, ctx, Rack)
         self.assertEqual(result.rows[0].action, "skip")
-        self.assertIn("SkipRack", rack_map)
+        self.assertIn("SkipRack", ctx.rack_map)
 
 
 # ---------------------------------------------------------------------------
@@ -860,16 +860,16 @@ class WriteDeviceRowTest(TestCase):
 
     def test_device_type_not_found_returns_error(self):
         """_write_device_row returns action='error' when DeviceType does not exist."""
-        from dcim.models import Device, DeviceType, DeviceRole, Rack
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
 
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         row = self._base_row(1)
-        result = _write_device_row(
+        result_row = _write_device_row(
             row,
-            self.profile,
-            self.site,
-            None,
-            None,
-            {},
+            ctx,
             "WD Corp",
             "WD Model",
             self.crm,
@@ -888,24 +888,24 @@ class WriteDeviceRowTest(TestCase):
             Rack,
             Device,
         )
-        self.assertEqual(result.action, "error")
-        self.assertIn("not found", result.detail)
+        self.assertEqual(result_row.action, "error")
+        self.assertIn("not found", result_row.detail)
 
     def test_device_role_not_found_returns_error(self):
         """_write_device_row returns action='error' when DeviceRole does not exist."""
-        from dcim.models import Device, DeviceType, DeviceRole, Rack
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
 
         crm_bad = ClassRoleMapping.objects.create(
             profile=self.profile, source_class="BadRole", role_slug="nonexistent-role"
         )
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         row = self._base_row(2)
-        result = _write_device_row(
+        result_row = _write_device_row(
             row,
-            self.profile,
-            self.site,
-            None,
-            None,
-            {},
+            ctx,
             "WD Corp",
             "WD Model",
             crm_bad,
@@ -924,21 +924,21 @@ class WriteDeviceRowTest(TestCase):
             Rack,
             Device,
         )
-        self.assertEqual(result.action, "error")
-        self.assertIn("not found", result.detail)
+        self.assertEqual(result_row.action, "error")
+        self.assertIn("not found", result_row.detail)
 
     def test_create_device_successfully(self):
         """_write_device_row creates a Device and returns action='create' with correct detail."""
-        from dcim.models import Device, DeviceType, DeviceRole, Rack
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
 
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         row = self._base_row(3)
-        result = _write_device_row(
+        result_row = _write_device_row(
             row,
-            self.profile,
-            self.site,
-            None,
-            None,
-            {},
+            ctx,
             "WD Corp",
             "WD Model",
             self.crm,
@@ -957,23 +957,23 @@ class WriteDeviceRowTest(TestCase):
             Rack,
             Device,
         )
-        self.assertEqual(result.action, "create")
-        self.assertNotIn("  ", result.detail)  # no double space
+        self.assertEqual(result_row.action, "create")
+        self.assertNotIn("  ", result_row.detail)  # no double space
         self.assertTrue(Device.objects.filter(site=self.site, name="wd-dev-03").exists())
 
     def test_update_existing_device_with_asset_tag(self):
         """_write_device_row updates an existing device and sets asset_tag."""
-        from dcim.models import Device, DeviceType, DeviceRole, Rack
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
 
         Device.objects.create(name="wd-dev-04", site=self.site, device_type=self.dt, role=self.role)
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         row = self._base_row(4, device_name="wd-dev-04")
-        result = _write_device_row(
+        result_row = _write_device_row(
             row,
-            self.profile,
-            self.site,
-            None,
-            None,
-            {},
+            ctx,
             "WD Corp",
             "WD Model",
             self.crm,
@@ -992,25 +992,25 @@ class WriteDeviceRowTest(TestCase):
             Rack,
             Device,
         )
-        self.assertEqual(result.action, "update")
+        self.assertEqual(result_row.action, "update")
         dev = Device.objects.get(site=self.site, name="wd-dev-04")
         self.assertEqual(dev.asset_tag, "AT001")
 
     def test_skip_existing_device_when_update_existing_false(self):
         """_write_device_row returns action='skip' when update_existing=False and device exists."""
-        from dcim.models import Device, DeviceType, DeviceRole, Rack
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
 
         self.profile.update_existing = False
         self.profile.save()
         Device.objects.create(name="wd-dev-05", site=self.site, device_type=self.dt, role=self.role)
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         row = self._base_row(5, device_name="wd-dev-05")
-        result = _write_device_row(
+        result_row = _write_device_row(
             row,
-            self.profile,
-            self.site,
-            None,
-            None,
-            {},
+            ctx,
             "WD Corp",
             "WD Model",
             self.crm,
@@ -1029,8 +1029,8 @@ class WriteDeviceRowTest(TestCase):
             Rack,
             Device,
         )
-        self.assertEqual(result.action, "skip")
-        self.assertIn("update_existing=False", result.detail)
+        self.assertEqual(result_row.action, "skip")
+        self.assertIn("update_existing=False", result_row.detail)
 
 
 # ---------------------------------------------------------------------------
@@ -1182,45 +1182,39 @@ class EnsureManufacturerEdgeCaseTest(TestCase):
 
     def test_seen_manufacturer_skips(self):
         """_ensure_manufacturer is a no-op when mfg_slug already in seen_manufacturers."""
-        from netbox_data_import.engine import _ensure_manufacturer, ImportResult
         from dcim.models import Manufacturer
 
         result = ImportResult()
+        ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=True, result=result)
         seen = {"already-seen"}
         before = Manufacturer.objects.count()
-        _ensure_manufacturer(
-            "already-seen", "AlreadySeen", seen, self.profile, result, True, {"_row_number": 1}, Manufacturer
-        )
+        _ensure_manufacturer("already-seen", "AlreadySeen", seen, ctx, {"_row_number": 1}, Manufacturer)
         self.assertEqual(Manufacturer.objects.count(), before)
         self.assertEqual(len(result.rows), 0)
 
     def test_execute_mode_creates_manufacturer(self):
         """_ensure_manufacturer creates manufacturer in execute mode when flag is set."""
-        from netbox_data_import.engine import _ensure_manufacturer, ImportResult
         from dcim.models import Manufacturer
 
         self.profile.create_missing_device_types = True
         self.profile.save()
         result = ImportResult()
+        ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=False, result=result)
         seen = set()
-        _ensure_manufacturer(
-            "exec-mfg-slug", "Exec Mfg", seen, self.profile, result, False, {"_row_number": 1}, Manufacturer
-        )
+        _ensure_manufacturer("exec-mfg-slug", "Exec Mfg", seen, ctx, {"_row_number": 1}, Manufacturer)
         self.assertTrue(Manufacturer.objects.filter(slug="exec-mfg-slug").exists())
 
     def test_execute_mode_skips_when_flag_false(self):
         """_ensure_manufacturer is a no-op in execute mode when create_missing_device_types=False."""
-        from netbox_data_import.engine import _ensure_manufacturer, ImportResult
         from dcim.models import Manufacturer
 
         self.profile.create_missing_device_types = False
         self.profile.save()
         result = ImportResult()
+        ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=False, result=result)
         seen = set()
         before = Manufacturer.objects.count()
-        _ensure_manufacturer(
-            "no-create-mfg", "No Create Mfg", seen, self.profile, result, False, {"_row_number": 1}, Manufacturer
-        )
+        _ensure_manufacturer("no-create-mfg", "No Create Mfg", seen, ctx, {"_row_number": 1}, Manufacturer)
         self.assertEqual(Manufacturer.objects.count(), before)
 
 
@@ -1236,10 +1230,10 @@ class EnsureDeviceTypeEdgeCaseTest(TestCase):
 
     def test_seen_device_type_skips(self):
         """_ensure_device_type is a no-op when the (mfg,dt) key already in seen_device_types."""
-        from netbox_data_import.engine import _ensure_device_type, ImportResult
-        from dcim.models import Manufacturer, DeviceType
+        from dcim.models import DeviceType, Manufacturer
 
         result = ImportResult()
+        ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=True, result=result)
         seen = {("edtec-mfg", "edtec-seen")}
         before = DeviceType.objects.count()
         _ensure_device_type(
@@ -1249,9 +1243,7 @@ class EnsureDeviceTypeEdgeCaseTest(TestCase):
             "Seen",
             1,
             seen,
-            self.profile,
-            result,
-            True,
+            ctx,
             {"_row_number": 1},
             Manufacturer,
             DeviceType,
@@ -1261,13 +1253,13 @@ class EnsureDeviceTypeEdgeCaseTest(TestCase):
 
     def test_dry_run_existing_dt_no_rows_appended(self):
         """In dry_run, when DeviceType already exists, no rows are appended."""
-        from netbox_data_import.engine import _ensure_device_type, ImportResult
-        from dcim.models import Manufacturer, DeviceType
+        from dcim.models import DeviceType, Manufacturer
 
         DeviceType.objects.get_or_create(
             manufacturer=self.mfg, slug="edtec-exists", defaults={"model": "Exists", "u_height": 1}
         )
         result = ImportResult()
+        ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=True, result=result)
         seen: set = set()
         _ensure_device_type(
             "edtec-mfg",
@@ -1276,9 +1268,7 @@ class EnsureDeviceTypeEdgeCaseTest(TestCase):
             "Exists",
             1,
             seen,
-            self.profile,
-            result,
-            True,
+            ctx,
             {"_row_number": 1},
             Manufacturer,
             DeviceType,
@@ -1298,53 +1288,68 @@ class EnsureDeviceRoleEdgeCaseTest(TestCase):
 
     def test_no_crm_skips(self):
         """_ensure_device_role is a no-op when crm is None."""
-        from netbox_data_import.engine import _ensure_device_role
         from dcim.models import DeviceRole
 
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         seen: set = set()
         before = DeviceRole.objects.count()
-        _ensure_device_role(None, seen, False, DeviceRole)
+        _ensure_device_role(None, seen, ctx, DeviceRole)
         self.assertEqual(DeviceRole.objects.count(), before)
 
     def test_crm_no_role_slug_skips(self):
         """_ensure_device_role is a no-op when crm has no role_slug."""
-        from netbox_data_import.engine import _ensure_device_role
         from dcim.models import DeviceRole
+
         from netbox_data_import.models import ClassRoleMapping
 
         crm = ClassRoleMapping.objects.create(
             profile=self.profile, source_class="NoRoleClass", creates_rack=False, role_slug=""
         )
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         seen: set = set()
         before = DeviceRole.objects.count()
-        _ensure_device_role(crm, seen, False, DeviceRole)
+        _ensure_device_role(crm, seen, ctx, DeviceRole)
         self.assertEqual(DeviceRole.objects.count(), before)
 
     def test_already_seen_role_skips(self):
         """_ensure_device_role is a no-op when role_slug already in seen_roles."""
-        from netbox_data_import.engine import _ensure_device_role
         from dcim.models import DeviceRole
+
         from netbox_data_import.models import ClassRoleMapping
 
         crm = ClassRoleMapping.objects.create(
             profile=self.profile, source_class="SeenRoleClass", creates_rack=False, role_slug="seen-role"
         )
         seen = {"seen-role"}
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         before = DeviceRole.objects.count()
-        _ensure_device_role(crm, seen, False, DeviceRole)
+        _ensure_device_role(crm, seen, ctx, DeviceRole)
         self.assertEqual(DeviceRole.objects.count(), before)
 
     def test_execute_creates_role(self):
         """_ensure_device_role creates a DeviceRole in execute mode."""
-        from netbox_data_import.engine import _ensure_device_role
         from dcim.models import DeviceRole
+
         from netbox_data_import.models import ClassRoleMapping
 
         crm = ClassRoleMapping.objects.create(
             profile=self.profile, source_class="NewRoleClass", creates_rack=False, role_slug="new-unique-role-edr"
         )
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=False, result=result
+        )
         seen: set = set()
-        _ensure_device_role(crm, seen, False, DeviceRole)
+        _ensure_device_role(crm, seen, ctx, DeviceRole)
         self.assertTrue(DeviceRole.objects.filter(slug="new-unique-role-edr").exists())
 
 
@@ -1812,3 +1817,193 @@ class DeviceExistingMatchPrecedenceTest(TestCase):
         self.assertEqual(device_rows[0].action, "update")
         # The updated device must be linked_device, not coincidental_device
         self.assertIn("linked-prod-server", device_rows[0].detail)
+
+
+# ---------------------------------------------------------------------------
+# Permission-denied engine tests
+# ---------------------------------------------------------------------------
+
+
+class PermissionDeniedEngineTest(TestCase):
+    """Tests for engine permission-denied paths using mock users without DCIM permissions."""
+
+    def setUp(self):
+        """Create minimal DB objects needed for permission-denied tests."""
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
+
+        self.site = Site.objects.create(name="PermSite", slug="perm-site")
+        self.mfg = Manufacturer.objects.create(name="PermMfg", slug="perm-mfg")
+        self.dt = DeviceType.objects.create(manufacturer=self.mfg, model="PermDT", slug="perm-dt")
+        self.role = DeviceRole.objects.create(name="PermRole", slug="perm-role")
+        self.profile = ImportProfile.objects.create(
+            name="PermProfile",
+            sheet_name="Data",
+            source_id_column="Id",
+            update_existing=True,
+            create_missing_device_types=True,
+        )
+        self.crm = ClassRoleMapping.objects.create(
+            profile=self.profile, source_class="Server", creates_rack=False, role_slug="perm-role"
+        )
+
+    def _row(self, num=1):
+        return {"_row_number": num, "source_id": f"PERM{num:03d}"}
+
+    def _ctx(self, user=None, dry_run=False):
+        return ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=dry_run,
+            result=ImportResult(),
+            user=user,
+        )
+
+    def test_perm_denied_row_fields(self):
+        """_perm_denied_row returns a RowResult with correct action, name, object_type, and detail."""
+        row = {"_row_number": 7, "source_id": "SRC007"}
+        result = _perm_denied_row("dcim.add_rack", row, "Rack-A", "rack")
+        self.assertEqual(result.action, "error")
+        self.assertEqual(result.name, "Rack-A")
+        self.assertEqual(result.object_type, "rack")
+        self.assertIn("dcim.add_rack", result.detail)
+        self.assertEqual(result.row_number, 7)
+
+    def test_ensure_manufacturer_perm_denied(self):
+        """_ensure_manufacturer appends a perm-denied row when user lacks dcim.add_manufacturer."""
+        from dcim.models import Manufacturer
+
+        ctx = self._ctx(user=_MockUserNoPerm())
+        _ensure_manufacturer("perm-cisco", "Cisco", set(), ctx, self._row(), Manufacturer)
+        self.assertEqual(len(ctx.result.rows), 1)
+        self.assertEqual(ctx.result.rows[0].action, "error")
+        self.assertIn("dcim.add_manufacturer", ctx.result.rows[0].detail)
+
+    def test_ensure_device_type_perm_denied_add_manufacturer(self):
+        """_ensure_device_type appends perm-denied row when user lacks dcim.add_manufacturer."""
+        from dcim.models import DeviceType, Manufacturer
+
+        ctx = self._ctx(user=_MockUserNoPerm())
+        _ensure_device_type("no-mfg", "no-dt", "NoMfg", "NoDT", 1, set(), ctx, self._row(2), Manufacturer, DeviceType)
+        self.assertEqual(len(ctx.result.rows), 1)
+        self.assertIn("dcim.add_manufacturer", ctx.result.rows[0].detail)
+
+    def test_ensure_device_type_perm_denied_add_devicetype(self):
+        """_ensure_device_type appends perm-denied row when user has add_manufacturer but lacks add_devicetype."""
+        from dcim.models import DeviceType, Manufacturer
+
+        ctx = self._ctx(user=_MockUserMfgOnly())
+        _ensure_device_type(
+            "no-mfg2", "no-dt2", "NoMfg2", "NoDT2", 1, set(), ctx, self._row(3), Manufacturer, DeviceType
+        )
+        self.assertEqual(len(ctx.result.rows), 1)
+        self.assertIn("dcim.add_devicetype", ctx.result.rows[0].detail)
+
+    def test_write_rack_add_perm_denied(self):
+        """_write_rack_to_db appends perm-denied row and does not create rack when user lacks add_rack."""
+        from dcim.models import Rack
+
+        ctx = self._ctx(user=_MockUserNoPerm())
+        _write_rack_to_db("PermRack", 42, "", "SRC1", self._row(4), ctx, Rack)
+        self.assertEqual(len(ctx.result.rows), 1)
+        self.assertEqual(ctx.result.rows[0].action, "error")
+        self.assertIn("dcim.add_rack", ctx.result.rows[0].detail)
+        self.assertFalse(Rack.objects.filter(site=self.site, name="PermRack").exists())
+
+    def test_write_rack_change_perm_denied(self):
+        """_write_rack_to_db appends perm-denied row when user lacks dcim.change_rack on existing rack."""
+        from dcim.models import Rack
+
+        Rack.objects.create(site=self.site, name="ExistPermRack", u_height=42)
+        ctx = self._ctx(user=_MockUserNoPerm())
+        _write_rack_to_db("ExistPermRack", 24, "", "SRC2", self._row(5), ctx, Rack)
+        self.assertEqual(len(ctx.result.rows), 1)
+        self.assertEqual(ctx.result.rows[0].action, "error")
+        self.assertIn("dcim.change_rack", ctx.result.rows[0].detail)
+
+    def test_write_device_row_add_perm_denied(self):
+        """_write_device_row returns perm-denied row when user lacks dcim.add_device."""
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
+
+        ctx = self._ctx(user=_MockUserNoPerm())
+        row = {
+            **self._row(6),
+            "device_name": "perm-new-dev",
+            "device_class": "Server",
+            "make": "PermMfg",
+            "model": "PermDT",
+            "u_height": "1",
+            "rack_name": "",
+            "u_position": "1",
+            "serial": "",
+            "asset_tag": "",
+            "status": "active",
+        }
+        result = _write_device_row(
+            row,
+            ctx,
+            "PermMfg",
+            "PermDT",
+            self.crm,
+            "perm-mfg",
+            "perm-dt",
+            "PERM006",
+            "perm-new-dev",
+            "",
+            None,
+            1,
+            None,
+            None,
+            "active",
+            DeviceType,
+            DeviceRole,
+            Rack,
+            Device,
+        )
+        self.assertEqual(result.action, "error")
+        self.assertIn("dcim.add_device", result.detail)
+        self.assertFalse(Device.objects.filter(site=self.site, name="perm-new-dev").exists())
+
+    def test_write_device_row_change_perm_denied(self):
+        """_write_device_row returns perm-denied row when user lacks dcim.change_device."""
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
+
+        Device.objects.create(name="perm-exist-dev", site=self.site, device_type=self.dt, role=self.role)
+        ctx = self._ctx(user=_MockUserNoPerm())
+        row = {
+            **self._row(7),
+            "device_name": "perm-exist-dev",
+            "device_class": "Server",
+            "make": "PermMfg",
+            "model": "PermDT",
+            "u_height": "1",
+            "rack_name": "",
+            "u_position": "1",
+            "serial": "",
+            "asset_tag": "",
+            "status": "active",
+        }
+        result = _write_device_row(
+            row,
+            ctx,
+            "PermMfg",
+            "PermDT",
+            self.crm,
+            "perm-mfg",
+            "perm-dt",
+            "PERM007",
+            "perm-exist-dev",
+            "",
+            None,
+            1,
+            None,
+            None,
+            "active",
+            DeviceType,
+            DeviceRole,
+            Rack,
+            Device,
+        )
+        self.assertEqual(result.action, "error")
+        self.assertIn("dcim.change_device", result.detail)

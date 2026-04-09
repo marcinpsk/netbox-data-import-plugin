@@ -21,8 +21,10 @@ path = [
     ".github/ISSUE_TEMPLATE/**",
     ".github/PULL_REQUEST_TEMPLATE/**",
     "CHANGELOG.md",
+    "COMPATIBILITY.md",
     "README.md",
     "CONTRIBUTING.md",
+    "netbox-plugin.yaml",
     "docs/**",
 ]
 SPDX-FileCopyrightText = "2025 Marcin Zieba <marcinpsk@gmail.com>"

@@ -19,16 +19,14 @@ concurrency:
 jobs:
   test-netbox:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.netbox-version == 'main' }}
 
     strategy:
       fail-fast: false
       max-parallel: 6
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
-        netbox-version: ["v4.3.7", "v4.4.10", "v4.5.3"]
-        exclude:
-          - python-version: "3.14"
-            netbox-version: "v4.3.7"  # strawberry-graphql incompatible with Python 3.14 on this NetBox version
+        netbox-version: ["v4.4.10", "v4.5.7", "main"]
 
     services:
       redis:
@@ -70,6 +68,9 @@ jobs:
           path: netbox
           ref: ${{ matrix.netbox-version }}
 
+      - name: Install system dependencies
+        run: sudo apt-get install -y libpq-dev
+
       - name: Install NetBox and plugin
         working-directory: netbox-data-import-plugin
         run: |
@@ -110,7 +111,7 @@ jobs:
           coverage report
 
       - name: Generate coverage report
-        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.5.3'
+        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.5.7'
         working-directory: netbox/netbox
         env:
           COVERAGE_RCFILE: ../../netbox-data-import-plugin/pyproject.toml
@@ -119,7 +120,7 @@ jobs:
           coverage html -d ../../coverage-report/htmlcov
 
       - name: Upload coverage report
-        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.5.3'
+        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.5.7'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
         with:
           name: coverage-report

@@ -308,6 +308,32 @@ class ColumnTransformRule(models.Model):
         verbose_name = "Column Transform Rule"
         verbose_name_plural = "Column Transform Rules"
 
+    def clean(self):
+        """Validate the regex pattern and that it has enough capture groups."""
+        import re
+
+        from django.core.exceptions import ValidationError
+
+        try:
+            compiled = re.compile(self.pattern)
+        except re.error as exc:
+            raise ValidationError({"pattern": f"Invalid regex pattern: {exc}"})
+
+        required_groups = 0
+        if self.group_1_target:
+            required_groups = 1
+        if self.group_2_target:
+            required_groups = 2
+        if compiled.groups < required_groups:
+            raise ValidationError(
+                {
+                    "pattern": (
+                        f"Regex must contain at least {required_groups} capture group(s) "
+                        f"for the configured group target(s), but found {compiled.groups}."
+                    )
+                }
+            )
+
     def __str__(self):
         return f"{self.source_column}: {self.pattern}"
 

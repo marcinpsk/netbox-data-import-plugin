@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+import logging
+
 from netbox.plugins import PluginConfig
+
+logger = logging.getLogger(__name__)
 
 __version__ = "1.0.1"
 
@@ -27,8 +31,8 @@ def _ensure_import_custom_fields(sender, **kwargs):
         )
         if created:
             cf.object_types.set([device_ct])
-    except Exception:
-        pass
+    except Exception:  # pragma: no cover
+        logger.warning("Failed to auto-create data_import_source custom field", exc_info=True)
 
 
 class NetBoxDataImportConfig(PluginConfig):

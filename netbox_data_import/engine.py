@@ -119,6 +119,26 @@ class ImportResult:
         return groups
 
 
+@dataclass
+class ImportContext:
+    """Shared execution context passed through all import pipeline stages.
+
+    Holds profile/site/tenant/flags so internal helpers do not need
+    to accept those as separate positional arguments.  ``rack_map`` is
+    populated by pass 2 and consumed by pass 3.
+    """
+
+    profile: ImportProfile
+    site: object
+    location: object | None
+    tenant: object | None
+    dry_run: bool
+    result: ImportResult
+    rack_map: dict = field(default_factory=dict)
+    pending_device_roles: set = field(default_factory=set)
+    user: object | None = None
+
+
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
@@ -185,6 +205,11 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
     # Pre-fetch transform rules for efficiency
     transform_rules = list(profile.column_transform_rules.all())
 
+    # Pre-fetch all saved resolutions for this profile (avoids N+1 queries)
+    resolutions_by_source_id: dict[str, list] = {}
+    for res in profile.source_resolutions.all():
+        resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
+
     rows = []
     for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         # Skip fully empty rows
@@ -206,7 +231,7 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
         # Apply saved resolutions (rerere)
         source_id = row_dict.get("source_id", "")
         if source_id:
-            for res in profile.source_resolutions.filter(source_id=str(source_id)):
+            for res in resolutions_by_source_id.get(str(source_id), []):
                 row_dict.update(res.resolved_fields)
 
         rows.append(row_dict)
@@ -225,11 +250,10 @@ def _resolve_device_type_slugs(make: str, model: str, profile: ImportProfile) ->
     Check DeviceTypeMapping first; fall back to auto-slugify.
     Both make and model are expected to be whitespace-normalized.
     """
-    import re as _re
 
     def _normalize(s: str) -> str:
         r"""Normalize whitespace and decode JS-style \uXXXX escape sequences."""
-        s = _re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
+        s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
         return " ".join(s.split())
 
     # Direct lookup (fast path — matches normalized stored records)
@@ -288,38 +312,69 @@ def _get_translation_maps():
     return side, airflow, _STATUS_MAP
 
 
-def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, profile, result, dry_run, row, Manufacturer):
+def _perm_denied_row(perm: str, row: dict, name: str, object_type: str) -> RowResult:
+    """Return a permission-denied RowResult for a write operation the user may not perform."""
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=str(row.get("source_id", "")),
+        name=name,
+        action="error",
+        object_type=object_type,
+        detail=f"Permission denied: {perm}",
+    )
+
+
+def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufacturer):
     """Create (or preview-create) a manufacturer if not yet seen."""
     if mfg_slug in seen_manufacturers:
         return
     seen_manufacturers.add(mfg_slug)
-    if not dry_run:
-        if profile.create_missing_device_types:
+    if not ctx.dry_run:
+        if ctx.profile.create_missing_device_types:
+            if not Manufacturer.objects.filter(slug=mfg_slug).exists():
+                if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
+                    ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
+                    return
             Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
-    elif not Manufacturer.objects.filter(slug=mfg_slug).exists() and profile.create_missing_device_types:
-        result.rows.append(
-            RowResult(
-                row_number=row["_row_number"],
-                source_id=str(row.get("source_id", "")),
-                name=make,
-                action="create",
-                object_type="manufacturer",
-                detail=f"Would create manufacturer '{make}' (slug: {mfg_slug})",
-                extra_data={"source_make": make, "mfg_slug": mfg_slug},
+    elif not Manufacturer.objects.filter(slug=mfg_slug).exists() and ctx.profile.create_missing_device_types:
+        if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
+            ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
+        else:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=str(row.get("source_id", "")),
+                    name=make,
+                    action="create",
+                    object_type="manufacturer",
+                    detail=f"Would create manufacturer '{make}' (slug: {mfg_slug})",
+                    extra_data={"source_make": make, "mfg_slug": mfg_slug},
+                )
             )
-        )
 
 
 def _ensure_device_type(
-    mfg_slug, dt_slug, make, model, u_height, seen_device_types, profile, result, dry_run, row, Manufacturer, DeviceType
-):  # noqa: E501
+    mfg_slug, dt_slug, make, model, u_height, seen_device_types, ctx, row, Manufacturer, DeviceType
+):
     """Create (or preview-create) a device type if not yet seen."""
     dt_key = (mfg_slug, dt_slug)
     if dt_key in seen_device_types:
         return
     seen_device_types.add(dt_key)
-    if not dry_run:
-        if profile.create_missing_device_types:
+    if not ctx.dry_run:
+        if ctx.profile.create_missing_device_types:
+            if not DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists():
+                if not Manufacturer.objects.filter(slug=mfg_slug).exists():
+                    if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
+                        ctx.result.rows.append(
+                            _perm_denied_row("dcim.add_manufacturer", row, f"{make} / {model}", "device_type")
+                        )
+                        return
+                if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicetype"):
+                    ctx.result.rows.append(
+                        _perm_denied_row("dcim.add_devicetype", row, f"{make} / {model}", "device_type")
+                    )
+                    return
             mfg, _ = Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
             DeviceType.objects.get_or_create(
                 manufacturer=mfg, slug=dt_slug, defaults={"model": model, "u_height": u_height}
@@ -328,26 +383,29 @@ def _ensure_device_type(
     exists = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists()
     if exists:
         return
-    if profile.create_missing_device_types:
-        result.rows.append(
-            RowResult(
-                row_number=row["_row_number"],
-                source_id=str(row.get("source_id", "")),
-                name=f"{make} / {model}",
-                action="create",
-                object_type="device_type",
-                detail=f"Would create device type '{model}' under '{make}'",
-                extra_data={
-                    "source_make": make,
-                    "source_model": model,
-                    "mfg_slug": mfg_slug,
-                    "dt_slug": dt_slug,
-                    "u_height": u_height,
-                },
+    if ctx.profile.create_missing_device_types:
+        if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicetype"):
+            ctx.result.rows.append(_perm_denied_row("dcim.add_devicetype", row, f"{make} / {model}", "device_type"))
+        else:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=str(row.get("source_id", "")),
+                    name=f"{make} / {model}",
+                    action="create",
+                    object_type="device_type",
+                    detail=f"Would create device type '{model}' under '{make}'",
+                    extra_data={
+                        "source_make": make,
+                        "source_model": model,
+                        "mfg_slug": mfg_slug,
+                        "dt_slug": dt_slug,
+                        "u_height": u_height,
+                    },
+                )
             )
-        )
     else:
-        result.rows.append(
+        ctx.result.rows.append(
             RowResult(
                 row_number=row["_row_number"],
                 source_id=str(row.get("source_id", "")),
@@ -366,19 +424,24 @@ def _ensure_device_type(
         )
 
 
-def _ensure_device_role(crm, seen_roles, dry_run, DeviceRole):
-    """Create a device role if not yet seen."""
+def _ensure_device_role(crm, seen_roles, ctx, DeviceRole):
+    """Create a device role if not yet seen, respecting user permissions."""
     if not (crm and crm.role_slug and crm.role_slug not in seen_roles):
         return
     seen_roles.add(crm.role_slug)
-    if not dry_run:
+    if ctx.dry_run:
+        if ctx.user is None or ctx.user.has_perm("dcim.add_devicerole"):
+            ctx.pending_device_roles.add(crm.role_slug)
+    else:
+        if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicerole"):
+            return
         DeviceRole.objects.get_or_create(
             slug=crm.role_slug,
             defaults={"name": crm.role_slug.replace("-", " ").title(), "color": "9e9e9e"},
         )
 
 
-def _pass1_ensure_types(rows, profile, class_role_map, result, dry_run):
+def _pass1_ensure_types(rows, ctx, class_role_map):
     """Pass 1: ensure Manufacturer, DeviceType, and DeviceRole objects exist."""
     from dcim.models import DeviceRole, DeviceType, Manufacturer
 
@@ -400,8 +463,8 @@ def _pass1_ensure_types(rows, profile, class_role_map, result, dry_run):
         except (TypeError, ValueError):
             u_height = 1
 
-        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, profile)
-        _ensure_manufacturer(mfg_slug, make, seen_manufacturers, profile, result, dry_run, row, Manufacturer)
+        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
+        _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufacturer)
         _ensure_device_type(
             mfg_slug,
             dt_slug,
@@ -409,44 +472,32 @@ def _pass1_ensure_types(rows, profile, class_role_map, result, dry_run):
             model,
             u_height,
             seen_device_types,
-            profile,
-            result,
-            dry_run,
+            ctx,
             row,
             Manufacturer,
             DeviceType,
-        )  # noqa: E501
-        _ensure_device_role(crm, seen_roles, dry_run, DeviceRole)
+        )
+        _ensure_device_role(crm, seen_roles, ctx, DeviceRole)
 
 
-def _write_rack_to_db(
-    rack_name,
-    site,
-    location,
-    tenant,
-    u_height,
-    serial,
-    profile,
-    source_id,
-    row,
-    rack_map,
-    result,
-    update_existing,
-    Rack,
-):  # noqa: E501
+def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
     """Write or update a rack in the database and record the result."""
     try:
-        rack = Rack.objects.get(site=site, name=rack_name)
-        if update_existing:
+        rack = Rack.objects.get(site=ctx.site, name=rack_name)
+        if ctx.profile.update_existing:
+            if ctx.user is not None and not ctx.user.has_perm("dcim.change_rack"):
+                ctx.result.rows.append(_perm_denied_row("dcim.change_rack", row, rack_name, "rack"))
+                ctx.rack_map[rack_name] = rack
+                return
             rack.u_height = u_height
             rack.serial = serial or rack.serial
-            if location:
-                rack.location = location
-            if tenant:
-                rack.tenant = tenant
+            if ctx.location:
+                rack.location = ctx.location
+            if ctx.tenant:
+                rack.tenant = ctx.tenant
             rack.save()
-            rack_map[rack_name] = rack
-            result.rows.append(
+            ctx.rack_map[rack_name] = rack
+            ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
                     source_id=source_id,
@@ -458,8 +509,8 @@ def _write_rack_to_db(
                 )
             )
         else:
-            rack_map[rack_name] = rack
-            result.rows.append(
+            ctx.rack_map[rack_name] = rack
+            ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
                     source_id=source_id,
@@ -470,12 +521,15 @@ def _write_rack_to_db(
                 )
             )
     except Rack.DoesNotExist:
+        if ctx.user is not None and not ctx.user.has_perm("dcim.add_rack"):
+            ctx.result.rows.append(_perm_denied_row("dcim.add_rack", row, rack_name, "rack"))
+            return
         rack = Rack.objects.create(
-            site=site, location=location, name=rack_name, tenant=tenant, u_height=u_height, serial=serial
+            site=ctx.site, location=ctx.location, name=rack_name, tenant=ctx.tenant, u_height=u_height, serial=serial
         )
-        _store_source_id(rack, profile, source_id)
-        rack_map[rack_name] = rack
-        result.rows.append(
+        _store_source_id(rack, ctx.profile, source_id)
+        ctx.rack_map[rack_name] = rack
+        ctx.result.rows.append(
             RowResult(
                 row_number=row["_row_number"],
                 source_id=source_id,
@@ -488,11 +542,9 @@ def _write_rack_to_db(
         )
 
 
-def _pass2_process_racks(rows, profile, site, location, tenant, class_role_map, result, dry_run):
-    """Pass 2: create or update Rack objects. Returns rack_name→Rack map."""
+def _pass2_process_racks(rows, ctx, class_role_map):
+    """Pass 2: create or update Rack objects. Populates ctx.rack_map in place."""
     from dcim.models import Rack
-
-    rack_map: dict[str, object] = {}
 
     for row in rows:
         device_class = str(row.get("device_class", "")).strip()
@@ -511,7 +563,7 @@ def _pass2_process_racks(rows, profile, site, location, tenant, class_role_map, 
             u_height = 42
 
         if not rack_name:
-            result.rows.append(
+            ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
                     source_id=source_id,
@@ -523,16 +575,16 @@ def _pass2_process_racks(rows, profile, site, location, tenant, class_role_map, 
             )
             continue
 
-        if dry_run:
+        if ctx.dry_run:
             try:
-                Rack.objects.get(site=site, name=rack_name)
-                action = "update" if profile.update_existing else "skip"
+                Rack.objects.get(site=ctx.site, name=rack_name)
+                action = "update" if ctx.profile.update_existing else "skip"
                 detail = f"Rack '{rack_name}' already exists"
             except Rack.DoesNotExist:
                 action = "create"
-                detail = f"Would create rack '{rack_name}' ({u_height}U) at site '{site}'"
-            rack_map[rack_name] = rack_name
-            result.rows.append(
+                detail = f"Would create rack '{rack_name}' ({u_height}U) at site '{ctx.site}'"
+            ctx.rack_map[rack_name] = rack_name
+            ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
                     source_id=source_id,
@@ -543,23 +595,7 @@ def _pass2_process_racks(rows, profile, site, location, tenant, class_role_map, 
                 )
             )
         else:
-            _write_rack_to_db(
-                rack_name,
-                site,
-                location,
-                tenant,
-                u_height,
-                serial,
-                profile,
-                source_id,
-                row,
-                rack_map,
-                result,
-                profile.update_existing,
-                Rack,
-            )
-
-    return rack_map
+            _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack)
 
 
 def _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device):
@@ -615,9 +651,7 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
 
 def _preview_device_row(
     row,
-    profile,
-    site,
-    rack_map,
+    ctx,
     make,
     model,
     mfg_slug,
@@ -628,10 +662,11 @@ def _preview_device_row(
     asset_tag,
     DeviceType,
     Device,
-):  # noqa: E501
+    Rack,
+):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     dt_exists = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists()
-    if not dt_exists and not profile.create_missing_device_types:
+    if not dt_exists and not ctx.profile.create_missing_device_types:
         return RowResult(
             row_number=row["_row_number"],
             source_id=source_id,
@@ -643,7 +678,13 @@ def _preview_device_row(
 
     rack_name = str(row.get("rack_name", "")).strip()
     if rack_name:
-        rack_label = rack_name if rack_name in rack_map else f"{rack_name} (not found)"
+        if rack_name in ctx.rack_map:
+            rack_label = rack_name
+        elif Rack.objects.filter(site=ctx.site, name=rack_name).exists():
+            ctx.rack_map[rack_name] = rack_name  # cache to avoid repeated queries
+            rack_label = rack_name
+        else:
+            rack_label = f"{rack_name} (not found)"
     else:
         rack_label = "(no rack)"
     raw_position = row.get("u_position")
@@ -655,10 +696,10 @@ def _preview_device_row(
     # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
     # ensuring explicit operator mappings always take precedence over coincidental name matches.
     matched_device, match_method = _find_existing_device(
-        profile, source_id, site, device_name, serial, asset_tag, Device
+        ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device
     )
     if matched_device is not None:
-        action = "update" if profile.update_existing else "skip"
+        action = "update" if ctx.profile.update_existing else "skip"
         if match_method == "name":
             detail = f"Device '{device_name}' already exists"
         else:
@@ -682,11 +723,7 @@ def _preview_device_row(
 
 def _write_device_row(
     row,
-    profile,
-    site,
-    location,
-    tenant,
-    rack_map,
+    ctx,
     make,
     model,
     crm,
@@ -704,7 +741,7 @@ def _write_device_row(
     DeviceRole,
     Rack,
     Device,
-):  # noqa: E501
+):
     """Write or update a device in the DB and return a RowResult."""
     rack_name = str(row.get("rack_name", "")).strip()
     try:
@@ -731,16 +768,20 @@ def _write_device_row(
             detail=f"Device role not found: {crm.role_slug}",
         )
 
-    rack = rack_map.get(rack_name) if rack_name else None
+    rack = ctx.rack_map.get(rack_name) if rack_name else None
     if rack_name and rack is None:
-        rack = Rack.objects.filter(site=site, name=rack_name).first()
+        rack = Rack.objects.filter(site=ctx.site, name=rack_name).first()
 
     # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
     # ensuring explicit operator mappings always take precedence over coincidental name matches.
-    device, match_method = _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device)
+    device, match_method = _find_existing_device(
+        ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device
+    )
 
     if device is not None:
-        if profile.update_existing:
+        if ctx.profile.update_existing:
+            if ctx.user is not None and not ctx.user.has_perm("dcim.change_device"):
+                return _perm_denied_row("dcim.change_device", row, device_name, "device")
             device.device_type = device_type
             device.role = device_role
             device.rack = rack if isinstance(rack, Rack) else None
@@ -751,10 +792,10 @@ def _write_device_row(
             device.serial = serial or device.serial
             if asset_tag:
                 device.asset_tag = asset_tag
-            if tenant:
-                device.tenant = tenant
+            if ctx.tenant:
+                device.tenant = ctx.tenant
             device.save()
-            _store_source_id(device, profile, source_id)
+            _store_source_id(device, ctx.profile, source_id)
             return RowResult(
                 row_number=row["_row_number"],
                 source_id=source_id,
@@ -777,9 +818,11 @@ def _write_device_row(
             extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
         )
 
+    if ctx.user is not None and not ctx.user.has_perm("dcim.add_device"):
+        return _perm_denied_row("dcim.add_device", row, device_name, "device")
     device = Device.objects.create(
-        site=site,
-        location=location,
+        site=ctx.site,
+        location=ctx.location,
         name=device_name,
         device_type=device_type,
         role=device_role,
@@ -790,9 +833,9 @@ def _write_device_row(
         status=status,
         serial=serial,
         asset_tag=asset_tag,
-        tenant=tenant,
+        tenant=ctx.tenant,
     )
-    _store_source_id(device, profile, source_id)
+    _store_source_id(device, ctx.profile, source_id)
     _rack_label = rack_name if rack_name else "(no rack)"
     _pos_label = f" U{position}" if position is not None else ""
     return RowResult(
@@ -808,12 +851,15 @@ def _write_device_row(
     )
 
 
-def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map, rack_map, result, dry_run):
+def _pass3_process_devices(rows, ctx, class_role_map):
     """Pass 3: create or update Device objects."""
     from dcim.models import Device, DeviceRole, DeviceType, Rack
     from .models import IgnoredDevice
 
     side_map, airflow_map, status_map = _get_translation_maps()
+
+    # Pre-fetch ignored source IDs to avoid per-row queries
+    ignored_source_ids = set(IgnoredDevice.objects.filter(profile=ctx.profile).values_list("source_id", flat=True))
 
     for row in rows:
         device_class = str(row.get("device_class", "")).strip()
@@ -834,7 +880,7 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
         try:
             position = int(float(u_position_raw))
             if position < 1:
-                result.rows.append(
+                ctx.result.rows.append(
                     RowResult(
                         row_number=row["_row_number"],
                         source_id=source_id,
@@ -850,7 +896,7 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
             position = None
 
         if not device_name:
-            result.rows.append(
+            ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
                     source_id=source_id,
@@ -862,8 +908,8 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
             )
             continue
 
-        if IgnoredDevice.objects.filter(profile=profile, source_id=source_id).exists():
-            result.rows.append(
+        if source_id in ignored_source_ids:
+            ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
                     source_id=source_id,
@@ -877,7 +923,7 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
             continue
 
         if not crm:
-            result.rows.append(
+            ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
                     source_id=source_id,
@@ -887,7 +933,7 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
                     detail=f"No class→role mapping for class '{device_class}'",
                     extra_data={
                         "source_class": device_class,
-                        "profile_id": profile.pk,
+                        "profile_id": ctx.profile.pk,
                         "source_make": make,
                         "source_model": model,
                         "asset_tag": asset_tag or "",
@@ -897,7 +943,7 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
             continue
 
         if crm.ignore:
-            result.rows.append(
+            ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
                     source_id=source_id,
@@ -910,17 +956,15 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
             )
             continue
 
-        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, profile)
+        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
         device_status = status_map.get(str(row.get("status", "")).strip().lower(), "active")
         device_face = side_map.get(str(row.get("face", "")).strip().lower())
         device_airflow = airflow_map.get(str(row.get("airflow", "")).strip().lower())
 
-        if dry_run:
+        if ctx.dry_run:
             row_result = _preview_device_row(
                 row,
-                profile,
-                site,
-                rack_map,
+                ctx,
                 make,
                 model,
                 mfg_slug,
@@ -931,15 +975,12 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
                 asset_tag,
                 DeviceType,
                 Device,
-            )  # noqa: E501
+                Rack,
+            )
         else:
             row_result = _write_device_row(
                 row,
-                profile,
-                site,
-                location,
-                tenant,
-                rack_map,
+                ctx,
                 make,
                 model,
                 crm,
@@ -957,8 +998,8 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
                 DeviceRole,
                 Rack,
                 Device,
-            )  # noqa: E501
-        result.rows.append(row_result)
+            )
+        ctx.result.rows.append(row_result)
 
 
 # ---------------------------------------------------------------------------
@@ -966,26 +1007,35 @@ def _pass3_process_devices(rows, profile, site, location, tenant, class_role_map
 # ---------------------------------------------------------------------------
 
 
-def run_import(rows: list[dict], profile: ImportProfile, context: dict, dry_run: bool = True) -> ImportResult:
+def run_import(
+    rows: list[dict], profile: ImportProfile, context: dict, dry_run: bool = True, user: object | None = None
+) -> ImportResult:
     """Run (or preview) the import.
 
     context keys: site, location (optional), tenant (optional)
     dry_run=True  → no DB writes, returns what *would* happen
-    dry_run=False → writes to DB
+    dry_run=False → writes to DB; pass user to enforce DCIM object permissions
     """
-    site = context["site"]
-    location = context.get("location")
-    tenant = context.get("tenant")
+    ctx = ImportContext(
+        profile=profile,
+        site=context["site"],
+        location=context.get("location"),
+        tenant=context.get("tenant"),
+        dry_run=dry_run,
+        result=ImportResult(),
+        user=user,
+    )
 
     class_role_map: dict[str, object] = {crm.source_class: crm for crm in profile.class_role_mappings.all()}
-    result = ImportResult()
 
-    _pass1_ensure_types(rows, profile, class_role_map, result, dry_run)
-    rack_map = _pass2_process_racks(rows, profile, site, location, tenant, class_role_map, result, dry_run)
-    _pass3_process_devices(rows, profile, site, location, tenant, class_role_map, rack_map, result, dry_run)
+    _pass1_ensure_types(rows, ctx, class_role_map)
+    _pass2_process_racks(rows, ctx, class_role_map)
+    _pass3_process_devices(rows, ctx, class_role_map)
 
-    result._recompute_counts()
-    return result
+    ctx.result._recompute_counts()
+    if ctx.pending_device_roles:
+        ctx.result.counts["device_roles_pending"] = len(ctx.pending_device_roles)
+    return ctx.result
 
 
 # ---------------------------------------------------------------------------
@@ -1002,8 +1052,8 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str):
         try:
             obj.custom_field_data[profile.custom_field_name] = source_id
             changed = True
-        except (AttributeError, KeyError):
-            pass
+        except (AttributeError, KeyError):  # pragma: no cover
+            logger.warning("Failed to set custom field '%s' on %s", profile.custom_field_name, obj)
 
     # Plugin-managed JSON field: data_import_source
     try:
@@ -1013,11 +1063,11 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str):
             "profile_name": profile.name,
         }
         changed = True
-    except (AttributeError, KeyError):
-        pass
+    except (AttributeError, KeyError):  # pragma: no cover
+        logger.warning("Failed to set data_import_source on %s", obj)
 
     if changed:
         try:
             obj.save(update_fields=["custom_field_data"])
-        except Exception:
-            pass
+        except Exception:  # pragma: no cover
+            logger.exception("Failed to save custom_field_data on %s (source_id=%s)", obj, source_id)

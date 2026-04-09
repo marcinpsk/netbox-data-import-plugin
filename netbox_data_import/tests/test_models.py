@@ -7,7 +7,9 @@ from django.test import TestCase
 from netbox_data_import.models import (
     ClassRoleMapping,
     ColumnMapping,
+    ColumnTransformRule,
     DeviceTypeMapping,
+    ImportJob,
     ImportProfile,
 )
 
@@ -37,6 +39,50 @@ class ImportProfileModelTest(TestCase):
         url = profile.get_absolute_url()
         self.assertIn("/plugins/data-import/profiles/", url)
         self.assertIn(str(profile.pk), url)
+
+    def test_get_absolute_url_without_profile(self):
+        """get_absolute_url returns the list URL when profile_id is None."""
+        job = ImportJob.__new__(ImportJob)
+        job.profile_id = None
+        url = job.get_absolute_url()
+        self.assertIn("/plugins/data-import/profiles/", url)
+
+
+class ColumnTransformRuleModelTest(TestCase):
+    """Tests for ColumnTransformRule.clean() validation."""
+
+    def setUp(self):
+        self.profile = ImportProfile.objects.create(name="CTR Profile")
+
+    def test_clean_invalid_regex(self):
+        """clean() raises ValidationError for an invalid regex pattern."""
+        from django.core.exceptions import ValidationError
+
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Name",
+            pattern="[invalid",
+            group_1_target="device_name",
+        )
+        with self.assertRaises(ValidationError) as cm:
+            rule.clean()
+        self.assertIn("pattern", cm.exception.message_dict)
+
+    def test_clean_too_few_groups_for_group2_target(self):
+        """clean() raises ValidationError when group_2_target needs 2 groups but pattern has none."""
+        from django.core.exceptions import ValidationError
+
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Name",
+            pattern="nogroups",
+            group_1_target="device_name",
+            group_2_target="rack_name",
+        )
+        with self.assertRaises(ValidationError) as cm:
+            rule.clean()
+        self.assertIn("pattern", cm.exception.message_dict)
+        self.assertIn("2", cm.exception.message_dict["pattern"][0])
 
 
 class ColumnMappingModelTest(TestCase):

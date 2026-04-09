@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 from django.contrib import messages
-from django.contrib.auth.mixins import LoginRequiredMixin
+from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
+from utilities.permissions import get_permission_for_model
 from .models import (
     ImportProfile,
     ColumnMapping,
@@ -31,6 +32,7 @@ from .tables import (
     ClassRoleMappingTable,
     DeviceTypeMappingTable,
     ColumnTransformRuleTable,
+    ImportJobTable,
 )
 from .filters import ImportProfileFilterSet
 
@@ -92,73 +94,96 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
 
 
 # ---------------------------------------------------------------------------
+# Shared base views for ImportProfile child objects
+# ---------------------------------------------------------------------------
+
+
+class _ProfileChildEditView(PermissionRequiredMixin, generic.ObjectEditView):
+    """Base add/edit view for objects that belong to an ImportProfile.
+
+    Handles pre-populating the hidden ``profile`` field on add (via the
+    ``profile_pk`` URL kwarg) and redirecting back to the parent profile
+    detail page after a successful save.
+
+    Override ``get_required_permission`` so that add-URLs (which carry
+    ``profile_pk`` but not ``pk``) are not misidentified as edit-URLs by
+    NetBox's generic ``dispatch`` hook.
+    """
+
+    def get_required_permission(self):
+        action = "change" if "pk" in self.kwargs else "add"
+        return get_permission_for_model(self.queryset.model, action)
+
+    def get_object(self, **kwargs):
+        """Filter only by ``pk`` — ignore ``profile_pk`` URL kwarg.
+
+        NetBox's ``ObjectEditView.get()`` passes all URL kwargs to
+        ``get_object_or_404``.  ``profile_pk`` is not a field on child
+        models, so we must strip it before the ORM lookup.
+        """
+        if "pk" in kwargs:
+            return get_object_or_404(self.queryset, pk=kwargs["pk"])
+        return self.queryset.model()
+
+    def alter_object(self, obj, request, url_args, url_kwargs):
+        if not obj.pk and "profile_pk" in url_kwargs:
+            obj.profile = get_object_or_404(ImportProfile, pk=url_kwargs["profile_pk"])
+        return obj
+
+    def get_return_url(self, request, obj=None):
+        if obj is not None and getattr(obj, "profile", None):
+            return obj.profile.get_absolute_url()
+        return super().get_return_url(request, obj)
+
+    def get_extra_context(self, request, instance):
+        if instance.pk:
+            return {"profile": instance.profile}
+        profile_pk = self.kwargs.get("profile_pk")
+        if profile_pk:
+            return {"profile": get_object_or_404(ImportProfile, pk=profile_pk)}
+        return {}
+
+
+class _ProfileChildDeleteView(PermissionRequiredMixin, generic.ObjectDeleteView):
+    """Base delete view for objects that belong to an ImportProfile.
+
+    Redirects to the parent profile detail page after successful deletion.
+    """
+
+    def get_return_url(self, request, obj=None):
+        if obj is not None and getattr(obj, "profile", None):
+            return obj.profile.get_absolute_url()
+        return super().get_return_url(request, obj)
+
+
+# ---------------------------------------------------------------------------
 # ColumnMapping CRUD
 # ---------------------------------------------------------------------------
 
 
-class ColumnMappingAddView(LoginRequiredMixin, View):
+class ColumnMappingAddView(_ProfileChildEditView):
     """Add a column mapping to an existing ImportProfile."""
 
-    def get(self, request, profile_pk):
-        """Render the add form for a new column mapping."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ColumnMappingForm(initial={"profile": profile})
-        return render(request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": profile})
-
-    def post(self, request, profile_pk):
-        """Save a new column mapping or re-render the form with errors."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ColumnMappingForm(request.POST)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Column mapping added.")
-            return redirect(profile.get_absolute_url())
-        return render(request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": profile})
+    queryset = ColumnMapping.objects.all()
+    form = ColumnMappingForm
+    template_name = "netbox_data_import/columnmapping_edit.html"
+    permission_required = "netbox_data_import.add_columnmapping"
 
 
-class ColumnMappingEditView(LoginRequiredMixin, View):
+class ColumnMappingEditView(_ProfileChildEditView):
     """Edit an existing column mapping."""
 
-    def get(self, request, pk):
-        """Render the edit form for an existing column mapping."""
-        obj = get_object_or_404(ColumnMapping, pk=pk)
-        form = ColumnMappingForm(instance=obj)
-        return render(
-            request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": obj.profile, "object": obj}
-        )
-
-    def post(self, request, pk):
-        """Save edits to an existing column mapping or re-render with errors."""
-        obj = get_object_or_404(ColumnMapping, pk=pk)
-        form = ColumnMappingForm(request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Column mapping updated.")
-            return redirect(obj.profile.get_absolute_url())
-        return render(
-            request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": obj.profile, "object": obj}
-        )
+    queryset = ColumnMapping.objects.all()
+    form = ColumnMappingForm
+    template_name = "netbox_data_import/columnmapping_edit.html"
+    permission_required = "netbox_data_import.change_columnmapping"
 
 
-class ColumnMappingDeleteView(LoginRequiredMixin, View):
+class ColumnMappingDeleteView(_ProfileChildDeleteView):
     """Delete a column mapping."""
 
-    def get(self, request, pk):
-        """Render the delete confirmation page for a column mapping."""
-        obj = get_object_or_404(ColumnMapping, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {"object": obj, "return_url": obj.profile.get_absolute_url()},
-        )
-
-    def post(self, request, pk):
-        """Delete the column mapping and redirect to the parent profile."""
-        obj = get_object_or_404(ColumnMapping, pk=pk)
-        profile_url = obj.profile.get_absolute_url()
-        obj.delete()
-        messages.success(request, "Column mapping deleted.")
-        return redirect(profile_url)
+    queryset = ColumnMapping.objects.all()
+    permission_required = "netbox_data_import.delete_columnmapping"
 
 
 # ---------------------------------------------------------------------------
@@ -166,73 +191,29 @@ class ColumnMappingDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ClassRoleMappingAddView(LoginRequiredMixin, View):
+class ClassRoleMappingAddView(_ProfileChildEditView):
     """Add a class→role mapping to an existing ImportProfile."""
 
-    def get(self, request, profile_pk):
-        """Render the add form for a new class→role mapping."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ClassRoleMappingForm(initial={"profile": profile})
-        return render(request, "netbox_data_import/classrolemapping_edit.html", {"form": form, "profile": profile})
-
-    def post(self, request, profile_pk):
-        """Save a new class→role mapping or re-render with errors."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ClassRoleMappingForm(request.POST)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Class→Role mapping added.")
-            return redirect(profile.get_absolute_url())
-        return render(request, "netbox_data_import/classrolemapping_edit.html", {"form": form, "profile": profile})
+    queryset = ClassRoleMapping.objects.all()
+    form = ClassRoleMappingForm
+    template_name = "netbox_data_import/classrolemapping_edit.html"
+    permission_required = "netbox_data_import.add_classrolemapping"
 
 
-class ClassRoleMappingEditView(LoginRequiredMixin, View):
+class ClassRoleMappingEditView(_ProfileChildEditView):
     """Edit an existing class→role mapping."""
 
-    def get(self, request, pk):
-        """Render the edit form for an existing class→role mapping."""
-        obj = get_object_or_404(ClassRoleMapping, pk=pk)
-        form = ClassRoleMappingForm(instance=obj)
-        return render(
-            request,
-            "netbox_data_import/classrolemapping_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
-
-    def post(self, request, pk):
-        """Save edits to an existing class→role mapping or re-render with errors."""
-        obj = get_object_or_404(ClassRoleMapping, pk=pk)
-        form = ClassRoleMappingForm(request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Class→Role mapping updated.")
-            return redirect(obj.profile.get_absolute_url())
-        return render(
-            request,
-            "netbox_data_import/classrolemapping_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
+    queryset = ClassRoleMapping.objects.all()
+    form = ClassRoleMappingForm
+    template_name = "netbox_data_import/classrolemapping_edit.html"
+    permission_required = "netbox_data_import.change_classrolemapping"
 
 
-class ClassRoleMappingDeleteView(LoginRequiredMixin, View):
+class ClassRoleMappingDeleteView(_ProfileChildDeleteView):
     """Delete a class→role mapping."""
 
-    def get(self, request, pk):
-        """Render the delete confirmation page for a class→role mapping."""
-        obj = get_object_or_404(ClassRoleMapping, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {"object": obj, "return_url": obj.profile.get_absolute_url()},
-        )
-
-    def post(self, request, pk):
-        """Delete the class→role mapping and redirect to the parent profile."""
-        obj = get_object_or_404(ClassRoleMapping, pk=pk)
-        profile_url = obj.profile.get_absolute_url()
-        obj.delete()
-        messages.success(request, "Class→Role mapping deleted.")
-        return redirect(profile_url)
+    queryset = ClassRoleMapping.objects.all()
+    permission_required = "netbox_data_import.delete_classrolemapping"
 
 
 # ---------------------------------------------------------------------------
@@ -240,82 +221,47 @@ class ClassRoleMappingDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class DeviceTypeMappingAddView(LoginRequiredMixin, View):
+class DeviceTypeMappingAddView(_ProfileChildEditView):
     """Add a device type mapping to an existing ImportProfile."""
 
-    def get(self, request, profile_pk):
-        """Render the add form for a new device type mapping."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = DeviceTypeMappingForm(initial={"profile": profile})
-        return render(request, "netbox_data_import/devicetypemapping_edit.html", {"form": form, "profile": profile})
-
-    def post(self, request, profile_pk):
-        """Save a new device type mapping or re-render with errors."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = DeviceTypeMappingForm(request.POST)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Device type mapping added.")
-            return redirect(profile.get_absolute_url())
-        return render(request, "netbox_data_import/devicetypemapping_edit.html", {"form": form, "profile": profile})
+    queryset = DeviceTypeMapping.objects.all()
+    form = DeviceTypeMappingForm
+    template_name = "netbox_data_import/devicetypemapping_edit.html"
+    permission_required = "netbox_data_import.add_devicetypemapping"
 
 
-class DeviceTypeMappingEditView(LoginRequiredMixin, View):
+class DeviceTypeMappingEditView(_ProfileChildEditView):
     """Edit an existing device type mapping."""
 
-    def get(self, request, pk):
-        """Render the edit form for an existing device type mapping."""
-        obj = get_object_or_404(DeviceTypeMapping, pk=pk)
-        form = DeviceTypeMappingForm(instance=obj)
-        return render(
-            request,
-            "netbox_data_import/devicetypemapping_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
-
-    def post(self, request, pk):
-        """Save edits to an existing device type mapping or re-render with errors."""
-        obj = get_object_or_404(DeviceTypeMapping, pk=pk)
-        form = DeviceTypeMappingForm(request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Device type mapping updated.")
-            return redirect(obj.profile.get_absolute_url())
-        return render(
-            request,
-            "netbox_data_import/devicetypemapping_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
+    queryset = DeviceTypeMapping.objects.all()
+    form = DeviceTypeMappingForm
+    template_name = "netbox_data_import/devicetypemapping_edit.html"
+    permission_required = "netbox_data_import.change_devicetypemapping"
 
 
-class DeviceTypeMappingDeleteView(LoginRequiredMixin, View):
+class DeviceTypeMappingDeleteView(_ProfileChildDeleteView):
     """Delete a device type mapping."""
 
-    def get(self, request, pk):
-        """Render the delete confirmation page for a device type mapping."""
-        obj = get_object_or_404(DeviceTypeMapping, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {"object": obj, "return_url": obj.profile.get_absolute_url()},
-        )
-
-    def post(self, request, pk):
-        """Delete the device type mapping and redirect to the parent profile."""
-        obj = get_object_or_404(DeviceTypeMapping, pk=pk)
-        profile_url = obj.profile.get_absolute_url()
-        obj.delete()
-        messages.success(request, "Device type mapping deleted.")
-        return redirect(profile_url)
+    queryset = DeviceTypeMapping.objects.all()
+    permission_required = "netbox_data_import.delete_devicetypemapping"
 
 
 # ---------------------------------------------------------------------------
 # Import Wizard — Phase 2 (setup + preview)
 # ---------------------------------------------------------------------------
 
+# These views intentionally use raw django.views.View rather than a NetBox
+# generic view base.  The wizard is a three-step, session-backed state machine
+# (setup → preview → run → results) that does not correspond to any single
+# NetBox generic view pattern (ObjectEditView, ObjectListView, etc.).  Using a
+# raw View keeps the control flow explicit and avoids fighting ObjectEditView's
+# form-save lifecycle, queryset requirements, and redirect conventions.
 
-class ImportSetupView(LoginRequiredMixin, View):
+
+class ImportSetupView(PermissionRequiredMixin, View):
     """Step 1: select profile, upload file, choose site/location/tenant."""
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Render the import setup form."""
@@ -346,7 +292,7 @@ class ImportSetupView(LoginRequiredMixin, View):
             return render(request, "netbox_data_import/import_setup.html", {"form": form})
 
         context = {"site": site, "location": location, "tenant": tenant}
-        result = engine.run_import(rows, profile, context, dry_run=True)
+        result = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
 
         # Store result + raw rows + context in session for the preview/execute steps
         # Rows need JSON-safe serialization (handle datetime from Excel)
@@ -362,8 +308,10 @@ class ImportSetupView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class ImportPreviewView(LoginRequiredMixin, View):
+class ImportPreviewView(PermissionRequiredMixin, View):
     """Step 2: show dry-run results, let user confirm or go back."""
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Re-run the dry-run import and render the preview template."""
@@ -388,7 +336,7 @@ class ImportPreviewView(LoginRequiredMixin, View):
 
         context_obj = {"site": site, "location": location, "tenant": tenant}
         # Always re-run so any new mappings/matches are immediately reflected
-        result = engine.run_import(rows, profile, context_obj, dry_run=True)
+        result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
         request.session["import_result"] = result.to_session_dict()
 
         # Build existing resolutions map for the split-name modal preview
@@ -417,8 +365,10 @@ class ImportPreviewView(LoginRequiredMixin, View):
         )
 
 
-class ImportRunView(LoginRequiredMixin, View):
+class ImportRunView(PermissionRequiredMixin, View):
     """Step 3: run the real import (dry_run=False)."""
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Execute the real import and redirect to the results page."""
@@ -441,7 +391,7 @@ class ImportRunView(LoginRequiredMixin, View):
         context = {"site": site, "location": location, "tenant": tenant}
 
         with transaction.atomic():
-            result = engine.run_import(rows, profile, context, dry_run=False)
+            result = engine.run_import(rows, profile, context, dry_run=False, user=request.user)
 
         # Persist job record
         from .models import ImportJob
@@ -465,8 +415,10 @@ class ImportRunView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_results"))
 
 
-class ImportResultsView(LoginRequiredMixin, View):
+class ImportResultsView(PermissionRequiredMixin, View):
     """Step 4: show final results with links to created objects."""
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request):
         """Render the results page for the most recent import."""
@@ -486,13 +438,17 @@ class ImportResultsView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ImportJobListView(LoginRequiredMixin, View):
+class ImportJobListView(PermissionRequiredMixin, generic.ObjectListView):
     """List all past import jobs for audit / history."""
 
-    def get(self, request):
-        """Render the import job history list."""
-        jobs = ImportJob.objects.select_related("profile").all()
-        return render(request, "netbox_data_import/importjob_list.html", {"jobs": jobs})
+    queryset = ImportJob.objects.select_related("profile").all()
+    table = ImportJobTable
+    template_name = "netbox_data_import/importjob_list.html"
+    permission_required = "netbox_data_import.view_importjob"
+
+    def get_required_permission(self):
+        """Return the permission string required to view the import job list."""
+        return "netbox_data_import.view_importjob"
 
 
 # ---------------------------------------------------------------------------
@@ -500,73 +456,29 @@ class ImportJobListView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ColumnTransformRuleAddView(LoginRequiredMixin, View):
+class ColumnTransformRuleAddView(_ProfileChildEditView):
     """Add a column transform rule to an existing ImportProfile."""
 
-    def get(self, request, profile_pk):
-        """Render the add form for a new column transform rule."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ColumnTransformRuleForm(initial={"profile": profile})
-        return render(request, "netbox_data_import/columntransformrule_edit.html", {"form": form, "profile": profile})
-
-    def post(self, request, profile_pk):
-        """Save a new column transform rule or re-render with errors."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ColumnTransformRuleForm(request.POST)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Column transform rule added.")
-            return redirect(profile.get_absolute_url())
-        return render(request, "netbox_data_import/columntransformrule_edit.html", {"form": form, "profile": profile})
+    queryset = ColumnTransformRule.objects.all()
+    form = ColumnTransformRuleForm
+    template_name = "netbox_data_import/columntransformrule_edit.html"
+    permission_required = "netbox_data_import.add_columntransformrule"
 
 
-class ColumnTransformRuleEditView(LoginRequiredMixin, View):
+class ColumnTransformRuleEditView(_ProfileChildEditView):
     """Edit an existing column transform rule."""
 
-    def get(self, request, pk):
-        """Render the edit form for an existing column transform rule."""
-        obj = get_object_or_404(ColumnTransformRule, pk=pk)
-        form = ColumnTransformRuleForm(instance=obj)
-        return render(
-            request,
-            "netbox_data_import/columntransformrule_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
-
-    def post(self, request, pk):
-        """Save edits to an existing column transform rule or re-render with errors."""
-        obj = get_object_or_404(ColumnTransformRule, pk=pk)
-        form = ColumnTransformRuleForm(request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Column transform rule updated.")
-            return redirect(obj.profile.get_absolute_url())
-        return render(
-            request,
-            "netbox_data_import/columntransformrule_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
+    queryset = ColumnTransformRule.objects.all()
+    form = ColumnTransformRuleForm
+    template_name = "netbox_data_import/columntransformrule_edit.html"
+    permission_required = "netbox_data_import.change_columntransformrule"
 
 
-class ColumnTransformRuleDeleteView(LoginRequiredMixin, View):
+class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
     """Delete a column transform rule."""
 
-    def get(self, request, pk):
-        """Render the delete confirmation page for a column transform rule."""
-        obj = get_object_or_404(ColumnTransformRule, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {"object": obj, "return_url": obj.profile.get_absolute_url()},
-        )
-
-    def post(self, request, pk):
-        """Delete the column transform rule and redirect to the parent profile."""
-        obj = get_object_or_404(ColumnTransformRule, pk=pk)
-        profile_url = obj.profile.get_absolute_url()
-        obj.delete()
-        messages.success(request, "Column transform rule deleted.")
-        return redirect(profile_url)
+    queryset = ColumnTransformRule.objects.all()
+    permission_required = "netbox_data_import.delete_columntransformrule"
 
 
 # ---------------------------------------------------------------------------
@@ -574,8 +486,10 @@ class ColumnTransformRuleDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class IgnoreDeviceView(LoginRequiredMixin, View):
+class IgnoreDeviceView(PermissionRequiredMixin, View):
     """Mark a specific device (by source_id) as ignored for a profile."""
+
+    permission_required = "netbox_data_import.add_ignoreddevice"
 
     def post(self, request):
         """Add the specified device to the profile's ignore list."""
@@ -597,8 +511,10 @@ class IgnoreDeviceView(LoginRequiredMixin, View):
         return redirect(next_url)
 
 
-class UnignoreDeviceView(LoginRequiredMixin, View):
+class UnignoreDeviceView(PermissionRequiredMixin, View):
     """Remove a device from the ignore list."""
+
+    permission_required = "netbox_data_import.delete_ignoreddevice"
 
     def post(self, request):
         """Remove the specified device from the profile's ignore list."""
@@ -622,8 +538,10 @@ class UnignoreDeviceView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class SaveResolutionView(LoginRequiredMixin, View):
+class SaveResolutionView(PermissionRequiredMixin, View):
     """Save a manual field resolution for rerere replay."""
+
+    permission_required = "netbox_data_import.add_sourceresolution"
 
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
@@ -662,30 +580,20 @@ class SaveResolutionView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class DeviceTypeAnalysisView(LoginRequiredMixin, View):
+class DeviceTypeAnalysisView(PermissionRequiredMixin, View):
     """Show all unique (make, model) pairs across import jobs and profiles.
 
     Highlights which ones have explicit DeviceTypeMapping vs auto-slugified.
     """
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request, profile_pk=None):
         """Render the device type analysis page for the given profile."""
         profile = get_object_or_404(ImportProfile, pk=profile_pk) if profile_pk else None
         profiles = ImportProfile.objects.all()
 
-        # Collect unique (make, model) pairs from all recent import jobs
-        job_qs = ImportJob.objects.all()
-        if profile:
-            job_qs = job_qs.filter(profile=profile)
-
-        for job in job_qs.order_by("-created")[:50]:
-            for row in job.result_rows:
-                if row.get("object_type") in ("manufacturer", "device_type"):
-                    continue
-                # We don't store make/model in result_rows, so skip
-                pass
-
-        # Better: build analysis from DeviceTypeMapping + auto-slugify check
+        # Build analysis from DeviceTypeMapping + auto-slugify check
         if profile:
             dt_mappings = DeviceTypeMapping.objects.filter(profile=profile)
         else:
@@ -731,11 +639,13 @@ class DeviceTypeAnalysisView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class BulkYamlImportView(LoginRequiredMixin, View):
+class BulkYamlImportView(PermissionRequiredMixin, View):
     """Accept a YAML file and bulk-create ClassRoleMappings or DeviceTypeMappings for a profile.
 
     Useful for bootstrapping from contrib/ definition files.
     """
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request, profile_pk):
         """Render the bulk YAML import form."""
@@ -819,8 +729,10 @@ class BulkYamlImportView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ExportProfileYamlView(LoginRequiredMixin, View):
+class ExportProfileYamlView(PermissionRequiredMixin, View):
     """Download all profile configuration as a single YAML file."""
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request, pk):
         """Serialize the profile and all its mappings to YAML and return as a file download."""
@@ -890,11 +802,13 @@ class ExportProfileYamlView(LoginRequiredMixin, View):
         )
 
 
-class ImportProfileYamlView(LoginRequiredMixin, View):
+class ImportProfileYamlView(PermissionRequiredMixin, View):
     """Import a full profile YAML (as exported by ExportProfileYamlView).
 
     If the profile already exists (by name), merges/updates its mappings.
     """
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
         """Render the profile YAML import form."""
@@ -996,16 +910,23 @@ class ImportProfileYamlView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class CheckDeviceNameView(LoginRequiredMixin, View):
+class CheckDeviceNameView(PermissionRequiredMixin, View):
     """AJAX endpoint: check if a device with the given name exists in NetBox.
 
     Returns JSON: {"exists": bool, "url": str|null, "id": int|null}.
     """
 
+    permission_required = "netbox_data_import.view_importprofile"
+
     def get(self, request):
         """Return JSON indicating whether a device with the given name exists."""
         from django.http import JsonResponse
         from dcim.models import Device
+
+        if not request.user.has_perm("dcim.view_device"):  # pragma: no cover
+            from django.http import HttpResponseForbidden
+
+            return HttpResponseForbidden()
 
         name = request.GET.get("name", "").strip()
         if not name:
@@ -1040,8 +961,10 @@ class CheckDeviceNameView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class SourceResolutionListView(LoginRequiredMixin, View):
+class SourceResolutionListView(PermissionRequiredMixin, View):
     """List all saved name-split resolutions for a profile."""
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request, profile_pk):
         """Render the list of saved source resolutions for the given profile."""
@@ -1059,8 +982,10 @@ class SourceResolutionListView(LoginRequiredMixin, View):
         )
 
 
-class SourceResolutionDeleteView(LoginRequiredMixin, View):
+class SourceResolutionDeleteView(PermissionRequiredMixin, View):
     """Delete a saved source resolution."""
+
+    permission_required = "netbox_data_import.delete_sourceresolution"
 
     def get(self, request, pk):
         """Render the delete confirmation page for a source resolution."""
@@ -1092,16 +1017,21 @@ class SourceResolutionDeleteView(LoginRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class QuickCreateManufacturerView(LoginRequiredMixin, View):
+class QuickCreateManufacturerView(PermissionRequiredMixin, View):
     """Immediately create a Manufacturer in NetBox from the preview page.
 
     Redirects back to preview so the row changes from 'create' to a device action.
     """
 
+    permission_required = "netbox_data_import.add_devicetypemapping"
+
     def post(self, request):
         """Create the manufacturer in NetBox and redirect back to preview."""
         from dcim.models import Manufacturer
 
+        if not request.user.has_perm("dcim.add_manufacturer"):  # pragma: no cover
+            messages.error(request, "Permission denied: dcim.add_manufacturer required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         mfg_name = request.POST.get("mfg_name", "").strip()
         mfg_slug = request.POST.get("mfg_slug", "").strip()
         if not mfg_name or not mfg_slug:
@@ -1118,12 +1048,14 @@ class QuickCreateManufacturerView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickResolveManufacturerView(LoginRequiredMixin, View):
+class QuickResolveManufacturerView(PermissionRequiredMixin, View):
     """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page.
 
     Used when a source has inconsistent naming (e.g. 'Dell EMC' → 'dell').
     Redirects back to preview which re-runs with the mapping applied.
     """
+
+    permission_required = "netbox_data_import.add_manufacturermapping"
 
     def post(self, request):
         """Save the manufacturer mapping and redirect back to preview."""
@@ -1144,12 +1076,14 @@ class QuickResolveManufacturerView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickResolveDeviceTypeView(LoginRequiredMixin, View):
+class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
     """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page.
 
     Optionally also creates the manufacturer and/or device type in NetBox right now.
     Redirects back to preview which re-runs and shows the resolved rows.
     """
+
+    permission_required = "netbox_data_import.add_devicetypemapping"
 
     def post(self, request):
         """Save the device type mapping (and optionally create objects) then redirect."""
@@ -1185,6 +1119,12 @@ class QuickResolveDeviceTypeView(LoginRequiredMixin, View):
         )
 
         if action == "create_now":
+            if not request.user.has_perm("dcim.add_manufacturer"):  # pragma: no cover
+                messages.error(request, "Permission denied: dcim.add_manufacturer required.")
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            if not request.user.has_perm("dcim.add_devicetype"):  # pragma: no cover
+                messages.error(request, "Permission denied: dcim.add_devicetype required.")
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
             mfg, _ = Manufacturer.objects.get_or_create(
                 slug=netbox_mfg_slug,
                 defaults={"name": source_make},
@@ -1212,11 +1152,13 @@ class QuickResolveDeviceTypeView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickAddClassRoleMappingView(LoginRequiredMixin, View):
+class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
     """Quickly add a ClassRoleMapping (ignore / role) directly from an error row in preview.
 
     Redirects back to preview; error rows for that class disappear on re-run.
     """
+
+    permission_required = "netbox_data_import.add_classrolemapping"
 
     def post(self, request):
         """Save the class→role mapping and redirect back to preview."""
@@ -1251,11 +1193,13 @@ class QuickAddClassRoleMappingView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class MatchExistingDeviceView(LoginRequiredMixin, View):
+class MatchExistingDeviceView(PermissionRequiredMixin, View):
     """Link a source row to an existing NetBox device (by device ID).
 
     Saves a DeviceExistingMatch; on next preview re-run the row shows action='update'.
     """
+
+    permission_required = "netbox_data_import.add_deviceexistingmatch"
 
     def post(self, request):
         """Save the device match and redirect back to preview."""
@@ -1289,12 +1233,14 @@ class MatchExistingDeviceView(LoginRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class SearchNetBoxObjectsView(LoginRequiredMixin, View):
+class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
     GET params: type (manufacturer|device_type|device|role), q (search string).
     Returns JSON list of {id, name, slug, url} dicts.
     """
+
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request):
         """Return a JSON list of matching NetBox objects for the given type and query."""
@@ -1304,6 +1250,16 @@ class SearchNetBoxObjectsView(LoginRequiredMixin, View):
         obj_type = request.GET.get("type", "device")
         q = request.GET.get("q", "").strip()
         limit = 20
+
+        _perm_map = {
+            "manufacturer": "dcim.view_manufacturer",
+            "device_type": "dcim.view_devicetype",
+            "device": "dcim.view_device",
+            "role": "dcim.view_devicerole",
+        }
+        required_perm = _perm_map.get(obj_type)
+        if required_perm and not request.user.has_perm(required_perm):  # pragma: no cover
+            return JsonResponse({"results": [], "error": "permission_denied"}, status=403)
 
         if not q:
             return JsonResponse({"results": []})
@@ -1389,12 +1345,14 @@ def _auto_match_single_device(device_model, device_name, serial, asset_tag):
     return device, False
 
 
-class AutoMatchDevicesView(LoginRequiredMixin, View):
+class AutoMatchDevicesView(PermissionRequiredMixin, View):
     """Scan all device rows in the session and auto-match to existing NetBox devices.
 
     Priority: serial > asset_tag > exact name match.
     Name substring matches are recorded as probable_matches only (not auto-linked).
     """
+
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Run auto-matching and redirect back to preview with a summary message."""
