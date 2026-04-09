@@ -292,7 +292,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
             return render(request, "netbox_data_import/import_setup.html", {"form": form})
 
         context = {"site": site, "location": location, "tenant": tenant}
-        result = engine.run_import(rows, profile, context, dry_run=True)
+        result = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
 
         # Store result + raw rows + context in session for the preview/execute steps
         # Rows need JSON-safe serialization (handle datetime from Excel)
@@ -336,7 +336,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
 
         context_obj = {"site": site, "location": location, "tenant": tenant}
         # Always re-run so any new mappings/matches are immediately reflected
-        result = engine.run_import(rows, profile, context_obj, dry_run=True)
+        result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
         request.session["import_result"] = result.to_session_dict()
 
         # Build existing resolutions map for the split-name modal preview

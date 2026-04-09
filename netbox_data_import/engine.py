@@ -331,22 +331,26 @@ def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufactu
     seen_manufacturers.add(mfg_slug)
     if not ctx.dry_run:
         if ctx.profile.create_missing_device_types:
-            if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
-                ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
-                return
+            if not Manufacturer.objects.filter(slug=mfg_slug).exists():
+                if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
+                    ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
+                    return
             Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
     elif not Manufacturer.objects.filter(slug=mfg_slug).exists() and ctx.profile.create_missing_device_types:
-        ctx.result.rows.append(
-            RowResult(
-                row_number=row["_row_number"],
-                source_id=str(row.get("source_id", "")),
-                name=make,
-                action="create",
-                object_type="manufacturer",
-                detail=f"Would create manufacturer '{make}' (slug: {mfg_slug})",
-                extra_data={"source_make": make, "mfg_slug": mfg_slug},
+        if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
+            ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
+        else:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=str(row.get("source_id", "")),
+                    name=make,
+                    action="create",
+                    object_type="manufacturer",
+                    detail=f"Would create manufacturer '{make}' (slug: {mfg_slug})",
+                    extra_data={"source_make": make, "mfg_slug": mfg_slug},
+                )
             )
-        )
 
 
 def _ensure_device_type(
@@ -359,14 +363,18 @@ def _ensure_device_type(
     seen_device_types.add(dt_key)
     if not ctx.dry_run:
         if ctx.profile.create_missing_device_types:
-            if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
-                ctx.result.rows.append(
-                    _perm_denied_row("dcim.add_manufacturer", row, f"{make} / {model}", "device_type")
-                )
-                return
-            if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicetype"):
-                ctx.result.rows.append(_perm_denied_row("dcim.add_devicetype", row, f"{make} / {model}", "device_type"))
-                return
+            if not DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists():
+                if not Manufacturer.objects.filter(slug=mfg_slug).exists():
+                    if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
+                        ctx.result.rows.append(
+                            _perm_denied_row("dcim.add_manufacturer", row, f"{make} / {model}", "device_type")
+                        )
+                        return
+                if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicetype"):
+                    ctx.result.rows.append(
+                        _perm_denied_row("dcim.add_devicetype", row, f"{make} / {model}", "device_type")
+                    )
+                    return
             mfg, _ = Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
             DeviceType.objects.get_or_create(
                 manufacturer=mfg, slug=dt_slug, defaults={"model": model, "u_height": u_height}
@@ -376,23 +384,26 @@ def _ensure_device_type(
     if exists:
         return
     if ctx.profile.create_missing_device_types:
-        ctx.result.rows.append(
-            RowResult(
-                row_number=row["_row_number"],
-                source_id=str(row.get("source_id", "")),
-                name=f"{make} / {model}",
-                action="create",
-                object_type="device_type",
-                detail=f"Would create device type '{model}' under '{make}'",
-                extra_data={
-                    "source_make": make,
-                    "source_model": model,
-                    "mfg_slug": mfg_slug,
-                    "dt_slug": dt_slug,
-                    "u_height": u_height,
-                },
+        if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicetype"):
+            ctx.result.rows.append(_perm_denied_row("dcim.add_devicetype", row, f"{make} / {model}", "device_type"))
+        else:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=str(row.get("source_id", "")),
+                    name=f"{make} / {model}",
+                    action="create",
+                    object_type="device_type",
+                    detail=f"Would create device type '{model}' under '{make}'",
+                    extra_data={
+                        "source_make": make,
+                        "source_model": model,
+                        "mfg_slug": mfg_slug,
+                        "dt_slug": dt_slug,
+                        "u_height": u_height,
+                    },
+                )
             )
-        )
     else:
         ctx.result.rows.append(
             RowResult(
@@ -414,13 +425,16 @@ def _ensure_device_type(
 
 
 def _ensure_device_role(crm, seen_roles, ctx, DeviceRole):
-    """Create a device role if not yet seen."""
+    """Create a device role if not yet seen, respecting user permissions."""
     if not (crm and crm.role_slug and crm.role_slug not in seen_roles):
         return
     seen_roles.add(crm.role_slug)
     if ctx.dry_run:
-        ctx.pending_device_roles.add(crm.role_slug)
+        if ctx.user is None or ctx.user.has_perm("dcim.add_devicerole"):
+            ctx.pending_device_roles.add(crm.role_slug)
     else:
+        if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicerole"):
+            return
         DeviceRole.objects.get_or_create(
             slug=crm.role_slug,
             defaults={"name": crm.role_slug.replace("-", " ").title(), "color": "9e9e9e"},

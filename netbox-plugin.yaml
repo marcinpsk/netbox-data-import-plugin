@@ -5,8 +5,8 @@ version: 1.0.1
 package_name: netbox-data-import
 compatibility:
   - release: 1.0.1
-    netbox_min: 4.2.0
+    netbox_min: 4.4.0
     netbox_max: 4.5.7
   - release: 1.0.0
-    netbox_min: 4.2.0
+    netbox_min: 4.4.0
     netbox_max: 4.5.7
