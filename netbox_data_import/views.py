@@ -7,6 +7,7 @@ from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
+from utilities.permissions import get_permission_for_model
 from .models import (
     ImportProfile,
     ColumnMapping,
@@ -92,79 +93,85 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
 
 
 # ---------------------------------------------------------------------------
+# Shared base views for ImportProfile child objects
+# ---------------------------------------------------------------------------
+
+
+class _ProfileChildEditView(PermissionRequiredMixin, generic.ObjectEditView):
+    """Base add/edit view for objects that belong to an ImportProfile.
+
+    Handles pre-populating the hidden ``profile`` field on add (via the
+    ``profile_pk`` URL kwarg) and redirecting back to the parent profile
+    detail page after a successful save.
+
+    Override ``get_required_permission`` so that add-URLs (which carry
+    ``profile_pk`` but not ``pk``) are not misidentified as edit-URLs by
+    NetBox's generic ``dispatch`` hook.
+    """
+
+    def get_required_permission(self):
+        action = "change" if "pk" in self.kwargs else "add"
+        return get_permission_for_model(self.queryset.model, action)
+
+    def alter_object(self, obj, request, url_args, url_kwargs):
+        if not obj.pk and "profile_pk" in url_kwargs:
+            obj.profile = get_object_or_404(ImportProfile, pk=url_kwargs["profile_pk"])
+        return obj
+
+    def get_return_url(self, request, obj=None):
+        if obj is not None and getattr(obj, "profile", None):
+            return obj.profile.get_absolute_url()
+        return super().get_return_url(request, obj)
+
+    def get_extra_context(self, request, instance):
+        if instance.pk:
+            return {"profile": instance.profile}
+        profile_pk = self.kwargs.get("profile_pk")
+        if profile_pk:
+            return {"profile": get_object_or_404(ImportProfile, pk=profile_pk)}
+        return {}
+
+
+class _ProfileChildDeleteView(PermissionRequiredMixin, generic.ObjectDeleteView):
+    """Base delete view for objects that belong to an ImportProfile.
+
+    Redirects to the parent profile detail page after successful deletion.
+    """
+
+    def get_return_url(self, request, obj=None):
+        if obj is not None and getattr(obj, "profile", None):
+            return obj.profile.get_absolute_url()
+        return super().get_return_url(request, obj)
+
+
+# ---------------------------------------------------------------------------
 # ColumnMapping CRUD
 # ---------------------------------------------------------------------------
 
 
-class ColumnMappingAddView(PermissionRequiredMixin, View):
+class ColumnMappingAddView(_ProfileChildEditView):
     """Add a column mapping to an existing ImportProfile."""
 
+    queryset = ColumnMapping.objects.all()
+    form = ColumnMappingForm
+    template_name = "netbox_data_import/columnmapping_edit.html"
     permission_required = "netbox_data_import.add_columnmapping"
 
-    def get(self, request, profile_pk):
-        """Render the add form for a new column mapping."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ColumnMappingForm(initial={"profile": profile})
-        return render(request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": profile})
 
-    def post(self, request, profile_pk):
-        """Save a new column mapping or re-render the form with errors."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ColumnMappingForm(request.POST)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Column mapping added.")
-            return redirect(profile.get_absolute_url())
-        return render(request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": profile})
-
-
-class ColumnMappingEditView(PermissionRequiredMixin, View):
+class ColumnMappingEditView(_ProfileChildEditView):
     """Edit an existing column mapping."""
 
+    queryset = ColumnMapping.objects.all()
+    form = ColumnMappingForm
+    template_name = "netbox_data_import/columnmapping_edit.html"
     permission_required = "netbox_data_import.change_columnmapping"
 
-    def get(self, request, pk):
-        """Render the edit form for an existing column mapping."""
-        obj = get_object_or_404(ColumnMapping, pk=pk)
-        form = ColumnMappingForm(instance=obj)
-        return render(
-            request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": obj.profile, "object": obj}
-        )
 
-    def post(self, request, pk):
-        """Save edits to an existing column mapping or re-render with errors."""
-        obj = get_object_or_404(ColumnMapping, pk=pk)
-        form = ColumnMappingForm(request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Column mapping updated.")
-            return redirect(obj.profile.get_absolute_url())
-        return render(
-            request, "netbox_data_import/columnmapping_edit.html", {"form": form, "profile": obj.profile, "object": obj}
-        )
-
-
-class ColumnMappingDeleteView(PermissionRequiredMixin, View):
+class ColumnMappingDeleteView(_ProfileChildDeleteView):
     """Delete a column mapping."""
 
+    queryset = ColumnMapping.objects.all()
     permission_required = "netbox_data_import.delete_columnmapping"
-
-    def get(self, request, pk):
-        """Render the delete confirmation page for a column mapping."""
-        obj = get_object_or_404(ColumnMapping, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {"object": obj, "return_url": obj.profile.get_absolute_url()},
-        )
-
-    def post(self, request, pk):
-        """Delete the column mapping and redirect to the parent profile."""
-        obj = get_object_or_404(ColumnMapping, pk=pk)
-        profile_url = obj.profile.get_absolute_url()
-        obj.delete()
-        messages.success(request, "Column mapping deleted.")
-        return redirect(profile_url)
 
 
 # ---------------------------------------------------------------------------
@@ -172,79 +179,29 @@ class ColumnMappingDeleteView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ClassRoleMappingAddView(PermissionRequiredMixin, View):
+class ClassRoleMappingAddView(_ProfileChildEditView):
     """Add a class→role mapping to an existing ImportProfile."""
 
+    queryset = ClassRoleMapping.objects.all()
+    form = ClassRoleMappingForm
+    template_name = "netbox_data_import/classrolemapping_edit.html"
     permission_required = "netbox_data_import.add_classrolemapping"
 
-    def get(self, request, profile_pk):
-        """Render the add form for a new class→role mapping."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ClassRoleMappingForm(initial={"profile": profile})
-        return render(request, "netbox_data_import/classrolemapping_edit.html", {"form": form, "profile": profile})
 
-    def post(self, request, profile_pk):
-        """Save a new class→role mapping or re-render with errors."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ClassRoleMappingForm(request.POST)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Class→Role mapping added.")
-            return redirect(profile.get_absolute_url())
-        return render(request, "netbox_data_import/classrolemapping_edit.html", {"form": form, "profile": profile})
-
-
-class ClassRoleMappingEditView(PermissionRequiredMixin, View):
+class ClassRoleMappingEditView(_ProfileChildEditView):
     """Edit an existing class→role mapping."""
 
+    queryset = ClassRoleMapping.objects.all()
+    form = ClassRoleMappingForm
+    template_name = "netbox_data_import/classrolemapping_edit.html"
     permission_required = "netbox_data_import.change_classrolemapping"
 
-    def get(self, request, pk):
-        """Render the edit form for an existing class→role mapping."""
-        obj = get_object_or_404(ClassRoleMapping, pk=pk)
-        form = ClassRoleMappingForm(instance=obj)
-        return render(
-            request,
-            "netbox_data_import/classrolemapping_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
 
-    def post(self, request, pk):
-        """Save edits to an existing class→role mapping or re-render with errors."""
-        obj = get_object_or_404(ClassRoleMapping, pk=pk)
-        form = ClassRoleMappingForm(request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Class→Role mapping updated.")
-            return redirect(obj.profile.get_absolute_url())
-        return render(
-            request,
-            "netbox_data_import/classrolemapping_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
-
-
-class ClassRoleMappingDeleteView(PermissionRequiredMixin, View):
+class ClassRoleMappingDeleteView(_ProfileChildDeleteView):
     """Delete a class→role mapping."""
 
+    queryset = ClassRoleMapping.objects.all()
     permission_required = "netbox_data_import.delete_classrolemapping"
-
-    def get(self, request, pk):
-        """Render the delete confirmation page for a class→role mapping."""
-        obj = get_object_or_404(ClassRoleMapping, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {"object": obj, "return_url": obj.profile.get_absolute_url()},
-        )
-
-    def post(self, request, pk):
-        """Delete the class→role mapping and redirect to the parent profile."""
-        obj = get_object_or_404(ClassRoleMapping, pk=pk)
-        profile_url = obj.profile.get_absolute_url()
-        obj.delete()
-        messages.success(request, "Class→Role mapping deleted.")
-        return redirect(profile_url)
 
 
 # ---------------------------------------------------------------------------
@@ -252,79 +209,29 @@ class ClassRoleMappingDeleteView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class DeviceTypeMappingAddView(PermissionRequiredMixin, View):
+class DeviceTypeMappingAddView(_ProfileChildEditView):
     """Add a device type mapping to an existing ImportProfile."""
 
+    queryset = DeviceTypeMapping.objects.all()
+    form = DeviceTypeMappingForm
+    template_name = "netbox_data_import/devicetypemapping_edit.html"
     permission_required = "netbox_data_import.add_devicetypemapping"
 
-    def get(self, request, profile_pk):
-        """Render the add form for a new device type mapping."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = DeviceTypeMappingForm(initial={"profile": profile})
-        return render(request, "netbox_data_import/devicetypemapping_edit.html", {"form": form, "profile": profile})
 
-    def post(self, request, profile_pk):
-        """Save a new device type mapping or re-render with errors."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = DeviceTypeMappingForm(request.POST)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Device type mapping added.")
-            return redirect(profile.get_absolute_url())
-        return render(request, "netbox_data_import/devicetypemapping_edit.html", {"form": form, "profile": profile})
-
-
-class DeviceTypeMappingEditView(PermissionRequiredMixin, View):
+class DeviceTypeMappingEditView(_ProfileChildEditView):
     """Edit an existing device type mapping."""
 
+    queryset = DeviceTypeMapping.objects.all()
+    form = DeviceTypeMappingForm
+    template_name = "netbox_data_import/devicetypemapping_edit.html"
     permission_required = "netbox_data_import.change_devicetypemapping"
 
-    def get(self, request, pk):
-        """Render the edit form for an existing device type mapping."""
-        obj = get_object_or_404(DeviceTypeMapping, pk=pk)
-        form = DeviceTypeMappingForm(instance=obj)
-        return render(
-            request,
-            "netbox_data_import/devicetypemapping_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
 
-    def post(self, request, pk):
-        """Save edits to an existing device type mapping or re-render with errors."""
-        obj = get_object_or_404(DeviceTypeMapping, pk=pk)
-        form = DeviceTypeMappingForm(request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Device type mapping updated.")
-            return redirect(obj.profile.get_absolute_url())
-        return render(
-            request,
-            "netbox_data_import/devicetypemapping_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
-
-
-class DeviceTypeMappingDeleteView(PermissionRequiredMixin, View):
+class DeviceTypeMappingDeleteView(_ProfileChildDeleteView):
     """Delete a device type mapping."""
 
+    queryset = DeviceTypeMapping.objects.all()
     permission_required = "netbox_data_import.delete_devicetypemapping"
-
-    def get(self, request, pk):
-        """Render the delete confirmation page for a device type mapping."""
-        obj = get_object_or_404(DeviceTypeMapping, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {"object": obj, "return_url": obj.profile.get_absolute_url()},
-        )
-
-    def post(self, request, pk):
-        """Delete the device type mapping and redirect to the parent profile."""
-        obj = get_object_or_404(DeviceTypeMapping, pk=pk)
-        profile_url = obj.profile.get_absolute_url()
-        obj.delete()
-        messages.success(request, "Device type mapping deleted.")
-        return redirect(profile_url)
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +372,7 @@ class ImportRunView(PermissionRequiredMixin, View):
         context = {"site": site, "location": location, "tenant": tenant}
 
         with transaction.atomic():
-            result = engine.run_import(rows, profile, context, dry_run=False)
+            result = engine.run_import(rows, profile, context, dry_run=False, user=request.user)
 
         # Persist job record
         from .models import ImportJob
@@ -533,79 +440,29 @@ class ImportJobListView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ColumnTransformRuleAddView(PermissionRequiredMixin, View):
+class ColumnTransformRuleAddView(_ProfileChildEditView):
     """Add a column transform rule to an existing ImportProfile."""
 
+    queryset = ColumnTransformRule.objects.all()
+    form = ColumnTransformRuleForm
+    template_name = "netbox_data_import/columntransformrule_edit.html"
     permission_required = "netbox_data_import.add_columntransformrule"
 
-    def get(self, request, profile_pk):
-        """Render the add form for a new column transform rule."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ColumnTransformRuleForm(initial={"profile": profile})
-        return render(request, "netbox_data_import/columntransformrule_edit.html", {"form": form, "profile": profile})
 
-    def post(self, request, profile_pk):
-        """Save a new column transform rule or re-render with errors."""
-        profile = get_object_or_404(ImportProfile, pk=profile_pk)
-        form = ColumnTransformRuleForm(request.POST)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Column transform rule added.")
-            return redirect(profile.get_absolute_url())
-        return render(request, "netbox_data_import/columntransformrule_edit.html", {"form": form, "profile": profile})
-
-
-class ColumnTransformRuleEditView(PermissionRequiredMixin, View):
+class ColumnTransformRuleEditView(_ProfileChildEditView):
     """Edit an existing column transform rule."""
 
+    queryset = ColumnTransformRule.objects.all()
+    form = ColumnTransformRuleForm
+    template_name = "netbox_data_import/columntransformrule_edit.html"
     permission_required = "netbox_data_import.change_columntransformrule"
 
-    def get(self, request, pk):
-        """Render the edit form for an existing column transform rule."""
-        obj = get_object_or_404(ColumnTransformRule, pk=pk)
-        form = ColumnTransformRuleForm(instance=obj)
-        return render(
-            request,
-            "netbox_data_import/columntransformrule_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
 
-    def post(self, request, pk):
-        """Save edits to an existing column transform rule or re-render with errors."""
-        obj = get_object_or_404(ColumnTransformRule, pk=pk)
-        form = ColumnTransformRuleForm(request.POST, instance=obj)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Column transform rule updated.")
-            return redirect(obj.profile.get_absolute_url())
-        return render(
-            request,
-            "netbox_data_import/columntransformrule_edit.html",
-            {"form": form, "profile": obj.profile, "object": obj},
-        )
-
-
-class ColumnTransformRuleDeleteView(PermissionRequiredMixin, View):
+class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
     """Delete a column transform rule."""
 
+    queryset = ColumnTransformRule.objects.all()
     permission_required = "netbox_data_import.delete_columntransformrule"
-
-    def get(self, request, pk):
-        """Render the delete confirmation page for a column transform rule."""
-        obj = get_object_or_404(ColumnTransformRule, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {"object": obj, "return_url": obj.profile.get_absolute_url()},
-        )
-
-    def post(self, request, pk):
-        """Delete the column transform rule and redirect to the parent profile."""
-        obj = get_object_or_404(ColumnTransformRule, pk=pk)
-        profile_url = obj.profile.get_absolute_url()
-        obj.delete()
-        messages.success(request, "Column transform rule deleted.")
-        return redirect(profile_url)
 
 
 # ---------------------------------------------------------------------------
@@ -1156,6 +1013,9 @@ class QuickCreateManufacturerView(PermissionRequiredMixin, View):
         """Create the manufacturer in NetBox and redirect back to preview."""
         from dcim.models import Manufacturer
 
+        if not request.user.has_perm("dcim.add_manufacturer"):
+            messages.error(request, "Permission denied: dcim.add_manufacturer required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         mfg_name = request.POST.get("mfg_name", "").strip()
         mfg_slug = request.POST.get("mfg_slug", "").strip()
         if not mfg_name or not mfg_slug:
@@ -1243,6 +1103,12 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         )
 
         if action == "create_now":
+            if not request.user.has_perm("dcim.add_manufacturer"):
+                messages.error(request, "Permission denied: dcim.add_manufacturer required.")
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            if not request.user.has_perm("dcim.add_devicetype"):
+                messages.error(request, "Permission denied: dcim.add_devicetype required.")
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
             mfg, _ = Manufacturer.objects.get_or_create(
                 slug=netbox_mfg_slug,
                 defaults={"name": source_make},

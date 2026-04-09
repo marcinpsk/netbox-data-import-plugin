@@ -136,6 +136,7 @@ class ImportContext:
     result: ImportResult
     rack_map: dict = field(default_factory=dict)
     pending_device_roles: set = field(default_factory=set)
+    user: object | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +312,18 @@ def _get_translation_maps():
     return side, airflow, _STATUS_MAP
 
 
+def _perm_denied_row(perm: str, row: dict, name: str, object_type: str) -> RowResult:
+    """Return a permission-denied RowResult for a write operation the user may not perform."""
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=str(row.get("source_id", "")),
+        name=name,
+        action="error",
+        object_type=object_type,
+        detail=f"Permission denied: {perm}",
+    )
+
+
 def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufacturer):
     """Create (or preview-create) a manufacturer if not yet seen."""
     if mfg_slug in seen_manufacturers:
@@ -318,6 +331,9 @@ def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufactu
     seen_manufacturers.add(mfg_slug)
     if not ctx.dry_run:
         if ctx.profile.create_missing_device_types:
+            if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
+                ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
+                return
             Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
     elif not Manufacturer.objects.filter(slug=mfg_slug).exists() and ctx.profile.create_missing_device_types:
         ctx.result.rows.append(
@@ -343,6 +359,14 @@ def _ensure_device_type(
     seen_device_types.add(dt_key)
     if not ctx.dry_run:
         if ctx.profile.create_missing_device_types:
+            if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
+                ctx.result.rows.append(
+                    _perm_denied_row("dcim.add_manufacturer", row, f"{make} / {model}", "device_type")
+                )
+                return
+            if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicetype"):
+                ctx.result.rows.append(_perm_denied_row("dcim.add_devicetype", row, f"{make} / {model}", "device_type"))
+                return
             mfg, _ = Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
             DeviceType.objects.get_or_create(
                 manufacturer=mfg, slug=dt_slug, defaults={"model": model, "u_height": u_height}
@@ -447,6 +471,10 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
     try:
         rack = Rack.objects.get(site=ctx.site, name=rack_name)
         if ctx.profile.update_existing:
+            if ctx.user is not None and not ctx.user.has_perm("dcim.change_rack"):
+                ctx.result.rows.append(_perm_denied_row("dcim.change_rack", row, rack_name, "rack"))
+                ctx.rack_map[rack_name] = rack
+                return
             rack.u_height = u_height
             rack.serial = serial or rack.serial
             if ctx.location:
@@ -479,6 +507,9 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
                 )
             )
     except Rack.DoesNotExist:
+        if ctx.user is not None and not ctx.user.has_perm("dcim.add_rack"):
+            ctx.result.rows.append(_perm_denied_row("dcim.add_rack", row, rack_name, "rack"))
+            return
         rack = Rack.objects.create(
             site=ctx.site, location=ctx.location, name=rack_name, tenant=ctx.tenant, u_height=u_height, serial=serial
         )
@@ -735,6 +766,8 @@ def _write_device_row(
 
     if device is not None:
         if ctx.profile.update_existing:
+            if ctx.user is not None and not ctx.user.has_perm("dcim.change_device"):
+                return _perm_denied_row("dcim.change_device", row, device_name, "device")
             device.device_type = device_type
             device.role = device_role
             device.rack = rack if isinstance(rack, Rack) else None
@@ -771,6 +804,8 @@ def _write_device_row(
             extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
         )
 
+    if ctx.user is not None and not ctx.user.has_perm("dcim.add_device"):
+        return _perm_denied_row("dcim.add_device", row, device_name, "device")
     device = Device.objects.create(
         site=ctx.site,
         location=ctx.location,
@@ -958,12 +993,14 @@ def _pass3_process_devices(rows, ctx, class_role_map):
 # ---------------------------------------------------------------------------
 
 
-def run_import(rows: list[dict], profile: ImportProfile, context: dict, dry_run: bool = True) -> ImportResult:
+def run_import(
+    rows: list[dict], profile: ImportProfile, context: dict, dry_run: bool = True, user: object | None = None
+) -> ImportResult:
     """Run (or preview) the import.
 
     context keys: site, location (optional), tenant (optional)
     dry_run=True  → no DB writes, returns what *would* happen
-    dry_run=False → writes to DB
+    dry_run=False → writes to DB; pass user to enforce DCIM object permissions
     """
     ctx = ImportContext(
         profile=profile,
@@ -972,6 +1009,7 @@ def run_import(rows: list[dict], profile: ImportProfile, context: dict, dry_run:
         tenant=context.get("tenant"),
         dry_run=dry_run,
         result=ImportResult(),
+        user=user,
     )
 
     class_role_map: dict[str, object] = {crm.source_class: crm for crm in profile.class_role_mappings.all()}
