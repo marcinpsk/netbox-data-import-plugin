@@ -114,6 +114,17 @@ class _ProfileChildEditView(PermissionRequiredMixin, generic.ObjectEditView):
         action = "change" if "pk" in self.kwargs else "add"
         return get_permission_for_model(self.queryset.model, action)
 
+    def get_object(self, **kwargs):
+        """Filter only by ``pk`` — ignore ``profile_pk`` URL kwarg.
+
+        NetBox's ``ObjectEditView.get()`` passes all URL kwargs to
+        ``get_object_or_404``.  ``profile_pk`` is not a field on child
+        models, so we must strip it before the ORM lookup.
+        """
+        if "pk" in kwargs:
+            return get_object_or_404(self.queryset, pk=kwargs["pk"])
+        return self.queryset.model()
+
     def alter_object(self, obj, request, url_args, url_kwargs):
         if not obj.pk and "profile_pk" in url_kwargs:
             obj.profile = get_object_or_404(ImportProfile, pk=url_kwargs["profile_pk"])

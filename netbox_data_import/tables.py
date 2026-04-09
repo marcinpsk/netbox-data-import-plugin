@@ -129,10 +129,9 @@ class DeviceTypeMappingTable(tables.Table):
         )
 
 
-class ImportJobTable(tables.Table):
+class ImportJobTable(NetBoxTable):
     """Table for listing ImportJob objects in the history view."""
 
-    pk = tables.Column(verbose_name="#")
     created = tables.DateTimeColumn(format="Y-m-d H:i")
     profile = tables.Column(linkify=lambda record: record.profile.get_absolute_url() if record.profile else None)
     input_filename = tables.Column(verbose_name="File")
@@ -157,7 +156,7 @@ class ImportJobTable(tables.Table):
         orderable=False,
     )
 
-    class Meta:
+    class Meta(NetBoxTable.Meta):
         model = ImportJob
         fields = (
             "pk",
@@ -169,11 +168,15 @@ class ImportJobTable(tables.Table):
             "devices_created",
             "errors",
         )
-        attrs = {"class": "table table-hover table-sm"}
-
-    def __init__(self, *args, user=None, **kwargs):
-        """Accept and ignore the user kwarg passed by ObjectListView.get_table()."""
-        super().__init__(*args, **kwargs)
+        default_columns = (
+            "created",
+            "profile",
+            "input_filename",
+            "site_name",
+            "racks_created",
+            "devices_created",
+            "errors",
+        )
 
     def render_profile(self, record):
         """Return the profile name, or a placeholder for deleted profiles."""

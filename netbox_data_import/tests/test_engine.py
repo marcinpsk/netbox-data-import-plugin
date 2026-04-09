@@ -226,30 +226,32 @@ class PreviewDeviceRowTest(TestCase):
 
     def test_rack_label_empty_rack_name(self):
         """An empty rack_name produces '(no rack)' — no leading space in detail."""
-        from dcim.models import Device, DeviceType
+        from dcim.models import Device, DeviceType, Rack
 
-        from netbox_data_import.engine import _preview_device_row
+        from netbox_data_import.engine import ImportContext, ImportResult, _preview_device_row
 
         row = {
             "_row_number": 1,
             "rack_name": "",
             "u_position": 3,
         }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
         result_row = _preview_device_row(
             row=row,
-            profile=self.profile,
-            rack_map={},
-            site=self.site,
-            mfg_slug="test-mfg",
-            dt_slug="test-dt",
+            ctx=ctx,
             make="TestMake",
             model="TestModel",
+            mfg_slug="test-mfg",
+            dt_slug="test-dt",
             source_id="1",
             device_name="test-device-01",
             serial="",
             asset_tag="",
             DeviceType=DeviceType,
             Device=Device,
+            Rack=Rack,
         )
         # Should use '(no rack)' placeholder, not '  (not found)' with leading space
         self.assertNotIn("  ", result_row.detail, "Detail should not contain double space")
@@ -257,30 +259,32 @@ class PreviewDeviceRowTest(TestCase):
 
     def test_rack_label_unknown_rack(self):
         """A non-empty rack_name not in rack_map produces 'rack-X (not found)'."""
-        from dcim.models import Device, DeviceType
+        from dcim.models import Device, DeviceType, Rack
 
-        from netbox_data_import.engine import _preview_device_row
+        from netbox_data_import.engine import ImportContext, ImportResult, _preview_device_row
 
         row = {
             "_row_number": 2,
             "rack_name": "RACK-99",
             "u_position": 5,
         }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
         result_row = _preview_device_row(
             row=row,
-            profile=self.profile,
-            rack_map={},
-            site=self.site,
-            mfg_slug="test-mfg",
-            dt_slug="test-dt",
+            ctx=ctx,
             make="TestMake",
             model="TestModel",
+            mfg_slug="test-mfg",
+            dt_slug="test-dt",
             source_id="2",
             device_name="test-device-02",
             serial="",
             asset_tag="",
             DeviceType=DeviceType,
             Device=Device,
+            Rack=Rack,
         )
         self.assertIn("RACK-99 (not found)", result_row.detail)
 
@@ -295,11 +299,12 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
         """Execute mode with create_missing_device_types=False appends no RowResult rows."""
         from dcim.models import DeviceType, Manufacturer
 
-        from netbox_data_import.engine import ImportResult, _ensure_device_type
+        from netbox_data_import.engine import ImportContext, ImportResult, _ensure_device_type
 
         self.profile.create_missing_device_types = False
         result = ImportResult()
         row = {"_row_number": 1, "source_id": "1"}
+        ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=False, result=result)
         _ensure_device_type(
             "unknown-mfg",
             "unknown-dt",
@@ -307,12 +312,10 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
             "Unknown Model",
             1,
             set(),
-            self.profile,
-            result,
-            dry_run=False,
-            row=row,
-            Manufacturer=Manufacturer,
-            DeviceType=DeviceType,
+            ctx,
+            row,
+            Manufacturer,
+            DeviceType,
         )
         device_type_rows = [r for r in result.rows if r.object_type == "device_type"]
         self.assertEqual(device_type_rows, [], "Execute mode must not append device_type RowResult rows")
@@ -321,11 +324,12 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
         """Execute mode with create_missing_device_types=True appends no RowResult rows (creates silently)."""
         from dcim.models import DeviceType, Manufacturer
 
-        from netbox_data_import.engine import ImportResult, _ensure_device_type
+        from netbox_data_import.engine import ImportContext, ImportResult, _ensure_device_type
 
         self.profile.create_missing_device_types = True
         result = ImportResult()
         row = {"_row_number": 1, "source_id": "1"}
+        ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=False, result=result)
         _ensure_device_type(
             "silent-mfg",
             "silent-dt",
@@ -333,12 +337,10 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
             "Silent Model",
             1,
             set(),
-            self.profile,
-            result,
-            dry_run=False,
-            row=row,
-            Manufacturer=Manufacturer,
-            DeviceType=DeviceType,
+            ctx,
+            row,
+            Manufacturer,
+            DeviceType,
         )
         device_type_rows = [r for r in result.rows if r.object_type == "device_type"]
         self.assertEqual(device_type_rows, [], "Execute mode must not append device_type RowResult rows")
@@ -349,11 +351,12 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
         """Dry-run with create_missing_device_types=False does append an error RowResult."""
         from dcim.models import DeviceType, Manufacturer
 
-        from netbox_data_import.engine import ImportResult, _ensure_device_type
+        from netbox_data_import.engine import ImportContext, ImportResult, _ensure_device_type
 
         self.profile.create_missing_device_types = False
         result = ImportResult()
         row = {"_row_number": 1, "source_id": "1"}
+        ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=True, result=result)
         _ensure_device_type(
             "dry-mfg",
             "dry-dt",
@@ -361,12 +364,10 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
             "Dry Model",
             1,
             set(),
-            self.profile,
-            result,
-            dry_run=True,
-            row=row,
-            Manufacturer=Manufacturer,
-            DeviceType=DeviceType,
+            ctx,
+            row,
+            Manufacturer,
+            DeviceType,
         )
         device_type_rows = [r for r in result.rows if r.object_type == "device_type"]
         self.assertEqual(len(device_type_rows), 1)
