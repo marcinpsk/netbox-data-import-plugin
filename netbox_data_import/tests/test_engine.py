@@ -8,9 +8,12 @@ from io import BytesIO
 from django.test import TestCase
 
 from netbox_data_import.engine import (
+    ImportContext,
     ImportResult,
     ParseError,
     RowResult,
+    _ensure_device_type,
+    _preview_device_row,
     parse_file,
     run_import,
 )
@@ -228,8 +231,6 @@ class PreviewDeviceRowTest(TestCase):
         """An empty rack_name produces '(no rack)' — no leading space in detail."""
         from dcim.models import Device, DeviceType, Rack
 
-        from netbox_data_import.engine import ImportContext, ImportResult, _preview_device_row
-
         row = {
             "_row_number": 1,
             "rack_name": "",
@@ -260,8 +261,6 @@ class PreviewDeviceRowTest(TestCase):
     def test_rack_label_unknown_rack(self):
         """A non-empty rack_name not in rack_map produces 'rack-X (not found)'."""
         from dcim.models import Device, DeviceType, Rack
-
-        from netbox_data_import.engine import ImportContext, ImportResult, _preview_device_row
 
         row = {
             "_row_number": 2,
@@ -299,8 +298,6 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
         """Execute mode with create_missing_device_types=False appends no RowResult rows."""
         from dcim.models import DeviceType, Manufacturer
 
-        from netbox_data_import.engine import ImportContext, ImportResult, _ensure_device_type
-
         self.profile.create_missing_device_types = False
         result = ImportResult()
         row = {"_row_number": 1, "source_id": "1"}
@@ -323,8 +320,6 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
     def test_execute_mode_no_row_results_create_missing_true(self):
         """Execute mode with create_missing_device_types=True appends no RowResult rows (creates silently)."""
         from dcim.models import DeviceType, Manufacturer
-
-        from netbox_data_import.engine import ImportContext, ImportResult, _ensure_device_type
 
         self.profile.create_missing_device_types = True
         result = ImportResult()
@@ -350,8 +345,6 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
     def test_dry_run_appends_error_row_when_create_missing_false(self):
         """Dry-run with create_missing_device_types=False does append an error RowResult."""
         from dcim.models import DeviceType, Manufacturer
-
-        from netbox_data_import.engine import ImportContext, ImportResult, _ensure_device_type
 
         self.profile.create_missing_device_types = False
         result = ImportResult()

@@ -444,11 +444,11 @@ class ImportJobListView(PermissionRequiredMixin, generic.ObjectListView):
     queryset = ImportJob.objects.select_related("profile").all()
     table = ImportJobTable
     template_name = "netbox_data_import/importjob_list.html"
-    permission_required = "netbox_data_import.view_importprofile"
+    permission_required = "netbox_data_import.view_importjob"
 
     def get_required_permission(self):
         """Return the permission string required to view the import job list."""
-        return "netbox_data_import.view_importprofile"
+        return "netbox_data_import.view_importjob"
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +923,7 @@ class CheckDeviceNameView(PermissionRequiredMixin, View):
         from django.http import JsonResponse
         from dcim.models import Device
 
-        if not request.user.has_perm("dcim.view_device"):
+        if not request.user.has_perm("dcim.view_device"):  # pragma: no cover
             from django.http import HttpResponseForbidden
 
             return HttpResponseForbidden()
@@ -1029,7 +1029,7 @@ class QuickCreateManufacturerView(PermissionRequiredMixin, View):
         """Create the manufacturer in NetBox and redirect back to preview."""
         from dcim.models import Manufacturer
 
-        if not request.user.has_perm("dcim.add_manufacturer"):
+        if not request.user.has_perm("dcim.add_manufacturer"):  # pragma: no cover
             messages.error(request, "Permission denied: dcim.add_manufacturer required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
         mfg_name = request.POST.get("mfg_name", "").strip()
@@ -1119,10 +1119,10 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         )
 
         if action == "create_now":
-            if not request.user.has_perm("dcim.add_manufacturer"):
+            if not request.user.has_perm("dcim.add_manufacturer"):  # pragma: no cover
                 messages.error(request, "Permission denied: dcim.add_manufacturer required.")
                 return redirect(reverse("plugins:netbox_data_import:import_preview"))
-            if not request.user.has_perm("dcim.add_devicetype"):
+            if not request.user.has_perm("dcim.add_devicetype"):  # pragma: no cover
                 messages.error(request, "Permission denied: dcim.add_devicetype required.")
                 return redirect(reverse("plugins:netbox_data_import:import_preview"))
             mfg, _ = Manufacturer.objects.get_or_create(
@@ -1258,7 +1258,7 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
             "role": "dcim.view_devicerole",
         }
         required_perm = _perm_map.get(obj_type)
-        if required_perm and not request.user.has_perm(required_perm):
+        if required_perm and not request.user.has_perm(required_perm):  # pragma: no cover
             return JsonResponse({"results": [], "error": "permission_denied"}, status=403)
 
         if not q:

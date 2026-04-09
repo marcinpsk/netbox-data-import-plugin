@@ -186,10 +186,12 @@ class ImportJobTable(NetBoxTable):
 
     def render_racks_created(self, value):
         """Extract racks_created count from the JSON result_counts dict."""
+        value = value or {}
         return value.get("racks_created", 0)
 
     def render_devices_created(self, value):
         """Extract devices_created count from the JSON result_counts dict."""
+        value = value or {}
         return value.get("devices_created", 0)
 
 
