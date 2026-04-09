@@ -32,6 +32,7 @@ from .tables import (
     ClassRoleMappingTable,
     DeviceTypeMappingTable,
     ColumnTransformRuleTable,
+    ImportJobTable,
 )
 from .filters import ImportProfileFilterSet
 
@@ -238,6 +239,13 @@ class DeviceTypeMappingDeleteView(_ProfileChildDeleteView):
 # Import Wizard — Phase 2 (setup + preview)
 # ---------------------------------------------------------------------------
 
+# These views intentionally use raw django.views.View rather than a NetBox
+# generic view base.  The wizard is a three-step, session-backed state machine
+# (setup → preview → run → results) that does not correspond to any single
+# NetBox generic view pattern (ObjectEditView, ObjectListView, etc.).  Using a
+# raw View keeps the control flow explicit and avoids fighting ObjectEditView's
+# form-save lifecycle, queryset requirements, and redirect conventions.
+
 
 class ImportSetupView(PermissionRequiredMixin, View):
     """Step 1: select profile, upload file, choose site/location/tenant."""
@@ -419,20 +427,17 @@ class ImportResultsView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class ImportJobListView(PermissionRequiredMixin, View):
+class ImportJobListView(PermissionRequiredMixin, generic.ObjectListView):
     """List all past import jobs for audit / history."""
 
+    queryset = ImportJob.objects.select_related("profile").all()
+    table = ImportJobTable
+    template_name = "netbox_data_import/importjob_list.html"
     permission_required = "netbox_data_import.view_importprofile"
 
-    def get(self, request):
-        """Render the import job history list."""
-        from django.core.paginator import Paginator
-
-        jobs_qs = ImportJob.objects.select_related("profile").all()
-        paginator = Paginator(jobs_qs, 50)
-        page = request.GET.get("page")
-        jobs = paginator.get_page(page)
-        return render(request, "netbox_data_import/importjob_list.html", {"jobs": jobs})
+    def get_required_permission(self):
+        """Return the permission string required to view the import job list."""
+        return "netbox_data_import.view_importprofile"
 
 
 # ---------------------------------------------------------------------------

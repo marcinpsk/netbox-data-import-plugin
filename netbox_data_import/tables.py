@@ -2,7 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
-from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
+from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule, ImportJob
 
 
 class ImportProfileTable(NetBoxTable):
@@ -127,6 +127,67 @@ class DeviceTypeMappingTable(tables.Table):
             "netbox_device_type_slug",
             "actions",
         )
+
+
+class ImportJobTable(tables.Table):
+    """Table for listing ImportJob objects in the history view."""
+
+    pk = tables.Column(verbose_name="#")
+    created = tables.DateTimeColumn(format="Y-m-d H:i")
+    profile = tables.Column(linkify=lambda record: record.profile.get_absolute_url() if record.profile else None)
+    input_filename = tables.Column(verbose_name="File")
+    site_name = tables.Column(verbose_name="Site")
+    racks_created = tables.Column(
+        accessor="result_counts",
+        verbose_name="Racks",
+        orderable=False,
+    )
+    devices_created = tables.Column(
+        accessor="result_counts",
+        verbose_name="Devices",
+        orderable=False,
+    )
+    errors = tables.TemplateColumn(
+        template_code="""
+        {% with c=record.result_counts %}
+        {% if c.errors %}<span class="badge bg-danger">{{ c.errors }}</span>{% else %}—{% endif %}
+        {% endwith %}
+        """,
+        verbose_name="Errors",
+        orderable=False,
+    )
+
+    class Meta:
+        model = ImportJob
+        fields = (
+            "pk",
+            "created",
+            "profile",
+            "input_filename",
+            "site_name",
+            "racks_created",
+            "devices_created",
+            "errors",
+        )
+        attrs = {"class": "table table-hover table-sm"}
+
+    def __init__(self, *args, user=None, **kwargs):
+        """Accept and ignore the user kwarg passed by ObjectListView.get_table()."""
+        super().__init__(*args, **kwargs)
+
+    def render_profile(self, record):
+        """Return the profile name, or a placeholder for deleted profiles."""
+        if record.profile:
+            return record.profile.name
+        return "(deleted)"
+
+    def render_racks_created(self, value):
+        """Extract racks_created count from the JSON result_counts dict."""
+        return value.get("racks_created", 0)
+
+    def render_devices_created(self, value):
+        """Extract devices_created count from the JSON result_counts dict."""
+        return value.get("devices_created", 0)
 
 
 class ColumnTransformRuleTable(tables.Table):
