@@ -94,6 +94,19 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
     queryset = ImportProfile.objects.all()
 
 
+# Scalar profile fields handled by _apply_profile_yaml_data.
+# 'tags' (M2M) is intentionally excluded — use the edit UI or the flat import path.
+_PROFILE_FIELDS = (
+    "description",
+    "sheet_name",
+    "source_id_column",
+    "custom_field_name",
+    "update_existing",
+    "create_missing_device_types",
+    "preview_view_mode",
+)
+
+
 def _validate_model_instance(instance, label):
     """Call full_clean() and surface ValidationErrors as ValueError so the atomic block rolls back."""
     from django.core.exceptions import ValidationError as DjangoValidationError
@@ -106,6 +119,17 @@ def _validate_model_instance(instance, label):
         else:
             msg = "; ".join(exc.messages)
         raise ValueError(f"Validation error in {label}: {msg}") from exc
+
+
+def _get_or_init(model_class, **lookup):
+    """Return the existing persisted instance matching *lookup*, or a new unsaved one.
+
+    This enables validate-before-save semantics: callers can set fields on the
+    returned instance, call ``_validate_model_instance``, and only then call
+    ``instance.save()``.  DB-level errors (e.g. overlength strings) are thus
+    caught by Django's field validators before any write reaches the database.
+    """
+    return model_class.objects.filter(**lookup).first() or model_class(**lookup)
 
 
 def _iter_yaml_section(data, section_name, required_keys=()):
@@ -134,6 +158,23 @@ def _iter_yaml_section(data, section_name, required_keys=()):
         yield item
 
 
+def _delete_stale_device_type_mappings(profile, keep_keys):
+    """Delete DeviceTypeMapping rows whose (source_make, source_model) is not in *keep_keys*.
+
+    Uses a single DB-level exclusion via Q objects, consistent with how other sections
+    handle reconcile-deletes, and avoids loading all existing rows into Python.
+    """
+    from django.db.models import Q
+
+    qs = DeviceTypeMapping.objects.filter(profile=profile)
+    if keep_keys:
+        keep_q = Q()
+        for make, model in keep_keys:
+            keep_q |= Q(source_make=make, source_model=model)
+        qs = qs.exclude(keep_q)
+    qs.delete()
+
+
 def _apply_profile_yaml_data(data):
     """Create or update an ImportProfile and all its nested mappings from parsed YAML data.
 
@@ -156,37 +197,25 @@ def _apply_profile_yaml_data(data):
     if not pdata.get("name"):
         raise ValueError("Profile YAML must include a 'name' field.")
 
-    _PROFILE_FIELDS = (
-        "description",
-        "sheet_name",
-        "source_id_column",
-        "custom_field_name",
-        "update_existing",
-        "create_missing_device_types",
-        "preview_view_mode",
-    )
-
     with transaction.atomic():
         # Only include fields that are explicitly present in the YAML so that a
         # partial reimport (e.g. just trimming child sections) does not silently
         # reset unrelated profile settings back to hard-coded defaults.
         profile_defaults = {f: pdata[f] for f in _PROFILE_FIELDS if f in pdata}
-        profile, _ = ImportProfile.objects.update_or_create(
-            name=pdata["name"],
-            defaults=profile_defaults,
-        )
+        profile = _get_or_init(ImportProfile, name=pdata["name"])
+        for field, value in profile_defaults.items():
+            setattr(profile, field, value)
         _validate_model_instance(profile, "profile")
+        profile.save()
 
         stats = {}
 
         cm_target_fields = []
         for cm in _iter_yaml_section(data, "column_mappings", ("target_field", "source_column")):
-            instance, _ = ColumnMapping.objects.update_or_create(
-                profile=profile,
-                target_field=cm["target_field"],
-                defaults={"source_column": cm["source_column"]},
-            )
+            instance = _get_or_init(ColumnMapping, profile=profile, target_field=cm["target_field"])
+            instance.source_column = cm["source_column"]
             _validate_model_instance(instance, f"column_mappings[{cm['target_field']}]")
+            instance.save()
             cm_target_fields.append(cm["target_field"])
             stats["column_mappings"] = stats.get("column_mappings", 0) + 1
         if "column_mappings" in data:
@@ -194,16 +223,12 @@ def _apply_profile_yaml_data(data):
 
         crm_source_classes = []
         for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
-            instance, _ = ClassRoleMapping.objects.update_or_create(
-                profile=profile,
-                source_class=m["source_class"],
-                defaults={
-                    "creates_rack": m.get("creates_rack", False),
-                    "role_slug": m.get("role_slug", ""),
-                    "ignore": m.get("ignore", False),
-                },
-            )
+            instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
+            instance.creates_rack = m.get("creates_rack", False)
+            instance.role_slug = m.get("role_slug", "")
+            instance.ignore = m.get("ignore", False)
             _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
+            instance.save()
             crm_source_classes.append(m["source_class"])
             stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
         if "class_role_mappings" in data:
@@ -215,35 +240,24 @@ def _apply_profile_yaml_data(data):
             "device_type_mappings",
             ("source_make", "source_model", "netbox_manufacturer_slug", "netbox_device_type_slug"),
         ):
-            instance, _ = DeviceTypeMapping.objects.update_or_create(
-                profile=profile,
-                source_make=m["source_make"],
-                source_model=m["source_model"],
-                defaults={
-                    "netbox_manufacturer_slug": m["netbox_manufacturer_slug"],
-                    "netbox_device_type_slug": m["netbox_device_type_slug"],
-                },
+            instance = _get_or_init(
+                DeviceTypeMapping, profile=profile, source_make=m["source_make"], source_model=m["source_model"]
             )
+            instance.netbox_manufacturer_slug = m["netbox_manufacturer_slug"]
+            instance.netbox_device_type_slug = m["netbox_device_type_slug"]
             _validate_model_instance(instance, f"device_type_mappings[{m['source_make']}/{m['source_model']}]")
+            instance.save()
             dtm_keys.append((m["source_make"], m["source_model"]))
             stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
         if "device_type_mappings" in data:
-            dtm_key_set = set(dtm_keys)
-            kept_pks = {
-                dtm.pk
-                for dtm in DeviceTypeMapping.objects.filter(profile=profile)
-                if (dtm.source_make, dtm.source_model) in dtm_key_set
-            }
-            DeviceTypeMapping.objects.filter(profile=profile).exclude(pk__in=kept_pks).delete()
+            _delete_stale_device_type_mappings(profile, dtm_keys)
 
         mm_source_makes = []
         for m in _iter_yaml_section(data, "manufacturer_mappings", ("source_make", "netbox_manufacturer_slug")):
-            instance, _ = ManufacturerMapping.objects.update_or_create(
-                profile=profile,
-                source_make=m["source_make"],
-                defaults={"netbox_manufacturer_slug": m["netbox_manufacturer_slug"]},
-            )
+            instance = _get_or_init(ManufacturerMapping, profile=profile, source_make=m["source_make"])
+            instance.netbox_manufacturer_slug = m["netbox_manufacturer_slug"]
             _validate_model_instance(instance, f"manufacturer_mappings[{m['source_make']}]")
+            instance.save()
             mm_source_makes.append(m["source_make"])
             stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
         if "manufacturer_mappings" in data:
@@ -251,16 +265,12 @@ def _apply_profile_yaml_data(data):
 
         ctr_source_columns = []
         for r in _iter_yaml_section(data, "column_transform_rules", ("source_column", "pattern")):
-            instance, _ = ColumnTransformRule.objects.update_or_create(
-                profile=profile,
-                source_column=r["source_column"],
-                defaults={
-                    "pattern": r["pattern"],
-                    "group_1_target": r.get("group_1_target", ""),
-                    "group_2_target": r.get("group_2_target", ""),
-                },
-            )
+            instance = _get_or_init(ColumnTransformRule, profile=profile, source_column=r["source_column"])
+            instance.pattern = r["pattern"]
+            instance.group_1_target = r.get("group_1_target", "")
+            instance.group_2_target = r.get("group_2_target", "")
             _validate_model_instance(instance, f"column_transform_rules[{r['source_column']}]")
+            instance.save()
             ctr_source_columns.append(r["source_column"])
             stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
         if "column_transform_rules" in data:
@@ -315,7 +325,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
         if isinstance(data, dict) and "profile" in data:
             try:
                 profile, stats = _apply_profile_yaml_data(data)
-            except (ValueError, KeyError) as exc:
+            except ValueError as exc:  # KeyError no longer escapes since _iter_yaml_section validates required_keys
                 messages.error(request, str(exc))
                 return redirect(request.path)
             summary = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items())
@@ -1067,7 +1077,7 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
 
         try:
             profile, stats = _apply_profile_yaml_data(data)
-        except (ValueError, KeyError) as exc:
+        except ValueError as exc:  # KeyError no longer escapes since _iter_yaml_section validates required_keys
             messages.error(request, str(exc))
             return render(request, "netbox_data_import/import_profile_yaml.html")
 

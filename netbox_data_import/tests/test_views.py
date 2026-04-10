@@ -2299,6 +2299,44 @@ column_mappings:
             "Profile must be created via flat file upload; seek(0) rewind is required.",
         )
 
+    def test_post_hierarchical_yaml_creates_column_transform_rules(self):
+        """POST hierarchical YAML creates ColumnTransformRules end-to-end."""
+        from netbox_data_import.models import ColumnTransformRule
+
+        yaml_with_transforms = (
+            "profile:\n"
+            "  name: TransformRulesProfile\n"
+            "  sheet_name: Data\n"
+            "column_transform_rules:\n"
+            "  - source_column: HostName\n"
+            "    pattern: '^([a-z]+)(\\d+)'\n"
+            "    group_1_target: device_name\n"
+            "    group_2_target: ''\n"
+        )
+        resp = self.client.post(self._url(), {"data": yaml_with_transforms})
+        self.assertIn(resp.status_code, [200, 302])
+        profile = ImportProfile.objects.filter(name="TransformRulesProfile").first()
+        self.assertIsNotNone(profile, "Profile must be created")
+        self.assertTrue(
+            ColumnTransformRule.objects.filter(profile=profile, source_column="HostName").exists(),
+            "ColumnTransformRule must be created from hierarchical YAML",
+        )
+
+    # --- Authentication ---
+
+    def test_unauthenticated_get_redirects_to_login(self):
+        """Unauthenticated GET is redirected to login, not served directly."""
+        self.client.logout()
+        resp = self.client.get(self._url())
+        self.assertIn(resp.status_code, [302, 403])
+
+    def test_unauthenticated_post_is_rejected(self):
+        """Unauthenticated POST is rejected (302 to login or 403)."""
+        self.client.logout()
+        resp = self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        self.assertIn(resp.status_code, [302, 403])
+        self.assertFalse(ImportProfile.objects.filter(name="BulkImportedProfile").exists())
+
 
 class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
     """Unit tests for the _apply_profile_yaml_data helper."""
@@ -2515,3 +2553,14 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
             _apply_profile_yaml_data(data)
         self.assertIn("manufacturer_mappings[1]", str(cm.exception))
         self.assertIn("netbox_manufacturer_slug", str(cm.exception))
+
+    def test_overlength_profile_name_raises_value_error_not_500(self):
+        """Overlength field is caught by full_clean before any DB write, raising ValueError."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "X" * 200},  # exceeds max_length=100 for ImportProfile.name
+        }
+        with self.assertRaises(ValueError, msg="overlength name must raise ValueError, not DataError"):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name__startswith="X" * 50).exists())
