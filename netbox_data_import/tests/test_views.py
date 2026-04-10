@@ -2272,6 +2272,33 @@ column_mappings:
         self.assertIn(resp.status_code, [200, 302])
         self.assertNotEqual(resp.status_code, 500)
 
+    def test_post_flat_yaml_via_file_upload_exercises_seek_rewind(self):
+        """Flat YAML via file upload exercises the upload.seek(0) rewind path.
+
+        When the YAML has no top-level 'profile:' key, the view calls
+        upload.seek(0) before delegating to NetBox's BulkImportView.  Without
+        this rewind the parent receives an EOF file handle and imports nothing.
+        Creating the profile via this path confirms seek(0) is present.
+        """
+        flat_yaml = (
+            b"- name: FlatRewindProfile\n"
+            b"  sheet_name: Data\n"
+            b"  preview_view_mode: rows\n"
+            b"  update_existing: false\n"
+            b"  create_missing_device_types: false\n"
+        )
+        f = BytesIO(flat_yaml)
+        f.name = "flat.yaml"
+        resp = self.client.post(
+            self._url(),
+            {"upload_file": f, "import_method": "upload", "format": "yaml"},
+        )
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(
+            ImportProfile.objects.filter(name="FlatRewindProfile").exists(),
+            "Profile must be created via flat file upload; seek(0) rewind is required.",
+        )
+
 
 class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
     """Unit tests for the _apply_profile_yaml_data helper."""
@@ -2326,16 +2353,17 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         self.assertTrue(ImportProfile.objects.filter(name="UnitTestProfile").exists())
 
     def test_atomic_rollback_on_bad_column_mapping(self):
-        """A KeyError mid-import rolls back the entire transaction."""
+        """A missing required key mid-import raises ValueError and rolls back the transaction."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
         bad_data = {
             "profile": {"name": "AtomicRollbackProfile"},
-            # missing required 'target_field' key → KeyError
+            # missing required 'target_field' key → descriptive ValueError
             "column_mappings": [{"source_column": "Name"}],
         }
-        with self.assertRaises(KeyError):
+        with self.assertRaises(ValueError) as cm:
             _apply_profile_yaml_data(bad_data)
+        self.assertIn("target_field", str(cm.exception))
         self.assertFalse(ImportProfile.objects.filter(name="AtomicRollbackProfile").exists())
 
     def test_column_mappings_not_a_list_raises(self):
@@ -2440,3 +2468,50 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         self.assertEqual(profile.custom_field_name, "my_cf", "custom_field_name must not be reset")
         self.assertFalse(profile.update_existing, "update_existing must not be reset")
         self.assertEqual(profile.preview_view_mode, "racks", "preview_view_mode must not be reset")
+
+    def test_column_mapping_missing_required_key_raises_descriptive_error(self):
+        """Missing required key in column_mappings raises ValueError with section and key name."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        ImportProfile.objects.create(name="KeyErrProfile", sheet_name="Data")
+        data = {
+            "profile": {"name": "KeyErrProfile"},
+            "column_mappings": [{"source_column": "Name"}],  # missing target_field
+        }
+        with self.assertRaises(ValueError) as cm:
+            _apply_profile_yaml_data(data)
+        self.assertIn("column_mappings[1]", str(cm.exception))
+        self.assertIn("target_field", str(cm.exception))
+
+    def test_device_type_mapping_missing_required_key_raises_descriptive_error(self):
+        """Missing required key in device_type_mappings raises ValueError, not bare KeyError."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        ImportProfile.objects.create(name="DTMKeyErrProfile", sheet_name="Data")
+        data = {
+            "profile": {"name": "DTMKeyErrProfile"},
+            "device_type_mappings": [
+                {
+                    "source_make": "Cisco",
+                    "source_model": "ISR4321",
+                    # missing netbox_manufacturer_slug and netbox_device_type_slug
+                }
+            ],
+        }
+        with self.assertRaises(ValueError) as cm:
+            _apply_profile_yaml_data(data)
+        self.assertIn("device_type_mappings[1]", str(cm.exception))
+
+    def test_manufacturer_mapping_missing_required_key_raises_descriptive_error(self):
+        """Missing required key in manufacturer_mappings raises ValueError with context."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        ImportProfile.objects.create(name="MMKeyErrProfile", sheet_name="Data")
+        data = {
+            "profile": {"name": "MMKeyErrProfile"},
+            "manufacturer_mappings": [{"source_make": "Cisco"}],  # missing netbox_manufacturer_slug
+        }
+        with self.assertRaises(ValueError) as cm:
+            _apply_profile_yaml_data(data)
+        self.assertIn("manufacturer_mappings[1]", str(cm.exception))
+        self.assertIn("netbox_manufacturer_slug", str(cm.exception))

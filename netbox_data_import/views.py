@@ -108,12 +108,14 @@ def _validate_model_instance(instance, label):
         raise ValueError(f"Validation error in {label}: {msg}") from exc
 
 
-def _iter_yaml_section(data, section_name):
+def _iter_yaml_section(data, section_name, required_keys=()):
     """Yield mapping items for a named section in a parsed YAML dict.
 
     - Absent key → yields nothing (caller skips reconciliation).
     - Explicit null or non-list value → raises ValueError.
     - Explicit empty list → yields nothing (caller reconcile-deletes all).
+    - Item missing a required key → raises ValueError with index and key name(s),
+      preventing a bare KeyError from bubbling up with no context.
     """
     if section_name not in data:
         return
@@ -126,6 +128,9 @@ def _iter_yaml_section(data, section_name):
     for idx, item in enumerate(section, start=1):
         if not isinstance(item, dict):
             raise ValueError(f"'{section_name}[{idx}]' must be a mapping, got {type(item).__name__}.")
+        missing = [k for k in required_keys if k not in item]
+        if missing:
+            raise ValueError(f"'{section_name}[{idx}]' missing required key(s): {', '.join(missing)}")
         yield item
 
 
@@ -175,7 +180,7 @@ def _apply_profile_yaml_data(data):
         stats = {}
 
         cm_target_fields = []
-        for cm in _iter_yaml_section(data, "column_mappings"):
+        for cm in _iter_yaml_section(data, "column_mappings", ("target_field", "source_column")):
             instance, _ = ColumnMapping.objects.update_or_create(
                 profile=profile,
                 target_field=cm["target_field"],
@@ -188,7 +193,7 @@ def _apply_profile_yaml_data(data):
             ColumnMapping.objects.filter(profile=profile).exclude(target_field__in=cm_target_fields).delete()
 
         crm_source_classes = []
-        for m in _iter_yaml_section(data, "class_role_mappings"):
+        for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
             instance, _ = ClassRoleMapping.objects.update_or_create(
                 profile=profile,
                 source_class=m["source_class"],
@@ -205,7 +210,11 @@ def _apply_profile_yaml_data(data):
             ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
 
         dtm_keys = []
-        for m in _iter_yaml_section(data, "device_type_mappings"):
+        for m in _iter_yaml_section(
+            data,
+            "device_type_mappings",
+            ("source_make", "source_model", "netbox_manufacturer_slug", "netbox_device_type_slug"),
+        ):
             instance, _ = DeviceTypeMapping.objects.update_or_create(
                 profile=profile,
                 source_make=m["source_make"],
@@ -228,7 +237,7 @@ def _apply_profile_yaml_data(data):
             DeviceTypeMapping.objects.filter(profile=profile).exclude(pk__in=kept_pks).delete()
 
         mm_source_makes = []
-        for m in _iter_yaml_section(data, "manufacturer_mappings"):
+        for m in _iter_yaml_section(data, "manufacturer_mappings", ("source_make", "netbox_manufacturer_slug")):
             instance, _ = ManufacturerMapping.objects.update_or_create(
                 profile=profile,
                 source_make=m["source_make"],
@@ -241,7 +250,7 @@ def _apply_profile_yaml_data(data):
             ManufacturerMapping.objects.filter(profile=profile).exclude(source_make__in=mm_source_makes).delete()
 
         ctr_source_columns = []
-        for r in _iter_yaml_section(data, "column_transform_rules"):
+        for r in _iter_yaml_section(data, "column_transform_rules", ("source_column", "pattern")):
             instance, _ = ColumnTransformRule.objects.update_or_create(
                 profile=profile,
                 source_column=r["source_column"],
