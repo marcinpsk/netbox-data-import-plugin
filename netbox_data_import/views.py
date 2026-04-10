@@ -151,18 +151,24 @@ def _apply_profile_yaml_data(data):
     if not pdata.get("name"):
         raise ValueError("Profile YAML must include a 'name' field.")
 
+    _PROFILE_FIELDS = (
+        "description",
+        "sheet_name",
+        "source_id_column",
+        "custom_field_name",
+        "update_existing",
+        "create_missing_device_types",
+        "preview_view_mode",
+    )
+
     with transaction.atomic():
+        # Only include fields that are explicitly present in the YAML so that a
+        # partial reimport (e.g. just trimming child sections) does not silently
+        # reset unrelated profile settings back to hard-coded defaults.
+        profile_defaults = {f: pdata[f] for f in _PROFILE_FIELDS if f in pdata}
         profile, _ = ImportProfile.objects.update_or_create(
             name=pdata["name"],
-            defaults={
-                "description": pdata.get("description", ""),
-                "sheet_name": pdata.get("sheet_name", "Data"),
-                "source_id_column": pdata.get("source_id_column", ""),
-                "custom_field_name": pdata.get("custom_field_name", ""),
-                "update_existing": pdata.get("update_existing", True),
-                "create_missing_device_types": pdata.get("create_missing_device_types", True),
-                "preview_view_mode": pdata.get("preview_view_mode", "rows"),
-            },
+            defaults=profile_defaults,
         )
         _validate_model_instance(profile, "profile")
 

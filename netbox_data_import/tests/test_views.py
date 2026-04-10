@@ -2416,3 +2416,27 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
             _apply_profile_yaml_data(bad_data)
         # Full rollback: profile itself must not exist.
         self.assertFalse(ImportProfile.objects.filter(name="BadTargetFieldProfile").exists())
+
+    def test_partial_reimport_preserves_unmentioned_profile_fields(self):
+        """Reimporting YAML that omits optional profile fields does not reset them."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        # Create a profile with non-default field values.
+        profile = ImportProfile.objects.create(
+            name="PartialReimportProfile",
+            sheet_name="CustomSheet",
+            source_id_column="SourceId",
+            custom_field_name="my_cf",
+            update_existing=False,
+            preview_view_mode="racks",
+        )
+
+        # Re-import with only 'name' — no other profile fields.
+        _apply_profile_yaml_data({"profile": {"name": "PartialReimportProfile"}})
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.sheet_name, "CustomSheet", "sheet_name must not be reset")
+        self.assertEqual(profile.source_id_column, "SourceId", "source_id_column must not be reset")
+        self.assertEqual(profile.custom_field_name, "my_cf", "custom_field_name must not be reset")
+        self.assertFalse(profile.update_existing, "update_existing must not be reset")
+        self.assertEqual(profile.preview_view_mode, "racks", "preview_view_mode must not be reset")
