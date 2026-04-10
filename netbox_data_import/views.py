@@ -130,10 +130,19 @@ def _apply_profile_yaml_data(data):
             },
         )
 
+        def _iter_section(section_name):
+            section = data.get(section_name) or []
+            if not isinstance(section, list):
+                raise ValueError(f"'{section_name}' must be a list of mappings, got {type(section).__name__}.")
+            for idx, item in enumerate(section, start=1):
+                if not isinstance(item, dict):
+                    raise ValueError(f"'{section_name}[{idx}]' must be a mapping, got {type(item).__name__}.")
+                yield item
+
         stats = {}
 
         cm_target_fields = []
-        for cm in data.get("column_mappings", []):
+        for cm in _iter_section("column_mappings"):
             ColumnMapping.objects.update_or_create(
                 profile=profile,
                 target_field=cm["target_field"],
@@ -144,7 +153,7 @@ def _apply_profile_yaml_data(data):
         ColumnMapping.objects.filter(profile=profile).exclude(target_field__in=cm_target_fields).delete()
 
         crm_source_classes = []
-        for m in data.get("class_role_mappings", []):
+        for m in _iter_section("class_role_mappings"):
             ClassRoleMapping.objects.update_or_create(
                 profile=profile,
                 source_class=m["source_class"],
@@ -159,7 +168,7 @@ def _apply_profile_yaml_data(data):
         ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
 
         dtm_keys = []
-        for m in data.get("device_type_mappings", []):
+        for m in _iter_section("device_type_mappings"):
             DeviceTypeMapping.objects.update_or_create(
                 profile=profile,
                 source_make=m["source_make"],
@@ -176,7 +185,7 @@ def _apply_profile_yaml_data(data):
                 dtm.delete()
 
         mm_source_makes = []
-        for m in data.get("manufacturer_mappings", []):
+        for m in _iter_section("manufacturer_mappings"):
             ManufacturerMapping.objects.update_or_create(
                 profile=profile,
                 source_make=m["source_make"],
@@ -187,7 +196,7 @@ def _apply_profile_yaml_data(data):
         ManufacturerMapping.objects.filter(profile=profile).exclude(source_make__in=mm_source_makes).delete()
 
         ctr_source_columns = []
-        for r in data.get("column_transform_rules", []):
+        for r in _iter_section("column_transform_rules"):
             ColumnTransformRule.objects.update_or_create(
                 profile=profile,
                 source_column=r["source_column"],

@@ -2265,6 +2265,13 @@ column_mappings:
         resp = self.client.post(self._url(), {"data": "profile:\n  sheet_name: Data\n"})
         self.assertIn(resp.status_code, [200, 302])
 
+    def test_post_malformed_section_shows_error_not_500(self):
+        """POST with a section that is a dict (not list) returns error, not 500."""
+        malformed = "profile:\n  name: MalformedSectionProfile\ncolumn_mappings:\n  target_field: device_name\n"
+        resp = self.client.post(self._url(), {"data": malformed})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertNotEqual(resp.status_code, 500)
+
 
 class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
     """Unit tests for the _apply_profile_yaml_data helper."""
@@ -2330,3 +2337,28 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         with self.assertRaises(KeyError):
             _apply_profile_yaml_data(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="AtomicRollbackProfile").exists())
+
+    def test_column_mappings_not_a_list_raises(self):
+        """Raises ValueError when a section is a dict instead of a list."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "SectionTypeProfile"},
+            # dict instead of list
+            "column_mappings": {"target_field": "device_name", "source_column": "Name"},
+        }
+        with self.assertRaises(ValueError, msg="section type check"):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="SectionTypeProfile").exists())
+
+    def test_column_mappings_item_not_a_dict_raises(self):
+        """Raises ValueError when a section item is a scalar instead of a mapping."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "SectionItemProfile"},
+            "column_mappings": ["just-a-string"],
+        }
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="SectionItemProfile").exists())
