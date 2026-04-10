@@ -2249,10 +2249,17 @@ column_mappings:
         resp = self.client.post(self._url(), {})
         self.assertIn(resp.status_code, [200, 302])
 
-    def test_post_invalid_yaml_shows_error(self):
-        """POST with invalid YAML shows error and redirects."""
-        resp = self.client.post(self._url(), {"data": ": {{ invalid yaml"})
+    def test_post_yaml_parse_failure_falls_through_to_parent(self):
+        """YAML-parse-failing content falls through to NetBox's BulkImportView, not a 500.
+
+        CSV files with colons or unbalanced braces can fail yaml.safe_load.
+        The view must pass them to super().post() rather than blocking with an
+        'Invalid YAML' error.  A realistic POST includes ``format`` (as the
+        NetBox UI form always does) so the parent handler doesn't crash.
+        """
+        resp = self.client.post(self._url(), {"data": ": {{ invalid yaml", "format": "auto"})
         self.assertIn(resp.status_code, [200, 302])
+        self.assertNotEqual(resp.status_code, 500)
 
     def test_post_non_dict_profile_value_shows_error(self):
         """POST with profile: scalar (not a dict) shows error."""

@@ -317,9 +317,12 @@ class ImportProfileBulkImportView(generic.BulkImportView):
 
         try:
             data = yaml.safe_load(raw)
-        except Exception as exc:
-            messages.error(request, f"Invalid YAML: {exc}")
-            return redirect(request.path)
+        except Exception:
+            # Input is not valid YAML — let NetBox's BulkImportView handle it
+            # (covers CSV and any flat format with YAML-invalid characters).
+            if upload:
+                upload.seek(0)
+            return super().post(request)
 
         # Hierarchical format: delegate to shared helper.
         if isinstance(data, dict) and "profile" in data:
