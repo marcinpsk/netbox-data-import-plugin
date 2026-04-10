@@ -103,80 +103,103 @@ def _apply_profile_yaml_data(data):
     Returns ``(profile, stats)`` where *stats* is a ``{section: count}`` dict.
     Raises ``ValueError`` with a descriptive message on invalid input.
     """
+    from django.db import transaction
+
     from .models import ColumnTransformRule
 
     if not isinstance(data, dict) or "profile" not in data:
         raise ValueError("YAML must contain a top-level 'profile' key.")
 
     pdata = data["profile"]
+    if not isinstance(pdata, dict):
+        raise ValueError("The 'profile' value must be a mapping (dict), not a scalar or list.")
     if not pdata.get("name"):
         raise ValueError("Profile YAML must include a 'name' field.")
 
-    profile, _ = ImportProfile.objects.update_or_create(
-        name=pdata["name"],
-        defaults={
-            "description": pdata.get("description", ""),
-            "sheet_name": pdata.get("sheet_name", "Data"),
-            "source_id_column": pdata.get("source_id_column", ""),
-            "custom_field_name": pdata.get("custom_field_name", ""),
-            "update_existing": pdata.get("update_existing", True),
-            "create_missing_device_types": pdata.get("create_missing_device_types", True),
-            "preview_view_mode": pdata.get("preview_view_mode", "rows"),
-        },
-    )
-
-    stats = {}
-    for cm in data.get("column_mappings", []):
-        ColumnMapping.objects.update_or_create(
-            profile=profile,
-            target_field=cm["target_field"],
-            defaults={"source_column": cm["source_column"]},
-        )
-        stats["column_mappings"] = stats.get("column_mappings", 0) + 1
-
-    for m in data.get("class_role_mappings", []):
-        ClassRoleMapping.objects.update_or_create(
-            profile=profile,
-            source_class=m["source_class"],
+    with transaction.atomic():
+        profile, _ = ImportProfile.objects.update_or_create(
+            name=pdata["name"],
             defaults={
-                "creates_rack": m.get("creates_rack", False),
-                "role_slug": m.get("role_slug", ""),
-                "ignore": m.get("ignore", False),
+                "description": pdata.get("description", ""),
+                "sheet_name": pdata.get("sheet_name", "Data"),
+                "source_id_column": pdata.get("source_id_column", ""),
+                "custom_field_name": pdata.get("custom_field_name", ""),
+                "update_existing": pdata.get("update_existing", True),
+                "create_missing_device_types": pdata.get("create_missing_device_types", True),
+                "preview_view_mode": pdata.get("preview_view_mode", "rows"),
             },
         )
-        stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
 
-    for m in data.get("device_type_mappings", []):
-        DeviceTypeMapping.objects.update_or_create(
-            profile=profile,
-            source_make=m["source_make"],
-            source_model=m["source_model"],
-            defaults={
-                "netbox_manufacturer_slug": m["netbox_manufacturer_slug"],
-                "netbox_device_type_slug": m["netbox_device_type_slug"],
-            },
-        )
-        stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
+        stats = {}
 
-    for m in data.get("manufacturer_mappings", []):
-        ManufacturerMapping.objects.update_or_create(
-            profile=profile,
-            source_make=m["source_make"],
-            defaults={"netbox_manufacturer_slug": m["netbox_manufacturer_slug"]},
-        )
-        stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
+        cm_target_fields = []
+        for cm in data.get("column_mappings", []):
+            ColumnMapping.objects.update_or_create(
+                profile=profile,
+                target_field=cm["target_field"],
+                defaults={"source_column": cm["source_column"]},
+            )
+            cm_target_fields.append(cm["target_field"])
+            stats["column_mappings"] = stats.get("column_mappings", 0) + 1
+        ColumnMapping.objects.filter(profile=profile).exclude(target_field__in=cm_target_fields).delete()
 
-    for r in data.get("column_transform_rules", []):
-        ColumnTransformRule.objects.update_or_create(
-            profile=profile,
-            source_column=r["source_column"],
-            defaults={
-                "pattern": r["pattern"],
-                "group_1_target": r.get("group_1_target", ""),
-                "group_2_target": r.get("group_2_target", ""),
-            },
-        )
-        stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
+        crm_source_classes = []
+        for m in data.get("class_role_mappings", []):
+            ClassRoleMapping.objects.update_or_create(
+                profile=profile,
+                source_class=m["source_class"],
+                defaults={
+                    "creates_rack": m.get("creates_rack", False),
+                    "role_slug": m.get("role_slug", ""),
+                    "ignore": m.get("ignore", False),
+                },
+            )
+            crm_source_classes.append(m["source_class"])
+            stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
+        ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
+
+        dtm_keys = []
+        for m in data.get("device_type_mappings", []):
+            DeviceTypeMapping.objects.update_or_create(
+                profile=profile,
+                source_make=m["source_make"],
+                source_model=m["source_model"],
+                defaults={
+                    "netbox_manufacturer_slug": m["netbox_manufacturer_slug"],
+                    "netbox_device_type_slug": m["netbox_device_type_slug"],
+                },
+            )
+            dtm_keys.append((m["source_make"], m["source_model"]))
+            stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
+        for dtm in DeviceTypeMapping.objects.filter(profile=profile):
+            if (dtm.source_make, dtm.source_model) not in dtm_keys:
+                dtm.delete()
+
+        mm_source_makes = []
+        for m in data.get("manufacturer_mappings", []):
+            ManufacturerMapping.objects.update_or_create(
+                profile=profile,
+                source_make=m["source_make"],
+                defaults={"netbox_manufacturer_slug": m["netbox_manufacturer_slug"]},
+            )
+            mm_source_makes.append(m["source_make"])
+            stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
+        ManufacturerMapping.objects.filter(profile=profile).exclude(source_make__in=mm_source_makes).delete()
+
+        ctr_source_columns = []
+        for r in data.get("column_transform_rules", []):
+            ColumnTransformRule.objects.update_or_create(
+                profile=profile,
+                source_column=r["source_column"],
+                defaults={
+                    "pattern": r["pattern"],
+                    "group_1_target": r.get("group_1_target", ""),
+                    "group_2_target": r.get("group_2_target", ""),
+                },
+            )
+            ctr_source_columns.append(r["source_column"])
+            stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
+        ColumnTransformRule.objects.filter(profile=profile).exclude(source_column__in=ctr_source_columns).delete()
 
     return profile, stats
 
@@ -235,6 +258,9 @@ class ImportProfileBulkImportView(generic.BulkImportView):
             return redirect(profile.get_absolute_url())
 
         # Flat format: let NetBox's BulkImportView handle it.
+        # Rewind the file stream so the parent handler receives the full content.
+        if upload:
+            upload.seek(0)
         return super().post(request)
 
 

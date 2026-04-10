@@ -2141,3 +2141,192 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         device, is_ambiguous = _auto_match_single_device(mock_dev_model, "any-name", "", "SHARED-TAG")
         self.assertIsNone(device)
         self.assertTrue(is_ambiguous)
+
+
+class ImportProfileBulkImportViewTest(BaseViewTestCase):
+    """Tests for ImportProfileBulkImportView (NetBox built-in import UI integration)."""
+
+    HIERARCHICAL_YAML = b"""profile:
+  name: BulkImportedProfile
+  sheet_name: Data
+  source_id_column: Id
+  update_existing: true
+  create_missing_device_types: true
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+  - source_column: Rack
+    target_field: rack_name
+class_role_mappings:
+  - source_class: Server
+    creates_rack: false
+    role_slug: server
+    ignore: false
+manufacturer_mappings:
+  - source_make: Acme
+    netbox_manufacturer_slug: acme
+"""
+
+    def _url(self):
+        return reverse("plugins:netbox_data_import:importprofile_bulk_import")
+
+    # --- GET ---
+
+    def test_get_returns_200(self):
+        """GET the bulk-import page returns 200."""
+        resp = self.client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+
+    # --- POST: hierarchical YAML via text area ---
+
+    def test_post_hierarchical_yaml_creates_profile(self):
+        """POST hierarchical YAML creates ImportProfile."""
+        resp = self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(ImportProfile.objects.filter(name="BulkImportedProfile").exists())
+
+    def test_post_hierarchical_yaml_creates_column_mappings(self):
+        """POST hierarchical YAML creates ColumnMappings."""
+        self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        profile = ImportProfile.objects.filter(name="BulkImportedProfile").first()
+        self.assertIsNotNone(profile)
+        self.assertTrue(ColumnMapping.objects.filter(profile=profile, target_field="device_name").exists())
+        self.assertTrue(ColumnMapping.objects.filter(profile=profile, target_field="rack_name").exists())
+
+    def test_post_hierarchical_yaml_creates_class_role_mappings(self):
+        """POST hierarchical YAML creates ClassRoleMappings."""
+        self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        profile = ImportProfile.objects.filter(name="BulkImportedProfile").first()
+        self.assertIsNotNone(profile)
+        self.assertTrue(ClassRoleMapping.objects.filter(profile=profile, source_class="Server").exists())
+
+    def test_post_hierarchical_yaml_creates_manufacturer_mappings(self):
+        """POST hierarchical YAML creates ManufacturerMappings."""
+        self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        profile = ImportProfile.objects.filter(name="BulkImportedProfile").first()
+        self.assertIsNotNone(profile)
+        self.assertTrue(ManufacturerMapping.objects.filter(profile=profile, source_make="Acme").exists())
+
+    def test_post_hierarchical_yaml_idempotent(self):
+        """Posting the same hierarchical YAML twice is idempotent."""
+        for _ in range(2):
+            self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        self.assertEqual(ImportProfile.objects.filter(name="BulkImportedProfile").count(), 1)
+
+    def test_post_hierarchical_yaml_deletes_removed_mappings(self):
+        """Reimport with fewer mappings deletes the removed ones."""
+        # First import: 2 column mappings
+        self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        profile = ImportProfile.objects.get(name="BulkImportedProfile")
+        self.assertEqual(ColumnMapping.objects.filter(profile=profile).count(), 2)
+
+        # Second import: only 1 column mapping
+        reduced_yaml = b"""profile:
+  name: BulkImportedProfile
+  sheet_name: Data
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+"""
+        self.client.post(self._url(), {"data": reduced_yaml.decode()})
+        self.assertEqual(ColumnMapping.objects.filter(profile=profile).count(), 1)
+        self.assertFalse(ColumnMapping.objects.filter(profile=profile, target_field="rack_name").exists())
+
+    # --- POST: hierarchical YAML via file upload ---
+
+    def test_post_hierarchical_yaml_via_file_upload(self):
+        """POST hierarchical YAML as a file upload creates the profile."""
+        f = BytesIO(self.HIERARCHICAL_YAML)
+        f.name = "profile.yaml"
+        resp = self.client.post(self._url(), {"upload_file": f})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(ImportProfile.objects.filter(name="BulkImportedProfile").exists())
+
+    # --- POST: error paths ---
+
+    def test_post_no_data_shows_error(self):
+        """POST with neither file nor text shows error and redirects."""
+        resp = self.client.post(self._url(), {})
+        self.assertIn(resp.status_code, [200, 302])
+
+    def test_post_invalid_yaml_shows_error(self):
+        """POST with invalid YAML shows error and redirects."""
+        resp = self.client.post(self._url(), {"data": ": {{ invalid yaml"})
+        self.assertIn(resp.status_code, [200, 302])
+
+    def test_post_non_dict_profile_value_shows_error(self):
+        """POST with profile: scalar (not a dict) shows error."""
+        resp = self.client.post(self._url(), {"data": "profile: just-a-string\n"})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertFalse(ImportProfile.objects.filter(name="just-a-string").exists())
+
+    def test_post_missing_name_shows_error(self):
+        """POST with profile dict missing name shows error."""
+        resp = self.client.post(self._url(), {"data": "profile:\n  sheet_name: Data\n"})
+        self.assertIn(resp.status_code, [200, 302])
+
+
+class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
+    """Unit tests for the _apply_profile_yaml_data helper."""
+
+    def test_missing_profile_key_raises(self):
+        """Raises ValueError when top-level 'profile' key is absent."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError, msg="profile key missing"):
+            _apply_profile_yaml_data({"column_mappings": []})
+
+    def test_non_dict_input_raises(self):
+        """Raises ValueError when input is not a dict."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data("just a string")  # type: ignore[arg-type]
+
+    def test_profile_scalar_raises(self):
+        """Raises ValueError when profile value is a scalar, not a mapping."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data({"profile": "not-a-dict"})
+
+    def test_profile_list_raises(self):
+        """Raises ValueError when profile value is a list, not a mapping."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data({"profile": ["item1", "item2"]})
+
+    def test_missing_name_raises(self):
+        """Raises ValueError when profile dict has no 'name' field."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data({"profile": {"sheet_name": "Data"}})
+
+    def test_creates_profile_and_returns_stats(self):
+        """Creates an ImportProfile and returns non-empty stats dict."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "UnitTestProfile", "sheet_name": "Sheet1"},
+            "column_mappings": [{"source_column": "Name", "target_field": "device_name"}],
+        }
+        profile, stats = _apply_profile_yaml_data(data)
+        self.assertEqual(profile.name, "UnitTestProfile")
+        self.assertEqual(profile.sheet_name, "Sheet1")
+        self.assertEqual(stats.get("column_mappings"), 1)
+        self.assertTrue(ImportProfile.objects.filter(name="UnitTestProfile").exists())
+
+    def test_atomic_rollback_on_bad_column_mapping(self):
+        """A KeyError mid-import rolls back the entire transaction."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "AtomicRollbackProfile"},
+            # missing required 'target_field' key → KeyError
+            "column_mappings": [{"source_column": "Name"}],
+        }
+        with self.assertRaises(KeyError):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="AtomicRollbackProfile").exists())
