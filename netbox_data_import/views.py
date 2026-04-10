@@ -94,16 +94,148 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
     queryset = ImportProfile.objects.all()
 
 
-class ImportProfileBulkImportView(generic.BulkImportView):
-    """Import ImportProfile objects from CSV/YAML using NetBox's built-in import UI.
+def _apply_profile_yaml_data(data):
+    """Create or update an ImportProfile and all its nested mappings from parsed YAML data.
 
-    This handles flat profile metadata (name, description, settings).
-    For a full hierarchical import (including column mappings, class-role
-    mappings, etc.), use the "Import Full Profile YAML" button instead.
+    ``data`` must be a dict with a top-level ``profile`` key (the format
+    produced by :class:`ExportProfileYamlView`).
+
+    Returns ``(profile, stats)`` where *stats* is a ``{section: count}`` dict.
+    Raises ``ValueError`` with a descriptive message on invalid input.
+    """
+    from .models import ColumnTransformRule
+
+    if not isinstance(data, dict) or "profile" not in data:
+        raise ValueError("YAML must contain a top-level 'profile' key.")
+
+    pdata = data["profile"]
+    if not pdata.get("name"):
+        raise ValueError("Profile YAML must include a 'name' field.")
+
+    profile, _ = ImportProfile.objects.update_or_create(
+        name=pdata["name"],
+        defaults={
+            "description": pdata.get("description", ""),
+            "sheet_name": pdata.get("sheet_name", "Data"),
+            "source_id_column": pdata.get("source_id_column", ""),
+            "custom_field_name": pdata.get("custom_field_name", ""),
+            "update_existing": pdata.get("update_existing", True),
+            "create_missing_device_types": pdata.get("create_missing_device_types", True),
+            "preview_view_mode": pdata.get("preview_view_mode", "rows"),
+        },
+    )
+
+    stats = {}
+    for cm in data.get("column_mappings", []):
+        ColumnMapping.objects.update_or_create(
+            profile=profile,
+            target_field=cm["target_field"],
+            defaults={"source_column": cm["source_column"]},
+        )
+        stats["column_mappings"] = stats.get("column_mappings", 0) + 1
+
+    for m in data.get("class_role_mappings", []):
+        ClassRoleMapping.objects.update_or_create(
+            profile=profile,
+            source_class=m["source_class"],
+            defaults={
+                "creates_rack": m.get("creates_rack", False),
+                "role_slug": m.get("role_slug", ""),
+                "ignore": m.get("ignore", False),
+            },
+        )
+        stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
+
+    for m in data.get("device_type_mappings", []):
+        DeviceTypeMapping.objects.update_or_create(
+            profile=profile,
+            source_make=m["source_make"],
+            source_model=m["source_model"],
+            defaults={
+                "netbox_manufacturer_slug": m["netbox_manufacturer_slug"],
+                "netbox_device_type_slug": m["netbox_device_type_slug"],
+            },
+        )
+        stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
+
+    for m in data.get("manufacturer_mappings", []):
+        ManufacturerMapping.objects.update_or_create(
+            profile=profile,
+            source_make=m["source_make"],
+            defaults={"netbox_manufacturer_slug": m["netbox_manufacturer_slug"]},
+        )
+        stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
+
+    for r in data.get("column_transform_rules", []):
+        ColumnTransformRule.objects.update_or_create(
+            profile=profile,
+            source_column=r["source_column"],
+            defaults={
+                "pattern": r["pattern"],
+                "group_1_target": r.get("group_1_target", ""),
+                "group_2_target": r.get("group_2_target", ""),
+            },
+        )
+        stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
+
+    return profile, stats
+
+
+class ImportProfileBulkImportView(generic.BulkImportView):
+    """Import ImportProfile objects via NetBox's built-in import UI.
+
+    Supports two formats from the same text area / file upload:
+
+    * **Hierarchical YAML** – the format produced by the "Export YAML" button
+      (top-level keys: ``profile``, ``column_mappings``, ``class_role_mappings``,
+      ``device_type_mappings``, ``manufacturer_mappings``,
+      ``column_transform_rules``).  All nested mappings are created/updated.
+    * **Flat CSV/YAML** – one record per profile, plain metadata fields only
+      (name, description, sheet_name, …).  Falls back to NetBox's standard
+      bulk-import logic.
     """
 
     queryset = ImportProfile.objects.all()
     model_form = ImportProfileImportForm
+
+    def post(self, request):
+        """Detect format and apply hierarchical YAML or delegate to flat bulk import."""
+        import yaml
+
+        # Read the raw input from the file upload or the text area.
+        upload = request.FILES.get("upload_file")
+        if upload:
+            try:
+                raw = upload.read().decode("utf-8-sig")
+            except Exception as exc:  # pragma: no cover
+                messages.error(request, f"Could not read uploaded file: {exc}")
+                return redirect(request.path)
+        else:
+            raw = request.POST.get("data", "").strip()
+
+        if not raw:
+            messages.error(request, "No data provided.")
+            return redirect(request.path)
+
+        try:
+            data = yaml.safe_load(raw)
+        except Exception as exc:
+            messages.error(request, f"Invalid YAML: {exc}")
+            return redirect(request.path)
+
+        # Hierarchical format: delegate to shared helper.
+        if isinstance(data, dict) and "profile" in data:
+            try:
+                profile, stats = _apply_profile_yaml_data(data)
+            except (ValueError, KeyError) as exc:
+                messages.error(request, str(exc))
+                return redirect(request.path)
+            summary = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items())
+            messages.success(request, f"Profile '{profile.name}' imported/updated. {summary}.")
+            return redirect(profile.get_absolute_url())
+
+        # Flat format: let NetBox's BulkImportView handle it.
+        return super().post(request)
 
 
 # ---------------------------------------------------------------------------
@@ -842,78 +974,11 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
             messages.error(request, f"Failed to parse YAML: {exc}")
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
-        if not isinstance(data, dict) or "profile" not in data:
-            messages.error(request, "YAML must contain a top-level 'profile' key.")
+        try:
+            profile, stats = _apply_profile_yaml_data(data)
+        except (ValueError, KeyError) as exc:
+            messages.error(request, str(exc))
             return render(request, "netbox_data_import/import_profile_yaml.html")
-
-        pdata = data["profile"]
-        profile, _ = ImportProfile.objects.update_or_create(
-            name=pdata["name"],
-            defaults={
-                "description": pdata.get("description", ""),
-                "sheet_name": pdata.get("sheet_name", "Data"),
-                "source_id_column": pdata.get("source_id_column", ""),
-                "custom_field_name": pdata.get("custom_field_name", ""),
-                "update_existing": pdata.get("update_existing", True),
-                "create_missing_device_types": pdata.get("create_missing_device_types", True),
-                "preview_view_mode": pdata.get("preview_view_mode", "rows"),
-            },
-        )
-
-        stats = {}
-        for cm in data.get("column_mappings", []):
-            _, c = ColumnMapping.objects.update_or_create(
-                profile=profile,
-                target_field=cm["target_field"],
-                defaults={"source_column": cm["source_column"]},
-            )
-            stats["column_mappings"] = stats.get("column_mappings", 0) + 1
-
-        for m in data.get("class_role_mappings", []):
-            ClassRoleMapping.objects.update_or_create(
-                profile=profile,
-                source_class=m["source_class"],
-                defaults={
-                    "creates_rack": m.get("creates_rack", False),
-                    "role_slug": m.get("role_slug", ""),
-                    "ignore": m.get("ignore", False),
-                },
-            )
-            stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
-
-        for m in data.get("device_type_mappings", []):
-            DeviceTypeMapping.objects.update_or_create(
-                profile=profile,
-                source_make=m["source_make"],
-                source_model=m["source_model"],
-                defaults={
-                    "netbox_manufacturer_slug": m["netbox_manufacturer_slug"],
-                    "netbox_device_type_slug": m["netbox_device_type_slug"],
-                },
-            )
-            stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
-
-        for m in data.get("manufacturer_mappings", []):
-            ManufacturerMapping.objects.update_or_create(
-                profile=profile,
-                source_make=m["source_make"],
-                defaults={"netbox_manufacturer_slug": m["netbox_manufacturer_slug"]},
-            )
-            stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
-
-        from .models import ColumnTransformRule
-
-        for r in data.get("column_transform_rules", []):
-            ColumnTransformRule.objects.update_or_create(
-                profile=profile,
-                source_column=r["source_column"],
-                defaults={
-                    "pattern": r["pattern"],
-                    "group_1_target": r.get("group_1_target", ""),
-                    "group_2_target": r.get("group_2_target", ""),
-                },
-            )
-            stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
 
         summary = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items())
         messages.success(request, f"Profile '{profile.name}' imported/updated. {summary}.")
