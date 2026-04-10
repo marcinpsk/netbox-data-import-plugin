@@ -2362,3 +2362,57 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         with self.assertRaises(ValueError):
             _apply_profile_yaml_data(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="SectionItemProfile").exists())
+
+    def test_null_section_raises_value_error(self):
+        """Raises ValueError (not silently deleting) when a section value is explicitly null."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "NullSectionProfile"},
+            "column_mappings": None,
+        }
+        with self.assertRaises(ValueError, msg="explicit null section must raise ValueError"):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="NullSectionProfile").exists())
+
+    def test_absent_section_preserves_existing_mappings(self):
+        """If a section key is absent from YAML, existing mappings are preserved."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        # Set up a profile with a column mapping.
+        profile = ImportProfile.objects.create(name="PreserveProfile")
+        existing = ColumnMapping.objects.create(profile=profile, source_column="Host", target_field="device_name")
+
+        # Import same profile without the column_mappings key at all.
+        data = {"profile": {"name": "PreserveProfile", "sheet_name": "Data"}}
+        _apply_profile_yaml_data(data)
+
+        # The existing column mapping must still exist.
+        self.assertTrue(
+            ColumnMapping.objects.filter(pk=existing.pk).exists(),
+            "Absent section should preserve existing mappings, not delete them",
+        )
+
+    def test_invalid_preview_view_mode_raises(self):
+        """full_clean catches an invalid preview_view_mode and rolls back the transaction."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "BadViewModeProfile", "preview_view_mode": "invalid"},
+        }
+        with self.assertRaises(ValueError, msg="invalid choice field must raise ValueError"):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="BadViewModeProfile").exists())
+
+    def test_invalid_column_mapping_target_field_raises_and_rolls_back(self):
+        """Invalid target_field choice triggers full_clean and rolls back the profile too."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "BadTargetFieldProfile"},
+            "column_mappings": [{"source_column": "Col", "target_field": "not_a_real_field"}],
+        }
+        with self.assertRaises(ValueError, msg="invalid target_field choice must raise ValueError"):
+            _apply_profile_yaml_data(bad_data)
+        # Full rollback: profile itself must not exist.
+        self.assertFalse(ImportProfile.objects.filter(name="BadTargetFieldProfile").exists())

@@ -94,6 +94,41 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
     queryset = ImportProfile.objects.all()
 
 
+def _validate_model_instance(instance, label):
+    """Call full_clean() and surface ValidationErrors as ValueError so the atomic block rolls back."""
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    try:
+        instance.full_clean(validate_unique=False)
+    except DjangoValidationError as exc:
+        if hasattr(exc, "message_dict"):
+            msg = "; ".join(f"{f}: {', '.join(es)}" for f, es in exc.message_dict.items())
+        else:
+            msg = "; ".join(exc.messages)
+        raise ValueError(f"Validation error in {label}: {msg}") from exc
+
+
+def _iter_yaml_section(data, section_name):
+    """Yield mapping items for a named section in a parsed YAML dict.
+
+    - Absent key → yields nothing (caller skips reconciliation).
+    - Explicit null or non-list value → raises ValueError.
+    - Explicit empty list → yields nothing (caller reconcile-deletes all).
+    """
+    if section_name not in data:
+        return
+    section = data[section_name]
+    if section is None or not isinstance(section, list):
+        raise ValueError(
+            f"'{section_name}' must be a list of mappings; "
+            f"use [] to explicitly remove all entries, got {type(section).__name__}."
+        )
+    for idx, item in enumerate(section, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"'{section_name}[{idx}]' must be a mapping, got {type(item).__name__}.")
+        yield item
+
+
 def _apply_profile_yaml_data(data):
     """Create or update an ImportProfile and all its nested mappings from parsed YAML data.
 
@@ -129,32 +164,26 @@ def _apply_profile_yaml_data(data):
                 "preview_view_mode": pdata.get("preview_view_mode", "rows"),
             },
         )
-
-        def _iter_section(section_name):
-            section = data.get(section_name) or []
-            if not isinstance(section, list):
-                raise ValueError(f"'{section_name}' must be a list of mappings, got {type(section).__name__}.")
-            for idx, item in enumerate(section, start=1):
-                if not isinstance(item, dict):
-                    raise ValueError(f"'{section_name}[{idx}]' must be a mapping, got {type(item).__name__}.")
-                yield item
+        _validate_model_instance(profile, "profile")
 
         stats = {}
 
         cm_target_fields = []
-        for cm in _iter_section("column_mappings"):
-            ColumnMapping.objects.update_or_create(
+        for cm in _iter_yaml_section(data, "column_mappings"):
+            instance, _ = ColumnMapping.objects.update_or_create(
                 profile=profile,
                 target_field=cm["target_field"],
                 defaults={"source_column": cm["source_column"]},
             )
+            _validate_model_instance(instance, f"column_mappings[{cm['target_field']}]")
             cm_target_fields.append(cm["target_field"])
             stats["column_mappings"] = stats.get("column_mappings", 0) + 1
-        ColumnMapping.objects.filter(profile=profile).exclude(target_field__in=cm_target_fields).delete()
+        if "column_mappings" in data:
+            ColumnMapping.objects.filter(profile=profile).exclude(target_field__in=cm_target_fields).delete()
 
         crm_source_classes = []
-        for m in _iter_section("class_role_mappings"):
-            ClassRoleMapping.objects.update_or_create(
+        for m in _iter_yaml_section(data, "class_role_mappings"):
+            instance, _ = ClassRoleMapping.objects.update_or_create(
                 profile=profile,
                 source_class=m["source_class"],
                 defaults={
@@ -163,13 +192,15 @@ def _apply_profile_yaml_data(data):
                     "ignore": m.get("ignore", False),
                 },
             )
+            _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
             crm_source_classes.append(m["source_class"])
             stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
-        ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
+        if "class_role_mappings" in data:
+            ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
 
         dtm_keys = []
-        for m in _iter_section("device_type_mappings"):
-            DeviceTypeMapping.objects.update_or_create(
+        for m in _iter_yaml_section(data, "device_type_mappings"):
+            instance, _ = DeviceTypeMapping.objects.update_or_create(
                 profile=profile,
                 source_make=m["source_make"],
                 source_model=m["source_model"],
@@ -178,26 +209,34 @@ def _apply_profile_yaml_data(data):
                     "netbox_device_type_slug": m["netbox_device_type_slug"],
                 },
             )
+            _validate_model_instance(instance, f"device_type_mappings[{m['source_make']}/{m['source_model']}]")
             dtm_keys.append((m["source_make"], m["source_model"]))
             stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
-        for dtm in DeviceTypeMapping.objects.filter(profile=profile):
-            if (dtm.source_make, dtm.source_model) not in dtm_keys:
-                dtm.delete()
+        if "device_type_mappings" in data:
+            dtm_key_set = set(dtm_keys)
+            kept_pks = {
+                dtm.pk
+                for dtm in DeviceTypeMapping.objects.filter(profile=profile)
+                if (dtm.source_make, dtm.source_model) in dtm_key_set
+            }
+            DeviceTypeMapping.objects.filter(profile=profile).exclude(pk__in=kept_pks).delete()
 
         mm_source_makes = []
-        for m in _iter_section("manufacturer_mappings"):
-            ManufacturerMapping.objects.update_or_create(
+        for m in _iter_yaml_section(data, "manufacturer_mappings"):
+            instance, _ = ManufacturerMapping.objects.update_or_create(
                 profile=profile,
                 source_make=m["source_make"],
                 defaults={"netbox_manufacturer_slug": m["netbox_manufacturer_slug"]},
             )
+            _validate_model_instance(instance, f"manufacturer_mappings[{m['source_make']}]")
             mm_source_makes.append(m["source_make"])
             stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
-        ManufacturerMapping.objects.filter(profile=profile).exclude(source_make__in=mm_source_makes).delete()
+        if "manufacturer_mappings" in data:
+            ManufacturerMapping.objects.filter(profile=profile).exclude(source_make__in=mm_source_makes).delete()
 
         ctr_source_columns = []
-        for r in _iter_section("column_transform_rules"):
-            ColumnTransformRule.objects.update_or_create(
+        for r in _iter_yaml_section(data, "column_transform_rules"):
+            instance, _ = ColumnTransformRule.objects.update_or_create(
                 profile=profile,
                 source_column=r["source_column"],
                 defaults={
@@ -206,9 +245,11 @@ def _apply_profile_yaml_data(data):
                     "group_2_target": r.get("group_2_target", ""),
                 },
             )
+            _validate_model_instance(instance, f"column_transform_rules[{r['source_column']}]")
             ctr_source_columns.append(r["source_column"])
             stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
-        ColumnTransformRule.objects.filter(profile=profile).exclude(source_column__in=ctr_source_columns).delete()
+        if "column_transform_rules" in data:
+            ColumnTransformRule.objects.filter(profile=profile).exclude(source_column__in=ctr_source_columns).delete()
 
     return profile, stats
 
