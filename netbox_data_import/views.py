@@ -132,6 +132,28 @@ def _get_or_init(model_class, **lookup):
     return model_class.objects.filter(**lookup).first() or model_class(**lookup)
 
 
+def _set_if_present(instance, data, fields):
+    """Set attributes on *instance* only when the corresponding key exists in *data*."""
+    for name in fields:
+        if name in data:
+            setattr(instance, name, data[name])
+
+
+def _save_or_refetch(instance, model_class, **lookup):
+    """Persist *instance*; on IntegrityError from a concurrent insert, refetch the winner.
+
+    Uses a savepoint so the IntegrityError does not abort the outer transaction.
+    """
+    from django.db import IntegrityError, transaction
+
+    try:
+        with transaction.atomic():
+            instance.save()
+    except IntegrityError:
+        instance = model_class.objects.filter(**lookup).first()
+    return instance
+
+
 def _iter_yaml_section(data, section_name, required_keys=()):
     """Yield mapping items for a named section in a parsed YAML dict.
 
@@ -206,7 +228,7 @@ def _apply_profile_yaml_data(data):
         for field, value in profile_defaults.items():
             setattr(profile, field, value)
         _validate_model_instance(profile, "profile")
-        profile.save()
+        profile = _save_or_refetch(profile, ImportProfile, name=pdata["name"])
 
         stats = {}
 
@@ -215,7 +237,7 @@ def _apply_profile_yaml_data(data):
             instance = _get_or_init(ColumnMapping, profile=profile, target_field=cm["target_field"])
             instance.source_column = cm["source_column"]
             _validate_model_instance(instance, f"column_mappings[{cm['target_field']}]")
-            instance.save()
+            _save_or_refetch(instance, ColumnMapping, profile=profile, target_field=cm["target_field"])
             cm_target_fields.append(cm["target_field"])
             stats["column_mappings"] = stats.get("column_mappings", 0) + 1
         if "column_mappings" in data:
@@ -224,11 +246,9 @@ def _apply_profile_yaml_data(data):
         crm_source_classes = []
         for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
             instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
-            instance.creates_rack = m.get("creates_rack", False)
-            instance.role_slug = m.get("role_slug", "")
-            instance.ignore = m.get("ignore", False)
+            _set_if_present(instance, m, ("creates_rack", "role_slug", "ignore"))
             _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
-            instance.save()
+            _save_or_refetch(instance, ClassRoleMapping, profile=profile, source_class=m["source_class"])
             crm_source_classes.append(m["source_class"])
             stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
         if "class_role_mappings" in data:
@@ -246,7 +266,13 @@ def _apply_profile_yaml_data(data):
             instance.netbox_manufacturer_slug = m["netbox_manufacturer_slug"]
             instance.netbox_device_type_slug = m["netbox_device_type_slug"]
             _validate_model_instance(instance, f"device_type_mappings[{m['source_make']}/{m['source_model']}]")
-            instance.save()
+            _save_or_refetch(
+                instance,
+                DeviceTypeMapping,
+                profile=profile,
+                source_make=m["source_make"],
+                source_model=m["source_model"],
+            )
             dtm_keys.append((m["source_make"], m["source_model"]))
             stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
         if "device_type_mappings" in data:
@@ -257,7 +283,7 @@ def _apply_profile_yaml_data(data):
             instance = _get_or_init(ManufacturerMapping, profile=profile, source_make=m["source_make"])
             instance.netbox_manufacturer_slug = m["netbox_manufacturer_slug"]
             _validate_model_instance(instance, f"manufacturer_mappings[{m['source_make']}]")
-            instance.save()
+            _save_or_refetch(instance, ManufacturerMapping, profile=profile, source_make=m["source_make"])
             mm_source_makes.append(m["source_make"])
             stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
         if "manufacturer_mappings" in data:
@@ -267,10 +293,9 @@ def _apply_profile_yaml_data(data):
         for r in _iter_yaml_section(data, "column_transform_rules", ("source_column", "pattern")):
             instance = _get_or_init(ColumnTransformRule, profile=profile, source_column=r["source_column"])
             instance.pattern = r["pattern"]
-            instance.group_1_target = r.get("group_1_target", "")
-            instance.group_2_target = r.get("group_2_target", "")
+            _set_if_present(instance, r, ("group_1_target", "group_2_target"))
             _validate_model_instance(instance, f"column_transform_rules[{r['source_column']}]")
-            instance.save()
+            _save_or_refetch(instance, ColumnTransformRule, profile=profile, source_column=r["source_column"])
             ctr_source_columns.append(r["source_column"])
             stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
         if "column_transform_rules" in data:

@@ -98,7 +98,9 @@ class ColumnMapping(models.Model):
 
     class Meta:
         ordering = ["profile", "target_field"]
-        unique_together = [("profile", "target_field")]
+        constraints = [
+            models.UniqueConstraint(fields=["profile", "target_field"], name="ndi_columnmapping_profile_target"),
+        ]
         verbose_name = "Column Mapping"
         verbose_name_plural = "Column Mappings"
 
@@ -138,7 +140,9 @@ class ClassRoleMapping(models.Model):
 
     class Meta:
         ordering = ["profile", "source_class"]
-        unique_together = [("profile", "source_class")]
+        constraints = [
+            models.UniqueConstraint(fields=["profile", "source_class"], name="ndi_classrolemapping_profile_class"),
+        ]
         verbose_name = "Class → Role Mapping"
         verbose_name_plural = "Class → Role Mappings"
 
@@ -199,7 +203,11 @@ class DeviceTypeMapping(models.Model):
 
     class Meta:
         ordering = ["profile", "source_make", "source_model"]
-        unique_together = [("profile", "source_make", "source_model")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "source_make", "source_model"], name="ndi_dtm_profile_make_model"
+            ),
+        ]
         verbose_name = "Device Type Mapping"
         verbose_name_plural = "Device Type Mappings"
 
@@ -232,7 +240,9 @@ class ManufacturerMapping(models.Model):
 
     class Meta:
         ordering = ["profile", "source_make"]
-        unique_together = [("profile", "source_make")]
+        constraints = [
+            models.UniqueConstraint(fields=["profile", "source_make"], name="ndi_mfgmapping_profile_make"),
+        ]
         verbose_name = "Manufacturer Mapping"
         verbose_name_plural = "Manufacturer Mappings"
 
@@ -260,7 +270,9 @@ class IgnoredDevice(models.Model):
 
     class Meta:
         ordering = ["profile", "source_id"]
-        unique_together = [("profile", "source_id")]
+        constraints = [
+            models.UniqueConstraint(fields=["profile", "source_id"], name="ndi_ignoreddevice_profile_srcid"),
+        ]
         verbose_name = "Ignored Device"
         verbose_name_plural = "Ignored Devices"
 
@@ -304,7 +316,9 @@ class ColumnTransformRule(models.Model):
 
     class Meta:
         ordering = ["profile", "source_column"]
-        unique_together = [("profile", "source_column")]
+        constraints = [
+            models.UniqueConstraint(fields=["profile", "source_column"], name="ndi_ctr_profile_column"),
+        ]
         verbose_name = "Column Transform Rule"
         verbose_name_plural = "Column Transform Rules"
 
@@ -373,7 +387,11 @@ class SourceResolution(models.Model):
 
     class Meta:
         ordering = ["profile", "source_id"]
-        unique_together = [("profile", "source_id", "source_column")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "source_id", "source_column"], name="ndi_srcresolution_profile_id_col"
+            ),
+        ]
         verbose_name = "Source Resolution"
         verbose_name_plural = "Source Resolutions"
 
@@ -415,7 +433,9 @@ class DeviceExistingMatch(models.Model):
 
     class Meta:
         ordering = ["profile", "source_id"]
-        unique_together = [("profile", "source_id")]
+        constraints = [
+            models.UniqueConstraint(fields=["profile", "source_id"], name="ndi_devicematch_profile_srcid"),
+        ]
         verbose_name = "Device Existing Match"
         verbose_name_plural = "Device Existing Matches"
 
