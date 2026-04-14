@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-data-import"
-version = "1.0.2"
+version = "1.0.3"
 description = "NetBox plugin for importing data from external DCIM systems"
 readme = "README.md"
 requires-python = ">=3.12.0"
