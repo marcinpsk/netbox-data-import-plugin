@@ -7,6 +7,7 @@ urlpatterns = [
     # Import Profiles
     path("profiles/", views.ImportProfileListView.as_view(), name="importprofile_list"),
     path("profiles/add/", views.ImportProfileEditView.as_view(), name="importprofile_add"),
+    path("profiles/import/", views.ImportProfileBulkImportView.as_view(), name="importprofile_bulk_import"),
     path("profiles/<int:pk>/", views.ImportProfileView.as_view(), name="importprofile"),
     path("profiles/<int:pk>/edit/", views.ImportProfileEditView.as_view(), name="importprofile_edit"),
     path("profiles/<int:pk>/delete/", views.ImportProfileDeleteView.as_view(), name="importprofile_delete"),

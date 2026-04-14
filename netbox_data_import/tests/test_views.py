@@ -2141,3 +2141,433 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         device, is_ambiguous = _auto_match_single_device(mock_dev_model, "any-name", "", "SHARED-TAG")
         self.assertIsNone(device)
         self.assertTrue(is_ambiguous)
+
+
+class ImportProfileBulkImportViewTest(BaseViewTestCase):
+    """Tests for ImportProfileBulkImportView (NetBox built-in import UI integration)."""
+
+    HIERARCHICAL_YAML = b"""profile:
+  name: BulkImportedProfile
+  sheet_name: Data
+  source_id_column: Id
+  update_existing: true
+  create_missing_device_types: true
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+  - source_column: Rack
+    target_field: rack_name
+class_role_mappings:
+  - source_class: Server
+    creates_rack: false
+    role_slug: server
+    ignore: false
+manufacturer_mappings:
+  - source_make: Acme
+    netbox_manufacturer_slug: acme
+"""
+
+    def _url(self):
+        return reverse("plugins:netbox_data_import:importprofile_bulk_import")
+
+    # --- GET ---
+
+    def test_get_returns_200(self):
+        """GET the bulk-import page returns 200."""
+        resp = self.client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+
+    # --- POST: hierarchical YAML via text area ---
+
+    def test_post_hierarchical_yaml_creates_profile(self):
+        """POST hierarchical YAML creates ImportProfile."""
+        resp = self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(ImportProfile.objects.filter(name="BulkImportedProfile").exists())
+
+    def test_post_hierarchical_yaml_creates_column_mappings(self):
+        """POST hierarchical YAML creates ColumnMappings."""
+        self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        profile = ImportProfile.objects.filter(name="BulkImportedProfile").first()
+        self.assertIsNotNone(profile)
+        self.assertTrue(ColumnMapping.objects.filter(profile=profile, target_field="device_name").exists())
+        self.assertTrue(ColumnMapping.objects.filter(profile=profile, target_field="rack_name").exists())
+
+    def test_post_hierarchical_yaml_creates_class_role_mappings(self):
+        """POST hierarchical YAML creates ClassRoleMappings."""
+        self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        profile = ImportProfile.objects.filter(name="BulkImportedProfile").first()
+        self.assertIsNotNone(profile)
+        self.assertTrue(ClassRoleMapping.objects.filter(profile=profile, source_class="Server").exists())
+
+    def test_post_hierarchical_yaml_creates_manufacturer_mappings(self):
+        """POST hierarchical YAML creates ManufacturerMappings."""
+        self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        profile = ImportProfile.objects.filter(name="BulkImportedProfile").first()
+        self.assertIsNotNone(profile)
+        self.assertTrue(ManufacturerMapping.objects.filter(profile=profile, source_make="Acme").exists())
+
+    def test_post_hierarchical_yaml_idempotent(self):
+        """Posting the same hierarchical YAML twice is idempotent."""
+        for _ in range(2):
+            self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        self.assertEqual(ImportProfile.objects.filter(name="BulkImportedProfile").count(), 1)
+
+    def test_post_hierarchical_yaml_deletes_removed_mappings(self):
+        """Reimport with fewer mappings deletes the removed ones."""
+        # First import: 2 column mappings
+        self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        profile = ImportProfile.objects.get(name="BulkImportedProfile")
+        self.assertEqual(ColumnMapping.objects.filter(profile=profile).count(), 2)
+
+        # Second import: only 1 column mapping
+        reduced_yaml = b"""profile:
+  name: BulkImportedProfile
+  sheet_name: Data
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+"""
+        self.client.post(self._url(), {"data": reduced_yaml.decode()})
+        self.assertEqual(ColumnMapping.objects.filter(profile=profile).count(), 1)
+        self.assertFalse(ColumnMapping.objects.filter(profile=profile, target_field="rack_name").exists())
+
+    # --- POST: hierarchical YAML via file upload ---
+
+    def test_post_hierarchical_yaml_via_file_upload(self):
+        """POST hierarchical YAML as a file upload creates the profile."""
+        f = BytesIO(self.HIERARCHICAL_YAML)
+        f.name = "profile.yaml"
+        resp = self.client.post(self._url(), {"upload_file": f})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(ImportProfile.objects.filter(name="BulkImportedProfile").exists())
+
+    # --- POST: error paths ---
+
+    def test_post_no_data_shows_error(self):
+        """POST with neither file nor text shows error and redirects."""
+        resp = self.client.post(self._url(), {})
+        self.assertIn(resp.status_code, [200, 302])
+
+    def test_post_yaml_parse_failure_falls_through_to_parent(self):
+        """YAML-parse-failing content falls through to NetBox's BulkImportView, not a 500.
+
+        CSV files with colons or unbalanced braces can fail yaml.safe_load.
+        The view must pass them to super().post() rather than blocking with an
+        'Invalid YAML' error.  A realistic POST includes ``format`` (as the
+        NetBox UI form always does) so the parent handler doesn't crash.
+        """
+        resp = self.client.post(self._url(), {"data": ": {{ invalid yaml", "format": "auto"})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertNotEqual(resp.status_code, 500)
+
+    def test_post_non_dict_profile_value_shows_error(self):
+        """POST with profile: scalar (not a dict) shows error."""
+        resp = self.client.post(self._url(), {"data": "profile: just-a-string\n"})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertFalse(ImportProfile.objects.filter(name="just-a-string").exists())
+
+    def test_post_missing_name_shows_error(self):
+        """POST with profile dict missing name shows error."""
+        resp = self.client.post(self._url(), {"data": "profile:\n  sheet_name: Data\n"})
+        self.assertIn(resp.status_code, [200, 302])
+
+    def test_post_malformed_section_shows_error_not_500(self):
+        """POST with a section that is a dict (not list) returns error, not 500."""
+        malformed = "profile:\n  name: MalformedSectionProfile\ncolumn_mappings:\n  target_field: device_name\n"
+        resp = self.client.post(self._url(), {"data": malformed})
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertNotEqual(resp.status_code, 500)
+
+    def test_post_flat_yaml_via_file_upload_exercises_seek_rewind(self):
+        """Flat YAML via file upload exercises the upload.seek(0) rewind path.
+
+        When the YAML has no top-level 'profile:' key, the view calls
+        upload.seek(0) before delegating to NetBox's BulkImportView.  Without
+        this rewind the parent receives an EOF file handle and imports nothing.
+        Creating the profile via this path confirms seek(0) is present.
+        """
+        flat_yaml = (
+            b"- name: FlatRewindProfile\n"
+            b"  sheet_name: Data\n"
+            b"  preview_view_mode: rows\n"
+            b"  update_existing: false\n"
+            b"  create_missing_device_types: false\n"
+        )
+        f = BytesIO(flat_yaml)
+        f.name = "flat.yaml"
+        resp = self.client.post(
+            self._url(),
+            {"upload_file": f, "import_method": "upload", "format": "yaml"},
+        )
+        self.assertIn(resp.status_code, [200, 302])
+        self.assertTrue(
+            ImportProfile.objects.filter(name="FlatRewindProfile").exists(),
+            "Profile must be created via flat file upload; seek(0) rewind is required.",
+        )
+
+    def test_post_hierarchical_yaml_creates_column_transform_rules(self):
+        """POST hierarchical YAML creates ColumnTransformRules end-to-end."""
+        from netbox_data_import.models import ColumnTransformRule
+
+        yaml_with_transforms = (
+            "profile:\n"
+            "  name: TransformRulesProfile\n"
+            "  sheet_name: Data\n"
+            "column_transform_rules:\n"
+            "  - source_column: HostName\n"
+            "    pattern: '^([a-z]+)(\\d+)'\n"
+            "    group_1_target: device_name\n"
+            "    group_2_target: ''\n"
+        )
+        resp = self.client.post(self._url(), {"data": yaml_with_transforms})
+        self.assertIn(resp.status_code, [200, 302])
+        profile = ImportProfile.objects.filter(name="TransformRulesProfile").first()
+        self.assertIsNotNone(profile, "Profile must be created")
+        self.assertTrue(
+            ColumnTransformRule.objects.filter(profile=profile, source_column="HostName").exists(),
+            "ColumnTransformRule must be created from hierarchical YAML",
+        )
+
+    # --- Authentication ---
+
+    def test_unauthenticated_get_redirects_to_login(self):
+        """Unauthenticated GET is redirected to login, not served directly."""
+        self.client.logout()
+        resp = self.client.get(self._url())
+        self.assertIn(resp.status_code, [302, 403])
+
+    def test_unauthenticated_post_is_rejected(self):
+        """Unauthenticated POST is rejected (302 to login or 403)."""
+        self.client.logout()
+        resp = self.client.post(self._url(), {"data": self.HIERARCHICAL_YAML.decode()})
+        self.assertIn(resp.status_code, [302, 403])
+        self.assertFalse(ImportProfile.objects.filter(name="BulkImportedProfile").exists())
+
+
+class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
+    """Unit tests for the _apply_profile_yaml_data helper."""
+
+    def test_missing_profile_key_raises(self):
+        """Raises ValueError when top-level 'profile' key is absent."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError, msg="profile key missing"):
+            _apply_profile_yaml_data({"column_mappings": []})
+
+    def test_non_dict_input_raises(self):
+        """Raises ValueError when input is not a dict."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data("just a string")  # type: ignore[arg-type]
+
+    def test_profile_scalar_raises(self):
+        """Raises ValueError when profile value is a scalar, not a mapping."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data({"profile": "not-a-dict"})
+
+    def test_profile_list_raises(self):
+        """Raises ValueError when profile value is a list, not a mapping."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data({"profile": ["item1", "item2"]})
+
+    def test_missing_name_raises(self):
+        """Raises ValueError when profile dict has no 'name' field."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data({"profile": {"sheet_name": "Data"}})
+
+    def test_creates_profile_and_returns_stats(self):
+        """Creates an ImportProfile and returns non-empty stats dict."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "UnitTestProfile", "sheet_name": "Sheet1"},
+            "column_mappings": [{"source_column": "Name", "target_field": "device_name"}],
+        }
+        profile, stats = _apply_profile_yaml_data(data)
+        self.assertEqual(profile.name, "UnitTestProfile")
+        self.assertEqual(profile.sheet_name, "Sheet1")
+        self.assertEqual(stats.get("column_mappings"), 1)
+        self.assertTrue(ImportProfile.objects.filter(name="UnitTestProfile").exists())
+
+    def test_atomic_rollback_on_bad_column_mapping(self):
+        """A missing required key mid-import raises ValueError and rolls back the transaction."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "AtomicRollbackProfile"},
+            # missing required 'target_field' key → descriptive ValueError
+            "column_mappings": [{"source_column": "Name"}],
+        }
+        with self.assertRaises(ValueError) as cm:
+            _apply_profile_yaml_data(bad_data)
+        self.assertIn("target_field", str(cm.exception))
+        self.assertFalse(ImportProfile.objects.filter(name="AtomicRollbackProfile").exists())
+
+    def test_column_mappings_not_a_list_raises(self):
+        """Raises ValueError when a section is a dict instead of a list."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "SectionTypeProfile"},
+            # dict instead of list
+            "column_mappings": {"target_field": "device_name", "source_column": "Name"},
+        }
+        with self.assertRaises(ValueError, msg="section type check"):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="SectionTypeProfile").exists())
+
+    def test_column_mappings_item_not_a_dict_raises(self):
+        """Raises ValueError when a section item is a scalar instead of a mapping."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "SectionItemProfile"},
+            "column_mappings": ["just-a-string"],
+        }
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="SectionItemProfile").exists())
+
+    def test_null_section_raises_value_error(self):
+        """Raises ValueError (not silently deleting) when a section value is explicitly null."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "NullSectionProfile"},
+            "column_mappings": None,
+        }
+        with self.assertRaises(ValueError, msg="explicit null section must raise ValueError"):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="NullSectionProfile").exists())
+
+    def test_absent_section_preserves_existing_mappings(self):
+        """If a section key is absent from YAML, existing mappings are preserved."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        # Set up a profile with a column mapping.
+        profile = ImportProfile.objects.create(name="PreserveProfile")
+        existing = ColumnMapping.objects.create(profile=profile, source_column="Host", target_field="device_name")
+
+        # Import same profile without the column_mappings key at all.
+        data = {"profile": {"name": "PreserveProfile", "sheet_name": "Data"}}
+        _apply_profile_yaml_data(data)
+
+        # The existing column mapping must still exist.
+        self.assertTrue(
+            ColumnMapping.objects.filter(pk=existing.pk).exists(),
+            "Absent section should preserve existing mappings, not delete them",
+        )
+
+    def test_invalid_preview_view_mode_raises(self):
+        """full_clean catches an invalid preview_view_mode and rolls back the transaction."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "BadViewModeProfile", "preview_view_mode": "invalid"},
+        }
+        with self.assertRaises(ValueError, msg="invalid choice field must raise ValueError"):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name="BadViewModeProfile").exists())
+
+    def test_invalid_column_mapping_target_field_raises_and_rolls_back(self):
+        """Invalid target_field choice triggers full_clean and rolls back the profile too."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "BadTargetFieldProfile"},
+            "column_mappings": [{"source_column": "Col", "target_field": "not_a_real_field"}],
+        }
+        with self.assertRaises(ValueError, msg="invalid target_field choice must raise ValueError"):
+            _apply_profile_yaml_data(bad_data)
+        # Full rollback: profile itself must not exist.
+        self.assertFalse(ImportProfile.objects.filter(name="BadTargetFieldProfile").exists())
+
+    def test_partial_reimport_preserves_unmentioned_profile_fields(self):
+        """Reimporting YAML that omits optional profile fields does not reset them."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        # Create a profile with non-default field values.
+        profile = ImportProfile.objects.create(
+            name="PartialReimportProfile",
+            sheet_name="CustomSheet",
+            source_id_column="SourceId",
+            custom_field_name="my_cf",
+            update_existing=False,
+            preview_view_mode="racks",
+        )
+
+        # Re-import with only 'name' — no other profile fields.
+        _apply_profile_yaml_data({"profile": {"name": "PartialReimportProfile"}})
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.sheet_name, "CustomSheet", "sheet_name must not be reset")
+        self.assertEqual(profile.source_id_column, "SourceId", "source_id_column must not be reset")
+        self.assertEqual(profile.custom_field_name, "my_cf", "custom_field_name must not be reset")
+        self.assertFalse(profile.update_existing, "update_existing must not be reset")
+        self.assertEqual(profile.preview_view_mode, "racks", "preview_view_mode must not be reset")
+
+    def test_column_mapping_missing_required_key_raises_descriptive_error(self):
+        """Missing required key in column_mappings raises ValueError with section and key name."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        ImportProfile.objects.create(name="KeyErrProfile", sheet_name="Data")
+        data = {
+            "profile": {"name": "KeyErrProfile"},
+            "column_mappings": [{"source_column": "Name"}],  # missing target_field
+        }
+        with self.assertRaises(ValueError) as cm:
+            _apply_profile_yaml_data(data)
+        self.assertIn("column_mappings[1]", str(cm.exception))
+        self.assertIn("target_field", str(cm.exception))
+
+    def test_device_type_mapping_missing_required_key_raises_descriptive_error(self):
+        """Missing required key in device_type_mappings raises ValueError, not bare KeyError."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        ImportProfile.objects.create(name="DTMKeyErrProfile", sheet_name="Data")
+        data = {
+            "profile": {"name": "DTMKeyErrProfile"},
+            "device_type_mappings": [
+                {
+                    "source_make": "Cisco",
+                    "source_model": "ISR4321",
+                    # missing netbox_manufacturer_slug and netbox_device_type_slug
+                }
+            ],
+        }
+        with self.assertRaises(ValueError) as cm:
+            _apply_profile_yaml_data(data)
+        self.assertIn("device_type_mappings[1]", str(cm.exception))
+
+    def test_manufacturer_mapping_missing_required_key_raises_descriptive_error(self):
+        """Missing required key in manufacturer_mappings raises ValueError with context."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        ImportProfile.objects.create(name="MMKeyErrProfile", sheet_name="Data")
+        data = {
+            "profile": {"name": "MMKeyErrProfile"},
+            "manufacturer_mappings": [{"source_make": "Cisco"}],  # missing netbox_manufacturer_slug
+        }
+        with self.assertRaises(ValueError) as cm:
+            _apply_profile_yaml_data(data)
+        self.assertIn("manufacturer_mappings[1]", str(cm.exception))
+        self.assertIn("netbox_manufacturer_slug", str(cm.exception))
+
+    def test_overlength_profile_name_raises_value_error_not_500(self):
+        """Overlength field is caught by full_clean before any DB write, raising ValueError."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        bad_data = {
+            "profile": {"name": "X" * 200},  # exceeds max_length=100 for ImportProfile.name
+        }
+        with self.assertRaises(ValueError, msg="overlength name must raise ValueError, not DataError"):
+            _apply_profile_yaml_data(bad_data)
+        self.assertFalse(ImportProfile.objects.filter(name__startswith="X" * 50).exists())
