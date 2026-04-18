@@ -58,7 +58,7 @@ class ClassRoleMappingSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ClassRoleMapping
-        fields = ["id", "profile", "source_class", "creates_rack", "role_slug", "ignore"]
+        fields = ["id", "profile", "source_class", "creates_rack", "rack_type", "role_slug", "ignore"]
 
 
 class DeviceTypeMappingSerializer(serializers.ModelSerializer):

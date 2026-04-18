@@ -480,7 +480,7 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
         _ensure_device_role(crm, seen_roles, ctx, DeviceRole)
 
 
-def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
+def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=None):
     """Write or update a rack in the database and record the result."""
     try:
         rack = Rack.objects.get(site=ctx.site, name=rack_name)
@@ -491,6 +491,8 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
                 return
             rack.u_height = u_height
             rack.serial = serial or rack.serial
+            if rack_type is not None:
+                rack.rack_type = rack_type
             if ctx.location:
                 rack.location = ctx.location
             if ctx.tenant:
@@ -525,7 +527,13 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
             ctx.result.rows.append(_perm_denied_row("dcim.add_rack", row, rack_name, "rack"))
             return
         rack = Rack.objects.create(
-            site=ctx.site, location=ctx.location, name=rack_name, tenant=ctx.tenant, u_height=u_height, serial=serial
+            site=ctx.site,
+            location=ctx.location,
+            name=rack_name,
+            tenant=ctx.tenant,
+            u_height=u_height,
+            serial=serial,
+            rack_type=rack_type,
         )
         _store_source_id(rack, ctx.profile, source_id)
         ctx.rack_map[rack_name] = rack
@@ -576,13 +584,14 @@ def _pass2_process_racks(rows, ctx, class_role_map):
             continue
 
         if ctx.dry_run:
+            rack_type_label = f", type={crm.rack_type}" if crm.rack_type_id else ""
             try:
                 Rack.objects.get(site=ctx.site, name=rack_name)
                 action = "update" if ctx.profile.update_existing else "skip"
                 detail = f"Rack '{rack_name}' already exists"
             except Rack.DoesNotExist:
                 action = "create"
-                detail = f"Would create rack '{rack_name}' ({u_height}U) at site '{ctx.site}'"
+                detail = f"Would create rack '{rack_name}' ({u_height}U{rack_type_label}) at site '{ctx.site}'"
             ctx.rack_map[rack_name] = rack_name
             ctx.result.rows.append(
                 RowResult(
@@ -595,7 +604,7 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                 )
             )
         else:
-            _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack)
+            _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=crm.rack_type)
 
 
 def _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device):

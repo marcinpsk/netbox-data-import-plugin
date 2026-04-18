@@ -78,6 +78,7 @@ class ClassRoleMappingTable(tables.Table):
 
     source_class = tables.Column()
     creates_rack = tables.BooleanColumn()
+    rack_type = tables.Column(verbose_name="Rack Type", accessor="rack_type", default="—")
     role_slug = tables.Column()
     ignore = tables.BooleanColumn()
     actions = tables.TemplateColumn(
@@ -95,7 +96,7 @@ class ClassRoleMappingTable(tables.Table):
 
     class Meta:
         model = ClassRoleMapping
-        fields = ("source_class", "creates_rack", "role_slug", "ignore", "actions")
+        fields = ("source_class", "creates_rack", "rack_type", "role_slug", "ignore", "actions")
 
 
 class DeviceTypeMappingTable(tables.Table):

@@ -819,6 +819,49 @@ class WriteRackToDbTest(TestCase):
         self.assertEqual(result.rows[0].action, "skip")
         self.assertIn("SkipRack", ctx.rack_map)
 
+    def test_create_rack_with_rack_type(self):
+        """_write_rack_to_db creates a new Rack with rack_type assigned."""
+        from dcim.models import Manufacturer, Rack, RackType
+
+        mfg = Manufacturer.objects.create(name="WRMfg", slug="wr-mfg")
+        rt = RackType.objects.create(manufacturer=mfg, model="WRModel", slug="wr-model", u_height=42)
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=result,
+        )
+        row = {"_row_number": 10}
+        _write_rack_to_db("TypedRack", 42, "", "SRC10", row, ctx, Rack, rack_type=rt)
+        self.assertEqual(result.rows[0].action, "create")
+        rack = Rack.objects.get(site=self.site, name="TypedRack")
+        self.assertEqual(rack.rack_type, rt)
+
+    def test_update_rack_sets_rack_type(self):
+        """_write_rack_to_db updates existing rack's rack_type."""
+        from dcim.models import Manufacturer, Rack, RackType
+
+        mfg = Manufacturer.objects.create(name="WRMfg2", slug="wr-mfg2")
+        rt = RackType.objects.create(manufacturer=mfg, model="WRModel2", slug="wr-model2", u_height=42)
+        Rack.objects.create(site=self.site, name="UpdTypeRack", u_height=42)
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=result,
+        )
+        row = {"_row_number": 11}
+        _write_rack_to_db("UpdTypeRack", 42, "", "SRC11", row, ctx, Rack, rack_type=rt)
+        self.assertEqual(result.rows[0].action, "update")
+        rack = Rack.objects.get(site=self.site, name="UpdTypeRack")
+        self.assertEqual(rack.rack_type, rt)
+
 
 # ---------------------------------------------------------------------------
 # New tests: WriteDeviceRowTest

@@ -197,6 +197,31 @@ def _delete_stale_device_type_mappings(profile, keep_keys):
     qs.delete()
 
 
+def _import_class_role_mappings(data, profile, stats):
+    """Import class_role_mappings from YAML data into the given profile."""
+    crm_source_classes = []
+    for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
+        instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
+        _set_if_present(instance, m, ("creates_rack", "role_slug", "ignore"))
+        if "rack_type" in m and m["rack_type"]:
+            from dcim.models import RackType
+
+            try:
+                instance.rack_type = RackType.objects.get(slug=m["rack_type"])
+            except RackType.DoesNotExist:
+                raise ValueError(
+                    f"class_role_mappings[{m['source_class']}]: RackType with slug '{m['rack_type']}' not found"
+                )
+        elif "rack_type" in m:
+            instance.rack_type = None
+        _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
+        _save_or_refetch(instance, ClassRoleMapping, profile=profile, source_class=m["source_class"])
+        crm_source_classes.append(m["source_class"])
+        stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
+    if "class_role_mappings" in data:
+        ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
+
+
 def _apply_profile_yaml_data(data):
     """Create or update an ImportProfile and all its nested mappings from parsed YAML data.
 
@@ -243,16 +268,7 @@ def _apply_profile_yaml_data(data):
         if "column_mappings" in data:
             ColumnMapping.objects.filter(profile=profile).exclude(target_field__in=cm_target_fields).delete()
 
-        crm_source_classes = []
-        for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
-            instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
-            _set_if_present(instance, m, ("creates_rack", "role_slug", "ignore"))
-            _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
-            _save_or_refetch(instance, ClassRoleMapping, profile=profile, source_class=m["source_class"])
-            crm_source_classes.append(m["source_class"])
-            stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
-        if "class_role_mappings" in data:
-            ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
+        _import_class_role_mappings(data, profile, stats)
 
         dtm_keys = []
         for m in _iter_yaml_section(
@@ -799,11 +815,14 @@ class UnignoreDeviceView(PermissionRequiredMixin, View):
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         if profile_id and source_id:
-            IgnoredDevice.objects.filter(
+            count, _ = IgnoredDevice.objects.filter(
                 profile_id=profile_id,
                 source_id=source_id,
             ).delete()
-            messages.success(request, "Device removed from ignore list.")
+            if count:
+                messages.success(request, "Device removed from ignore list.")
+            else:
+                messages.warning(request, "Device was not on the ignore list (may be ignored by class mapping).")
         return redirect(next_url)
 
 
@@ -1032,12 +1051,17 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
             ],
             "class_role_mappings": [
                 {
-                    "source_class": m.source_class,
-                    "creates_rack": m.creates_rack,
-                    "role_slug": m.role_slug,
-                    "ignore": m.ignore,
+                    k: v
+                    for k, v in {
+                        "source_class": m.source_class,
+                        "creates_rack": m.creates_rack,
+                        "rack_type": m.rack_type.slug if m.rack_type_id else None,
+                        "role_slug": m.role_slug,
+                        "ignore": m.ignore,
+                    }.items()
+                    if v is not None and v != ""
                 }
-                for m in profile.class_role_mappings.all()
+                for m in profile.class_role_mappings.select_related("rack_type").all()
             ],
             "device_type_mappings": [
                 {
@@ -1369,12 +1393,22 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Save the class→role mapping and redirect back to preview."""
+        from dcim.models import RackType
+
         profile_id = request.POST.get("profile_id")
         profile = get_object_or_404(ImportProfile, pk=profile_id)
         source_class = request.POST.get("source_class", "").strip()
         mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore" or "role"
         role_slug = request.POST.get("role_slug", "").strip()
         creates_rack = request.POST.get("creates_rack") == "1"
+        rack_type_id = request.POST.get("rack_type_id", "").strip()
+
+        rack_type = None
+        if creates_rack and rack_type_id:
+            try:
+                rack_type = RackType.objects.get(pk=int(rack_type_id))
+            except (RackType.DoesNotExist, ValueError, TypeError):
+                pass
 
         if not source_class:
             messages.error(request, "Source class is required.")
@@ -1386,6 +1420,7 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
             defaults={
                 "ignore": mapping_action == "ignore",
                 "creates_rack": creates_rack,
+                "rack_type": rack_type,
                 "role_slug": role_slug if mapping_action == "role" else "",
             },
         )
@@ -1393,7 +1428,8 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
         if mapping_action == "ignore":
             action_label = "ignore"
         elif mapping_action == "rack":
-            action_label = "creates rack"
+            rt_suffix = f" (type: {rack_type})" if rack_type else ""
+            action_label = f"creates rack{rt_suffix}"
         else:
             action_label = f"role '{role_slug}'"
         messages.success(request, f"{verb} mapping: class '{source_class}' → {action_label}")
@@ -1443,7 +1479,7 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
 class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
-    GET params: type (manufacturer|device_type|device|role), q (search string).
+    GET params: type (manufacturer|device_type|device|role|rack_type), q (search string).
     Returns JSON list of {id, name, slug, url} dicts.
     """
 
@@ -1452,7 +1488,7 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
     def get(self, request):
         """Return a JSON list of matching NetBox objects for the given type and query."""
         from django.http import JsonResponse
-        from dcim.models import Manufacturer, DeviceType, Device, DeviceRole
+        from dcim.models import Manufacturer, DeviceType, Device, DeviceRole, RackType
 
         obj_type = request.GET.get("type", "device")
         q = request.GET.get("q", "").strip()
@@ -1463,6 +1499,7 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
             "device_type": "dcim.view_devicetype",
             "device": "dcim.view_device",
             "role": "dcim.view_devicerole",
+            "rack_type": "dcim.view_racktype",
         }
         required_perm = _perm_map.get(obj_type)
         if required_perm and not request.user.has_perm(required_perm):  # pragma: no cover
@@ -1515,6 +1552,17 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
                         "name": role.name,
                         "slug": role.slug,
                         "url": request.build_absolute_uri(role.get_absolute_url()),
+                    }
+                )
+        elif obj_type == "rack_type":
+            qs = RackType.objects.select_related("manufacturer").filter(model__icontains=q)[:limit]
+            for rt in qs:
+                results.append(
+                    {
+                        "id": rt.pk,
+                        "name": f"{rt.manufacturer.name} / {rt.model}" if rt.manufacturer else rt.model,
+                        "slug": rt.slug,
+                        "url": request.build_absolute_uri(rt.get_absolute_url()),
                     }
                 )
 

@@ -2571,3 +2571,147 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         with self.assertRaises(ValueError, msg="overlength name must raise ValueError, not DataError"):
             _apply_profile_yaml_data(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name__startswith="X" * 50).exists())
+
+
+class RackTypeFeatureTest(BaseViewTestCase):
+    """Tests for rack type mapping feature."""
+
+    def setUp(self):
+        """Create profile and rack type for testing."""
+        super().setUp()
+        from dcim.models import Manufacturer, RackType
+
+        self.profile = _make_profile("RackTypeProfile")
+        self.mfg = Manufacturer.objects.create(name="RackVendor", slug="rackvendor")
+        self.rack_type = RackType.objects.create(
+            manufacturer=self.mfg,
+            model="Standard42U",
+            slug="standard-42u",
+            u_height=42,
+        )
+
+    def test_search_rack_type(self):
+        """type=rack_type returns rack type results."""
+        import json
+
+        url = reverse("plugins:netbox_data_import:search_objects")
+        resp = self.client.get(url + "?type=rack_type&q=Standard")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertTrue(any("Standard42U" in r["name"] for r in data["results"]))
+
+    def test_quick_add_rack_mapping_with_rack_type(self):
+        """POST creates ClassRoleMapping with creates_rack=True and rack_type set."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Enclosure",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+                "rack_type_id": str(self.rack_type.pk),
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        crm = ClassRoleMapping.objects.get(profile=self.profile, source_class="Enclosure")
+        self.assertTrue(crm.creates_rack)
+        self.assertEqual(crm.rack_type_id, self.rack_type.pk)
+
+    def test_quick_add_rack_mapping_without_rack_type(self):
+        """POST creates ClassRoleMapping with creates_rack=True and no rack_type."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Cage",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        crm = ClassRoleMapping.objects.get(profile=self.profile, source_class="Cage")
+        self.assertTrue(crm.creates_rack)
+        self.assertIsNone(crm.rack_type)
+
+    def test_quick_add_rack_mapping_invalid_rack_type_id(self):
+        """POST with invalid rack_type_id proceeds without error, just no rack_type set."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Frame",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+                "rack_type_id": "99999",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        crm = ClassRoleMapping.objects.get(profile=self.profile, source_class="Frame")
+        self.assertTrue(crm.creates_rack)
+        self.assertIsNone(crm.rack_type)
+
+    def test_model_str_with_rack_type(self):
+        """ClassRoleMapping.__str__ includes rack type when set."""
+        crm = ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="TypedRack",
+            creates_rack=True,
+            rack_type=self.rack_type,
+        )
+        s = str(crm)
+        self.assertIn("Rack", s)
+        self.assertIn("Standard42U", s)
+
+    def test_yaml_export_includes_rack_type(self):
+        """Exported YAML includes rack_type slug for class_role_mappings."""
+        import yaml
+
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Cabinet").update(rack_type=self.rack_type)
+        url = reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.profile.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        data = yaml.safe_load(resp.content.decode())
+        cabinet_crm = next(
+            (m for m in data["class_role_mappings"] if m["source_class"] == "Cabinet"),
+            None,
+        )
+        self.assertIsNotNone(cabinet_crm)
+        self.assertEqual(cabinet_crm.get("rack_type"), "standard-42u")
+
+    def test_yaml_import_with_rack_type(self):
+        """YAML import resolves rack_type slug to FK."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "RackTypeImport"},
+            "class_role_mappings": [
+                {
+                    "source_class": "Cab",
+                    "creates_rack": True,
+                    "rack_type": "standard-42u",
+                },
+            ],
+        }
+        profile, stats = _apply_profile_yaml_data(data)
+        crm = ClassRoleMapping.objects.get(profile=profile, source_class="Cab")
+        self.assertEqual(crm.rack_type_id, self.rack_type.pk)
+
+    def test_yaml_import_with_invalid_rack_type_raises(self):
+        """YAML import with non-existent rack_type slug raises ValueError."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "RackTypeBadImport"},
+            "class_role_mappings": [
+                {
+                    "source_class": "Cab",
+                    "creates_rack": True,
+                    "rack_type": "nonexistent-rt",
+                },
+            ],
+        }
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data(data)
