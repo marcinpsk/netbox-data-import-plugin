@@ -6,14 +6,19 @@
 
 {% block head %}
 <style>
-  .ndi-badge-create  { background-color: var(--bs-success) !important; color: #fff !important; }
-  .ndi-badge-update  { background-color: var(--bs-primary) !important; color: #fff !important; }
-  .ndi-badge-skip    { background-color: var(--bs-secondary) !important; color: #fff !important; }
-  .ndi-badge-error   { background-color: var(--bs-danger) !important; color: #fff !important; }
-  .ndi-badge-rack    { background-color: var(--bs-info) !important; }
-  .ndi-badge-generic { background-color: var(--bs-tertiary-bg) !important; color: var(--bs-body-color) !important;
-                       border: 1px solid var(--bs-border-color) !important; }
-  [data-bs-theme="dark"] .ndi-badge-rack { color: #000 !important; }
+  /* Badge colors using Tabler CSS variables (NetBox uses --tblr-* not --bs-*) */
+  .ndi-badge-create  { background-color: var(--tblr-success) !important; color: #fff !important; }
+  .ndi-badge-update  { background-color: var(--tblr-primary) !important; color: #fff !important; }
+  .ndi-badge-skip    { background-color: var(--tblr-secondary) !important; color: #fff !important; }
+  .ndi-badge-error   { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  .ndi-badge-rack    { background-color: var(--tblr-info) !important; color: #fff !important; }
+  .ndi-badge-mfg     { background-color: var(--tblr-warning) !important; color: #000 !important; }
+  .ndi-badge-dt      { background-color: #b8860b !important; color: #fff !important; }
+  .ndi-badge-generic { background-color: var(--tblr-bg-surface-tertiary, var(--tblr-gray-100)) !important;
+                       color: var(--tblr-body-color) !important;
+                       border: 1px solid var(--tblr-border-color) !important; }
+  [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
+  [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
 </style>
 {% endblock %}
 

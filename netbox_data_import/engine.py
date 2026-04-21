@@ -601,6 +601,7 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                     action=action,
                     object_type="rack",
                     detail=detail,
+                    extra_data={"source_class": device_class, "rack_type_set": bool(crm.rack_type_id)},
                 )
             )
         else:

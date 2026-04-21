@@ -6,19 +6,20 @@
 
 {% block head %}
 <style>
-  /* Badge colors that adapt to light/dark theme */
-  .ndi-badge-create  { background-color: var(--bs-success) !important; color: #fff !important; }
-  .ndi-badge-update  { background-color: var(--bs-primary) !important; color: #fff !important; }
-  .ndi-badge-skip    { background-color: var(--bs-secondary) !important; color: #fff !important; }
-  .ndi-badge-error   { background-color: var(--bs-danger) !important; color: #fff !important; }
-  .ndi-badge-ignored { background-color: var(--bs-dark) !important; color: #fff !important; }
-  .ndi-badge-rack    { background-color: var(--bs-info) !important; }
-  .ndi-badge-mfg     { background-color: var(--bs-warning) !important; color: #fff !important; }
+  /* Badge colors using Tabler CSS variables (NetBox uses --tblr-* not --bs-*) */
+  .ndi-badge-create  { background-color: var(--tblr-success) !important; color: #fff !important; }
+  .ndi-badge-update  { background-color: var(--tblr-primary) !important; color: #fff !important; }
+  .ndi-badge-skip    { background-color: var(--tblr-secondary) !important; color: #fff !important; }
+  .ndi-badge-error   { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  .ndi-badge-ignored { background-color: var(--tblr-dark) !important; color: #fff !important; }
+  .ndi-badge-rack    { background-color: var(--tblr-info) !important; color: #fff !important; }
+  .ndi-badge-mfg     { background-color: var(--tblr-warning) !important; color: #000 !important; }
   .ndi-badge-dt      { background-color: #b8860b !important; color: #fff !important; }
-  .ndi-badge-generic { background-color: var(--bs-tertiary-bg) !important; color: var(--bs-body-color) !important;
-                       border: 1px solid var(--bs-border-color) !important; }
-  [data-bs-theme="dark"] .ndi-badge-rack { color: #000 !important; }
-  [data-bs-theme="dark"] .ndi-badge-dt   { background-color: #d4a017 !important; }
+  .ndi-badge-generic { background-color: var(--tblr-bg-surface-tertiary, var(--tblr-gray-100)) !important;
+                       color: var(--tblr-body-color) !important;
+                       border: 1px solid var(--tblr-border-color) !important; }
+  [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
+  [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
 </style>
 {% endblock %}
 
@@ -318,6 +319,17 @@
                     </button>
                   </form>
 
+                {% elif row.object_type == 'rack' and profile_id and row.extra_data.source_class %}
+                  {# Rack row — allow reconfiguring the class mapping (e.g. to set rack type) #}
+                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                          data-bs-toggle="modal" data-bs-target="#classMappingModal"
+                          data-source-class="{{ row.extra_data.source_class }}"
+                          data-profile-id="{{ profile_id }}"
+                          data-initial-action="rack"
+                          title="Configure class mapping (e.g. set rack type) for '{{ row.extra_data.source_class }}'">
+                    <i class="mdi mdi-cog"></i> Configure class
+                  </button>
+
                 {% elif row.action == 'error' and row.object_type == 'device' and profile_id %}
                   {# Device error — show class mapping button if we have source_class #}
                   {% if row.extra_data.source_class %}
@@ -590,7 +602,6 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('cm_source_class_display').textContent = sourceClass;
     document.getElementById('cm_title_class').textContent = sourceClass;
     document.getElementById('cm_role_slug').value = '';
-    document.getElementById('cm_action_ignore').checked = true;
     document.getElementById('cm_role_row').style.display = 'none';
     document.getElementById('cm_rack_type_row').style.display = 'none';
     document.getElementById('cm_creates_rack').value = '0';
@@ -599,6 +610,16 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('cm_rack_type_search_q').value = '';
     document.getElementById('cm_rack_type_search_results').innerHTML = '';
     document.getElementById('cm_rack_type_selected').style.display = 'none';
+
+    var initialAction = btn.dataset.initialAction || 'ignore';
+    if (initialAction === 'rack') {
+      document.getElementById('cm_action_rack').checked = true;
+    } else if (initialAction === 'role') {
+      document.getElementById('cm_action_role').checked = true;
+    } else {
+      document.getElementById('cm_action_ignore').checked = true;
+    }
+    cmToggleAction();
   });
 
   document.getElementById('manufacturerMappingModal').addEventListener('show.bs.modal', function(event) {
