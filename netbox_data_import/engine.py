@@ -928,6 +928,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                     object_type="device",
                     detail="Ignored device",
                     rack_name=rack_name,
+                    extra_data={"ignore_kind": "individual"},
                 )
             )
             continue

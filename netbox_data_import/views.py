@@ -208,10 +208,10 @@ def _import_class_role_mappings(data, profile, stats):
 
             try:
                 instance.rack_type = RackType.objects.get(slug=m["rack_type"])
-            except RackType.DoesNotExist:
+            except RackType.DoesNotExist as exc:
                 raise ValueError(
                     f"class_role_mappings[{m['source_class']}]: RackType with slug '{m['rack_type']}' not found"
-                )
+                ) from exc
         elif "rack_type" in m:
             instance.rack_type = None
         _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")

@@ -47,10 +47,12 @@
             {{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} to create
           </span>
           {% if c.racks_updated or c.devices_updated %}
+          {% with racks_updated=c.racks_updated|default:0 devices_updated=c.devices_updated|default:0 %}
           <span class="badge fs-6 ndi-badge-update">
             <i class="mdi mdi-pencil"></i>
-            {{ c.racks_updated|default:0|add:c.devices_updated|default:0 }} to update
+            {{ racks_updated|add:devices_updated }} to update
           </span>
+          {% endwith %}
           {% endif %}
           {% if c.skipped %}
           <span class="badge fs-6 ndi-badge-skip">
@@ -387,7 +389,7 @@
                   </form>
 
                 {% elif row.action == 'ignore' and row.object_type == 'device' and row.source_id and profile_id %}
-                  {% if row.detail == 'Ignored device' %}
+                  {% if row.extra_data.ignore_kind == 'individual' %}
                     {# Individually ignored — offer unignore #}
                     <form method="post" action="{% url 'plugins:netbox_data_import:unignore_device' %}" class="d-inline">
                       {% csrf_token %}
@@ -1100,7 +1102,7 @@ function dmSearch() {
           <div id="cm_rack_type_row" style="display:none;">
             <input type="hidden" name="rack_type_id" id="cm_rack_type_id" value="">
             <div class="mb-3">
-              <label class="form-label">Rack type <span class="text-muted">(optional)</span></label>
+              <label class="form-label" for="cm_rack_type_search_q">Rack type <span class="text-muted">(optional)</span></label>
               <div class="input-group">
                 <input type="text" id="cm_rack_type_search_q" class="form-control" placeholder="Search NetBox rack types…">
                 <button type="button" class="btn btn-outline-secondary" onclick="cmSearchRackTypes()">
