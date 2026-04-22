@@ -17,7 +17,11 @@ class Migration(migrations.Migration):
             model_name="classrolemapping",
             name="rack_type",
             field=models.ForeignKey(
-                blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, to="dcim.racktype"
+                blank=True,
+                help_text="Optional rack type assigned when creating racks",
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                to="dcim.racktype",
             ),
         ),
     ]

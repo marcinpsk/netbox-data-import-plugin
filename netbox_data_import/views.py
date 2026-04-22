@@ -1051,15 +1051,17 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
             ],
             "class_role_mappings": [
                 {
-                    k: v
-                    for k, v in {
-                        "source_class": m.source_class,
-                        "creates_rack": m.creates_rack,
-                        "rack_type": m.rack_type.slug if m.rack_type_id else None,
-                        "role_slug": m.role_slug,
-                        "ignore": m.ignore,
-                    }.items()
-                    if v is not None and v != ""
+                    **{
+                        k: v
+                        for k, v in {
+                            "source_class": m.source_class,
+                            "creates_rack": m.creates_rack,
+                            "role_slug": m.role_slug,
+                            "ignore": m.ignore,
+                        }.items()
+                        if v != ""
+                    },
+                    "rack_type": m.rack_type.slug if m.rack_type_id else None,
                 }
                 for m in profile.class_role_mappings.select_related("rack_type").all()
             ],
