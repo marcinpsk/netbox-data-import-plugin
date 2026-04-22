@@ -1398,9 +1398,9 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
         profile_id = request.POST.get("profile_id")
         profile = get_object_or_404(ImportProfile, pk=profile_id)
         source_class = request.POST.get("source_class", "").strip()
-        mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore" or "role"
+        mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore", "role", or "rack"
         role_slug = request.POST.get("role_slug", "").strip()
-        creates_rack = request.POST.get("creates_rack") == "1"
+        creates_rack = mapping_action == "rack"
         rack_type_id = request.POST.get("rack_type_id", "").strip()
 
         rack_type = None

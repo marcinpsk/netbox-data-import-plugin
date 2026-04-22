@@ -8,7 +8,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("dcim", "0227_alter_interface_speed_bigint"),
+        ("dcim", "0188_racktype"),
         ("netbox_data_import", "0008_unique_constraints"),
     ]
 

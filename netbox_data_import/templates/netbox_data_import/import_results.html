@@ -41,6 +41,7 @@
           <span class="badge fs-6 ndi-badge-update">{{ racks_updated|add:devices_updated }} updated</span>
           {% endwith %}
           {% endif %}
+          {% if c.ignored %}<span class="badge fs-6 ndi-badge-ignored">{{ c.ignored }} ignored</span>{% endif %}
           {% if c.skipped %}<span class="badge fs-6 ndi-badge-skip">{{ c.skipped }} skipped</span>{% endif %}
           {% if c.errors %}<span class="badge fs-6 ndi-badge-error">{{ c.errors }} error{{ c.errors|pluralize }}</span>{% endif %}
           {% endwith %}
