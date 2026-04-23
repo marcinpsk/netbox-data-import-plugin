@@ -53,8 +53,19 @@ class ColumnMappingSerializer(serializers.ModelSerializer):
         fields = ["id", "profile", "source_column", "target_field"]
 
 
+class _RackTypeSlugField(serializers.SlugRelatedField):
+    """SlugRelatedField for RackType that defers the queryset import."""
+
+    def get_queryset(self):
+        from dcim.models import RackType
+
+        return RackType.objects.all()
+
+
 class ClassRoleMappingSerializer(serializers.ModelSerializer):
     """Serializer for ClassRoleMapping (plain model)."""
+
+    rack_type = _RackTypeSlugField(slug_field="slug", allow_null=True, required=False)
 
     class Meta:
         model = ClassRoleMapping

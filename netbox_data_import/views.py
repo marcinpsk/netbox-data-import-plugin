@@ -1410,7 +1410,10 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
             try:
                 rack_type = RackType.objects.get(pk=int(rack_type_id))
             except (RackType.DoesNotExist, ValueError, TypeError):
-                pass
+                messages.error(
+                    request, f"Invalid rack type selected for class '{source_class}'. Please choose a valid rack type."
+                )
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         if not source_class:
             messages.error(request, "Source class is required.")

@@ -2636,7 +2636,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
         self.assertIsNone(crm.rack_type)
 
     def test_quick_add_rack_mapping_invalid_rack_type_id(self):
-        """POST with invalid rack_type_id proceeds without error, just no rack_type set."""
+        """POST with invalid rack_type_id returns error redirect without creating a mapping."""
         url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
         resp = self.client.post(
             url,
@@ -2649,9 +2649,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
             },
         )
         self.assertEqual(resp.status_code, 302)
-        crm = ClassRoleMapping.objects.get(profile=self.profile, source_class="Frame")
-        self.assertTrue(crm.creates_rack)
-        self.assertIsNone(crm.rack_type)
+        self.assertFalse(ClassRoleMapping.objects.filter(profile=self.profile, source_class="Frame").exists())
 
     def test_model_str_with_rack_type(self):
         """ClassRoleMapping.__str__ includes rack type when set."""
