@@ -650,7 +650,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "profile_id": ctx.get("profile_id"),
                 "profile": profile,
                 "view_mode": view_mode,
-                "existing_resolutions_json": _json.dumps(existing_resolutions),
+                "existing_resolutions_json": _json.dumps(existing_resolutions).translate(
+                    {ord("<"): "\\u003C", ord(">"): "\\u003E", ord("&"): "\\u0026"}
+                ),
                 "can_create_role": request.user.has_perm("dcim.add_devicerole"),
             },
         )
