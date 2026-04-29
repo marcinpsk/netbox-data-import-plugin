@@ -1,41 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+import logging
+
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
+from django.core.exceptions import ValidationError
+from django.db import DatabaseError, IntegrityError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
 from utilities.permissions import get_permission_for_model
-from .models import (
-    ImportProfile,
-    ColumnMapping,
-    ClassRoleMapping,
-    DeviceTypeMapping,
-    ImportJob,
-    ColumnTransformRule,
-    DeviceExistingMatch,
-    ManufacturerMapping,
-)
+
+from .filters import ImportProfileFilterSet
 from .forms import (
+    ClassRoleMappingForm,
+    ColumnMappingForm,
+    ColumnTransformRuleForm,
+    DeviceTypeMappingForm,
     ImportProfileForm,
     ImportProfileImportForm,
-    ColumnMappingForm,
-    ClassRoleMappingForm,
-    DeviceTypeMappingForm,
-    ColumnTransformRuleForm,
     ImportSetupForm,
 )
-from .tables import (
-    ImportProfileTable,
-    ColumnMappingTable,
-    ClassRoleMappingTable,
-    DeviceTypeMappingTable,
-    ColumnTransformRuleTable,
-    ImportJobTable,
+from .models import (
+    ClassRoleMapping,
+    ColumnMapping,
+    ColumnTransformRule,
+    DeviceExistingMatch,
+    DeviceTypeMapping,
+    ImportJob,
+    ImportProfile,
+    ManufacturerMapping,
 )
-from .filters import ImportProfileFilterSet
+from .tables import (
+    ClassRoleMappingTable,
+    ColumnMappingTable,
+    ColumnTransformRuleTable,
+    DeviceTypeMappingTable,
+    ImportJobTable,
+    ImportProfileTable,
+)
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -51,6 +56,9 @@ def _safe_next_url(request, fallback: str) -> str:
 # ---------------------------------------------------------------------------
 # ImportProfile
 # ---------------------------------------------------------------------------
+
+
+logger = logging.getLogger(__name__)
 
 
 class ImportProfileListView(generic.ObjectListView):
@@ -611,9 +619,10 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.warning(request, "No import in progress. Please start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        from . import engine
-        from dcim.models import Site, Location
+        from dcim.models import Location, Site
         from tenancy.models import Tenant
+
+        from . import engine
 
         profile = ImportProfile.objects.filter(pk=ctx.get("profile_id")).first()
         if not profile:
@@ -630,8 +639,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         request.session["import_result"] = result.to_session_dict()
 
         # Build existing resolutions map for the split-name modal preview
-        from .models import SourceResolution
         import json as _json
+
+        from .models import SourceResolution
 
         existing_resolutions = {}
         for res in SourceResolution.objects.filter(profile=profile):
@@ -671,9 +681,10 @@ class ImportRunView(PermissionRequiredMixin, View):
             messages.warning(request, "No import in progress.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
+        from dcim.models import Location, Site
         from django.db import transaction
-        from dcim.models import Site, Location
         from tenancy.models import Tenant
+
         from . import engine
 
         profile = get_object_or_404(ImportProfile, pk=ctx_data["profile_id"])
@@ -842,6 +853,7 @@ class SaveResolutionView(PermissionRequiredMixin, View):
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
         import json
+
         from .models import SourceResolution
 
         profile_id = request.POST.get("profile_id")
@@ -1032,8 +1044,8 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
 
     def get(self, request, pk):
         """Serialize the profile and all its mappings to YAML and return as a file download."""
-        from django.http import HttpResponse
         import yaml
+        from django.http import HttpResponse
 
         profile = get_object_or_404(ImportProfile, pk=pk)
 
@@ -1156,8 +1168,8 @@ class CheckDeviceNameView(PermissionRequiredMixin, View):
 
     def get(self, request):
         """Return JSON indicating whether a device with the given name exists."""
-        from django.http import JsonResponse
         from dcim.models import Device
+        from django.http import JsonResponse
 
         if not request.user.has_perm("dcim.view_device"):  # pragma: no cover
             from django.http import HttpResponseForbidden
@@ -1323,7 +1335,7 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Save the device type mapping (and optionally create objects) then redirect."""
-        from dcim.models import Manufacturer, DeviceType
+        from dcim.models import DeviceType, Manufacturer
         from django.utils.text import slugify
 
         profile_id = request.POST.get("profile_id")
@@ -1492,6 +1504,7 @@ def _device_name_filter(q: str):
     matches "prod-lab03-sw03.prod-lab.aorta.net" via the "LAB03" token.
     """
     import re as _re
+
     from django.db.models import Q as _Q
 
     base = _Q(name__icontains=q)
@@ -1515,8 +1528,8 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
 
     def get(self, request):
         """Return a JSON list of matching NetBox objects for the given type and query."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, RackType
         from django.http import JsonResponse
-        from dcim.models import Manufacturer, DeviceType, Device, DeviceRole, RackType
 
         obj_type = request.GET.get("type", "device")
         q = request.GET.get("q", "").strip()
@@ -1608,8 +1621,8 @@ class QuickCreateDeviceRoleView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Create the DeviceRole and return JSON {id, name, slug}."""
-        from django.http import JsonResponse
         from dcim.models import DeviceRole
+        from django.http import JsonResponse
 
         if not request.user.has_perm("dcim.add_devicerole"):
             return JsonResponse({"error": "Permission denied: dcim.add_devicerole required."}, status=403)
@@ -1630,8 +1643,15 @@ class QuickCreateDeviceRoleView(PermissionRequiredMixin, View):
 
         try:
             role, created = DeviceRole.objects.get_or_create(slug=slug, defaults={"name": name, "color": color})
-        except Exception as exc:
-            return JsonResponse({"error": str(exc)}, status=400)
+        except IntegrityError:
+            logger.exception("QuickCreateDeviceRoleView: integrity error creating role slug=%s", slug)
+            return JsonResponse({"error": "A device role with that slug already exists."}, status=400)
+        except (ValueError, ValidationError):
+            logger.exception("QuickCreateDeviceRoleView: validation error creating role slug=%s", slug)
+            return JsonResponse({"error": "Invalid role data."}, status=400)
+        except DatabaseError:
+            logger.exception("QuickCreateDeviceRoleView: database error creating role slug=%s", slug)
+            return JsonResponse({"error": "An internal error occurred."}, status=500)
 
         return JsonResponse(
             {

@@ -773,6 +773,107 @@ class QuickCreateManufacturerViewTest(BaseViewTestCase):
         self.assertIn(resp.status_code, [200, 302])
 
 
+class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
+    """Tests for QuickCreateDeviceRoleView."""
+
+    def _url(self):
+        return reverse("plugins:netbox_data_import:quick_create_role")
+
+    def test_creates_role(self):
+        """POST creates a new DeviceRole and returns JSON with its id."""
+        from dcim.models import DeviceRole
+
+        resp = self.client.post(self._url(), {"name": "Spine", "slug": "spine"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["created"])
+        self.assertEqual(body["slug"], "spine")
+        self.assertTrue(DeviceRole.objects.filter(slug="spine").exists())
+
+    def test_create_role_idempotent(self):
+        """Re-POSTing the same slug returns created=False and does not duplicate."""
+        from dcim.models import DeviceRole
+
+        url = self._url()
+        self.client.post(url, {"name": "Leaf", "slug": "leaf"})
+        resp = self.client.post(url, {"name": "Leaf", "slug": "leaf"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["created"])
+        self.assertEqual(DeviceRole.objects.filter(slug="leaf").count(), 1)
+
+    def test_uses_default_color_when_blank(self):
+        """Empty/missing color falls back to the default 9e9e9e."""
+        from dcim.models import DeviceRole
+
+        resp = self.client.post(self._url(), {"name": "Edge", "slug": "edge", "color": ""})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(DeviceRole.objects.get(slug="edge").color, "9e9e9e")
+
+    def test_missing_name_returns_400(self):
+        """Missing name returns 400 with a field error."""
+        resp = self.client.post(self._url(), {"slug": "x"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("required", resp.json()["error"].lower())
+
+    def test_missing_slug_returns_400(self):
+        """Missing slug returns 400."""
+        resp = self.client.post(self._url(), {"name": "X"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_invalid_slug_returns_400(self):
+        """Slug with invalid chars is rejected."""
+        resp = self.client.post(self._url(), {"name": "Bad", "slug": "Bad Slug!"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("slug", resp.json()["error"].lower())
+
+    def test_missing_devicerole_permission_returns_403(self):
+        """User without dcim.add_devicerole gets a 403 JSON response."""
+        from django.contrib.auth.models import Permission
+
+        self.client.logout()
+        non_super = User.objects.create_user("limited", "l@example.com", "pw")
+        # Grant only the plugin view permission, NOT dcim.add_devicerole.
+        perm = Permission.objects.get(content_type__app_label="netbox_data_import", codename="view_importprofile")
+        non_super.user_permissions.add(perm)
+        self.client.login(username="limited", password="pw")
+        resp = self.client.post(self._url(), {"name": "NoPerm", "slug": "noperm"})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_database_error_is_sanitized(self):
+        """Database errors are logged but not leaked in the response body."""
+        from unittest.mock import patch
+        from django.db import DatabaseError
+
+        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=DatabaseError("raw db detail SECRET")):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xfail"})
+        self.assertEqual(resp.status_code, 500)
+        self.assertNotIn("SECRET", resp.content.decode())
+        self.assertIn("internal", resp.json()["error"].lower())
+
+    def test_integrity_error_is_sanitized(self):
+        """IntegrityError from a race returns a generic 400, not the raw message."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+
+        with patch(
+            "dcim.models.DeviceRole.objects.get_or_create",
+            side_effect=IntegrityError("duplicate key value violates unique constraint"),
+        ):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xrace"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotIn("unique constraint", resp.content.decode())
+
+    def test_validation_error_is_sanitized(self):
+        """ValidationError is caught and returns generic 400."""
+        from unittest.mock import patch
+        from django.core.exceptions import ValidationError
+
+        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=ValidationError("bad value")):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xval"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("invalid", resp.json()["error"].lower())
+
+
 class QuickResolveManufacturerViewTest(BaseViewTestCase):
     """Tests for QuickResolveManufacturerView."""
 
