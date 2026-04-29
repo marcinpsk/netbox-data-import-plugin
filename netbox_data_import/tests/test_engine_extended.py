@@ -363,6 +363,40 @@ class RunImportIgnoredDeviceTest(TestCase):
         ignore_rows = [r for r in result.rows if r.action == "ignore"]
         self.assertGreater(len(ignore_rows), 0)
 
+    def test_ignored_device_with_missing_name_is_ignored_not_error(self):
+        """Regression: ignoring a row with an empty device_name must override the
+        'Missing device name' error so the user-visible state matches the toast."""
+        from netbox_data_import.models import IgnoredDevice
+
+        profile = _make_profile("IgnoredMissingName")
+        # Synthesize a row with source_id but no device_name, mimicking rows
+        # like Id=3279624 in libre/example.xlsx.
+        rows = [
+            {
+                "_row_number": 2,
+                "source_id": "999001",
+                "device_name": "",
+                "device_class": "Server",
+                "rack_name": "R1",
+                "make": "Acme",
+                "model": "X",
+                "u_position": 10,
+                "u_height": 1,
+                "status": "active",
+            }
+        ]
+        IgnoredDevice.objects.create(profile=profile, source_id="999001", device_name="")
+        result = run_import(rows, profile, {"site": self.site}, dry_run=True)
+        actions = [(r.source_id, r.action, r.detail) for r in result.rows]
+        self.assertTrue(
+            any(sid == "999001" and act == "ignore" for sid, act, _ in actions),
+            f"Expected source_id=999001 to be ignored, got {actions!r}",
+        )
+        self.assertFalse(
+            any(sid == "999001" and act == "error" for sid, act, _ in actions),
+            f"Ignored row must not also produce an error, got {actions!r}",
+        )
+
 
 class SourceResolutionInEngineTest(TestCase):
     """Tests that source resolutions (rerere) are applied during parse_file."""

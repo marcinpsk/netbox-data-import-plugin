@@ -886,6 +886,21 @@ def _pass3_process_devices(rows, ctx, class_role_map):
         asset_tag_raw = str(row.get("asset_tag", "")).strip() or None
         asset_tag = asset_tag_raw[:50] if asset_tag_raw else None
 
+        if source_id and source_id in ignored_source_ids:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="ignore",
+                    object_type="device",
+                    detail="Ignored device",
+                    rack_name=rack_name,
+                    extra_data={"ignore_kind": "individual"},
+                )
+            )
+            continue
+
         u_position_raw = row.get("u_position")
         try:
             position = int(float(u_position_raw))
@@ -914,21 +929,6 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                     action="error",
                     object_type="device",
                     detail="Missing device name",
-                )
-            )
-            continue
-
-        if source_id in ignored_source_ids:
-            ctx.result.rows.append(
-                RowResult(
-                    row_number=row["_row_number"],
-                    source_id=source_id,
-                    name=device_name,
-                    action="ignore",
-                    object_type="device",
-                    detail="Ignored device",
-                    rack_name=rack_name,
-                    extra_data={"ignore_kind": "individual"},
                 )
             )
             continue
