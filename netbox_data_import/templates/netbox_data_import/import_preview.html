@@ -926,6 +926,69 @@ function mmSearch() {
     });
 }
 
+// ---- Create Role helpers (Configure Class modal) ----
+
+function cmToggleCreateRole() {
+  var form = document.getElementById('cm_create_role_form');
+  if (!form) return;
+  var visible = form.style.display !== 'none';
+  form.style.display = visible ? 'none' : '';
+  if (!visible) {
+    document.getElementById('cm_new_role_name').focus();
+  }
+}
+
+function cmAutoSlug() {
+  var name = document.getElementById('cm_new_role_name').value;
+  var slug = name.toLowerCase()
+    .replace(/[^a-z0-9\s-_]/g, '')
+    .replace(/[\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 64);
+  document.getElementById('cm_new_role_slug').value = slug;
+}
+
+function cmCreateRole() {
+  var name = document.getElementById('cm_new_role_name').value.trim();
+  var slug = document.getElementById('cm_new_role_slug').value.trim();
+  var errEl = document.getElementById('cm_create_role_error');
+  errEl.style.display = 'none';
+
+  if (!name || !slug) {
+    errEl.textContent = 'Name and slug are required.';
+    errEl.style.display = '';
+    return;
+  }
+
+  var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+  var body = new URLSearchParams({ name: name, slug: slug });
+  fetch('{% url "plugins:netbox_data_import:quick_create_role" %}', {
+    method: 'POST',
+    headers: { 'X-CSRFToken': csrfToken, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+    .then(function(result) {
+      if (!result.ok) {
+        errEl.textContent = result.data.error || 'Failed to create role.';
+        errEl.style.display = '';
+        return;
+      }
+      // Auto-select the newly created role
+      document.getElementById('cm_role_slug').value = result.data.slug;
+      document.getElementById('cm_create_role_form').style.display = 'none';
+      // Show brief success notice in results area
+      var resultsEl = document.getElementById('cm_role_search_results');
+      resultsEl.innerHTML = '<span class="badge bg-success me-1"><i class="mdi mdi-check"></i></span>'
+        + '<small class="text-success">Role <strong>' + result.data.name + '</strong> '
+        + (result.data.created ? 'created' : 'already existed') + ' — slug set.</small>';
+    })
+    .catch(function() {
+      errEl.textContent = 'Request failed. Please try again.';
+      errEl.style.display = '';
+    });
+}
+
 // ---- Device Match modal ----
 
 function dmSearch() {
@@ -1100,6 +1163,37 @@ function dmSearch() {
               </div>
               <div class="mt-2" id="cm_role_search_results"></div>
             </div>
+            {% if can_create_role %}
+            <div class="mt-2">
+              <button type="button" class="btn btn-sm btn-outline-primary" id="cm_create_role_toggle"
+                      onclick="cmToggleCreateRole()">
+                <i class="mdi mdi-plus"></i> Create new role
+              </button>
+              <div id="cm_create_role_form" style="display:none;" class="border rounded p-3 mt-2 bg-body-secondary">
+                <p class="text-muted small mb-2">Create a new DeviceRole directly in NetBox and use it here.</p>
+                <div class="row g-2 mb-2">
+                  <div class="col-7">
+                    <label class="form-label small mb-1">Role name</label>
+                    <input type="text" id="cm_new_role_name" class="form-control form-control-sm"
+                           placeholder="e.g. Network Switch"
+                           oninput="cmAutoSlug()">
+                  </div>
+                  <div class="col-5">
+                    <label class="form-label small mb-1">Slug</label>
+                    <input type="text" id="cm_new_role_slug" class="form-control form-control-sm"
+                           placeholder="e.g. network-switch">
+                  </div>
+                </div>
+                <div id="cm_create_role_error" class="text-danger small mb-2" style="display:none;"></div>
+                <button type="button" class="btn btn-sm btn-success" onclick="cmCreateRole()">
+                  <i class="mdi mdi-check"></i> Create &amp; select
+                </button>
+                <button type="button" class="btn btn-sm btn-secondary ms-1" onclick="cmToggleCreateRole()">
+                  Cancel
+                </button>
+              </div>
+            </div>
+            {% endif %}
           </div>
 
           <div id="cm_rack_type_row" style="display:none;">

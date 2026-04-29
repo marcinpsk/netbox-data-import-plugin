@@ -651,6 +651,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "profile": profile,
                 "view_mode": view_mode,
                 "existing_resolutions_json": _json.dumps(existing_resolutions),
+                "can_create_role": request.user.has_perm("dcim.add_devicerole"),
             },
         )
 
@@ -1481,6 +1482,26 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
+def _device_name_filter(q: str):
+    """Build a Django Q filter for device name search.
+
+    Exact icontains is tried first; when the query contains separators (-, _, .)
+    individual tokens (≥3 chars) are OR-ed in so that e.g. "PROD-LAB03-SW3"
+    matches "prod-lab03-sw03.prod-lab.aorta.net" via the "LAB03" token.
+    """
+    import re as _re
+    from django.db.models import Q as _Q
+
+    base = _Q(name__icontains=q)
+    tokens = [t for t in _re.split(r"[-_.\s]+", q) if len(t) >= 3]
+    if len(tokens) > 1:
+        token_q = _Q()
+        for tok in tokens:
+            token_q |= _Q(name__icontains=tok)
+        return base | token_q
+    return base
+
+
 class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
@@ -1540,7 +1561,7 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
                     }
                 )
         elif obj_type == "device":
-            for dev in Device.objects.filter(name__icontains=q).select_related("site")[:limit]:
+            for dev in Device.objects.filter(_device_name_filter(q)).distinct().select_related("site")[:limit]:
                 results.append(
                     {
                         "id": dev.pk,
@@ -1572,6 +1593,52 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
                 )
 
         return JsonResponse({"results": results})
+
+
+class QuickCreateDeviceRoleView(PermissionRequiredMixin, View):
+    """AJAX endpoint: create a new DeviceRole and return its details as JSON.
+
+    Used by the Configure Class modal so operators can create missing roles
+    without leaving the import preview page.
+    """
+
+    permission_required = "netbox_data_import.view_importprofile"
+
+    def post(self, request):
+        """Create the DeviceRole and return JSON {id, name, slug}."""
+        from django.http import JsonResponse
+        from dcim.models import DeviceRole
+
+        if not request.user.has_perm("dcim.add_devicerole"):
+            return JsonResponse({"error": "Permission denied: dcim.add_devicerole required."}, status=403)
+
+        name = request.POST.get("name", "").strip()
+        slug = request.POST.get("slug", "").strip()
+        color = request.POST.get("color", "9e9e9e").strip() or "9e9e9e"
+
+        if not name or not slug:
+            return JsonResponse({"error": "Role name and slug are required."}, status=400)
+
+        import re
+
+        if not re.match(r"^[-a-z0-9_]+$", slug):
+            return JsonResponse(
+                {"error": "Slug may only contain lowercase letters, numbers, hyphens, and underscores."}, status=400
+            )
+
+        try:
+            role, created = DeviceRole.objects.get_or_create(slug=slug, defaults={"name": name, "color": color})
+        except Exception as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+
+        return JsonResponse(
+            {
+                "id": role.pk,
+                "name": role.name,
+                "slug": role.slug,
+                "created": created,
+            }
+        )
 
 
 def _auto_match_single_device(device_model, device_name, serial, asset_tag):
