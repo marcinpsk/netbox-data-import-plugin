@@ -80,7 +80,7 @@ class ColumnMappingViewSet(_PluginModelViewSet):
 class ClassRoleMappingViewSet(_PluginModelViewSet):
     """CRUD viewset for ClassRoleMapping."""
 
-    queryset = ClassRoleMapping.objects.select_related("profile")
+    queryset = ClassRoleMapping.objects.select_related("profile", "rack_type")
     serializer_class = ClassRoleMappingSerializer
 
     def get_queryset(self):

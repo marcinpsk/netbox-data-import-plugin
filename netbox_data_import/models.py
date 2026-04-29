@@ -128,6 +128,13 @@ class ClassRoleMapping(models.Model):
         default=False,
         help_text="If checked, rows with this class create a Rack instead of a Device",
     )
+    rack_type = models.ForeignKey(
+        to="dcim.RackType",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        help_text="Optional rack type assigned when creating racks",
+    )
     role_slug = models.CharField(
         max_length=100,
         blank=True,
@@ -148,7 +155,8 @@ class ClassRoleMapping(models.Model):
 
     def __str__(self):
         if self.creates_rack:
-            return f"{self.source_class} → Rack"
+            suffix = f" ({self.rack_type})" if self.rack_type_id else ""
+            return f"{self.source_class} → Rack{suffix}"
         return f"{self.source_class} → {self.role_slug}"
 
     def get_absolute_url(self):

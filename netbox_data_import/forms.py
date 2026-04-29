@@ -58,7 +58,7 @@ class ClassRoleMappingForm(forms.ModelForm):
 
     class Meta:
         model = ClassRoleMapping
-        fields = ["profile", "source_class", "creates_rack", "role_slug", "ignore"]
+        fields = ["profile", "source_class", "creates_rack", "rack_type", "role_slug", "ignore"]
         widgets = {"profile": forms.HiddenInput()}
 
 

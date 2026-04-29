@@ -4,6 +4,25 @@
 
 {% block title %}Import Results{% endblock %}
 
+{% block head %}
+<style>
+  /* Badge colors using Tabler CSS variables (NetBox uses --tblr-* not --bs-*) */
+  .ndi-badge-create  { background-color: var(--tblr-success) !important; color: #fff !important; }
+  .ndi-badge-update  { background-color: var(--tblr-primary) !important; color: #fff !important; }
+  .ndi-badge-skip    { background-color: var(--tblr-secondary) !important; color: #fff !important; }
+  .ndi-badge-error   { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  .ndi-badge-ignored { background-color: var(--tblr-dark) !important; color: #fff !important; }
+  .ndi-badge-rack    { background-color: var(--tblr-info) !important; color: #fff !important; }
+  .ndi-badge-mfg     { background-color: var(--tblr-warning) !important; color: #000 !important; }
+  .ndi-badge-dt      { background-color: #b8860b !important; color: #fff !important; }
+  .ndi-badge-generic { background-color: var(--tblr-bg-surface-tertiary, var(--tblr-gray-100)) !important;
+                       color: var(--tblr-body-color) !important;
+                       border: 1px solid var(--tblr-border-color) !important; }
+  [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
+  [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="row">
   <div class="col">
@@ -15,13 +34,16 @@
       <div class="card-body">
         <div class="d-flex gap-3 flex-wrap mb-3">
           {% with c=result.counts %}
-          <span class="badge fs-6 text-white" style="background:#198754;">{{ c.racks_created|default:0 }} rack{{ c.racks_created|default:0|pluralize }} created</span>
-          <span class="badge fs-6 text-white" style="background:#198754;">{{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} created</span>
+          <span class="badge fs-6 ndi-badge-create">{{ c.racks_created|default:0 }} rack{{ c.racks_created|default:0|pluralize }} created</span>
+          <span class="badge fs-6 ndi-badge-create">{{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} created</span>
           {% if c.racks_updated or c.devices_updated %}
-          <span class="badge fs-6 text-white" style="background:#0d6efd;">{{ c.racks_updated|default:0|add:c.devices_updated|default:0 }} updated</span>
+          {% with racks_updated=c.racks_updated|default:0 devices_updated=c.devices_updated|default:0 %}
+          <span class="badge fs-6 ndi-badge-update">{{ racks_updated|add:devices_updated }} updated</span>
+          {% endwith %}
           {% endif %}
-          {% if c.skipped %}<span class="badge fs-6 text-white" style="background:#6c757d;">{{ c.skipped }} skipped</span>{% endif %}
-          {% if c.errors %}<span class="badge fs-6 text-white" style="background:#dc3545;">{{ c.errors }} error{{ c.errors|pluralize }}</span>{% endif %}
+          {% if c.ignored %}<span class="badge fs-6 ndi-badge-ignored">{{ c.ignored }} ignored</span>{% endif %}
+          {% if c.skipped %}<span class="badge fs-6 ndi-badge-skip">{{ c.skipped }} skipped</span>{% endif %}
+          {% if c.errors %}<span class="badge fs-6 ndi-badge-error">{{ c.errors }} error{{ c.errors|pluralize }}</span>{% endif %}
           {% endwith %}
         </div>
         <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-primary">
@@ -63,18 +85,19 @@
               </td>
               <td>
                 {% if row.object_type == 'rack' %}
-                  <span class="badge text-white" style="background:#0dcaf0;color:#000!important;">Rack</span>
+                  <span class="badge ndi-badge-rack">Rack</span>
                 {% elif row.object_type == 'device' %}
-                  <span class="badge text-white" style="background:#6c757d;">Device</span>
+                  <span class="badge ndi-badge-skip">Device</span>
                 {% else %}
-                  <span class="badge" style="background:#dee2e6;color:#212529;border:1px solid #adb5bd;">{{ row.object_type }}</span>
+                  <span class="badge ndi-badge-generic">{{ row.object_type }}</span>
                 {% endif %}
               </td>
               <td>
-                {% if row.action == 'create' %}<span class="badge text-white" style="background:#198754;">Created</span>
-                {% elif row.action == 'update' %}<span class="badge text-white" style="background:#0d6efd;">Updated</span>
-                {% elif row.action == 'skip' %}<span class="badge text-white" style="background:#6c757d;">Skipped</span>
-                {% elif row.action == 'error' %}<span class="badge text-white" style="background:#dc3545;">Error</span>
+                {% if row.action == 'create' %}<span class="badge ndi-badge-create">Created</span>
+                {% elif row.action == 'update' %}<span class="badge ndi-badge-update">Updated</span>
+                {% elif row.action == 'skip' %}<span class="badge ndi-badge-skip">Skipped</span>
+                {% elif row.action == 'error' %}<span class="badge ndi-badge-error">Error</span>
+                {% elif row.action == 'ignore' %}<span class="badge ndi-badge-ignored"><i class="mdi mdi-eye-off"></i> Ignored</span>
                 {% endif %}
               </td>
               <td class="{% if row.action == 'error' %}text-danger{% endif %}">{{ row.detail }}</td>

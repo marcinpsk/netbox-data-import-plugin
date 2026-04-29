@@ -94,6 +94,7 @@ urlpatterns = [
     ),
     path("quick-resolve-device-type/", views.QuickResolveDeviceTypeView.as_view(), name="quick_resolve_device_type"),
     path("quick-add-class-mapping/", views.QuickAddClassRoleMappingView.as_view(), name="quick_add_class_mapping"),
+    path("quick-create-role/", views.QuickCreateDeviceRoleView.as_view(), name="quick_create_role"),
     path("match-existing-device/", views.MatchExistingDeviceView.as_view(), name="match_existing_device"),
     path("auto-match-devices/", views.AutoMatchDevicesView.as_view(), name="auto_match_devices"),
     # Import Job history

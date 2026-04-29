@@ -773,6 +773,107 @@ class QuickCreateManufacturerViewTest(BaseViewTestCase):
         self.assertIn(resp.status_code, [200, 302])
 
 
+class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
+    """Tests for QuickCreateDeviceRoleView."""
+
+    def _url(self):
+        return reverse("plugins:netbox_data_import:quick_create_role")
+
+    def test_creates_role(self):
+        """POST creates a new DeviceRole and returns JSON with its id."""
+        from dcim.models import DeviceRole
+
+        resp = self.client.post(self._url(), {"name": "Spine", "slug": "spine"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["created"])
+        self.assertEqual(body["slug"], "spine")
+        self.assertTrue(DeviceRole.objects.filter(slug="spine").exists())
+
+    def test_create_role_idempotent(self):
+        """Re-POSTing the same slug returns created=False and does not duplicate."""
+        from dcim.models import DeviceRole
+
+        url = self._url()
+        self.client.post(url, {"name": "Leaf", "slug": "leaf"})
+        resp = self.client.post(url, {"name": "Leaf", "slug": "leaf"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["created"])
+        self.assertEqual(DeviceRole.objects.filter(slug="leaf").count(), 1)
+
+    def test_uses_default_color_when_blank(self):
+        """Empty/missing color falls back to the default 9e9e9e."""
+        from dcim.models import DeviceRole
+
+        resp = self.client.post(self._url(), {"name": "Edge", "slug": "edge", "color": ""})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(DeviceRole.objects.get(slug="edge").color, "9e9e9e")
+
+    def test_missing_name_returns_400(self):
+        """Missing name returns 400 with a field error."""
+        resp = self.client.post(self._url(), {"slug": "x"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("required", resp.json()["error"].lower())
+
+    def test_missing_slug_returns_400(self):
+        """Missing slug returns 400."""
+        resp = self.client.post(self._url(), {"name": "X"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_invalid_slug_returns_400(self):
+        """Slug with invalid chars is rejected."""
+        resp = self.client.post(self._url(), {"name": "Bad", "slug": "Bad Slug!"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("slug", resp.json()["error"].lower())
+
+    def test_missing_devicerole_permission_returns_403(self):
+        """User without dcim.add_devicerole gets a 403 JSON response."""
+        from django.contrib.auth.models import Permission
+
+        self.client.logout()
+        non_super = User.objects.create_user("limited", "l@example.com", "pw")
+        # Grant only the plugin view permission, NOT dcim.add_devicerole.
+        perm = Permission.objects.get(content_type__app_label="netbox_data_import", codename="view_importprofile")
+        non_super.user_permissions.add(perm)
+        self.client.login(username="limited", password="pw")
+        resp = self.client.post(self._url(), {"name": "NoPerm", "slug": "noperm"})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_database_error_is_sanitized(self):
+        """Database errors are logged but not leaked in the response body."""
+        from unittest.mock import patch
+        from django.db import DatabaseError
+
+        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=DatabaseError("raw db detail SECRET")):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xfail"})
+        self.assertEqual(resp.status_code, 500)
+        self.assertNotIn("SECRET", resp.content.decode())
+        self.assertIn("internal", resp.json()["error"].lower())
+
+    def test_integrity_error_is_sanitized(self):
+        """IntegrityError from a race returns a generic 400, not the raw message."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+
+        with patch(
+            "dcim.models.DeviceRole.objects.get_or_create",
+            side_effect=IntegrityError("duplicate key value violates unique constraint"),
+        ):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xrace"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotIn("unique constraint", resp.content.decode())
+
+    def test_validation_error_is_sanitized(self):
+        """ValidationError is caught and returns generic 400."""
+        from unittest.mock import patch
+        from django.core.exceptions import ValidationError
+
+        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=ValidationError("bad value")):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xval"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("invalid", resp.json()["error"].lower())
+
+
 class QuickResolveManufacturerViewTest(BaseViewTestCase):
     """Tests for QuickResolveManufacturerView."""
 
@@ -2571,3 +2672,145 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         with self.assertRaises(ValueError, msg="overlength name must raise ValueError, not DataError"):
             _apply_profile_yaml_data(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name__startswith="X" * 50).exists())
+
+
+class RackTypeFeatureTest(BaseViewTestCase):
+    """Tests for rack type mapping feature."""
+
+    def setUp(self):
+        """Create profile and rack type for testing."""
+        super().setUp()
+        from dcim.models import Manufacturer, RackType
+
+        self.profile = _make_profile("RackTypeProfile")
+        self.mfg = Manufacturer.objects.create(name="RackVendor", slug="rackvendor")
+        self.rack_type = RackType.objects.create(
+            manufacturer=self.mfg,
+            model="Standard42U",
+            slug="standard-42u",
+            u_height=42,
+        )
+
+    def test_search_rack_type(self):
+        """type=rack_type returns rack type results."""
+        import json
+
+        url = reverse("plugins:netbox_data_import:search_objects")
+        resp = self.client.get(url + "?type=rack_type&q=Standard")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertTrue(any("Standard42U" in r["name"] for r in data["results"]))
+
+    def test_quick_add_rack_mapping_with_rack_type(self):
+        """POST creates ClassRoleMapping with creates_rack=True and rack_type set."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Enclosure",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+                "rack_type_id": str(self.rack_type.pk),
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        crm = ClassRoleMapping.objects.get(profile=self.profile, source_class="Enclosure")
+        self.assertTrue(crm.creates_rack)
+        self.assertEqual(crm.rack_type_id, self.rack_type.pk)
+
+    def test_quick_add_rack_mapping_without_rack_type(self):
+        """POST creates ClassRoleMapping with creates_rack=True and no rack_type."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Cage",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        crm = ClassRoleMapping.objects.get(profile=self.profile, source_class="Cage")
+        self.assertTrue(crm.creates_rack)
+        self.assertIsNone(crm.rack_type)
+
+    def test_quick_add_rack_mapping_invalid_rack_type_id(self):
+        """POST with invalid rack_type_id returns error redirect without creating a mapping."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Frame",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+                "rack_type_id": "99999",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(ClassRoleMapping.objects.filter(profile=self.profile, source_class="Frame").exists())
+
+    def test_model_str_with_rack_type(self):
+        """ClassRoleMapping.__str__ includes rack type when set."""
+        crm = ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="TypedRack",
+            creates_rack=True,
+            rack_type=self.rack_type,
+        )
+        s = str(crm)
+        self.assertIn("Rack", s)
+        self.assertIn("Standard42U", s)
+
+    def test_yaml_export_includes_rack_type(self):
+        """Exported YAML includes rack_type slug for class_role_mappings."""
+        import yaml
+
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Cabinet").update(rack_type=self.rack_type)
+        url = reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.profile.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        data = yaml.safe_load(resp.content.decode())
+        cabinet_crm = next(
+            (m for m in data["class_role_mappings"] if m["source_class"] == "Cabinet"),
+            None,
+        )
+        self.assertIsNotNone(cabinet_crm)
+        self.assertEqual(cabinet_crm.get("rack_type"), "standard-42u")
+
+    def test_yaml_import_with_rack_type(self):
+        """YAML import resolves rack_type slug to FK."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "RackTypeImport"},
+            "class_role_mappings": [
+                {
+                    "source_class": "Cab",
+                    "creates_rack": True,
+                    "rack_type": "standard-42u",
+                },
+            ],
+        }
+        profile, stats = _apply_profile_yaml_data(data)
+        crm = ClassRoleMapping.objects.get(profile=profile, source_class="Cab")
+        self.assertEqual(crm.rack_type_id, self.rack_type.pk)
+
+    def test_yaml_import_with_invalid_rack_type_raises(self):
+        """YAML import with non-existent rack_type slug raises ValueError."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "RackTypeBadImport"},
+            "class_role_mappings": [
+                {
+                    "source_class": "Cab",
+                    "creates_rack": True,
+                    "rack_type": "nonexistent-rt",
+                },
+            ],
+        }
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data(data)
