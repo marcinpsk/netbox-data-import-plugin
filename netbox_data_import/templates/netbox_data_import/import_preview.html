@@ -555,7 +555,7 @@ var TARGET_FIELDS = [
 ];
 
 // Existing saved resolutions keyed by source_id → source_column → {original_value, resolved_fields}
-var EXISTING_RESOLUTIONS = {{ existing_resolutions_json|default:"{}" }};
+var EXISTING_RESOLUTIONS = {{ existing_resolutions_json|default:"{}"|safe }};
 
 // Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
 document.addEventListener('DOMContentLoaded', function() {
@@ -953,6 +953,9 @@ function dmSearch() {
         };
         container.appendChild(btn);
       });
+    })
+    .catch(function() {
+      document.getElementById('dm_search_results').innerHTML = '<p class="text-danger small">Search failed. Please try again.</p>';
     });
 }
 </script>
