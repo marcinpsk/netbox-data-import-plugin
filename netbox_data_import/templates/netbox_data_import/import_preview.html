@@ -170,9 +170,10 @@
                   {% elif dev.action == 'ignore' %}<span class="badge bg-dark me-1">✕</span>
                   {% endif %}
                   {{ dev.name }}
+                  {% if dev.source_id %}<small class="text-muted ms-1">#{{ dev.source_id }}</small>{% endif %}
                 </span>
                 {% if dev.action != 'ignore' %}
-                <small class="text-muted">U{{ dev.detail|truncatechars:20 }}</small>
+                <small class="text-muted">{{ dev.detail|truncatechars:20 }}</small>
                 {% endif %}
               </li>
               {% endfor %}
