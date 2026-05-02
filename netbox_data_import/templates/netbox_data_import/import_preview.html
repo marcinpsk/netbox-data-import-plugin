@@ -18,6 +18,9 @@
   .ndi-badge-generic { background-color: var(--tblr-bg-surface-tertiary, var(--tblr-gray-100)) !important;
                        color: var(--tblr-body-color) !important;
                        border: 1px solid var(--tblr-border-color) !important; }
+  /* Count badge: soft indigo — readable in light and dark, not harsh */
+  .ndi-count-badge { background-color: #6366f1 !important; color: #fff !important; }
+  [data-bs-theme="dark"] .ndi-count-badge { background-color: #818cf8 !important; color: #1e1b4b !important; }
   .ndi-unused-badge  { cursor: pointer; }
   .ndi-unused-badge:hover { opacity: 0.85; }
   [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
@@ -138,7 +141,7 @@
             <span class="fw-semibold">
               <i class="mdi mdi-table-column-remove me-1 text-secondary"></i>
               Unused source columns
-              <span class="badge bg-secondary ms-1">{{ unused_columns|length }}</span>
+              <span class="badge ndi-count-badge ms-1">{{ unused_columns|length }}</span>
             </span>
             <button class="btn btn-sm btn-outline-secondary py-0"
                     type="button"
@@ -159,7 +162,7 @@
                       title="{{ col.count }} row{{ col.count|pluralize }} with data — samples: {{ col.samples|join:', ' }}"
                       onclick="ndiOpenQuickMapModal('{{ col.name|escapejs }}', '{{ col.suggested_field|default:''|escapejs }}')">
                   {{ col.name }}
-                  <span class="badge bg-secondary ms-1" style="font-size:0.7em">{{ col.count }}</span>
+                  <span class="badge ndi-count-badge ms-1" style="font-size:0.7em">{{ col.count }}</span>
                   {% if col.suggested_field %}
                     <i class="mdi mdi-auto-fix ms-1" title="Suggested: {{ col.suggested_field }}"></i>
                   {% endif %}
