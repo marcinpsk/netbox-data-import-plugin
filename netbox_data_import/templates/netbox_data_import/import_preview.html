@@ -1597,7 +1597,7 @@ document.addEventListener('click', function(e) {
   btn.disabled = true;
   btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i>';
 
-  const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
+  const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   const body = new URLSearchParams({
     device_id: deviceId,
     field: field,

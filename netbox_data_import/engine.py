@@ -287,9 +287,30 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Device-type slug resolution
-# ---------------------------------------------------------------------------
+def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
+    """Re-apply all saved SourceResolutions for a profile to pre-parsed rows.
+
+    Called in the preview GET handler so newly-saved resolutions are reflected
+    without requiring the user to re-upload the file.  The session rows may
+    already have older resolutions baked in; re-applying is idempotent for those
+    and correctly applies any resolution saved after the initial upload.
+    """
+    resolutions_by_source_id: dict[str, list] = {}
+    for res in profile.source_resolutions.all():
+        resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
+
+    if not resolutions_by_source_id:
+        return rows
+
+    result = []
+    for row in rows:
+        source_id = str(row.get("source_id", ""))
+        if source_id and source_id in resolutions_by_source_id:
+            row = dict(row)  # shallow copy — don't mutate the session dict
+            for res in resolutions_by_source_id[source_id]:
+                row.update(res.resolved_fields)
+        result.append(row)
+    return result
 
 
 def _parse_ip_with_prefix(raw_value: str) -> str | None:

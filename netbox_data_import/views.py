@@ -717,6 +717,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         tenant = Tenant.objects.filter(pk=ctx.get("tenant_id")).first() if ctx.get("tenant_id") else None
 
         context_obj = {"site": site, "location": location, "tenant": tenant}
+        # Re-apply saved resolutions so any resolution saved after the initial upload
+        # is reflected without requiring a file re-upload.
+        rows = engine.reapply_saved_resolutions(rows, profile)
         # Always re-run so any new mappings/matches are immediately reflected
         result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
         request.session["import_result"] = result.to_session_dict()
@@ -990,7 +993,7 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
 
     permission_required = "dcim.change_device"
 
-    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "u_height", "serial", "asset_tag"}
+    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "u_height", "serial", "asset_tag", "face"}
 
     def post(self, request):
         """Apply the given field value to the specified device."""
@@ -1072,6 +1075,16 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
             device.asset_tag = str(value)[:50] if value else None
             device.save(update_fields=["asset_tag"])
             return device.asset_tag
+
+        if field == "face":
+            v = str(value).strip().lower()
+            _FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
+            mapped = _FACE_MAP.get(v)
+            if mapped is None:
+                raise ValueError(f"Unknown face value '{value}' — expected 'front' or 'rear'")
+            device.face = mapped
+            device.save(update_fields=["face"])
+            return device.face
 
         raise ValueError(f"Field '{field}' is not syncable")
 
