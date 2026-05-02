@@ -730,6 +730,40 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
     return matched_device, match_method
 
 
+def _compute_field_diff(
+    matched_device, device_name, serial, asset_tag, device_face, device_airflow, device_status, u_height, u_position
+):
+    """Return a dict of fields that differ between the XLS row and the existing NetBox device."""
+    diff = {}
+    candidates = [
+        ("device_name", str(device_name), str(matched_device.name)),
+        ("status", str(device_status), str(matched_device.status)),
+        ("serial", str(serial or ""), str(matched_device.serial or "")),
+        ("asset_tag", str(asset_tag or ""), str(matched_device.asset_tag or "")),
+    ]
+    if device_face is not None:
+        candidates.append(("face", str(device_face), str(matched_device.face) if matched_device.face else ""))
+    if device_airflow is not None:
+        candidates.append(
+            ("airflow", str(device_airflow), str(matched_device.airflow) if matched_device.airflow else "")
+        )
+    for fname, xls_val, nb_val in candidates:
+        if xls_val != nb_val:
+            diff[fname] = {"netbox": nb_val, "file": xls_val}
+    nb_u_height = matched_device.device_type.u_height if matched_device.device_type_id else None
+    if nb_u_height is not None:
+        try:
+            if float(u_height) != float(nb_u_height):
+                diff["u_height"] = {"netbox": str(nb_u_height), "file": str(u_height)}
+        except (TypeError, ValueError):
+            pass
+    xls_pos = str(u_position) if u_position is not None else ""
+    nb_pos = str(matched_device.position) if matched_device.position is not None else ""
+    if xls_pos != nb_pos:
+        diff["u_position"] = {"netbox": nb_pos, "file": xls_pos}
+    return diff
+
+
 def _preview_device_row(
     row,
     ctx,
@@ -745,6 +779,10 @@ def _preview_device_row(
     Device,
     Rack,
     ip_fields: dict | None = None,
+    device_face=None,
+    device_airflow=None,
+    device_status="active",
+    u_position=None,
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     # Parse u_height early so it's available in all return paths
@@ -787,6 +825,7 @@ def _preview_device_row(
         rack_label = "(no rack)"
     raw_position = row.get("u_position")
     try:
+        # Re-derive position for display label; u_position param is the pre-resolved value for field_diff
         position = int(float(raw_position)) if raw_position is not None and str(raw_position).strip() != "" else None
     except (TypeError, ValueError):
         position = None
@@ -818,6 +857,20 @@ def _preview_device_row(
         _pos_label = f" U{position}" if position is not None else ""
         detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
 
+    field_diff: dict | None = None
+    if action == "update" and matched_device is not None:
+        field_diff = _compute_field_diff(
+            matched_device,
+            device_name,
+            serial,
+            asset_tag,
+            device_face,
+            device_airflow,
+            device_status,
+            u_height,
+            u_position,
+        )
+
     return RowResult(
         row_number=row["_row_number"],
         source_id=source_id,
@@ -834,6 +887,7 @@ def _preview_device_row(
             "u_height": u_height,
             "asset_tag": asset_tag or "",
             **({"_ip": ip_fields} if ip_fields else {}),
+            **({"field_diff": field_diff} if field_diff is not None else {}),
         },
     )
 
@@ -1000,18 +1054,15 @@ def _assign_ip_to_device(device, ip_field: str, ip_str: str):
                 existing_net = ipaddress.ip_interface(str(existing_ip.address)).network
                 if target_interface.ip in existing_net:
                     # Found a matching interface - handle IPAddress safely
-                    try:
-                        ip_obj = IPAddress.objects.get(address=ip_str)
-                        if ip_obj.assigned_object is None:
-                            # Unassigned IP — claim it for this interface
-                            ip_obj.assigned_object = iface
-                            ip_obj.save(update_fields=["assigned_object_type", "assigned_object_id"])
-                        elif getattr(ip_obj.assigned_object, "device_id", None) != device.pk:
-                            # IP belongs to another device — fall back to JSON
-                            return False
-                    except IPAddress.DoesNotExist:
-                        vrf = getattr(iface, "vrf", None)
+                    vrf = getattr(iface, "vrf", None)
+                    ip_obj = IPAddress.objects.filter(address=ip_str, vrf=vrf).first()
+                    if ip_obj is None:
                         ip_obj = IPAddress.objects.create(address=ip_str, assigned_object=iface, vrf=vrf)
+                    elif ip_obj.assigned_object is None:
+                        ip_obj.assigned_object = iface
+                        ip_obj.save(update_fields=["assigned_object_type", "assigned_object_id"])
+                    elif getattr(ip_obj.assigned_object, "device_id", None) != device.pk:
+                        return False
                     setattr(device, ip_field, ip_obj)
                     device.save(update_fields=[ip_field])
                     return True
@@ -1167,6 +1218,10 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 Device,
                 Rack,
                 ip_fields=ip_fields,
+                device_face=device_face,
+                device_airflow=device_airflow,
+                device_status=device_status,
+                u_position=position,
             )
         else:
             row_result = _write_device_row(
