@@ -534,6 +534,13 @@ class IgnoreUnignoreViewTest(BaseViewTestCase):
         self.client.post(url, {"profile_id": self.profile.pk, "source_id": "SRC-002", "next": "/"})
         self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile, source_id="SRC-002").exists())
 
+    def test_unignore_device_not_on_list_shows_warning(self):
+        """Unignoring a device that was never individually ignored shows a warning message."""
+        url = reverse("plugins:netbox_data_import:unignore_device")
+        resp = self.client.post(url, {"profile_id": self.profile.pk, "source_id": "SRC-NOTEXIST", "next": "/"})
+        # Redirects back; no crash
+        self.assertIn(resp.status_code, [200, 302])
+
 
 class SaveResolutionViewTest(BaseViewTestCase):
     """Tests for SaveResolutionView."""

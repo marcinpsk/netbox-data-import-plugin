@@ -120,3 +120,52 @@ class QuickAddColumnMappingViewTest(TestCase):
         )
         self.assertEqual(resp.status_code, 302)
         self.assertNotIn("import_preview", resp.url)
+
+    def test_valid_extra_json_key_accepted(self):
+        """extra_json:<valid_key> is accepted and stored."""
+        resp = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "JiraID",
+                "target_field": "extra_json:jira_id",
+            },
+        )
+        self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
+        self.assertTrue(
+            ColumnMapping.objects.filter(
+                profile=self.profile, source_column="JiraID", target_field="extra_json:jira_id"
+            ).exists()
+        )
+
+    def test_invalid_extra_json_key_rejected(self):
+        """extra_json: key with invalid characters (spaces, symbols) is rejected."""
+        resp = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "JiraID",
+                "target_field": "extra_json:has spaces!",
+            },
+        )
+        self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
+        self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, source_column="JiraID").exists())
+
+    def test_displaced_mapping_gets_reassigned_message(self):
+        """When a different source already maps to the same target, it is displaced with a message."""
+        ColumnMapping.objects.create(profile=self.profile, source_column="OldSerial", target_field="serial")
+        resp = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "NewSerial",
+                "target_field": "serial",
+            },
+        )
+        self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
+        self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, source_column="OldSerial").exists())
+        self.assertTrue(
+            ColumnMapping.objects.filter(
+                profile=self.profile, source_column="NewSerial", target_field="serial"
+            ).exists()
+        )

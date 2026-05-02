@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from django.test import TestCase
 
-from netbox_data_import.engine import _store_source_id, parse_file
+from netbox_data_import.engine import _collect_unmapped_values, _promote_extra_json_fields, _store_source_id, parse_file
 from netbox_data_import.models import ColumnMapping, ImportProfile
 
 
@@ -157,3 +157,63 @@ class StoreSourceIdExtraTest(TestCase):
         _store_source_id(obj, profile, "SRC-3", extra_columns={})
         stored = obj.custom_field_data.get("data_import_source", {})
         self.assertNotIn("extra", stored)
+
+
+class PromoteExtraJsonFieldsTest(TestCase):
+    """Unit tests for _promote_extra_json_fields."""
+
+    def test_moves_non_empty_value_to_extra_columns(self):
+        """extra_json:<key> with a value is moved into _extra_columns."""
+        row = {"device_name": "host", "extra_json:jira_id": "JIRA-123"}
+        _promote_extra_json_fields(row)
+        self.assertNotIn("extra_json:jira_id", row)
+        self.assertEqual(row["_extra_columns"]["jira_id"], "JIRA-123")
+
+    def test_multiple_extra_json_fields(self):
+        """Multiple extra_json: keys are all promoted."""
+        row = {"extra_json:jira_id": "JIRA-1", "extra_json:ticket": "T-99"}
+        _promote_extra_json_fields(row)
+        self.assertEqual(row["_extra_columns"]["jira_id"], "JIRA-1")
+        self.assertEqual(row["_extra_columns"]["ticket"], "T-99")
+
+    def test_none_value_not_added_to_extra_columns(self):
+        """extra_json: key with None value is removed but not written to _extra_columns."""
+        row = {"device_name": "host", "extra_json:jira_id": None}
+        _promote_extra_json_fields(row)
+        self.assertNotIn("extra_json:jira_id", row)
+        self.assertNotIn("_extra_columns", row)
+
+    def test_empty_string_value_not_added_to_extra_columns(self):
+        """extra_json: key with empty-string value is removed but not written to _extra_columns."""
+        row = {"device_name": "host", "extra_json:jira_id": ""}
+        _promote_extra_json_fields(row)
+        self.assertNotIn("extra_json:jira_id", row)
+        self.assertNotIn("_extra_columns", row)
+
+    def test_non_extra_json_keys_untouched(self):
+        """Keys not starting with extra_json: are not affected."""
+        row = {"device_name": "host", "serial": "ABC123"}
+        _promote_extra_json_fields(row)
+        self.assertEqual(row["device_name"], "host")
+        self.assertEqual(row["serial"], "ABC123")
+
+
+class CollectUnmappedValuesTest(TestCase):
+    """Unit tests for _collect_unmapped_values."""
+
+    def test_empty_string_value_is_skipped(self):
+        """Cells containing only whitespace are excluded (line 194: continue)."""
+        # row is a list, raw_headers maps column name to index
+        row = ["  ", "\t"]
+        raw_headers = {"col1": 0, "col2": 1}
+        unmapped_cols = ["col1", "col2"]
+        result = _collect_unmapped_values(row, raw_headers, unmapped_cols, {}, False, True)
+        self.assertEqual(result, {})
+
+    def test_non_empty_values_included(self):
+        """Cells with real values are collected."""
+        row = ["value1", "  "]
+        raw_headers = {"col1": 0, "col2": 1}
+        unmapped_cols = ["col1", "col2"]
+        result = _collect_unmapped_values(row, raw_headers, unmapped_cols, {}, False, True)
+        self.assertEqual(result, {"col1": "value1"})

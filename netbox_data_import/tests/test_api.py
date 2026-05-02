@@ -123,6 +123,29 @@ class ClassRoleMappingAPITest(BaseAPITestCase):
         for item in data["results"]:
             self.assertEqual(item["profile"], self.p1.pk)
 
+    def test_create_class_role_mapping_with_rack_type(self):
+        """POST with rack_type slug exercises _RackTypeSlugField.get_queryset()."""
+        import json
+
+        from dcim.models import Manufacturer, RackType
+
+        mfr = Manufacturer.objects.create(name="APIRackMfr", slug="api-rack-mfr")
+        rt = RackType.objects.create(manufacturer=mfr, model="APIRackType", slug="api-rack-type", u_height=42)
+        resp = self.client.post(
+            "/api/plugins/data-import/class-role-mappings/",
+            data=json.dumps(
+                {
+                    "profile": self.p1.pk,
+                    "source_class": "APICabinet",
+                    "creates_rack": True,
+                    "rack_type": rt.slug,
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+        self.assertIn(resp.status_code, [200, 201])
+
 
 class DeviceTypeMappingAPITest(BaseAPITestCase):
     """Tests for the DeviceTypeMapping REST API."""
