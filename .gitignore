@@ -60,3 +60,5 @@ site/
 
 # direnv
 .envrc
+
+docs/superpowers
