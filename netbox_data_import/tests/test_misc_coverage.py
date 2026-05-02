@@ -69,6 +69,21 @@ class DeviceImportDataExtensionTest(TestCase):
             result = ext.right_page()
         self.assertEqual(result, "<ok>")
 
+    def test_renders_with_ip_data_populates_ip_status(self):
+        """right_page() populates ip_status when data_import_source has _ip key — lines 29-37."""
+        obj = MagicMock()
+        obj.primary_ip4 = None
+        obj.cf = {"data_import_source": {"source_id": "SRC-3", "_ip": {"primary_ip4": "10.0.0.1/32"}}}
+        ext = self._make_ext({"object": obj})
+        with patch.object(ext, "render", return_value="<rendered-ip>") as mock_render:
+            result = ext.right_page()
+        self.assertEqual(result, "<rendered-ip>")
+        _, kwargs = mock_render.call_args
+        ip_status = kwargs["extra_context"]["ip_status"]
+        self.assertIn("primary_ip4", ip_status)
+        self.assertFalse(ip_status["primary_ip4"]["in_netbox"])
+        self.assertEqual(ip_status["primary_ip4"]["value"], "10.0.0.1/32")
+
 
 class ImportSetupFormValidationTest(TestCase):
     """Tests for ImportSetupForm.clean_excel_file() file-size validation."""
