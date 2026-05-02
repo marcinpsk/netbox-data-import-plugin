@@ -3035,14 +3035,12 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertEqual(self.device.status, "active")
 
     def test_sync_u_height(self):
-        """Set u_height on device type via SyncDeviceFieldView."""
+        """u_height is not in _ALLOWED_FIELDS → ok=False with 'not syncable' error."""
         response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_height", "value": "2"})
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertTrue(data["ok"])
-        self.assertIn("U", data["display"])
-        self.device.device_type.refresh_from_db()
-        self.assertEqual(float(self.device.device_type.u_height), 2.0)
+        self.assertFalse(data["ok"])
+        self.assertIn("not syncable", data["error"].lower())
 
     def test_sync_invalid_field(self):
         """Post invalid field name — expect ok=false."""

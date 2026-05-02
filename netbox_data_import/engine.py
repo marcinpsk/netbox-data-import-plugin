@@ -278,7 +278,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
         if return_stats or capture_extra:
             extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
             if capture_extra and extra:
-                row_dict["_extra_columns"] = extra
+                row_dict.setdefault("_extra_columns", {}).update(extra)
 
         rows.append(row_dict)
 

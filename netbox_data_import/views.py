@@ -439,13 +439,13 @@ class ImportProfileBulkImportView(generic.BulkImportView):
                 raw = upload.read().decode("utf-8-sig")
             except Exception as exc:  # pragma: no cover
                 messages.error(request, f"Could not read uploaded file: {exc}")
-                return redirect(request.path)
+                return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
         else:
             raw = request.POST.get("data", "").strip()
 
         if not raw:
             messages.error(request, "No data provided.")
-            return redirect(request.path)
+            return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
 
         try:
             data = yaml.safe_load(raw)
@@ -462,7 +462,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
                 profile, stats = _apply_profile_yaml_data(data)
             except ValueError as exc:  # KeyError no longer escapes since _iter_yaml_section validates required_keys
                 messages.error(request, str(exc))
-                return redirect(request.path)
+                return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
             summary = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items())
             messages.success(request, f"Profile '{profile.name}' imported/updated. {summary}.")
             return redirect(profile.get_absolute_url())
@@ -721,6 +721,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         # Re-apply saved resolutions so any resolution saved after the initial upload
         # is reflected without requiring a file re-upload.
         rows = engine.reapply_saved_resolutions(rows, profile)
+        request.session["import_rows"] = _serialize_rows(rows)
         # Always re-run so any new mappings/matches are immediately reflected
         result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
         request.session["import_result"] = result.to_session_dict()
@@ -770,6 +771,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "can_create_role": request.user.has_perm("dcim.add_devicerole"),
                 "unused_columns": unused_columns,
                 "target_field_choices": TARGET_FIELD_CHOICES,
+                "syncable_fields": SyncDeviceFieldView._ALLOWED_FIELDS,
             },
         )
 
@@ -981,8 +983,10 @@ class RemoveExtraIpView(PermissionRequiredMixin, View):
             return _safe_return()
 
         device = get_object_or_404(Device, pk=device_id)
-        import_data = device.cf.get("data_import_source") or {}
-        ip_data = import_data.get("_ip") or {}
+        import_data = device.cf.get("data_import_source")
+        import_data = import_data if isinstance(import_data, dict) else {}
+        ip_data = import_data.get("_ip")
+        ip_data = ip_data if isinstance(ip_data, dict) else {}
 
         if ip_field in ip_data:
             del ip_data[ip_field]
@@ -1313,7 +1317,7 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
             created, skipped = self._import_device_type_rows(data, profile, errors)
         else:
             messages.error(request, f"Unknown mapping type '{mapping_type}'.")
-            return redirect(request.path)
+            return redirect(profile.get_absolute_url())
 
         if errors:
             messages.warning(

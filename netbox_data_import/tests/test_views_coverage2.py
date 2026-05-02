@@ -104,8 +104,8 @@ class BulkImportSeekOnYamlErrorTest(TestCase):
         url = reverse("plugins:netbox_data_import:importprofile_bulk_import")
         # NetBox's BulkImportView form requires a 'format' field; include it so
         # the form validation doesn't raise KeyError before we can test the seek path.
-        resp = self.client.post(url, {"upload_file": invalid_yaml, "format": "yaml"})
-        # NetBox's BulkImportView returns 200 with form errors when YAML is invalid
+        resp = self.client.post(url, {"upload_file": invalid_yaml, "format": "yaml"}, follow=True)
+        # After following any redirects, the final response should be 200
         self.assertEqual(resp.status_code, 200)
 
 
@@ -369,13 +369,13 @@ class SyncDeviceFieldErrorPathsTest(TestCase):
         self.assertFalse(data["ok"])
         self.assertIn("unknown", data["error"].lower())
 
-    def test_u_height_non_parseable_returns_error(self):
-        """u_height='abc' raises ValueError → ok=False — lines 1083-1084."""
+    def test_u_height_not_syncable_returns_error(self):
+        """u_height is not in _ALLOWED_FIELDS → ok=False with explicit error — lines 1025-1026."""
         resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_height", "value": "abc"})
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertFalse(data["ok"])
-        self.assertIn("parse", data["error"].lower())
+        self.assertIn("not syncable", data["error"].lower())
 
     def test_face_front_sets_face_and_returns_ok(self):
         """face='front' is valid → ok=True — lines 1100-1108."""
@@ -528,15 +528,15 @@ class BulkYamlImportUnknownMappingTypeTest(TestCase):
             kwargs={"profile_pk": self.profile.pk},
         )
 
-    def test_unknown_mapping_type_shows_zero_created_in_success_message(self):
-        """Unknown mapping_type takes else branch: created=skipped=0 — line 1315."""
+    def test_unknown_mapping_type_shows_error_message(self):
+        """Unknown mapping_type takes else branch: returns error message — line 1319."""
         yaml_content = b"- source_class: Anything\n"
         yaml_file = BytesIO(yaml_content)
         yaml_file.name = "unk.yaml"
         resp = self.client.post(self.url, {"yaml_file": yaml_file, "mapping_type": "unknown_type"})
         self.assertEqual(resp.status_code, 302)
         messages = list(get_messages(resp.wsgi_request))
-        self.assertTrue(any("0 created" in str(m) for m in messages))
+        self.assertTrue(any("unknown mapping type" in str(m).lower() for m in messages))
 
 
 class BulkYamlImportErrorsPathTest(TestCase):

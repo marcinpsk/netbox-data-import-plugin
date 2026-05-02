@@ -528,7 +528,7 @@
                         <td class="ndi-diff-netbox-val">{{ vals.netbox|default:"—" }}</td>
                         <td>{{ vals.file|default:"—" }}</td>
                         <td>
-                          {% if field_name != "primary_ip4" and field_name != "primary_ip6" and field_name != "oob_ip" %}
+                          {% if field_name in syncable_fields %}
                           <button type="button" class="btn btn-xs btn-outline-primary ndi-sync-btn"
                                   data-device-id="{{ row.extra_data.netbox_device_id }}"
                                   data-field="{{ field_name }}"
