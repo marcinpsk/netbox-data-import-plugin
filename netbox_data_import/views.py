@@ -981,6 +981,102 @@ class RemoveExtraIpView(PermissionRequiredMixin, View):
 
 
 # ---------------------------------------------------------------------------
+# Sync single device field from import file value
+# ---------------------------------------------------------------------------
+
+
+class SyncDeviceFieldView(PermissionRequiredMixin, View):
+    """Apply a single field value from the import file to an existing NetBox device."""
+
+    permission_required = "dcim.change_device"
+
+    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "u_height", "serial", "asset_tag"}
+
+    def post(self, request):
+        """Apply the given field value to the specified device."""
+        from django.http import JsonResponse
+
+        from dcim.models import Device
+        from .engine import _STATUS_MAP
+
+        device_id = request.POST.get("device_id")
+        field = request.POST.get("field", "")
+        value = request.POST.get("value", "")
+
+        # Validate field first
+        if not field or field not in self._ALLOWED_FIELDS:
+            return JsonResponse({"ok": False, "error": f"Field '{field}' is not syncable"})
+
+        # Look up device
+        try:
+            device = Device.objects.select_related("device_type").get(pk=device_id)
+        except (Device.DoesNotExist, ValueError, TypeError):
+            return JsonResponse({"ok": False, "error": "Device not found"})
+
+        try:
+            display = self._apply_field(device, field, value, _STATUS_MAP)
+        except ValueError as exc:
+            return JsonResponse({"ok": False, "error": str(exc)})
+        except Exception as exc:
+            return JsonResponse({"ok": False, "error": str(exc)})
+
+        return JsonResponse({"ok": True, "display": display})
+
+    def _apply_field(self, device, field, value, status_map):
+        if field == "device_name":
+            new_name = str(value)[:64]
+            if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
+                raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
+            device.name = new_name
+            device.save(update_fields=["name"])
+            return new_name
+
+        if field == "u_position":
+            try:
+                pos = int(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"Cannot parse '{value}' as integer for u_position")
+            device.position = pos
+            device.save(update_fields=["position"])
+            return f"U{device.position}"
+
+        if field == "status":
+            v = str(value).strip().lower()
+            mapped = status_map.get(v)
+            # Also accept NetBox status slugs directly (e.g. "active", "offline")
+            if mapped is None and v in status_map.values():
+                mapped = v
+            if mapped is None:
+                raise ValueError(f"Unknown status value '{value}'")
+            device.status = mapped
+            device.save(update_fields=["status"])
+            return device.status
+
+        if field == "u_height":
+            # u_height is a DeviceType field — this change affects all devices sharing this type
+            try:
+                height = float(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"Cannot parse '{value}' as number for u_height")
+            device.device_type.u_height = height
+            device.device_type.save(update_fields=["u_height"])
+            n = device.device_type.u_height
+            return f"{int(n)}U" if n == int(n) else f"{n}U"
+
+        if field == "serial":
+            device.serial = str(value)[:50]
+            device.save(update_fields=["serial"])
+            return device.serial
+
+        if field == "asset_tag":
+            device.asset_tag = str(value)[:50] if value else None
+            device.save(update_fields=["asset_tag"])
+            return device.asset_tag
+
+        raise ValueError(f"Field '{field}' is not syncable")
+
+
+# ---------------------------------------------------------------------------
 # Save resolution (rerere)
 # ---------------------------------------------------------------------------
 

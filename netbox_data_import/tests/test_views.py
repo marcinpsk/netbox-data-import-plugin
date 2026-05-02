@@ -2952,3 +2952,135 @@ class RemoveExtraIpViewTests(TestCase):
         # Missing device_id
         response = self.client.post(url, {"ip_field": "primary_ip4"})
         self.assertEqual(response.status_code, 302)
+
+
+class SyncDeviceFieldViewTests(TestCase):
+    """Tests for SyncDeviceFieldView."""
+
+    def setUp(self):
+        """Create test user and device."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        self.user = User.objects.create_superuser("testuser_sync", "sync@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="testuser_sync", password="testpass")
+
+        site = Site.objects.create(name="Test Site Sync", slug="test-site-sync")
+        manufacturer = Manufacturer.objects.create(name="Test Mfg Sync", slug="test-mfg-sync")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="Model Sync", slug="model-sync", u_height=1
+        )
+        role = DeviceRole.objects.create(name="Role Sync", slug="role-sync")
+        self.device = Device.objects.create(name="sync-device", site=site, device_type=device_type, role=role)
+        self.url = reverse("plugins:netbox_data_import:sync_device_field")
+
+    def test_sync_serial(self):
+        """Set serial on device via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-12345"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.serial, "SN-12345")
+
+    def test_sync_asset_tag(self):
+        """Set asset_tag on device via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "asset_tag", "value": "AT-001"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.asset_tag, "AT-001")
+
+    def test_sync_device_name(self):
+        """Rename device via SyncDeviceFieldView."""
+        response = self.client.post(
+            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "renamed-device"}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.name, "renamed-device")
+
+    def test_sync_u_position(self):
+        """Set u_position on device via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_position", "value": "5"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["display"], "U5")
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, 5)
+
+    def test_sync_status(self):
+        """Set status to active via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "status", "value": "active"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.status, "active")
+
+    def test_sync_u_height(self):
+        """Set u_height on device type via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_height", "value": "2"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertIn("U", data["display"])
+        self.device.device_type.refresh_from_db()
+        self.assertEqual(float(self.device.device_type.u_height), 2.0)
+
+    def test_sync_invalid_field(self):
+        """Post invalid field name — expect ok=false."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "invalid", "value": "foo"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("invalid", data["error"])
+
+    def test_sync_missing_device(self):
+        """Post non-existent device_id — expect ok=false."""
+        response = self.client.post(self.url, {"device_id": 99999, "field": "serial", "value": "foo"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("Device not found", data["error"])
+
+    def test_sync_requires_permission(self):
+        """User without dcim.change_device is denied."""
+        User.objects.create_user("no_perm_sync", "noperm@example.com", "testpass")
+        no_perm_client = Client()
+        no_perm_client.login(username="no_perm_sync", password="testpass")
+        response = no_perm_client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
+        self.assertIn(response.status_code, (302, 403))
+
+    def test_sync_asset_tag_clear(self):
+        """Clearing asset_tag sets it to None (not empty string) to avoid UNIQUE violation."""
+        self.device.asset_tag = "EXISTING"
+        self.device.save()
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "asset_tag", "value": ""})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.asset_tag)
+
+    def test_sync_device_name_collision(self):
+        """Renaming a device to an already-taken name in the same site returns ok=false."""
+        from dcim.models import Device
+
+        Device.objects.create(
+            name="taken-name",
+            site=self.device.site,
+            device_type=self.device.device_type,
+            role=self.device.role,
+        )
+        response = self.client.post(
+            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "taken-name"}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("already exists", data["error"])
