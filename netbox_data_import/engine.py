@@ -888,6 +888,7 @@ def _preview_device_row(
             "asset_tag": asset_tag or "",
             **({"_ip": ip_fields} if ip_fields else {}),
             **({"field_diff": field_diff} if field_diff is not None else {}),
+            **({"netbox_device_id": matched_device.pk} if action == "update" else {}),
         },
     )
 

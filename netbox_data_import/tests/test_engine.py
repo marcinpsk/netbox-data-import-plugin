@@ -734,3 +734,26 @@ class FieldDiffComputationTest(TestCase):
         result = self._call_preview("existing-server", serial="S1", asset_tag="A1")
         diff = result.extra_data.get("field_diff", {})
         self.assertNotIn("u_height", diff, "u_height must not appear in diff when values match")
+
+    def test_extra_data_includes_netbox_device_id_on_update(self):
+        """Update rows must include netbox_device_id in extra_data equal to matched device PK."""
+        device = self._make_existing_device(serial="SN-ID", asset_tag="AT-ID")
+        result = self._call_preview("existing-server", serial="SN-ID", asset_tag="NEW-TAG")
+        self.assertEqual(result.action, "update")
+        self.assertIn("netbox_device_id", result.extra_data)
+        self.assertEqual(result.extra_data["netbox_device_id"], device.pk)
+
+    def test_netbox_device_id_absent_on_skip_row(self):
+        """netbox_device_id must NOT be present on skip rows (update_existing=False)."""
+        self.profile.update_existing = False
+        self.profile.save()
+        self._make_existing_device(serial="SN-SKIP", asset_tag=None)
+        result = self._call_preview("existing-server", serial="SN-SKIP", asset_tag=None)
+        self.assertEqual(result.action, "skip")
+        self.assertNotIn("netbox_device_id", result.extra_data)
+
+    def test_netbox_device_id_absent_on_create_row(self):
+        """netbox_device_id must NOT be present on create rows (no matching device)."""
+        result = self._call_preview("brand-new-device-xyz", serial="SN-NEW-XYZ", asset_tag=None)
+        self.assertEqual(result.action, "create")
+        self.assertNotIn("netbox_device_id", result.extra_data)

@@ -29,6 +29,15 @@
   [data-bs-theme="dark"] .ndi-badge-ignored { background-color: #4b5563 !important; border: 1px solid #6b7280 !important; }
   /* Generic unused-column badges need a tinted background to read in dark mode */
   [data-bs-theme="dark"] .ndi-badge-generic { background-color: #374151 !important; color: #e5e7eb !important; border-color: #4b5563 !important; }
+  /* Field diff sub-table */
+  .ndi-diff-toggle { cursor: pointer; }
+  .ndi-diff-toggle:hover { opacity: 0.85; }
+  .ndi-diff-row { display: none; }
+  .ndi-diff-row.show { display: table-row; }
+  .ndi-diff-table { font-size: 0.82rem; margin-bottom: 0; }
+  .ndi-diff-synced { text-decoration: line-through; color: var(--tblr-secondary); }
+  .ndi-diff-badge { background-color: #f59e0b !important; color: #000 !important; }
+  [data-bs-theme="dark"] .ndi-diff-badge { background-color: #fbbf24 !important; color: #000 !important; }
 </style>
 {% endblock %}
 
@@ -323,7 +332,19 @@
                   <span class="badge ndi-badge-ignored"><i class="mdi mdi-eye-off"></i> Ignored</span>
                 {% endif %}
               </td>
-              <td class="small text-muted">{{ row.detail }}</td>
+              <td class="small text-muted">
+                {{ row.detail }}
+                {% if row.action == 'update' and row.extra_data.field_diff %}
+                  {% with diff=row.extra_data.field_diff %}
+                  <br>
+                  <span class="badge ndi-diff-badge ndi-diff-toggle mt-1"
+                        data-diff-target="diff-{{ row.row_number }}"
+                        title="Click to see field differences">
+                    <i class="mdi mdi-chevron-down"></i> {{ diff|length }} field(s) differ
+                  </span>
+                  {% endwith %}
+                {% endif %}
+              </td>
               <td class="text-end" style="white-space:nowrap; min-width:180px;">
 
                 {% if row.object_type == 'manufacturer' and row.action == 'create' and profile_id %}
@@ -487,6 +508,48 @@
 
               </td>
             </tr>
+            {% if row.action == 'update' and row.extra_data.field_diff and row.extra_data.netbox_device_id %}
+            <tr id="diff-{{ row.row_number }}" class="ndi-diff-row">
+              <td colspan="7" class="p-0 border-top-0">
+                <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
+                  <table class="table table-sm table-borderless ndi-diff-table mb-0">
+                    <thead>
+                      <tr class="text-muted">
+                        <th style="width:15%">Field</th>
+                        <th style="width:35%">NetBox</th>
+                        <th style="width:35%">File</th>
+                        <th style="width:15%"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for field_name, vals in row.extra_data.field_diff.items %}
+                      <tr id="diff-field-{{ row.row_number }}-{{ field_name }}">
+                        <td class="text-muted">{{ field_name }}</td>
+                        <td class="ndi-diff-netbox-val">{{ vals.netbox|default:"—" }}</td>
+                        <td>{{ vals.file|default:"—" }}</td>
+                        <td>
+                          {% if field_name != "primary_ip4" and field_name != "primary_ip6" and field_name != "oob_ip" %}
+                          <button type="button" class="btn btn-xs btn-outline-primary ndi-sync-btn"
+                                  data-device-id="{{ row.extra_data.netbox_device_id }}"
+                                  data-field="{{ field_name }}"
+                                  data-value="{{ vals.file }}"
+                                  data-profile-id="{{ profile_id|default:'' }}"
+                                  data-row-id="{{ row.row_number }}"
+                                  title="Sync this field to NetBox now">
+                            <i class="mdi mdi-sync"></i>
+                          </button>
+                          {% else %}
+                          <span class="text-muted small">(manual)</span>
+                          {% endif %}
+                        </td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </td>
+            </tr>
+            {% endif %}
             {% empty %}
             <tr><td colspan="7" class="text-center text-muted">No rows found in file.</td></tr>
             {% endfor %}
@@ -1503,6 +1566,91 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
     });
   }
 }());
+</script>
+
+<script>
+// Toggle diff sub-table visibility
+document.addEventListener('click', function(e) {
+  const toggle = e.target.closest('.ndi-diff-toggle');
+  if (!toggle) return;
+  const targetId = toggle.dataset.diffTarget;
+  const row = document.getElementById(targetId);
+  if (!row) return;
+  row.classList.toggle('show');
+  const icon = toggle.querySelector('.mdi');
+  if (icon) {
+    icon.classList.toggle('mdi-chevron-down');
+    icon.classList.toggle('mdi-chevron-up');
+  }
+});
+
+// Per-field sync via fetch
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.ndi-sync-btn');
+  if (!btn) return;
+
+  const deviceId = btn.dataset.deviceId;
+  const field = btn.dataset.field;
+  const value = btn.dataset.value;
+  const profileId = btn.dataset.profileId;
+
+  btn.disabled = true;
+  btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i>';
+
+  const csrfToken = document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
+  const body = new URLSearchParams({
+    device_id: deviceId,
+    field: field,
+    value: value,
+    profile_id: profileId,
+  });
+
+  fetch('{% url "plugins:netbox_data_import:sync_device_field" %}', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-CSRFToken': csrfToken,
+    },
+    body: body.toString(),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      const rowId = btn.dataset.rowId;
+      const fieldName = btn.dataset.field;
+      const fieldRow = document.getElementById(`diff-field-${rowId}-${fieldName}`);
+      if (fieldRow) {
+        const nbCell = fieldRow.querySelector('.ndi-diff-netbox-val');
+        if (nbCell) {
+          const synced = document.createElement('span');
+          synced.className = 'ndi-diff-synced';
+          synced.textContent = nbCell.textContent;
+          const updated = document.createElement('strong');
+          updated.textContent = data.display;
+          nbCell.textContent = '';
+          nbCell.appendChild(synced);
+          nbCell.appendChild(document.createTextNode(' '));
+          nbCell.appendChild(updated);
+        }
+      }
+      btn.innerHTML = '<i class="mdi mdi-check text-success"></i>';
+      btn.disabled = true;
+    } else {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="mdi mdi-sync"></i>';
+      btn.title = data.error || 'Sync failed';
+      btn.classList.add('btn-danger');
+      btn.classList.remove('btn-outline-primary');
+    }
+  })
+  .catch(() => {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="mdi mdi-sync"></i>';
+    btn.title = 'Network error — sync failed';
+    btn.classList.add('btn-danger');
+    btn.classList.remove('btn-outline-primary');
+  });
+});
 </script>
 
 {% endblock %}
