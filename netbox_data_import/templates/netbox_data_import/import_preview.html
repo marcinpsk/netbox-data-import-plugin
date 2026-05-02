@@ -1393,6 +1393,15 @@ function dmSearch() {
         </div>
         <div class="modal-body">
           <div class="mb-3">
+            <label class="form-label fw-semibold d-block mb-1">Mapping type</label>
+            <div class="btn-group w-100" role="group">
+              <input type="radio" class="btn-check" name="ndi_map_mode" id="ndi_map_mode_std" value="standard" checked>
+              <label class="btn btn-outline-secondary" for="ndi_map_mode_std">NetBox field</label>
+              <input type="radio" class="btn-check" name="ndi_map_mode" id="ndi_map_mode_json" value="extra_json">
+              <label class="btn btn-outline-secondary" for="ndi_map_mode_json">Extra JSON key</label>
+            </div>
+          </div>
+          <div id="ndi_qmap_standard_div">
             <label class="form-label fw-semibold">Target NetBox field</label>
             <select name="target_field" id="ndi_qmap_target" class="form-select">
               {% for value, label in target_field_choices %}
@@ -1400,10 +1409,17 @@ function dmSearch() {
               {% endfor %}
             </select>
           </div>
+          <div id="ndi_qmap_extra_div" style="display:none;">
+            <label class="form-label fw-semibold">Key name in extra JSON</label>
+            <input type="text" id="ndi_qmap_extra_key" class="form-control" placeholder="e.g. jira_id" pattern="[a-zA-Z0-9_-]{1,50}">
+            <div class="form-text text-muted">
+              Stored in <code>data_import_source["extra"]["&lt;key&gt;"]</code>. Use letters, digits, <code>_</code>, or <code>-</code>.
+            </div>
+          </div>
         </div>
         <div class="modal-footer justify-content-between">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-primary">
+          <button type="submit" class="btn btn-primary" id="ndi_qmap_submit">
             <i class="mdi mdi-content-save"></i> Save mapping
           </button>
         </div>
@@ -1416,6 +1432,12 @@ function dmSearch() {
 function ndiOpenQuickMapModal(colName, suggestedField) {
   document.getElementById('ndi_qmap_source_col').value = colName;
   document.getElementById('ndi_qmap_col_label').textContent = colName;
+
+  // Reset to standard mode
+  document.getElementById('ndi_map_mode_std').checked = true;
+  document.getElementById('ndi_qmap_standard_div').style.display = '';
+  document.getElementById('ndi_qmap_extra_div').style.display = 'none';
+
   var sel = document.getElementById('ndi_qmap_target');
   if (suggestedField) {
     for (var i = 0; i < sel.options.length; i++) {
@@ -1432,6 +1454,40 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
   var modal = new ModalClass(document.getElementById('ndiQuickMapModal'));
   modal.show();
 }
+
+(function () {
+  // Toggle standard / extra-json panels
+  document.querySelectorAll('input[name="ndi_map_mode"]').forEach(function (radio) {
+    radio.addEventListener('change', function () {
+      var isExtra = this.value === 'extra_json';
+      document.getElementById('ndi_qmap_standard_div').style.display = isExtra ? 'none' : '';
+      document.getElementById('ndi_qmap_extra_div').style.display = isExtra ? '' : 'none';
+    });
+  });
+
+  // On submit, inject extra_json:<key> as the target_field when in JSON mode
+  var form = document.querySelector('#ndiQuickMapModal form');
+  if (form) {
+    form.addEventListener('submit', function (e) {
+      var mode = document.querySelector('input[name="ndi_map_mode"]:checked');
+      if (mode && mode.value === 'extra_json') {
+        var key = (document.getElementById('ndi_qmap_extra_key').value || '').trim();
+        if (!key || !/^[a-zA-Z0-9_-]{1,50}$/.test(key)) {
+          e.preventDefault();
+          document.getElementById('ndi_qmap_extra_key').focus();
+          return;
+        }
+        // Disable the standard select so it doesn't submit, inject the real value
+        document.getElementById('ndi_qmap_target').disabled = true;
+        var hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'target_field';
+        hidden.value = 'extra_json:' + key;
+        form.appendChild(hidden);
+      }
+    });
+  }
+}());
 </script>
 
 {% endblock %}

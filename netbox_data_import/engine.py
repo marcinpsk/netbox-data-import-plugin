@@ -201,6 +201,15 @@ def _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, retu
     return extra
 
 
+def _promote_extra_json_fields(row_dict: dict) -> None:
+    """Move any extra_json:<key> entries from row_dict into row_dict["_extra_columns"]."""
+    for k in [k for k in list(row_dict) if isinstance(k, str) and k.startswith("extra_json:")]:
+        json_key = k[len("extra_json:") :]
+        val = row_dict.pop(k)
+        if val not in (None, ""):
+            row_dict.setdefault("_extra_columns", {})[json_key] = val
+
+
 def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     """Read the Excel file and return a list of row-dicts keyed by target_field name.
 
@@ -254,6 +263,9 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
             if isinstance(value, str):
                 value = value.strip()
             row_dict[target_field] = value
+
+        # Promote explicit extra_json: mappings into _extra_columns
+        _promote_extra_json_fields(row_dict)
 
         _apply_transform_rules(row_dict, row, raw_headers, transform_rules)
 

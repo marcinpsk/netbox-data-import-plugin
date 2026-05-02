@@ -1564,23 +1564,45 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Save the column mapping and redirect back to preview."""
+        import re
+
         profile_id = request.POST.get("profile_id")
         profile = get_object_or_404(ImportProfile, pk=profile_id)
         source_column = request.POST.get("source_column", "").strip()
         target_field = request.POST.get("target_field", "").strip()
 
-        valid_fields = {choice[0] for choice in TARGET_FIELD_CHOICES}
-        if not source_column or target_field not in valid_fields:
+        valid_standard_fields = {choice[0] for choice in TARGET_FIELD_CHOICES}
+        is_extra_json = target_field.startswith("extra_json:")
+        if is_extra_json:
+            key = target_field[len("extra_json:") :]
+            if not re.match(r"^[a-zA-Z0-9_-]{1,50}$", key):
+                is_extra_json = False  # invalid key → fall through to error below
+
+        if not source_column or (target_field not in valid_standard_fields and not is_extra_json):
             messages.error(request, "Valid source column and target field are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        # Remove any existing mapping that claims the same target_field (for a different source
+        # column) before upserting, to avoid the unique constraint violation.
+        displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
+            source_column=source_column
+        )
+        displaced_source = displaced.values_list("source_column", flat=True).first()
+        displaced.delete()
 
         _, created = ColumnMapping.objects.update_or_create(
             profile=profile,
             source_column=source_column,
             defaults={"target_field": target_field},
         )
-        verb = "Created" if created else "Updated"
-        messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
+        if displaced_source:
+            messages.success(
+                request,
+                f"Reassigned: '{source_column}' → {target_field} (previously mapped from '{displaced_source}')",
+            )
+        else:
+            verb = "Created" if created else "Updated"
+            messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
