@@ -101,7 +101,9 @@ class BulkImportSeekOnYamlErrorTest(TestCase):
         invalid_yaml = BytesIO(b"key: [unclosed bracket: {bad yaml")
         invalid_yaml.name = "bad.yaml"
         url = reverse("plugins:netbox_data_import:importprofile_bulk_import")
-        resp = self.client.post(url, {"upload_file": invalid_yaml}, format="multipart")
+        # NetBox's BulkImportView form requires a 'format' field; include it so
+        # the form validation doesn't raise KeyError before we can test the seek path.
+        resp = self.client.post(url, {"upload_file": invalid_yaml, "format": "yaml"})
         # super().post() is NetBox's BulkImportView — it will return 200 with error info
         self.assertIn(resp.status_code, (200, 302))
 
@@ -156,7 +158,8 @@ class ImportPreviewViewProfileNotFoundTest(TestCase):
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 302)
-        self.assertIn("import_setup", resp["Location"])
+        expected = reverse("plugins:netbox_data_import:import_setup")
+        self.assertEqual(resp["Location"], expected)
 
 
 class ImportPreviewViewExistingResolutionsTest(TestCase):

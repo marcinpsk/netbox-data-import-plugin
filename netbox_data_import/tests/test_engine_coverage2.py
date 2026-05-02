@@ -484,8 +484,11 @@ class WriteDeviceRowRackFromDBTest(TestCase):
         from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
 
         self.site = Site.objects.create(name="RackDB2-Site", slug="rack-db2-site")
-        mfg = Manufacturer.objects.create(name="RackDB2Mfg", slug="rack-db2-mfg")
-        self.dt = DeviceType.objects.create(manufacturer=mfg, model="RackDB2Model", slug="rack-db2-model", u_height=1)
+        # Use slugs matching what slugify(name) produces so engine's get_or_create finds them.
+        mfg = Manufacturer.objects.create(name="RackDB2Mfg", slug="rackdb2mfg")
+        self.dt = DeviceType.objects.create(
+            manufacturer=mfg, model="RackDB2Model", slug="rackdb2mfg-rackdb2model", u_height=1
+        )
         self.role = DeviceRole.objects.create(name="RackDB2Role", slug="rack-db2-role", color="000000")
         self.rack = Rack.objects.create(name="RackDB2-01", site=self.site, u_height=42)
         self.profile = _make_profile("RackDB2Profile")
@@ -528,9 +531,10 @@ class WriteDeviceRowTenantAndIPJsonTest(TestCase):
         from extras.models import CustomField
 
         self.site = Site.objects.create(name="TenantIP2-Site", slug="tenant-ip2-site")
-        mfg = Manufacturer.objects.create(name="TenantIP2Mfg", slug="tenant-ip2-mfg")
+        # Use slugs matching what slugify(name) produces so engine's get_or_create finds them.
+        mfg = Manufacturer.objects.create(name="TenantIP2Mfg", slug="tenantip2mfg")
         self.dt = DeviceType.objects.create(
-            manufacturer=mfg, model="TenantIP2Model", slug="tenant-ip2-model", u_height=1
+            manufacturer=mfg, model="TenantIP2Model", slug="tenantip2mfg-tenantip2model", u_height=1
         )
         self.role = DeviceRole.objects.create(name="TenantIP2Role", slug="tenant-ip2-role", color="000000")
         self.profile = _make_profile("TenantIP2Profile")
@@ -592,9 +596,10 @@ class NewDeviceIPStoredInJSONTest(TestCase):
         from extras.models import CustomField
 
         self.site = Site.objects.create(name="NewDevIP2-Site", slug="new-dev-ip2-site")
-        mfg = Manufacturer.objects.create(name="NewDevIP2Mfg", slug="new-dev-ip2-mfg")
+        # Use slugs matching what slugify(name) produces so engine's get_or_create finds them.
+        mfg = Manufacturer.objects.create(name="NewDevIP2Mfg", slug="newdevip2mfg")
         self.dt = DeviceType.objects.create(
-            manufacturer=mfg, model="NewDevIP2Model", slug="new-dev-ip2-model", u_height=1
+            manufacturer=mfg, model="NewDevIP2Model", slug="newdevip2mfg-newdevip2model", u_height=1
         )
         self.role = DeviceRole.objects.create(name="NewDevIP2Role", slug="new-dev-ip2-role", color="000000")
         self.profile = _make_profile("NewDevIP2Profile")
