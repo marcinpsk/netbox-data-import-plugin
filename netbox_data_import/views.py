@@ -33,6 +33,7 @@ from .models import (
     ImportJob,
     ImportProfile,
     ManufacturerMapping,
+    SourceResolution,
     TARGET_FIELD_CHOICES,
 )
 from .tables import (
@@ -893,6 +894,10 @@ class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 # Ignore / Unignore device
 # ---------------------------------------------------------------------------
+# The action views below (Ignore/Unignore/Sync/Quick*) are lightweight POST
+# endpoints that return JSON or an immediate redirect.  No NetBox generic base
+# class exists for this pattern; PermissionRequiredMixin + View is intentional.
+# ---------------------------------------------------------------------------
 
 
 class IgnoreDeviceView(PermissionRequiredMixin, View):
@@ -1225,6 +1230,56 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         profile = get_object_or_404(ImportProfile, pk=profile_pk)
         return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
 
+    def _import_class_role_rows(self, data, profile, errors):
+        """Import a list of class-role mapping items; return (created, skipped)."""
+        created = skipped = 0
+        for item in data:
+            try:
+                _, was_created = ClassRoleMapping.objects.get_or_create(
+                    profile=profile,
+                    source_class=item["source_class"],
+                    defaults={
+                        "creates_rack": item.get("creates_rack", False),
+                        "role_slug": item.get("role_slug", ""),
+                        "ignore": item.get("ignore", False),
+                    },
+                )
+                if was_created:
+                    created += 1
+                else:
+                    skipped += 1
+            except (KeyError, ValueError) as exc:
+                errors.append(str(exc))
+            except Exception:
+                logger.exception("BulkYamlImportView class_role row failed for profile_id=%s", profile.pk)
+                errors.append("A row failed due to an unexpected error — see server logs.")
+        return created, skipped
+
+    def _import_device_type_rows(self, data, profile, errors):
+        """Import a list of device-type mapping items; return (created, skipped)."""
+        created = skipped = 0
+        for item in data:
+            try:
+                _, was_created = DeviceTypeMapping.objects.get_or_create(
+                    profile=profile,
+                    source_make=item["source_make"],
+                    source_model=item["source_model"],
+                    defaults={
+                        "netbox_manufacturer_slug": item["netbox_manufacturer_slug"],
+                        "netbox_device_type_slug": item["netbox_device_type_slug"],
+                    },
+                )
+                if was_created:
+                    created += 1
+                else:
+                    skipped += 1
+            except (KeyError, ValueError) as exc:
+                errors.append(str(exc))
+            except Exception:
+                logger.exception("BulkYamlImportView device_type row failed for profile_id=%s", profile.pk)
+                errors.append("A row failed due to an unexpected error — see server logs.")
+        return created, skipped
+
     def post(self, request, profile_pk):
         """Parse the uploaded YAML file and create mappings in bulk."""
         profile = get_object_or_404(ImportProfile, pk=profile_pk)
@@ -1239,54 +1294,25 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
             import yaml
 
             data = yaml.safe_load(yaml_file.read())
-        except Exception as exc:
+        except yaml.YAMLError as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
+            return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
+        except Exception:
+            logger.exception("BulkYamlImportView: failed to read uploaded file for profile_id=%s", profile_pk)
+            messages.error(request, "Could not read the uploaded file.")
             return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
 
         if not isinstance(data, list):
             messages.error(request, "YAML must be a list of mapping objects.")
             return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
 
-        created = 0
-        skipped = 0
         errors = []
-
         if mapping_type == "class_role":
-            for item in data:
-                try:
-                    _, was_created = ClassRoleMapping.objects.get_or_create(
-                        profile=profile,
-                        source_class=item["source_class"],
-                        defaults={
-                            "creates_rack": item.get("creates_rack", False),
-                            "role_slug": item.get("role_slug", ""),
-                            "ignore": item.get("ignore", False),
-                        },
-                    )
-                    if was_created:
-                        created += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:
-                    errors.append(str(exc))
+            created, skipped = self._import_class_role_rows(data, profile, errors)
         elif mapping_type == "device_type":
-            for item in data:
-                try:
-                    _, was_created = DeviceTypeMapping.objects.get_or_create(
-                        profile=profile,
-                        source_make=item["source_make"],
-                        source_model=item["source_model"],
-                        defaults={
-                            "netbox_manufacturer_slug": item["netbox_manufacturer_slug"],
-                            "netbox_device_type_slug": item["netbox_device_type_slug"],
-                        },
-                    )
-                    if was_created:
-                        created += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:
-                    errors.append(str(exc))
+            created, skipped = self._import_device_type_rows(data, profile, errors)
+        else:
+            created = skipped = 0
 
         if errors:
             messages.warning(
@@ -1481,8 +1507,6 @@ class SourceResolutionListView(PermissionRequiredMixin, View):
 
     def get(self, request, profile_pk):
         """Render the list of saved source resolutions for the given profile."""
-        from .models import SourceResolution
-
         profile = get_object_or_404(ImportProfile, pk=profile_pk)
         resolutions = SourceResolution.objects.filter(profile=profile).order_by("source_id")
         return render(
@@ -1495,34 +1519,11 @@ class SourceResolutionListView(PermissionRequiredMixin, View):
         )
 
 
-class SourceResolutionDeleteView(PermissionRequiredMixin, View):
+class SourceResolutionDeleteView(_ProfileChildDeleteView):
     """Delete a saved source resolution."""
 
+    queryset = SourceResolution.objects.all()
     permission_required = "netbox_data_import.delete_sourceresolution"
-
-    def get(self, request, pk):
-        """Render the delete confirmation page for a source resolution."""
-        from .models import SourceResolution
-
-        obj = get_object_or_404(SourceResolution, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {
-                "object": obj,
-                "return_url": reverse("plugins:netbox_data_import:source_resolution_list", args=[obj.profile_id]),
-            },
-        )
-
-    def post(self, request, pk):
-        """Delete the source resolution and redirect to the profile's resolution list."""
-        from .models import SourceResolution
-
-        obj = get_object_or_404(SourceResolution, pk=pk)
-        profile_pk = obj.profile_id
-        obj.delete()
-        messages.success(request, "Resolution deleted.")
-        return redirect(reverse("plugins:netbox_data_import:source_resolution_list", args=[profile_pk]))
 
 
 # ---------------------------------------------------------------------------
