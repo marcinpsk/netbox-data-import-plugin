@@ -6,6 +6,7 @@ from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.messages import get_messages
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -82,10 +83,10 @@ class ApplyProfileYamlRackTypeNullTest(TestCase):
         )
         url = reverse("plugins:netbox_data_import:importprofile_bulk_import")
         resp = self.client.post(url, {"data": yaml_data})
-        self.assertIn(resp.status_code, (200, 302))
+        self.assertEqual(resp.status_code, 302)
         crm = ClassRoleMapping.objects.filter(source_class="Cabinet").first()
-        if crm:
-            self.assertIsNone(crm.rack_type)
+        self.assertIsNotNone(crm, "ClassRoleMapping for 'Cabinet' was not created")
+        self.assertIsNone(crm.rack_type)
 
 
 class BulkImportSeekOnYamlErrorTest(TestCase):
@@ -104,8 +105,8 @@ class BulkImportSeekOnYamlErrorTest(TestCase):
         # NetBox's BulkImportView form requires a 'format' field; include it so
         # the form validation doesn't raise KeyError before we can test the seek path.
         resp = self.client.post(url, {"upload_file": invalid_yaml, "format": "yaml"})
-        # super().post() is NetBox's BulkImportView — it will return 200 with error info
-        self.assertIn(resp.status_code, (200, 302))
+        # NetBox's BulkImportView returns 200 with form errors when YAML is invalid
+        self.assertEqual(resp.status_code, 200)
 
 
 class ProfileChildEditViewPermissionTest(TestCase):
@@ -123,13 +124,13 @@ class ProfileChildEditViewPermissionTest(TestCase):
         """GET to edit URL (pk present) exercises get_required_permission returning 'change' — line 495."""
         url = reverse("plugins:netbox_data_import:columnmapping_edit", kwargs={"pk": self.cm.pk})
         resp = self.client.get(url)
-        self.assertIn(resp.status_code, (200, 302))
+        self.assertEqual(resp.status_code, 200)
 
     def test_add_url_with_profile_pk_requires_add_permission(self):
         """GET to add URL (profile_pk present, no pk) exercises get_required_permission returning 'add' — line 496."""
         url = reverse("plugins:netbox_data_import:columnmapping_add", kwargs={"profile_pk": self.profile.pk})
         resp = self.client.get(url)
-        self.assertIn(resp.status_code, (200, 302))
+        self.assertEqual(resp.status_code, 200)
 
 
 class ImportPreviewViewProfileNotFoundTest(TestCase):
@@ -302,7 +303,7 @@ class RemoveExtraIpFieldNotInDataTest(TestCase):
         url = reverse("plugins:netbox_data_import:remove_extra_ip")
         resp = self.client.post(url, {"device_id": self.device.pk, "ip_field": "primary_ip4"})
         self.assertEqual(resp.status_code, 302)
-        messages = list(resp.wsgi_request._messages)
+        messages = list(get_messages(resp.wsgi_request))
         self.assertTrue(any("not in JSON storage" in str(m) for m in messages))
 
 
@@ -445,7 +446,7 @@ class BulkYamlImportKeyErrorTest(TestCase):
             {"yaml_file": yaml_file, "mapping_type": "class_role"},
         )
         self.assertEqual(resp.status_code, 302)
-        messages = list(resp.wsgi_request._messages)
+        messages = list(get_messages(resp.wsgi_request))
         self.assertTrue(any("error" in str(m).lower() or "source_class" in str(m) for m in messages))
 
     def test_device_type_row_missing_source_make_key_adds_error(self):
@@ -458,7 +459,7 @@ class BulkYamlImportKeyErrorTest(TestCase):
             {"yaml_file": yaml_file, "mapping_type": "device_type"},
         )
         self.assertEqual(resp.status_code, 302)
-        messages = list(resp.wsgi_request._messages)
+        messages = list(get_messages(resp.wsgi_request))
         self.assertTrue(any("error" in str(m).lower() or "source_make" in str(m) for m in messages))
 
     def test_class_role_row_bare_exception_adds_error(self):
@@ -476,7 +477,7 @@ class BulkYamlImportKeyErrorTest(TestCase):
                 {"yaml_file": yaml_file, "mapping_type": "class_role"},
             )
         self.assertEqual(resp.status_code, 302)
-        messages = list(resp.wsgi_request._messages)
+        messages = list(get_messages(resp.wsgi_request))
         self.assertTrue(any("error" in str(m).lower() for m in messages))
 
 
@@ -534,7 +535,7 @@ class BulkYamlImportUnknownMappingTypeTest(TestCase):
         yaml_file.name = "unk.yaml"
         resp = self.client.post(self.url, {"yaml_file": yaml_file, "mapping_type": "unknown_type"})
         self.assertEqual(resp.status_code, 302)
-        messages = list(resp.wsgi_request._messages)
+        messages = list(get_messages(resp.wsgi_request))
         self.assertTrue(any("0 created" in str(m) for m in messages))
 
 
@@ -558,5 +559,7 @@ class BulkYamlImportErrorsPathTest(TestCase):
         yaml_file.name = "err.yaml"
         resp = self.client.post(self.url, {"yaml_file": yaml_file, "mapping_type": "class_role"})
         self.assertEqual(resp.status_code, 302)
-        messages = list(resp.wsgi_request._messages)
-        self.assertTrue(any("error" in str(m).lower() or "created" in str(m).lower() for m in messages))
+        messages = list(get_messages(resp.wsgi_request))
+        # The warning message format is "Created X, skipped Y, N errors: ..."
+        # Only the warning path (not success path) contains "errors:"
+        self.assertTrue(any("errors:" in str(m) for m in messages))

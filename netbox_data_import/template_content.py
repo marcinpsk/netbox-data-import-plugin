@@ -14,7 +14,7 @@ class DeviceImportDataExtension(PluginTemplateExtension):
         if not obj:
             return ""
         import_data = obj.cf.get("data_import_source") if obj.cf else None
-        if not import_data:
+        if not isinstance(import_data, dict) or not import_data:
             return ""
         extra = import_data.get("extra") or {}
         ip_data = import_data.get("_ip") or {}

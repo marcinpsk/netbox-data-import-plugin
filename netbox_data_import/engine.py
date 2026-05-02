@@ -583,8 +583,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
                 return
             rack.u_height = u_height
             rack.serial = serial or rack.serial
-            if rack_type is not None:
-                rack.rack_type = rack_type
+            rack.rack_type = rack_type
             if ctx.location:
                 rack.location = ctx.location
             if ctx.tenant:

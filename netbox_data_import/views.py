@@ -1009,7 +1009,7 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
 
     permission_required = "dcim.change_device"
 
-    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "u_height", "serial", "asset_tag", "face"}
+    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face"}
 
     def post(self, request):
         """Apply the given field value to the specified device."""
@@ -1312,7 +1312,8 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         elif mapping_type == "device_type":
             created, skipped = self._import_device_type_rows(data, profile, errors)
         else:
-            created = skipped = 0
+            messages.error(request, f"Unknown mapping type '{mapping_type}'.")
+            return redirect(request.path)
 
         if errors:
             messages.warning(

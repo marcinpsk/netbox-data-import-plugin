@@ -21,7 +21,7 @@
   /* Count badge: soft indigo — readable in light and dark, not harsh */
   .ndi-count-badge { background-color: #6366f1 !important; color: #fff !important; }
   [data-bs-theme="dark"] .ndi-count-badge { background-color: #818cf8 !important; color: #1e1b4b !important; }
-  .ndi-unused-badge  { cursor: pointer; }
+  .ndi-unused-badge  { cursor: pointer; border: none; }
   .ndi-unused-badge:hover { opacity: 0.85; }
   [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
   [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
@@ -30,7 +30,7 @@
   /* Generic unused-column badges need a tinted background to read in dark mode */
   [data-bs-theme="dark"] .ndi-badge-generic { background-color: #374151 !important; color: #e5e7eb !important; border-color: #4b5563 !important; }
   /* Field diff sub-table */
-  .ndi-diff-toggle { cursor: pointer; }
+  .ndi-diff-toggle { cursor: pointer; border: none; }
   .ndi-diff-toggle:hover { opacity: 0.85; }
   .ndi-diff-row { display: none; }
   .ndi-diff-row.show { display: table-row; }
@@ -167,15 +167,15 @@
               </p>
               <div class="d-flex flex-wrap gap-2">
                 {% for col in unused_columns %}
-                <span class="badge ndi-badge-generic ndi-unused-badge"
-                      title="{{ col.count }} row{{ col.count|pluralize }} with data — samples: {{ col.samples|join:', ' }}"
-                      onclick="ndiOpenQuickMapModal('{{ col.name|escapejs }}', '{{ col.suggested_field|default:''|escapejs }}')">
+                <button type="button" class="badge ndi-badge-generic ndi-unused-badge"
+                        title="{{ col.count }} row{{ col.count|pluralize }} with data — samples: {{ col.samples|join:', ' }}"
+                        onclick="ndiOpenQuickMapModal('{{ col.name|escapejs }}', '{{ col.suggested_field|default:''|escapejs }}')">
                   {{ col.name }}
                   <span class="badge ndi-count-badge ms-1" style="font-size:0.7em">{{ col.count }}</span>
                   {% if col.suggested_field %}
                     <i class="mdi mdi-auto-fix ms-1" title="Suggested: {{ col.suggested_field }}"></i>
                   {% endif %}
-                </span>
+                </button>
                 {% endfor %}
               </div>
             </div>
@@ -337,11 +337,11 @@
                 {% if row.action == 'update' and row.extra_data.field_diff %}
                   {% with diff=row.extra_data.field_diff %}
                   <br>
-                  <span class="badge ndi-diff-badge ndi-diff-toggle mt-1"
-                        data-diff-target="diff-{{ row.row_number }}"
-                        title="Click to see field differences">
+                  <button type="button" class="badge ndi-diff-badge ndi-diff-toggle mt-1"
+                          data-diff-target="diff-{{ row.row_number }}"
+                          title="Click to see field differences">
                     <i class="mdi mdi-chevron-down"></i> {{ diff|length }} field(s) differ
-                  </span>
+                  </button>
                   {% endwith %}
                 {% endif %}
               </td>
