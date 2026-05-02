@@ -62,3 +62,6 @@ site/
 .envrc
 
 docs/superpowers/
+
+# Brainstorm session files
+.superpowers/

@@ -470,6 +470,21 @@
                   </button>
                 {% endif %}
 
+                {# Map DT button: show on all device rows with source make/model (create, update, error) #}
+                {% if row.object_type == 'device' and row.extra_data.source_make and profile_id %}
+                  <button type="button" class="btn btn-sm btn-outline-secondary ms-1"
+                          data-bs-toggle="modal" data-bs-target="#deviceTypeMappingModal"
+                          data-source-make="{{ row.extra_data.source_make }}"
+                          data-source-model="{{ row.extra_data.source_model }}"
+                          data-mfg-slug="{{ row.extra_data.mfg_slug|default:'' }}"
+                          data-dt-slug="{{ row.extra_data.dt_slug|default:'' }}"
+                          data-u-height="{{ row.extra_data.u_height|default:1 }}"
+                          data-profile-id="{{ profile_id }}"
+                          title="Map or create device type for '{{ row.extra_data.source_make }} / {{ row.extra_data.source_model }}'">
+                    <i class="mdi mdi-chip"></i> Map DT
+                  </button>
+                {% endif %}
+
               </td>
             </tr>
             {% empty %}

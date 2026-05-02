@@ -287,6 +287,92 @@ class PreviewDeviceRowTest(TestCase):
         )
         self.assertIn("RACK-99 (not found)", result_row.detail)
 
+    def test_extra_data_includes_slugs(self):
+        """extra_data includes mfg_slug and dt_slug for device rows."""
+        from dcim.models import Device, DeviceType, Rack
+
+        row = {
+            "_row_number": 3,
+            "rack_name": "",
+            "u_position": None,
+        }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
+        result_row = _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="Dell",
+            model="PowerEdge R640",
+            mfg_slug="dell",
+            dt_slug="poweredge-r640",
+            source_id="3",
+            device_name="server-03",
+            serial="SN12345",
+            asset_tag="AT789",
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+        )
+        # Verify we're on the success path (not error)
+        self.assertEqual(result_row.action, "create")
+        # Verify extra_data contains all required fields
+        self.assertIn("source_make", result_row.extra_data)
+        self.assertIn("source_model", result_row.extra_data)
+        self.assertIn("mfg_slug", result_row.extra_data)
+        self.assertIn("dt_slug", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["source_make"], "Dell")
+        self.assertEqual(result_row.extra_data["source_model"], "PowerEdge R640")
+        self.assertEqual(result_row.extra_data["mfg_slug"], "dell")
+        self.assertEqual(result_row.extra_data["dt_slug"], "poweredge-r640")
+        self.assertIn("u_height", result_row.extra_data)
+        self.assertIn("asset_tag", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["asset_tag"], "AT789")
+
+    def test_extra_data_includes_slugs_on_error(self):
+        """extra_data includes slugs even when device type is not found."""
+        from dcim.models import Device, DeviceType, Rack
+
+        # Disable create_missing_device_types to force error path
+        self.profile.create_missing_device_types = False
+        self.profile.save()
+
+        row = {
+            "_row_number": 4,
+            "rack_name": "",
+            "u_position": None,
+        }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
+        result_row = _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="UnknownMfg",
+            model="UnknownModel",
+            mfg_slug="unknownmfg",
+            dt_slug="unknownmodel",
+            source_id="4",
+            device_name="unknown-device",
+            serial="",
+            asset_tag="",
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+        )
+        # Should be an error action
+        self.assertEqual(result_row.action, "error")
+        # extra_data should still contain slugs
+        self.assertIn("source_make", result_row.extra_data)
+        self.assertIn("source_model", result_row.extra_data)
+        self.assertIn("mfg_slug", result_row.extra_data)
+        self.assertIn("dt_slug", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["mfg_slug"], "unknownmfg")
+        self.assertEqual(result_row.extra_data["dt_slug"], "unknownmodel")
+        self.assertIn("u_height", result_row.extra_data)
+        self.assertIn("asset_tag", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["asset_tag"], "")
+
 
 class EnsureDeviceTypeExecuteModeTest(TestCase):
     """Tests that _ensure_device_type never appends RowResult rows in execute mode."""

@@ -723,6 +723,13 @@ def _preview_device_row(
     Rack,
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
+    # Parse u_height early so it's available in all return paths
+    u_height_raw = row.get("u_height", 1)
+    try:
+        u_height = max(1, int(float(u_height_raw)))
+    except (TypeError, ValueError):
+        u_height = 1
+
     dt_exists = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists()
     if not dt_exists and not ctx.profile.create_missing_device_types:
         return RowResult(
@@ -732,6 +739,14 @@ def _preview_device_row(
             action="error",
             object_type="device",
             detail=f"Device type not found: {make} / {model} (slug: {mfg_slug}/{dt_slug})",
+            extra_data={
+                "source_make": make,
+                "source_model": model,
+                "mfg_slug": mfg_slug,
+                "dt_slug": dt_slug,
+                "u_height": u_height,
+                "asset_tag": asset_tag or "",
+            },
         )
 
     rack_name = str(row.get("rack_name", "")).strip()
@@ -786,7 +801,14 @@ def _preview_device_row(
         object_type="device",
         detail=detail,
         rack_name=rack_name,
-        extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
+        extra_data={
+            "source_make": make,
+            "source_model": model,
+            "mfg_slug": mfg_slug,
+            "dt_slug": dt_slug,
+            "u_height": u_height,
+            "asset_tag": asset_tag or "",
+        },
     )
 
 
@@ -992,6 +1014,14 @@ def _pass3_process_devices(rows, ctx, class_role_map):
             )
             continue
 
+        # Resolve device type slugs and u_height early for error cases
+        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
+        u_height_raw = row.get("u_height", 1)
+        try:
+            u_height = max(1, int(float(u_height_raw)))
+        except (TypeError, ValueError):
+            u_height = 1
+
         if not crm:
             ctx.result.rows.append(
                 RowResult(
@@ -1007,6 +1037,9 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                         "source_make": make,
                         "source_model": model,
                         "asset_tag": asset_tag or "",
+                        "mfg_slug": mfg_slug,
+                        "dt_slug": dt_slug,
+                        "u_height": u_height,
                     },
                 )
             )
@@ -1026,7 +1059,6 @@ def _pass3_process_devices(rows, ctx, class_role_map):
             )
             continue
 
-        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
         device_status = status_map.get(str(row.get("status", "")).strip().lower(), "active")
         device_face = side_map.get(str(row.get("face", "")).strip().lower())
         device_airflow = airflow_map.get(str(row.get("airflow", "")).strip().lower())
