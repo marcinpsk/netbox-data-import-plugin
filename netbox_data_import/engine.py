@@ -749,7 +749,18 @@ def _preview_device_row(
         if match_method == "name":
             detail = f"Device '{device_name}' already exists"
         else:
-            detail = f"Matched to existing device '{matched_device.name}' (by {match_method})"
+            # Clarify what happens to name: it is NOT updated on matched devices
+            name_note = ""
+            if matched_device.name != device_name:
+                name_note = f"; name stays '{matched_device.name}' (source: '{device_name}')"
+            else:
+                name_note = "; name unchanged"
+            if ctx.profile.update_existing:
+                detail = f"Will update '{matched_device.name}' (matched by {match_method}{name_note})"
+            else:
+                detail = (
+                    f"Matched to '{matched_device.name}' (by {match_method}{name_note}, skip — update_existing off)"
+                )
     else:
         action = "create"
         _pos_label = f" U{position}" if position is not None else ""
