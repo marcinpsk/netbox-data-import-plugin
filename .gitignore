@@ -61,4 +61,4 @@ site/
 # direnv
 .envrc
 
-docs/superpowers
+docs/superpowers/
