@@ -23,6 +23,9 @@ TARGET_FIELD_CHOICES = [
     ("u_height", "U height"),
     ("serial", "Serial number"),
     ("asset_tag", "Asset tag"),
+    ("primary_ip4", "Primary IPv4"),
+    ("primary_ip6", "Primary IPv6"),
+    ("oob_ip", "Out-of-band IP"),
     ("source_id", "Source ID (stored in custom field)"),
 ]
 

@@ -292,6 +292,29 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
 # ---------------------------------------------------------------------------
 
 
+def _parse_ip_with_prefix(raw_value: str) -> str | None:
+    """Parse an IP address string, adding /32 or /128 prefix if absent.
+
+    Returns a normalised 'address/prefix' string or None if unparseable.
+    """
+    import ipaddress
+
+    raw = str(raw_value).strip()
+    if not raw:
+        return None
+    try:
+        # Try parsing as IP network (accepts CIDR notation)
+        if "/" in raw:
+            net = ipaddress.ip_interface(raw)
+            return str(net)
+        else:
+            addr = ipaddress.ip_address(raw)
+            prefix = "/32" if addr.version == 4 else "/128"
+            return f"{addr}{prefix}"
+    except ValueError:
+        return None
+
+
 def _resolve_device_type_slugs(make: str, model: str, profile: ImportProfile) -> tuple[str, str, bool]:
     """Return (manufacturer_slug, device_type_slug, is_explicit_mapping).
 
@@ -721,6 +744,7 @@ def _preview_device_row(
     DeviceType,
     Device,
     Rack,
+    ip_fields: dict | None = None,
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     # Parse u_height early so it's available in all return paths
@@ -746,6 +770,7 @@ def _preview_device_row(
                 "dt_slug": dt_slug,
                 "u_height": u_height,
                 "asset_tag": asset_tag or "",
+                **({"_ip": ip_fields} if ip_fields else {}),
             },
         )
 
@@ -808,6 +833,7 @@ def _preview_device_row(
             "dt_slug": dt_slug,
             "u_height": u_height,
             "asset_tag": asset_tag or "",
+            **({"_ip": ip_fields} if ip_fields else {}),
         },
     )
 
@@ -832,6 +858,7 @@ def _write_device_row(
     DeviceRole,
     Rack,
     Device,
+    ip_fields: dict | None = None,
 ):
     """Write or update a device in the DB and return a RowResult."""
     rack_name = str(row.get("rack_name", "")).strip()
@@ -886,7 +913,12 @@ def _write_device_row(
             if ctx.tenant:
                 device.tenant = ctx.tenant
             device.save()
-            _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"))
+            ip_json = {}
+            for ip_field, ip_str in (ip_fields or {}).items():
+                assigned = _assign_ip_to_device(device, ip_field, ip_str)
+                if not assigned:
+                    ip_json[ip_field] = ip_str
+            _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"), ip_json or None)
             return RowResult(
                 row_number=row["_row_number"],
                 source_id=source_id,
@@ -926,7 +958,11 @@ def _write_device_row(
         asset_tag=asset_tag,
         tenant=ctx.tenant,
     )
-    _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"))
+    ip_json = {}
+    for ip_field, ip_str in (ip_fields or {}).items():
+        # New device — no interfaces yet, always store in JSON
+        ip_json[ip_field] = ip_str
+    _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"), ip_json or None)
     _rack_label = rack_name if rack_name else "(no rack)"
     _pos_label = f" U{position}" if position is not None else ""
     return RowResult(
@@ -940,6 +976,48 @@ def _write_device_row(
         rack_name=rack_name,
         extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
     )
+
+
+def _assign_ip_to_device(device, ip_field: str, ip_str: str):
+    """Attempt to assign an IP natively to a device; returns True on success.
+
+    For existing devices: search interfaces for a subnet containing ip_str.
+    If found, create/get the IPAddress and set it on the device field.
+    If not found, returns False (caller should store in JSON).
+    """
+    from ipam.models import IPAddress
+    import ipaddress
+
+    try:
+        target_interface = ipaddress.ip_interface(ip_str)
+    except ValueError:
+        return False
+
+    # Search device interfaces for one whose assigned IPs or subnet matches
+    for iface in device.interfaces.prefetch_related("ip_addresses").all():
+        for existing_ip in iface.ip_addresses.all():
+            try:
+                existing_net = ipaddress.ip_interface(str(existing_ip.address)).network
+                if target_interface.ip in existing_net:
+                    # Found a matching interface - handle IPAddress safely
+                    try:
+                        ip_obj = IPAddress.objects.get(address=ip_str)
+                        if ip_obj.assigned_object is None:
+                            # Unassigned IP — claim it for this interface
+                            ip_obj.assigned_object = iface
+                            ip_obj.save(update_fields=["assigned_object_type", "assigned_object_id"])
+                        elif getattr(ip_obj.assigned_object, "device_id", None) != device.pk:
+                            # IP belongs to another device — fall back to JSON
+                            return False
+                    except IPAddress.DoesNotExist:
+                        vrf = getattr(iface, "vrf", None)
+                        ip_obj = IPAddress.objects.create(address=ip_str, assigned_object=iface, vrf=vrf)
+                    setattr(device, ip_field, ip_obj)
+                    device.save(update_fields=[ip_field])
+                    return True
+            except (ValueError, AttributeError):
+                continue
+    return False
 
 
 def _pass3_process_devices(rows, ctx, class_role_map):
@@ -966,6 +1044,16 @@ def _pass3_process_devices(rows, ctx, class_role_map):
         serial = str(row.get("serial", "")).strip()
         asset_tag_raw = str(row.get("asset_tag", "")).strip() or None
         asset_tag = asset_tag_raw[:50] if asset_tag_raw else None
+
+        ip_fields = {}
+        for ip_field in ("primary_ip4", "primary_ip6", "oob_ip"):
+            raw = str(row.get(ip_field, "")).strip()
+            if raw:
+                parsed = _parse_ip_with_prefix(raw)
+                if parsed:
+                    ip_fields[ip_field] = parsed
+                else:
+                    logger.warning("Row %s: unparseable IP value for %s: %r", row.get("_row_number"), ip_field, raw)
 
         if source_id and source_id in ignored_source_ids:
             ctx.result.rows.append(
@@ -1078,6 +1166,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 DeviceType,
                 Device,
                 Rack,
+                ip_fields=ip_fields,
             )
         else:
             row_result = _write_device_row(
@@ -1100,6 +1189,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 DeviceRole,
                 Rack,
                 Device,
+                ip_fields=ip_fields,
             )
         ctx.result.rows.append(row_result)
 
@@ -1145,7 +1235,9 @@ def run_import(
 # ---------------------------------------------------------------------------
 
 
-def _store_source_id(obj, profile: ImportProfile, source_id: str, extra_columns: dict | None = None):
+def _store_source_id(
+    obj, profile: ImportProfile, source_id: str, extra_columns: dict | None = None, ip_data: dict | None = None
+):
     """Store source ID in the configured custom field and in the plugin's JSON metadata field."""
     changed = False
 
@@ -1166,6 +1258,8 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str, extra_columns:
         }
         if extra_columns:
             data["extra"] = extra_columns
+        if ip_data:
+            data["_ip"] = ip_data
         obj.custom_field_data["data_import_source"] = data
         changed = True
     except (AttributeError, KeyError):  # pragma: no cover

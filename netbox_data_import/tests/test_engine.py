@@ -373,6 +373,98 @@ class PreviewDeviceRowTest(TestCase):
         self.assertIn("asset_tag", result_row.extra_data)
         self.assertEqual(result_row.extra_data["asset_tag"], "")
 
+    def test_ip_fields_in_preview_extra_data(self):
+        """extra_data includes _ip dict when ip_fields is passed."""
+        from dcim.models import Device, DeviceType, Rack
+
+        row = {
+            "_row_number": 5,
+            "rack_name": "",
+            "u_position": None,
+        }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
+        result_row = _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="TestMake",
+            model="TestModel",
+            mfg_slug="test-mfg",
+            dt_slug="test-dt",
+            source_id="5",
+            device_name="test-device-05",
+            serial="",
+            asset_tag="",
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+            ip_fields={"primary_ip4": "192.168.1.1/32"},
+        )
+        # Verify we're on the success path
+        self.assertEqual(result_row.action, "create")
+        # Verify extra_data contains _ip
+        self.assertIn("_ip", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["_ip"], {"primary_ip4": "192.168.1.1/32"})
+
+    def test_ip_fields_absent_when_not_provided(self):
+        """extra_data does NOT contain _ip key when ip_fields is empty/None."""
+        from dcim.models import Device, DeviceType, Rack
+
+        row = {
+            "_row_number": 6,
+            "rack_name": "",
+            "u_position": None,
+        }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
+        result_row = _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="TestMake",
+            model="TestModel",
+            mfg_slug="test-mfg",
+            dt_slug="test-dt",
+            source_id="6",
+            device_name="test-device-06",
+            serial="",
+            asset_tag="",
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+        )
+        # Verify we're on the success path
+        self.assertEqual(result_row.action, "create")
+        # Verify extra_data does NOT contain _ip
+        self.assertNotIn("_ip", result_row.extra_data)
+
+
+class ParseIPWithPrefixTest(TestCase):
+    """Tests for _parse_ip_with_prefix helper function."""
+
+    def test_parse_ip_with_prefix_adds_cidr(self):
+        """_parse_ip_with_prefix adds /32 or /128 prefix if absent."""
+        from netbox_data_import.engine import _parse_ip_with_prefix
+
+        # IPv4 without prefix
+        self.assertEqual(_parse_ip_with_prefix("192.168.1.1"), "192.168.1.1/32")
+
+        # IPv4 with prefix
+        self.assertEqual(_parse_ip_with_prefix("192.168.1.1/24"), "192.168.1.1/24")
+
+        # IPv6 without prefix
+        self.assertEqual(_parse_ip_with_prefix("::1"), "::1/128")
+
+        # Invalid IP
+        self.assertIsNone(_parse_ip_with_prefix("not-an-ip"))
+
+        # Empty string
+        self.assertIsNone(_parse_ip_with_prefix(""))
+
+        # IPv4 with prefix preserved
+        self.assertEqual(_parse_ip_with_prefix("192.168.1.1/24"), "192.168.1.1/24")
+
 
 class EnsureDeviceTypeExecuteModeTest(TestCase):
     """Tests that _ensure_device_type never appends RowResult rows in execute mode."""
