@@ -142,6 +142,7 @@ class ClassRoleMapping(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
+        related_name="+",
         help_text="Optional rack type assigned when creating racks",
     )
     role_slug = models.CharField(

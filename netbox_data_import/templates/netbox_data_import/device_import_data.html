@@ -40,9 +40,10 @@
               {% csrf_token %}
               <input type="hidden" name="device_id" value="{{ device.pk }}">
               <input type="hidden" name="ip_field" value="{{ field }}">
+              <input type="hidden" name="next" value="{{ request.path }}">
               <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1"
                       title="Remove {{ info.label }} from JSON storage"
-                      onclick="return confirm('Remove {{ info.label }} from JSON storage?')">
+                      onclick="return confirm('Remove {{ info.label|escapejs }} from JSON storage?')">
                 <i class="mdi mdi-delete-outline"></i>
               </button>
             </form>

@@ -145,6 +145,10 @@ class ClassRoleMappingAPITest(BaseAPITestCase):
             HTTP_ACCEPT="application/json",
         )
         self.assertIn(resp.status_code, [200, 201])
+        from netbox_data_import.models import ClassRoleMapping
+
+        mapping = ClassRoleMapping.objects.get(profile=self.p1, source_class="APICabinet")
+        self.assertEqual(mapping.rack_type, rt)
 
 
 class DeviceTypeMappingAPITest(BaseAPITestCase):

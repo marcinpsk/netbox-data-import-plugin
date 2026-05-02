@@ -744,12 +744,12 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         unused_columns = [
             {
                 "name": col,
-                "count": stats["count"],
-                "samples": stats["samples"],
+                "count": stats.get("count", 0),
+                "samples": stats.get("samples", []),
                 "suggested_field": _fuzzy_match_netbox_field(col),
             }
             for col, stats in raw_unused.items()
-            if col not in mapped_source_cols
+            if isinstance(stats, dict) and col not in mapped_source_cols
         ]
         unused_columns.sort(key=lambda x: -x["count"])
 
@@ -765,6 +765,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "existing_resolutions_json": _json.dumps(existing_resolutions).translate(
                     {ord("<"): "\\u003C", ord(">"): "\\u003E", ord("&"): "\\u0026"}
                 ),
+                "existing_resolutions": existing_resolutions,
                 "can_create_role": request.user.has_perm("dcim.add_devicerole"),
                 "unused_columns": unused_columns,
                 "target_field_choices": TARGET_FIELD_CHOICES,
@@ -956,13 +957,23 @@ class RemoveExtraIpView(PermissionRequiredMixin, View):
         device_id = request.POST.get("device_id")
         ip_field = request.POST.get("ip_field")
 
+        def _safe_return(device=None):
+            url = request.POST.get("next", "")
+            if url and url_has_allowed_host_and_scheme(
+                url, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+            ):
+                return redirect(url)
+            if device:
+                return redirect(device.get_absolute_url())
+            return redirect("/")
+
         if not device_id or not ip_field:
             messages.error(request, "Missing device_id or ip_field.")
-            return redirect(request.META.get("HTTP_REFERER", "/"))
+            return _safe_return()
 
         if ip_field not in ("primary_ip4", "primary_ip6", "oob_ip"):
             messages.error(request, f"Invalid ip_field: {ip_field}")
-            return redirect(request.META.get("HTTP_REFERER", "/"))
+            return _safe_return()
 
         device = get_object_or_404(Device, pk=device_id)
         import_data = device.cf.get("data_import_source") or {}
@@ -980,7 +991,7 @@ class RemoveExtraIpView(PermissionRequiredMixin, View):
         else:
             messages.info(request, f"{ip_field} was not in JSON storage.")
 
-        return redirect(request.META.get("HTTP_REFERER", device.get_absolute_url()))
+        return _safe_return(device)
 
 
 # ---------------------------------------------------------------------------
@@ -1020,8 +1031,13 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
             display = self._apply_field(device, field, value, _STATUS_MAP)
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
-        except Exception as exc:
-            return JsonResponse({"ok": False, "error": str(exc)})
+        except Exception:
+            logger.exception(
+                "SyncDeviceFieldView failed for device_id=%s field=%s",
+                device_id,
+                field,
+            )
+            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         return JsonResponse({"ok": True, "display": display})
 
