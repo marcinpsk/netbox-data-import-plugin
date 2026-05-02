@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+import difflib
 import logging
 
 from django.contrib import messages
@@ -32,6 +33,7 @@ from .models import (
     ImportJob,
     ImportProfile,
     ManufacturerMapping,
+    TARGET_FIELD_CHOICES,
 )
 from .tables import (
     ClassRoleMappingTable,
@@ -51,6 +53,86 @@ def _safe_next_url(request, fallback: str) -> str:
     ):
         return url
     return reverse(fallback)
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy matching: source column name → NetBox target field canonical name
+# ---------------------------------------------------------------------------
+
+_ALIAS_TO_CANONICAL: dict[str, str] = {
+    # rack_name
+    "rack": "rack_name",
+    "rack_name": "rack_name",
+    "rack name": "rack_name",
+    # device_name
+    "name": "device_name",
+    "device_name": "device_name",
+    "device name": "device_name",
+    "hostname": "device_name",
+    "host": "device_name",
+    # make
+    "make": "make",
+    "manufacturer": "make",
+    "vendor": "make",
+    "brand": "make",
+    # model
+    "model": "model",
+    "device_type": "model",
+    "device type": "model",
+    "product": "model",
+    # serial
+    "serial": "serial",
+    "serial_number": "serial",
+    "serial number": "serial",
+    "sn": "serial",
+    # asset_tag
+    "asset_tag": "asset_tag",
+    "asset tag": "asset_tag",
+    "asset": "asset_tag",
+    "tag": "asset_tag",
+    # source_id
+    "source_id": "source_id",
+    "source id": "source_id",
+    "id": "source_id",
+    "uid": "source_id",
+    # u_position
+    "u_position": "u_position",
+    "u position": "u_position",
+    "position": "u_position",
+    "unit": "u_position",
+    "u": "u_position",
+    # u_height
+    "u_height": "u_height",
+    "u height": "u_height",
+    "height": "u_height",
+    "size": "u_height",
+    # face
+    "face": "face",
+    "side": "face",
+    # airflow
+    "airflow": "airflow",
+    "air_flow": "airflow",
+    # status
+    "status": "status",
+    "state": "status",
+    # device_class
+    "device_class": "device_class",
+    "device class": "device_class",
+    "class": "device_class",
+    "type": "device_class",
+    "role": "device_class",
+}
+
+
+def _fuzzy_match_netbox_field(column_name: str) -> str | None:
+    """Return the best-matching canonical target field name for a source column, or None."""
+    normalised = column_name.strip().lower()
+    if normalised in _ALIAS_TO_CANONICAL:
+        return _ALIAS_TO_CANONICAL[normalised]
+    matches = difflib.get_close_matches(normalised, _ALIAS_TO_CANONICAL.keys(), n=1, cutoff=0.6)
+    if matches:
+        return _ALIAS_TO_CANONICAL[matches[0]]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +666,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
         tenant = form.cleaned_data.get("tenant")
 
         try:
-            rows = engine.parse_file(excel_file, profile)
+            rows, unused_stats = engine.parse_file(excel_file, profile, return_stats=True)
         except engine.ParseError as exc:
             messages.error(request, f"Failed to parse file: {exc}")
             return render(request, "netbox_data_import/import_setup.html", {"form": form})
@@ -603,6 +685,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
             "tenant_id": tenant.pk if tenant else None,
             "filename": excel_file.name,
         }
+        request.session["import_unused_columns"] = unused_stats
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
@@ -651,6 +734,22 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             }
 
         view_mode = request.GET.get("view", profile.preview_view_mode)
+
+        # Build unused columns list: filter out any that are now mapped
+        mapped_source_cols = set(profile.column_mappings.values_list("source_column", flat=True))
+        raw_unused = request.session.get("import_unused_columns") or {}
+        unused_columns = [
+            {
+                "name": col,
+                "count": stats["count"],
+                "samples": stats["samples"],
+                "suggested_field": _fuzzy_match_netbox_field(col),
+            }
+            for col, stats in raw_unused.items()
+            if col not in mapped_source_cols
+        ]
+        unused_columns.sort(key=lambda x: -x["count"])
+
         return render(
             request,
             "netbox_data_import/import_preview.html",
@@ -664,6 +763,8 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                     {ord("<"): "\\u003C", ord(">"): "\\u003E", ord("&"): "\\u0026"}
                 ),
                 "can_create_role": request.user.has_perm("dcim.add_devicerole"),
+                "unused_columns": unused_columns,
+                "target_field_choices": TARGET_FIELD_CHOICES,
             },
         )
 
@@ -1453,6 +1554,33 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
         else:
             action_label = f"role '{role_slug}'"
         messages.success(request, f"{verb} mapping: class '{source_class}' → {action_label}")
+        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+
+class QuickAddColumnMappingView(PermissionRequiredMixin, View):
+    """Quickly map an unmapped source column to a NetBox target field from the preview panel."""
+
+    permission_required = "netbox_data_import.add_columnmapping"
+
+    def post(self, request):
+        """Save the column mapping and redirect back to preview."""
+        profile_id = request.POST.get("profile_id")
+        profile = get_object_or_404(ImportProfile, pk=profile_id)
+        source_column = request.POST.get("source_column", "").strip()
+        target_field = request.POST.get("target_field", "").strip()
+
+        valid_fields = {choice[0] for choice in TARGET_FIELD_CHOICES}
+        if not source_column or target_field not in valid_fields:
+            messages.error(request, "Valid source column and target field are required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        _, created = ColumnMapping.objects.update_or_create(
+            profile=profile,
+            source_column=source_column,
+            defaults={"target_field": target_field},
+        )
+        verb = "Created" if created else "Updated"
+        messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 

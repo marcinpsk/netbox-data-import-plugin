@@ -18,6 +18,8 @@
   .ndi-badge-generic { background-color: var(--tblr-bg-surface-tertiary, var(--tblr-gray-100)) !important;
                        color: var(--tblr-body-color) !important;
                        border: 1px solid var(--tblr-border-color) !important; }
+  .ndi-unused-badge  { cursor: pointer; }
+  .ndi-unused-badge:hover { opacity: 0.85; }
   [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
   [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
 </style>
@@ -1323,5 +1325,101 @@ function dmSearch() {
     </div>
   </div>
 </div>
+
+{% if unused_columns %}
+{# ── Unused Source Columns Panel ──────────────────────────────────────────── #}
+<div class="card mt-3" id="ndi-unused-columns-card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h5 class="mb-0">
+      <i class="mdi mdi-table-column-remove me-1"></i>
+      Unused source columns
+      <span class="badge bg-secondary ms-1">{{ unused_columns|length }}</span>
+    </h5>
+    <button class="btn btn-sm btn-outline-secondary"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#ndi-unused-columns-body">
+      <i class="mdi mdi-chevron-down"></i>
+    </button>
+  </div>
+  <div class="collapse show" id="ndi-unused-columns-body">
+    <div class="card-body p-2">
+      <p class="text-muted small mb-2">
+        These columns exist in your file but are not mapped to any NetBox field.
+        Click a badge to quickly map it. Columns with no data are hidden.
+      </p>
+      <div class="d-flex flex-wrap gap-2">
+        {% for col in unused_columns %}
+        <span class="badge ndi-badge-generic ndi-unused-badge"
+              title="{{ col.count }} row{{ col.count|pluralize }} with data — samples: {{ col.samples|join:', ' }}"
+              onclick="ndiOpenQuickMapModal('{{ col.name|escapejs }}', '{{ col.suggested_field|default:''|escapejs }}')">
+          {{ col.name }}
+          <span class="badge bg-secondary ms-1" style="font-size:0.7em">{{ col.count }}</span>
+          {% if col.suggested_field %}
+            <i class="mdi mdi-auto-fix ms-1" title="Suggested: {{ col.suggested_field }}"></i>
+          {% endif %}
+        </span>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# ── Quick Map Column Modal ──────────────────────────────────────────────── #}
+<div class="modal fade" id="ndiQuickMapModal" tabindex="-1" aria-labelledby="ndiQuickMapModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_add_column_mapping' %}">
+        {% csrf_token %}
+        <input type="hidden" name="profile_id" value="{{ profile_id }}">
+        <input type="hidden" name="source_column" id="ndi_qmap_source_col">
+        <div class="modal-header">
+          <h5 class="modal-title" id="ndiQuickMapModalLabel">
+            <i class="mdi mdi-table-arrow-right me-1"></i>
+            Map column: <span id="ndi_qmap_col_label" class="text-info"></span>
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Target NetBox field</label>
+            <select name="target_field" id="ndi_qmap_target" class="form-select">
+              {% for value, label in target_field_choices %}
+              <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-content-save"></i> Save mapping
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+function ndiOpenQuickMapModal(colName, suggestedField) {
+  document.getElementById('ndi_qmap_source_col').value = colName;
+  document.getElementById('ndi_qmap_col_label').textContent = colName;
+  var sel = document.getElementById('ndi_qmap_target');
+  if (suggestedField) {
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === suggestedField) {
+        sel.selectedIndex = i;
+        break;
+      }
+    }
+  } else {
+    sel.selectedIndex = 0;
+  }
+  var modal = new bootstrap.Modal(document.getElementById('ndiQuickMapModal'));
+  modal.show();
+}
+</script>
 
 {% endblock %}

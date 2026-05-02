@@ -22,6 +22,7 @@ class ImportProfileForm(NetBoxModelForm):
             "update_existing",
             "create_missing_device_types",
             "preview_view_mode",
+            "capture_extra_data",
             "tags",
         ]
 
@@ -40,6 +41,7 @@ class ImportProfileImportForm(NetBoxModelImportForm):
             "update_existing",
             "create_missing_device_types",
             "preview_view_mode",
+            "capture_extra_data",
             "tags",
         ]
 

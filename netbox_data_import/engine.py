@@ -181,8 +181,31 @@ def _apply_transform_rules(row_dict: dict, raw_row, raw_headers: dict, transform
             row_dict[rule.group_2_target] = m.group(2)
 
 
-def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
+def _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra):
+    """Return extra dict for a single row and update unused_stats in-place."""
+    extra: dict[str, str] = {}
+    for col in unmapped_cols:
+        idx = raw_headers[col]
+        raw_val = row[idx] if idx < len(row) else None
+        if raw_val is None:
+            continue
+        str_val = str(raw_val).strip()
+        if not str_val:
+            continue
+        extra[col] = str_val
+        if return_stats:
+            entry = unused_stats.setdefault(col, {"count": 0, "samples": []})
+            entry["count"] += 1
+            if len(entry["samples"]) < 5:
+                entry["samples"].append(str_val)
+    return extra
+
+
+def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     """Read the Excel file and return a list of row-dicts keyed by target_field name.
+
+    When return_stats=True, returns a tuple (rows, unused_stats) where unused_stats
+    is a dict mapping unmapped source column names to {"count": int, "samples": list[str]}.
 
     Raises ParseError if the file or sheet is invalid.
     """
@@ -202,6 +225,9 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
     # Build source_column→target_field map from profile
     col_map: dict[str, str] = {cm.source_column: cm.target_field for cm in profile.column_mappings.all()}
 
+    # Unmapped columns: present in the sheet but not configured in col_map
+    unmapped_cols = [col for col in raw_headers if col not in col_map]
+
     # Pre-fetch transform rules for efficiency
     transform_rules = list(profile.column_transform_rules.all())
 
@@ -209,6 +235,9 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
     resolutions_by_source_id: dict[str, list] = {}
     for res in profile.source_resolutions.all():
         resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
+
+    unused_stats: dict[str, dict] = {}
+    capture_extra = profile.capture_extra_data
 
     rows = []
     for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
@@ -234,8 +263,15 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
             for res in resolutions_by_source_id.get(str(source_id), []):
                 row_dict.update(res.resolved_fields)
 
+        if return_stats or capture_extra:
+            extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
+            if capture_extra and extra:
+                row_dict["_extra_columns"] = extra
+
         rows.append(row_dict)
 
+    if return_stats:
+        return rows, unused_stats
     return rows
 
 
@@ -805,7 +841,7 @@ def _write_device_row(
             if ctx.tenant:
                 device.tenant = ctx.tenant
             device.save()
-            _store_source_id(device, ctx.profile, source_id)
+            _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"))
             return RowResult(
                 row_number=row["_row_number"],
                 source_id=source_id,
@@ -845,7 +881,7 @@ def _write_device_row(
         asset_tag=asset_tag,
         tenant=ctx.tenant,
     )
-    _store_source_id(device, ctx.profile, source_id)
+    _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"))
     _rack_label = rack_name if rack_name else "(no rack)"
     _pos_label = f" U{position}" if position is not None else ""
     return RowResult(
@@ -1054,7 +1090,7 @@ def run_import(
 # ---------------------------------------------------------------------------
 
 
-def _store_source_id(obj, profile: ImportProfile, source_id: str):
+def _store_source_id(obj, profile: ImportProfile, source_id: str, extra_columns: dict | None = None):
     """Store source ID in the configured custom field and in the plugin's JSON metadata field."""
     changed = False
 
@@ -1068,11 +1104,14 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str):
 
     # Plugin-managed JSON field: data_import_source
     try:
-        obj.custom_field_data["data_import_source"] = {
+        data = {
             "source_id": source_id or "",
             "profile_id": profile.pk,
             "profile_name": profile.name,
         }
+        if extra_columns:
+            data["extra"] = extra_columns
+        obj.custom_field_data["data_import_source"] = data
         changed = True
     except (AttributeError, KeyError):  # pragma: no cover
         logger.warning("Failed to set data_import_source on %s", obj)

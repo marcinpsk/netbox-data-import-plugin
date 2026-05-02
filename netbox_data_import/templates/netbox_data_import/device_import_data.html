@@ -1,0 +1,66 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
+<div class="card">
+  <div class="card-header">
+    <h5 class="mb-0">
+      <i class="mdi mdi-database-import-outline me-1"></i>
+      Import Data
+    </h5>
+  </div>
+
+  {% if extra_columns %}
+  <div class="card-body p-0">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th class="ps-3">Source Column</th>
+          <th>Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for key, value in extra_columns.items %}
+        <tr>
+          <td class="ps-3 text-muted small">{{ key }}</td>
+          <td class="small">{{ value }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="card-body pt-2 pb-2">
+    <div class="accordion accordion-flush" id="ndiImportMetaAccordion">
+      <div class="accordion-item border-0">
+        <h2 class="accordion-header">
+          <button class="accordion-button collapsed px-0 py-1 text-muted small"
+                  type="button"
+                  data-bs-toggle="collapse"
+                  data-bs-target="#ndiImportMetaBody">
+            Import metadata
+          </button>
+        </h2>
+        <div id="ndiImportMetaBody" class="accordion-collapse collapse">
+          <div class="accordion-body px-0 pb-0">
+            <table class="table table-sm mb-0">
+              <tbody>
+                {% if import_data.source_id %}
+                <tr>
+                  <td class="text-muted">Source ID</td>
+                  <td>{{ import_data.source_id }}</td>
+                </tr>
+                {% endif %}
+                {% if import_data.profile_name %}
+                <tr>
+                  <td class="text-muted">Profile</td>
+                  <td>{{ import_data.profile_name }}</td>
+                </tr>
+                {% endif %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

@@ -61,6 +61,12 @@ class ImportProfile(NetBoxModel):
         default="rows",
         help_text="How to display the import preview (row table or rack diagrams)",
     )
+    capture_extra_data = models.BooleanField(
+        default=False,
+        help_text=(
+            "Store unmapped source column values in the data_import_source['extra'] custom field key on each device."
+        ),
+    )
 
     # Override tags reverse accessor to avoid clashes with other plugins
     tags = models.ManyToManyField(

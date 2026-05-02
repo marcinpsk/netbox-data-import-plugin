@@ -38,6 +38,7 @@ class ImportProfileSerializer(NetBoxModelSerializer):
             "update_existing",
             "create_missing_device_types",
             "preview_view_mode",
+            "capture_extra_data",
             "tags",
             "custom_fields",
             "created",
