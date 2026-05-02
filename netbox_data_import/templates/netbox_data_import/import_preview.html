@@ -22,6 +22,10 @@
   .ndi-unused-badge:hover { opacity: 0.85; }
   [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
   [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
+  /* In dark mode --tblr-dark blends into the page bg; use a slate that stands out */
+  [data-bs-theme="dark"] .ndi-badge-ignored { background-color: #4b5563 !important; border: 1px solid #6b7280 !important; }
+  /* Generic unused-column badges need a tinted background to read in dark mode */
+  [data-bs-theme="dark"] .ndi-badge-generic { background-color: #374151 !important; color: #e5e7eb !important; border-color: #4b5563 !important; }
 </style>
 {% endblock %}
 
@@ -1420,7 +1424,9 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
   } else {
     sel.selectedIndex = 0;
   }
-  var modal = new bootstrap.Modal(document.getElementById('ndiQuickMapModal'));
+  // NetBox/Tabler exposes Bootstrap as global `Modal`, not `bootstrap.Modal`
+  var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || Modal;
+  var modal = new ModalClass(document.getElementById('ndiQuickMapModal'));
   modal.show();
 }
 </script>
