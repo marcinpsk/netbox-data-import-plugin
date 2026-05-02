@@ -63,6 +63,8 @@ urlpatterns = [
     # Ignore / Unignore device
     path("ignore-device/", views.IgnoreDeviceView.as_view(), name="ignore_device"),
     path("unignore-device/", views.UnignoreDeviceView.as_view(), name="unignore_device"),
+    # Quick-resolve views
+    path("remove-extra-ip/", views.RemoveExtraIpView.as_view(), name="remove_extra_ip"),
     # Save resolution (rerere)
     path("save-resolution/", views.SaveResolutionView.as_view(), name="save_resolution"),
     # Source resolutions list (per profile)

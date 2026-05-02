@@ -8,6 +8,52 @@
     </h5>
   </div>
 
+  {% if ip_status %}
+  <div class="card-body pb-0 pt-2">
+    <h6 class="text-muted small mb-2">
+      <i class="mdi mdi-ip-network-outline me-1"></i>
+      IP Fields (from import)
+    </h6>
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr>
+          <th class="ps-3 small">Field</th>
+          <th class="small">Value</th>
+          <th class="small">Status</th>
+          <th class="small"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for field, info in ip_status.items %}
+        <tr>
+          <td class="ps-3 text-muted small">{{ info.label }}</td>
+          <td class="small font-monospace">{{ info.value }}</td>
+          <td class="small">
+            {% if info.in_netbox %}
+              <span class="badge bg-success">✓ In NetBox</span>
+            {% else %}
+              <span class="badge bg-secondary">? Not assigned</span>
+            {% endif %}
+          </td>
+          <td class="small">
+            <form method="post" action="{% url 'plugins:netbox_data_import:remove_extra_ip' %}" class="d-inline">
+              {% csrf_token %}
+              <input type="hidden" name="device_id" value="{{ device.pk }}">
+              <input type="hidden" name="ip_field" value="{{ field }}">
+              <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1"
+                      title="Remove {{ info.label }} from JSON storage"
+                      onclick="return confirm('Remove {{ info.label }} from JSON storage?')">
+                <i class="mdi mdi-delete-outline"></i>
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   {% if extra_columns %}
   <div class="card-body p-0">
     <table class="table table-sm table-hover mb-0">

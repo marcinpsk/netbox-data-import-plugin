@@ -2821,3 +2821,134 @@ class RackTypeFeatureTest(BaseViewTestCase):
         }
         with self.assertRaises(ValueError):
             _apply_profile_yaml_data(data)
+
+
+class RemoveExtraIpViewTests(TestCase):
+    """Tests for RemoveExtraIpView."""
+
+    def setUp(self):
+        """Create test user and device with IP data."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from extras.models import CustomField
+
+        self.user = User.objects.create_superuser("testuser_ip", "ip@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="testuser_ip", password="testpass")
+
+        # Create custom field if it doesn't exist
+        CustomField.objects.get_or_create(
+            name="data_import_source",
+            defaults={
+                "type": "json",
+                "object_types": ["dcim.device"],
+            },
+        )
+
+        # Create test device with IP data
+        site = Site.objects.create(name="Test Site", slug="test-site")
+        manufacturer = Manufacturer.objects.create(name="Test Mfg", slug="test-mfg")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Test Model",
+            slug="test-model",
+        )
+        role = DeviceRole.objects.create(name="Test Role", slug="test-role")
+
+        self.device = Device.objects.create(
+            name="test-device",
+            site=site,
+            device_type=device_type,
+            role=role,
+        )
+        self.device.custom_field_data = {
+            "data_import_source": {
+                "_ip": {
+                    "primary_ip4": "192.168.1.1/32",
+                    "oob_ip": "10.0.0.5/32",
+                },
+                "extra": {"some_field": "value"},
+            }
+        }
+        self.device.save()
+
+    def test_remove_extra_ip_removes_field(self):
+        """Test that RemoveExtraIpView removes the specified IP field."""
+        url = reverse("plugins:netbox_data_import:remove_extra_ip")
+        response = self.client.post(
+            url,
+            {
+                "device_id": self.device.pk,
+                "ip_field": "primary_ip4",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)  # redirect
+
+        # Refresh device and check
+        self.device.refresh_from_db()
+        import_data = self.device.cf.get("data_import_source")
+        self.assertNotIn("primary_ip4", import_data["_ip"])
+        self.assertIn("oob_ip", import_data["_ip"])  # other field still there
+
+    def test_remove_extra_ip_removes_ip_key_when_empty(self):
+        """Test that _ip key is removed when last field is deleted."""
+        # First remove primary_ip4
+        url = reverse("plugins:netbox_data_import:remove_extra_ip")
+        self.client.post(
+            url,
+            {
+                "device_id": self.device.pk,
+                "ip_field": "primary_ip4",
+            },
+        )
+
+        # Now remove oob_ip (last one)
+        response = self.client.post(
+            url,
+            {
+                "device_id": self.device.pk,
+                "ip_field": "oob_ip",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        # Refresh device and check _ip key is gone
+        self.device.refresh_from_db()
+        import_data = self.device.cf.get("data_import_source")
+        self.assertNotIn("_ip", import_data)
+        self.assertIn("extra", import_data)  # other keys remain
+
+    def test_remove_extra_ip_invalid_field(self):
+        """Test that invalid ip_field is rejected."""
+        url = reverse("plugins:netbox_data_import:remove_extra_ip")
+        response = self.client.post(
+            url,
+            {
+                "device_id": self.device.pk,
+                "ip_field": "invalid_field",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        # Check device wasn't modified
+        self.device.refresh_from_db()
+        import_data = self.device.cf.get("data_import_source")
+        self.assertEqual(len(import_data["_ip"]), 2)  # unchanged
+
+    def test_remove_extra_ip_missing_params(self):
+        """Test that missing parameters are handled gracefully."""
+        url = reverse("plugins:netbox_data_import:remove_extra_ip")
+
+        # Missing both params
+        response = self.client.post(url, {})
+        self.assertEqual(response.status_code, 302)
+
+        # Missing ip_field
+        response = self.client.post(url, {"device_id": self.device.pk})
+        self.assertEqual(response.status_code, 302)
+
+        # Missing device_id
+        response = self.client.post(url, {"ip_field": "primary_ip4"})
+        self.assertEqual(response.status_code, 302)

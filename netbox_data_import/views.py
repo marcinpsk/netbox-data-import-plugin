@@ -941,6 +941,45 @@ class UnignoreDeviceView(PermissionRequiredMixin, View):
         return redirect(next_url)
 
 
+class RemoveExtraIpView(PermissionRequiredMixin, View):
+    """Remove a stored IP from extra_json['_ip'] on a device's data_import_source custom field."""
+
+    permission_required = "dcim.change_device"
+
+    def post(self, request):
+        """Remove an IP field from the device's data_import_source custom field."""
+        from dcim.models import Device
+
+        device_id = request.POST.get("device_id")
+        ip_field = request.POST.get("ip_field")
+
+        if not device_id or not ip_field:
+            messages.error(request, "Missing device_id or ip_field.")
+            return redirect(request.META.get("HTTP_REFERER", "/"))
+
+        if ip_field not in ("primary_ip4", "primary_ip6", "oob_ip"):
+            messages.error(request, f"Invalid ip_field: {ip_field}")
+            return redirect(request.META.get("HTTP_REFERER", "/"))
+
+        device = get_object_or_404(Device, pk=device_id)
+        import_data = device.cf.get("data_import_source") or {}
+        ip_data = import_data.get("_ip") or {}
+
+        if ip_field in ip_data:
+            del ip_data[ip_field]
+            if ip_data:
+                import_data["_ip"] = ip_data
+            else:
+                import_data.pop("_ip", None)
+            device.custom_field_data["data_import_source"] = import_data
+            device.save(update_fields=["custom_field_data"])
+            messages.success(request, f"Removed {ip_field} from JSON storage.")
+        else:
+            messages.info(request, f"{ip_field} was not in JSON storage.")
+
+        return redirect(request.META.get("HTTP_REFERER", device.get_absolute_url()))
+
+
 # ---------------------------------------------------------------------------
 # Save resolution (rerere)
 # ---------------------------------------------------------------------------
