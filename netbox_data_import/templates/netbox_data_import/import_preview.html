@@ -859,11 +859,31 @@ function checkDevice(name) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       div.classList.remove('d-none');
+      msg.textContent = '';
+      var icon = document.createElement('i');
+      var strong = document.createElement('strong');
+      strong.textContent = name;
       if (data.exists) {
-        msg.innerHTML = '<i class="mdi mdi-check-circle text-success"></i> Device <strong>' + name + '</strong> already exists in NetBox — ' +
-          (data.count > 1 ? data.count + ' matches' : '<a href="' + data.url + '" target="_blank">view it</a>');
+        icon.className = 'mdi mdi-check-circle text-success';
+        msg.appendChild(icon);
+        msg.appendChild(document.createTextNode(' Device '));
+        msg.appendChild(strong);
+        msg.appendChild(document.createTextNode(' already exists in NetBox \u2014 '));
+        if (data.count > 1) {
+          msg.appendChild(document.createTextNode(data.count + ' matches'));
+        } else {
+          var link = document.createElement('a');
+          link.href = data.url;
+          link.target = '_blank';
+          link.textContent = 'view it';
+          msg.appendChild(link);
+        }
       } else {
-        msg.innerHTML = '<i class="mdi mdi-plus-circle text-muted"></i> Device <strong>' + name + '</strong> not yet in NetBox — will be created on import.';
+        icon.className = 'mdi mdi-plus-circle text-muted';
+        msg.appendChild(icon);
+        msg.appendChild(document.createTextNode(' Device '));
+        msg.appendChild(strong);
+        msg.appendChild(document.createTextNode(' not yet in NetBox \u2014 will be created on import.'));
       }
     })
     .catch(function() { div.classList.add('d-none'); });
