@@ -201,17 +201,20 @@
             {% endif %}
           ">
             <strong><i class="mdi mdi-server-network"></i> {{ rack_name }}</strong>
-            {% if group.rack_row %}
-              <span class="badge bg-light text-dark">
-                {% if group.rack_row.action == 'create' %}Create
-                {% elif group.rack_row.action == 'update' %}Update
-                {% elif group.rack_row.action == 'skip' %}Existing
-                {% elif group.rack_row.action == 'error' %}Error
-                {% endif %}
-              </span>
-            {% else %}
-              <span class="badge bg-secondary">No rack row</span>
-            {% endif %}
+            <span class="d-flex align-items-center gap-1">
+              {% if group.rack_row %}
+                <span class="badge bg-light text-dark" title="{{ group.rack_row.detail }}">
+                  {% if group.rack_row.action == 'create' %}Create
+                  {% elif group.rack_row.action == 'update' %}Update
+                  {% elif group.rack_row.action == 'skip' %}Existing
+                  {% elif group.rack_row.action == 'error' %}Error
+                  {% endif %}
+                </span>
+              {% else %}
+                <span class="badge bg-secondary">No rack row</span>
+              {% endif %}
+              <span class="badge bg-light text-dark">{{ group.devices|length }} device{{ group.devices|length|pluralize }}</span>
+            </span>
           </div>
           <div class="card-body p-2">
             {% if group.devices %}
@@ -227,11 +230,18 @@
                   {% elif dev.action == 'error' %}<span class="badge bg-danger me-1">!</span>
                   {% elif dev.action == 'ignore' %}<span class="badge bg-dark me-1">✕</span>
                   {% endif %}
+                  {% if dev.extra_data.u_position %}<small class="text-muted me-1">U{{ dev.extra_data.u_position }}</small>{% endif %}
                   {{ dev.name }}
                   {% if dev.source_id %}<small class="text-muted ms-1">#{{ dev.source_id }}</small>{% endif %}
                 </span>
                 {% if dev.action != 'ignore' %}
-                <small class="text-muted">{{ dev.detail|truncatechars:20 }}</small>
+                <small class="text-muted text-end" style="max-width:12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ dev.detail }}">
+                  {% if dev.extra_data.source_make and dev.extra_data.source_model %}
+                    {{ dev.extra_data.source_make|truncatechars:12 }} / {{ dev.extra_data.source_model|truncatechars:16 }}
+                  {% else %}
+                    {{ dev.detail|truncatechars:40 }}
+                  {% endif %}
+                </small>
                 {% endif %}
               </li>
               {% endfor %}

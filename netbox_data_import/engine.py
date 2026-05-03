@@ -103,10 +103,18 @@ class ImportResult:
 
     @property
     def rack_groups(self) -> dict:
-        """Return rows grouped by rack name for the rack view template."""
+        """Return rows grouped by rack name for the rack view template.
+
+        Devices within each group are sorted by u_position (ascending, with
+        devices that have no position placed last).  Rack rows with an empty
+        name (caused by cabinet source rows that have no RACK column value) are
+        excluded so they don't produce a confusing unnamed card.
+        """
         groups: dict = {}
         for row in self.rows:
             if row.object_type == "rack":
+                if not row.name:
+                    continue
                 if row.name not in groups:
                     groups[row.name] = {"rack_row": row, "devices": []}
                 else:
@@ -116,6 +124,14 @@ class ImportResult:
                 if rack not in groups:
                     groups[rack] = {"rack_row": None, "devices": []}
                 groups[rack]["devices"].append(row)
+        # Sort each rack's device list by u_position ascending (None → last)
+        for group in groups.values():
+            group["devices"].sort(
+                key=lambda r: (
+                    r.extra_data.get("u_position") is None,
+                    r.extra_data.get("u_position") or 0,
+                )
+            )
         return groups
 
 
@@ -905,6 +921,7 @@ def _preview_device_row(
             "mfg_slug": mfg_slug,
             "dt_slug": dt_slug,
             "u_height": u_height,
+            "u_position": position,
             "asset_tag": asset_tag or "",
             **({"_ip": ip_fields} if ip_fields else {}),
             **({"field_diff": field_diff} if field_diff is not None else {}),
