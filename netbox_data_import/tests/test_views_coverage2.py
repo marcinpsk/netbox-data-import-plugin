@@ -107,6 +107,13 @@ class BulkImportSeekOnYamlErrorTest(TestCase):
         resp = self.client.post(url, {"upload_file": invalid_yaml, "format": "yaml"}, follow=True)
         # After following any redirects, the final response should be 200
         self.assertEqual(resp.status_code, 200)
+        # Verify the fallback path: form should have validation errors
+        form = resp.context.get("form") if resp.context else None
+        if form is not None:
+            self.assertTrue(
+                form.errors,
+                "Expected form validation errors on the YAML error fallback path",
+            )
 
 
 class ProfileChildEditViewPermissionTest(TestCase):
@@ -217,6 +224,13 @@ class ImportPreviewViewExistingResolutionsTest(TestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b"RES2-001", resp.content)
+        # Assert the view actually passed the resolution into context
+        existing = resp.context.get("existing_resolutions", {})
+        self.assertIn("RES2-001", existing)
+        self.assertEqual(
+            existing["RES2-001"]["Name"]["resolved_fields"],
+            {"device_name": "new-name"},
+        )
 
 
 class ImportJobListViewPermissionTest(TestCase):

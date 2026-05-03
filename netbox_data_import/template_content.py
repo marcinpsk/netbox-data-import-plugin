@@ -16,8 +16,10 @@ class DeviceImportDataExtension(PluginTemplateExtension):
         import_data = obj.cf.get("data_import_source") if obj.cf else None
         if not isinstance(import_data, dict) or not import_data:
             return ""
-        extra = import_data.get("extra") or {}
-        ip_data = import_data.get("_ip") or {}
+        _extra_raw = import_data.get("extra")
+        extra = _extra_raw if isinstance(_extra_raw, dict) else {}
+        _ip_raw = import_data.get("_ip")
+        ip_data = _ip_raw if isinstance(_ip_raw, dict) else {}
 
         # Check which IP fields are already natively assigned in NetBox
         ip_status = {}

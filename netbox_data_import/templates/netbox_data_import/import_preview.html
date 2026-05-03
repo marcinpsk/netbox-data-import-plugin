@@ -339,6 +339,8 @@
                   <br>
                   <button type="button" class="badge ndi-diff-badge ndi-diff-toggle mt-1"
                           data-diff-target="diff-{{ row.row_number }}"
+                          aria-controls="diff-{{ row.row_number }}"
+                          aria-expanded="false"
                           title="Click to see field differences">
                     <i class="mdi mdi-chevron-down"></i> {{ diff|length }} field(s) differ
                   </button>
@@ -1590,6 +1592,8 @@ document.addEventListener('click', function(e) {
   const row = document.getElementById(targetId);
   if (!row) return;
   row.classList.toggle('show');
+  const expanded = row.classList.contains('show');
+  toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   const icon = toggle.querySelector('.mdi');
   if (icon) {
     icon.classList.toggle('mdi-chevron-down');

@@ -742,12 +742,13 @@ class ImportPreviewView(PermissionRequiredMixin, View):
 
         # Build unused columns list: filter out any that are now mapped
         mapped_source_cols = set(profile.column_mappings.values_list("source_column", flat=True))
-        raw_unused = request.session.get("import_unused_columns") or {}
+        _raw_unused = request.session.get("import_unused_columns")
+        raw_unused = _raw_unused if isinstance(_raw_unused, dict) else {}
         unused_columns = [
             {
                 "name": col,
-                "count": stats.get("count", 0),
-                "samples": stats.get("samples", []),
+                "count": int(stats.get("count") or 0),
+                "samples": stats.get("samples") or [],
                 "suggested_field": _fuzzy_match_netbox_field(col),
             }
             for col, stats in raw_unused.items()
@@ -1703,6 +1704,17 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
 
         if not source_class:
             messages.error(request, "Source class is required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        _valid_actions = ("ignore", "role", "rack")
+        if mapping_action not in _valid_actions:
+            messages.error(
+                request, f"Invalid mapping action '{mapping_action}'. Must be one of: {', '.join(_valid_actions)}."
+            )
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        if mapping_action == "role" and not role_slug:
+            messages.error(request, "A role slug is required when mapping action is 'role'.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         _, created = ClassRoleMapping.objects.update_or_create(
