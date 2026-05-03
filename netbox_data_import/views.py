@@ -1809,6 +1809,16 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
         else:
             verb = "Created" if created else "Updated"
             messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
+
+        # Re-apply all column mappings to the in-session rows so the new
+        # mapping takes effect immediately without requiring a file re-upload.
+        from . import engine  # noqa: PLC0415
+
+        session_rows = request.session.get("import_rows")
+        if session_rows:
+            engine.apply_column_mappings(session_rows, profile)
+            request.session["import_rows"] = session_rows
+
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 

@@ -411,6 +411,8 @@
                           data-source-class="{{ row.extra_data.source_class }}"
                           data-profile-id="{{ profile_id }}"
                           data-initial-action="rack"
+                          data-current-rack-type-id="{{ row.extra_data.rack_type_id|default:'' }}"
+                          data-current-rack-type-name="{{ row.extra_data.rack_type_name|default:'' }}"
                           title="Configure class mapping (e.g. set rack type) for '{{ row.extra_data.source_class }}'">
                     <i class="mdi mdi-cog"></i> Configure class
                   </button>
@@ -763,6 +765,17 @@ document.addEventListener('DOMContentLoaded', function() {
       document.getElementById('cm_action_ignore').checked = true;
     }
     cmToggleAction();
+
+    // Hydrate existing rack type when editing a rack row that already has one
+    if (initialAction === 'rack') {
+      var rtId = btn.dataset.currentRackTypeId || '';
+      var rtName = btn.dataset.currentRackTypeName || '';
+      if (rtId) {
+        document.getElementById('cm_rack_type_id').value = rtId;
+        document.getElementById('cm_rack_type_selected_name').textContent = rtName;
+        document.getElementById('cm_rack_type_selected').style.display = '';
+      }
+    }
   });
 
   document.getElementById('manufacturerMappingModal').addEventListener('show.bs.modal', function(event) {
@@ -1534,7 +1547,7 @@ function dmSearch() {
           </div>
           <div id="ndi_qmap_extra_div" style="display:none;">
             <label class="form-label fw-semibold" for="ndi_qmap_extra_key">Key name in extra JSON</label>
-            <input type="text" id="ndi_qmap_extra_key" class="form-control" placeholder="e.g. jira_id" pattern="[a-zA-Z0-9_-]{1,50}">
+            <input type="text" id="ndi_qmap_extra_key" class="form-control" placeholder="e.g. jira_id" pattern="[a-zA-Z0-9_-]{1,50}" oninput="this.setCustomValidity('')">
             <div class="form-text text-muted">
               Stored in <code>data_import_source["extra"]["&lt;key&gt;"]</code>. Use letters, digits, <code>_</code>, or <code>-</code>.
             </div>
@@ -1579,12 +1592,15 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
 }
 
 (function () {
-  // Toggle standard / extra-json panels
+  // Toggle standard / extra-json panels; clear any custom validity on mode switch
   document.querySelectorAll('input[name="ndi_map_mode"]').forEach(function (radio) {
     radio.addEventListener('change', function () {
       var isExtra = this.value === 'extra_json';
       document.getElementById('ndi_qmap_standard_div').style.display = isExtra ? 'none' : '';
       document.getElementById('ndi_qmap_extra_div').style.display = isExtra ? '' : 'none';
+      if (!isExtra) {
+        document.getElementById('ndi_qmap_extra_key').setCustomValidity('');
+      }
     });
   });
 
@@ -1594,12 +1610,15 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
     form.addEventListener('submit', function (e) {
       var mode = document.querySelector('input[name="ndi_map_mode"]:checked');
       if (mode && mode.value === 'extra_json') {
-        var key = (document.getElementById('ndi_qmap_extra_key').value || '').trim();
+        var keyInput = document.getElementById('ndi_qmap_extra_key');
+        var key = (keyInput.value || '').trim();
         if (!key || !/^[a-zA-Z0-9_-]{1,50}$/.test(key)) {
+          keyInput.setCustomValidity('Enter a valid key: letters, digits, _ or - (1–50 chars).');
+          keyInput.reportValidity();
           e.preventDefault();
-          document.getElementById('ndi_qmap_extra_key').focus();
           return;
         }
+        keyInput.setCustomValidity('');
         // Disable the standard select so it doesn't submit, inject the real value
         document.getElementById('ndi_qmap_target').disabled = true;
         var hidden = document.createElement('input');

@@ -243,6 +243,24 @@ def _promote_extra_json_fields(row_dict: dict) -> None:
             row_dict.setdefault("_extra_columns", {})[json_key] = val
 
 
+def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict]:
+    """Re-apply the profile's column mappings to already-parsed session rows.
+
+    This is used after a quick-add column mapping so that the in-session row
+    dicts reflect the new mapping without requiring the source file to be
+    re-uploaded.  Unmapped source-column keys (still present with their
+    original name) are renamed to the configured target_field.  Any
+    ``extra_json:<key>`` targets are promoted into ``_extra_columns`` as usual.
+    """
+    col_map: dict[str, str] = {cm.source_column: cm.target_field for cm in profile.column_mappings.all()}
+    for row in rows:
+        for source_col, target_field in col_map.items():
+            if source_col in row:
+                row[target_field] = row.pop(source_col)
+        _promote_extra_json_fields(row)
+    return rows
+
+
 def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     """Read the Excel file and return a list of row-dicts keyed by target_field name.
 
@@ -725,7 +743,12 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                     action=action,
                     object_type="rack",
                     detail=detail,
-                    extra_data={"source_class": device_class, "rack_type_set": bool(crm.rack_type_id)},
+                    extra_data={
+                        "source_class": device_class,
+                        "rack_type_set": bool(crm.rack_type_id),
+                        "rack_type_id": crm.rack_type_id or "",
+                        "rack_type_name": str(crm.rack_type) if crm.rack_type_id else "",
+                    },
                 )
             )
         else:
@@ -1328,7 +1351,9 @@ def run_import(
         user=user,
     )
 
-    class_role_map: dict[str, object] = {crm.source_class: crm for crm in profile.class_role_mappings.all()}
+    class_role_map: dict[str, object] = {
+        crm.source_class: crm for crm in profile.class_role_mappings.select_related("rack_type").all()
+    }
 
     _pass1_ensure_types(rows, ctx, class_role_map)
     _pass2_process_racks(rows, ctx, class_role_map)
