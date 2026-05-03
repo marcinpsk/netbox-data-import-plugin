@@ -6,7 +6,7 @@ from netbox.plugins import PluginConfig
 
 logger = logging.getLogger(__name__)
 
-__version__ = "1.0.3"
+__version__ = "1.1.0"
 
 DATA_IMPORT_CF_NAME = "data_import_source"
 
