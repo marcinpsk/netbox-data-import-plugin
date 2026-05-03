@@ -63,6 +63,9 @@ urlpatterns = [
     # Ignore / Unignore device
     path("ignore-device/", views.IgnoreDeviceView.as_view(), name="ignore_device"),
     path("unignore-device/", views.UnignoreDeviceView.as_view(), name="unignore_device"),
+    # Quick-resolve views
+    path("remove-extra-ip/", views.RemoveExtraIpView.as_view(), name="remove_extra_ip"),
+    path("sync-device-field/", views.SyncDeviceFieldView.as_view(), name="sync_device_field"),
     # Save resolution (rerere)
     path("save-resolution/", views.SaveResolutionView.as_view(), name="save_resolution"),
     # Source resolutions list (per profile)
@@ -94,6 +97,8 @@ urlpatterns = [
     ),
     path("quick-resolve-device-type/", views.QuickResolveDeviceTypeView.as_view(), name="quick_resolve_device_type"),
     path("quick-add-class-mapping/", views.QuickAddClassRoleMappingView.as_view(), name="quick_add_class_mapping"),
+    path("quick-add-column-mapping/", views.QuickAddColumnMappingView.as_view(), name="quick_add_column_mapping"),
+    path("quick-create-role/", views.QuickCreateDeviceRoleView.as_view(), name="quick_create_role"),
     path("match-existing-device/", views.MatchExistingDeviceView.as_view(), name="match_existing_device"),
     path("auto-match-devices/", views.AutoMatchDevicesView.as_view(), name="auto_match_devices"),
     # Import Job history

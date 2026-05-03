@@ -34,7 +34,7 @@ Changelog = "https://github.com/marcinpsk/netbox-data-import-plugin/blob/main/CH
 include = ["netbox_data_import*"]
 
 [tool.setuptools.package-data]
-netbox_data_import = ["templates/**/*.html"]
+netbox_data_import = ["templates/**/*.html", "tests/fixtures/*.xlsx"]
 
 [dependency-groups]
 dev = [

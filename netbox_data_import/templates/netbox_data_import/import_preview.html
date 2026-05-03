@@ -4,6 +4,43 @@
 
 {% block title %}Import Preview{% endblock %}
 
+{% block head %}
+<style>
+  /* Badge colors using Tabler CSS variables (NetBox uses --tblr-* not --bs-*) */
+  .ndi-badge-create  { background-color: var(--tblr-success) !important; color: #fff !important; }
+  .ndi-badge-update  { background-color: var(--tblr-primary) !important; color: #fff !important; }
+  .ndi-badge-skip    { background-color: var(--tblr-secondary) !important; color: #fff !important; }
+  .ndi-badge-error   { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  .ndi-badge-ignored { background-color: var(--tblr-dark) !important; color: #fff !important; }
+  .ndi-badge-rack    { background-color: var(--tblr-info) !important; color: #fff !important; }
+  .ndi-badge-mfg     { background-color: var(--tblr-warning) !important; color: #000 !important; }
+  .ndi-badge-dt      { background-color: #b8860b !important; color: #fff !important; }
+  .ndi-badge-generic { background-color: var(--tblr-bg-surface-tertiary, var(--tblr-gray-100)) !important;
+                       color: var(--tblr-body-color) !important;
+                       border: 1px solid var(--tblr-border-color) !important; }
+  /* Count badge: soft indigo — readable in light and dark, not harsh */
+  .ndi-count-badge { background-color: #6366f1 !important; color: #fff !important; }
+  [data-bs-theme="dark"] .ndi-count-badge { background-color: #818cf8 !important; color: #1e1b4b !important; }
+  .ndi-unused-badge  { cursor: pointer; border: none; }
+  .ndi-unused-badge:hover { opacity: 0.85; }
+  [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
+  [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
+  /* In dark mode --tblr-dark blends into the page bg; use a slate that stands out */
+  [data-bs-theme="dark"] .ndi-badge-ignored { background-color: #4b5563 !important; border: 1px solid #6b7280 !important; }
+  /* Generic unused-column badges need a tinted background to read in dark mode */
+  [data-bs-theme="dark"] .ndi-badge-generic { background-color: #374151 !important; color: #e5e7eb !important; border-color: #4b5563 !important; }
+  /* Field diff sub-table */
+  .ndi-diff-toggle { cursor: pointer; border: none; }
+  .ndi-diff-toggle:hover { opacity: 0.85; }
+  .ndi-diff-row { display: none; }
+  .ndi-diff-row.show { display: table-row; }
+  .ndi-diff-table { font-size: 0.82rem; margin-bottom: 0; }
+  .ndi-diff-synced { text-decoration: line-through; color: var(--tblr-secondary); }
+  .ndi-diff-badge { background-color: #f59e0b !important; color: #000 !important; }
+  [data-bs-theme="dark"] .ndi-diff-badge { background-color: #fbbf24 !important; color: #000 !important; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="row">
   <div class="col">
@@ -19,34 +56,36 @@
         {# Summary bar #}
         <div class="d-flex gap-3 flex-wrap mb-3">
           {% with c=result.counts %}
-          <span class="badge fs-6 text-white" style="background:#198754;">
+          <span class="badge fs-6 ndi-badge-create">
             <i class="mdi mdi-plus-circle"></i>
             {{ c.racks_created|default:0 }} rack{{ c.racks_created|default:0|pluralize }} to create
           </span>
-          <span class="badge fs-6 text-white" style="background:#198754;">
+          <span class="badge fs-6 ndi-badge-create">
             <i class="mdi mdi-plus-circle"></i>
             {{ c.devices_created|default:0 }} device{{ c.devices_created|default:0|pluralize }} to create
           </span>
           {% if c.racks_updated or c.devices_updated %}
-          <span class="badge fs-6 text-white" style="background:#0d6efd;">
+          {% with racks_updated=c.racks_updated|default:0 devices_updated=c.devices_updated|default:0 %}
+          <span class="badge fs-6 ndi-badge-update">
             <i class="mdi mdi-pencil"></i>
-            {{ c.racks_updated|default:0|add:c.devices_updated|default:0 }} to update
+            {{ racks_updated|add:devices_updated }} to update
           </span>
+          {% endwith %}
           {% endif %}
           {% if c.skipped %}
-          <span class="badge fs-6 text-white" style="background:#6c757d;">
+          <span class="badge fs-6 ndi-badge-skip">
             <i class="mdi mdi-skip-next"></i>
             {{ c.skipped }} skipped
           </span>
           {% endif %}
           {% if c.ignored %}
-          <span class="badge fs-6 text-white" style="background:#495057;">
+          <span class="badge fs-6 ndi-badge-ignored">
             <i class="mdi mdi-eye-off"></i>
             {{ c.ignored }} ignored
           </span>
           {% endif %}
           {% if c.errors %}
-          <span class="badge fs-6 text-white" style="background:#dc3545;">
+          <span class="badge fs-6 ndi-badge-error">
             <i class="mdi mdi-alert-circle"></i>
             {{ c.errors }} error{{ c.errors|pluralize }}
           </span>
@@ -104,6 +143,46 @@
         </div>
         {% endif %}
 
+        {% if unused_columns %}
+        {# ── Unused Source Columns Panel ─────────────────────────────────── #}
+        <div class="card mt-3 border-secondary" id="ndi-unused-columns-card">
+          <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <span class="fw-semibold">
+              <i class="mdi mdi-table-column-remove me-1 text-secondary"></i>
+              Unused source columns
+              <span class="badge ndi-count-badge ms-1">{{ unused_columns|length }}</span>
+            </span>
+            <button class="btn btn-sm btn-outline-secondary py-0"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#ndi-unused-columns-body">
+              <i class="mdi mdi-chevron-down"></i>
+            </button>
+          </div>
+          <div class="collapse show" id="ndi-unused-columns-body">
+            <div class="card-body py-2 px-3">
+              <p class="text-muted small mb-2">
+                These columns have data in your file but are not mapped to any NetBox field.
+                Click a badge to quickly create a mapping. Columns with no data are hidden.
+              </p>
+              <div class="d-flex flex-wrap gap-2">
+                {% for col in unused_columns %}
+                <button type="button" class="badge ndi-badge-generic ndi-unused-badge"
+                        title="{{ col.count }} row{{ col.count|pluralize }} with data — samples: {{ col.samples|join:', ' }}"
+                        onclick="ndiOpenQuickMapModal('{{ col.name|escapejs }}', '{{ col.suggested_field|default:''|escapejs }}')">
+                  {{ col.name }}
+                  <span class="badge ndi-count-badge ms-1" style="font-size:0.7em">{{ col.count }}</span>
+                  {% if col.suggested_field %}
+                    <i class="mdi mdi-auto-fix ms-1" title="Suggested: {{ col.suggested_field }}"></i>
+                  {% endif %}
+                </button>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
       </div>
     </div>
 
@@ -122,17 +201,20 @@
             {% endif %}
           ">
             <strong><i class="mdi mdi-server-network"></i> {{ rack_name }}</strong>
-            {% if group.rack_row %}
-              <span class="badge bg-light text-dark">
-                {% if group.rack_row.action == 'create' %}Create
-                {% elif group.rack_row.action == 'update' %}Update
-                {% elif group.rack_row.action == 'skip' %}Existing
-                {% elif group.rack_row.action == 'error' %}Error
-                {% endif %}
-              </span>
-            {% else %}
-              <span class="badge bg-secondary">No rack row</span>
-            {% endif %}
+            <span class="d-flex align-items-center gap-1">
+              {% if group.rack_row %}
+                <span class="badge bg-white text-dark border" title="{{ group.rack_row.detail }}">
+                  {% if group.rack_row.action == 'create' %}Create
+                  {% elif group.rack_row.action == 'update' %}Update
+                  {% elif group.rack_row.action == 'skip' %}Existing
+                  {% elif group.rack_row.action == 'error' %}Error
+                  {% endif %}
+                </span>
+              {% else %}
+                <span class="badge bg-warning text-dark">No rack row</span>
+              {% endif %}
+              <span class="badge ndi-count-badge">{{ group.devices|length }} device{{ group.devices|length|pluralize }}</span>
+            </span>
           </div>
           <div class="card-body p-2">
             {% if group.devices %}
@@ -142,16 +224,24 @@
                 {% if dev.action == 'ignore' %}text-decoration-line-through text-muted{% endif %}
               ">
                 <span>
-                  {% if dev.action == 'create' %}<span class="badge bg-success me-1">+</span>
-                  {% elif dev.action == 'update' %}<span class="badge bg-primary me-1">~</span>
-                  {% elif dev.action == 'skip' %}<span class="badge bg-secondary me-1">—</span>
-                  {% elif dev.action == 'error' %}<span class="badge bg-danger me-1">!</span>
-                  {% elif dev.action == 'ignore' %}<span class="badge bg-dark me-1">✕</span>
+                  {% if dev.action == 'create' %}<span class="badge ndi-badge-create me-1">+</span>
+                  {% elif dev.action == 'update' %}<span class="badge ndi-badge-update me-1">~</span>
+                  {% elif dev.action == 'skip' %}<span class="badge ndi-badge-skip me-1">—</span>
+                  {% elif dev.action == 'error' %}<span class="badge ndi-badge-error me-1">!</span>
+                  {% elif dev.action == 'ignore' %}<span class="badge ndi-badge-ignored me-1">✕</span>
                   {% endif %}
+                  {% if dev.extra_data.u_position %}<small class="text-muted me-1">U{{ dev.extra_data.u_position }}</small>{% endif %}
                   {{ dev.name }}
+                  {% if dev.source_id %}<small class="text-muted ms-1">#{{ dev.source_id }}</small>{% endif %}
                 </span>
                 {% if dev.action != 'ignore' %}
-                <small class="text-muted">U{{ dev.detail|truncatechars:20 }}</small>
+                <small class="text-muted text-end" style="max-width:12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ dev.detail }}">
+                  {% if dev.extra_data.source_make and dev.extra_data.source_model %}
+                    {{ dev.extra_data.source_make|truncatechars:12 }} / {{ dev.extra_data.source_model|truncatechars:16 }}
+                  {% else %}
+                    {{ dev.detail|truncatechars:40 }}
+                  {% endif %}
+                </small>
                 {% endif %}
               </li>
               {% endfor %}
@@ -228,31 +318,45 @@
               </td>
               <td>
                 {% if row.object_type == 'rack' %}
-                  <span class="badge text-white" style="background:#0dcaf0;color:#000!important;">Rack</span>
+                  <span class="badge ndi-badge-rack">Rack</span>
                 {% elif row.object_type == 'device' %}
-                  <span class="badge text-white" style="background:#6c757d;">Device</span>
+                  <span class="badge ndi-badge-skip">Device</span>
                 {% elif row.object_type == 'manufacturer' %}
-                  <span class="badge" style="background:#fd7e14;color:#fff;">Manufacturer</span>
+                  <span class="badge ndi-badge-mfg">Manufacturer</span>
                 {% elif row.object_type == 'device_type' %}
-                  <span class="badge" style="background:#e6a817;color:#fff;">Device type</span>
+                  <span class="badge ndi-badge-dt">Device type</span>
                 {% else %}
-                  <span class="badge" style="background:#dee2e6;color:#212529;border:1px solid #adb5bd;">{{ row.object_type|default:"?" }}</span>
+                  <span class="badge ndi-badge-generic">{{ row.object_type|default:"?" }}</span>
                 {% endif %}
               </td>
               <td>
                 {% if row.action == 'create' %}
-                  <span class="badge text-white" style="background:#198754;"><i class="mdi mdi-plus"></i> Create</span>
+                  <span class="badge ndi-badge-create"><i class="mdi mdi-plus"></i> Create</span>
                 {% elif row.action == 'update' %}
-                  <span class="badge text-white" style="background:#0d6efd;"><i class="mdi mdi-pencil"></i> Update</span>
+                  <span class="badge ndi-badge-update"><i class="mdi mdi-pencil"></i> Update</span>
                 {% elif row.action == 'skip' %}
-                  <span class="badge text-white" style="background:#6c757d;">Skip</span>
+                  <span class="badge ndi-badge-skip">Skip</span>
                 {% elif row.action == 'error' %}
-                  <span class="badge text-white" style="background:#dc3545;"><i class="mdi mdi-alert"></i> Error</span>
+                  <span class="badge ndi-badge-error"><i class="mdi mdi-alert"></i> Error</span>
                 {% elif row.action == 'ignore' %}
-                  <span class="badge text-white" style="background:#495057;"><i class="mdi mdi-eye-off"></i> Ignored</span>
+                  <span class="badge ndi-badge-ignored"><i class="mdi mdi-eye-off"></i> Ignored</span>
                 {% endif %}
               </td>
-              <td class="small text-muted">{{ row.detail }}</td>
+              <td class="small text-muted">
+                {{ row.detail }}
+                {% if row.action == 'update' and row.extra_data.field_diff %}
+                  {% with diff=row.extra_data.field_diff %}
+                  <br>
+                  <button type="button" class="badge ndi-diff-badge ndi-diff-toggle mt-1"
+                          data-diff-target="diff-{{ row.row_number }}"
+                          aria-controls="diff-{{ row.row_number }}"
+                          aria-expanded="false"
+                          title="Click to see field differences">
+                    <i class="mdi mdi-chevron-down"></i> {{ diff|length }} field(s) differ
+                  </button>
+                  {% endwith %}
+                {% endif %}
+              </td>
               <td class="text-end" style="white-space:nowrap; min-width:180px;">
 
                 {% if row.object_type == 'manufacturer' and row.action == 'create' and profile_id %}
@@ -300,6 +404,19 @@
                     </button>
                   </form>
 
+                {% elif row.object_type == 'rack' and profile_id and row.extra_data.source_class %}
+                  {# Rack row — allow reconfiguring the class mapping (e.g. to set rack type) #}
+                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                          data-bs-toggle="modal" data-bs-target="#classMappingModal"
+                          data-source-class="{{ row.extra_data.source_class }}"
+                          data-profile-id="{{ profile_id }}"
+                          data-initial-action="rack"
+                          data-current-rack-type-id="{{ row.extra_data.rack_type_id|default:'' }}"
+                          data-current-rack-type-name="{{ row.extra_data.rack_type_name|default:'' }}"
+                          title="Configure class mapping (e.g. set rack type) for '{{ row.extra_data.source_class }}'">
+                    <i class="mdi mdi-cog"></i> Configure class
+                  </button>
+
                 {% elif row.action == 'error' and row.object_type == 'device' and profile_id %}
                   {# Device error — show class mapping button if we have source_class #}
                   {% if row.extra_data.source_class %}
@@ -307,8 +424,8 @@
                           data-bs-toggle="modal" data-bs-target="#classMappingModal"
                           data-source-class="{{ row.extra_data.source_class}}"
                           data-profile-id="{{ profile_id }}"
-                          title="Add class→role mapping to fix this error">
-                    <i class="mdi mdi-plus-circle"></i> Map class
+                          title="Configure how to handle devices with class '{{ row.extra_data.source_class }}'">
+                    <i class="mdi mdi-cog"></i> Configure class
                   </button>
                   {% endif %}
                   {# Link to existing device #}
@@ -357,16 +474,23 @@
                   </form>
 
                 {% elif row.action == 'ignore' and row.object_type == 'device' and row.source_id and profile_id %}
-                  {# Unignore button #}
-                  <form method="post" action="{% url 'plugins:netbox_data_import:unignore_device' %}" class="d-inline">
-                    {% csrf_token %}
-                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
-                    <input type="hidden" name="source_id" value="{{ row.source_id }}">
-                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
-                    <button type="submit" class="btn btn-sm btn-outline-secondary" title="Remove from ignore list">
-                      <i class="mdi mdi-eye"></i> Unignore
-                    </button>
-                  </form>
+                  {% if row.extra_data.ignore_kind == 'individual' %}
+                    {# Individually ignored — offer unignore #}
+                    <form method="post" action="{% url 'plugins:netbox_data_import:unignore_device' %}" class="d-inline">
+                      {% csrf_token %}
+                      <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                      <input type="hidden" name="source_id" value="{{ row.source_id }}">
+                      <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                      <button type="submit" class="btn btn-sm btn-outline-secondary" title="Remove from ignore list">
+                        <i class="mdi mdi-eye"></i> Unignore
+                      </button>
+                    </form>
+                  {% else %}
+                    {# Class-level ignore — direct user to edit the mapping #}
+                    <span class="text-muted small" title="This device is ignored by its class mapping">
+                      <i class="mdi mdi-information-outline"></i> Class rule
+                    </span>
+                  {% endif %}
                 {% endif %}
 
                 {# Split button: show on device rows where name contains ' - ' #}
@@ -381,8 +505,65 @@
                   </button>
                 {% endif %}
 
+                {# Map DT button: show on all device rows with source make/model (create, update, error) #}
+                {% if row.object_type == 'device' and row.extra_data.source_make and profile_id %}
+                  <button type="button" class="btn btn-sm btn-outline-secondary ms-1"
+                          data-bs-toggle="modal" data-bs-target="#deviceTypeMappingModal"
+                          data-source-make="{{ row.extra_data.source_make }}"
+                          data-source-model="{{ row.extra_data.source_model }}"
+                          data-mfg-slug="{{ row.extra_data.mfg_slug|default:'' }}"
+                          data-dt-slug="{{ row.extra_data.dt_slug|default:'' }}"
+                          data-u-height="{{ row.extra_data.u_height|default:1 }}"
+                          data-profile-id="{{ profile_id }}"
+                          title="Map or create device type for '{{ row.extra_data.source_make }} / {{ row.extra_data.source_model }}'">
+                    <i class="mdi mdi-chip"></i> Map DT
+                  </button>
+                {% endif %}
+
               </td>
             </tr>
+            {% if row.action == 'update' and row.extra_data.field_diff and row.extra_data.netbox_device_id %}
+            <tr id="diff-{{ row.row_number }}" class="ndi-diff-row">
+              <td colspan="7" class="p-0 border-top-0">
+                <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
+                  <table class="table table-sm table-borderless ndi-diff-table mb-0">
+                    <thead>
+                      <tr class="text-muted">
+                        <th style="width:15%">Field</th>
+                        <th style="width:35%">NetBox</th>
+                        <th style="width:35%">File</th>
+                        <th style="width:15%"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for field_name, vals in row.extra_data.field_diff.items %}
+                      <tr id="diff-field-{{ row.row_number }}-{{ field_name }}">
+                        <td class="text-muted">{{ field_name }}</td>
+                        <td class="ndi-diff-netbox-val">{{ vals.netbox|default:"—" }}</td>
+                        <td>{{ vals.file|default:"—" }}</td>
+                        <td>
+                          {% if field_name in syncable_fields %}
+                          <button type="button" class="btn btn-xs btn-outline-primary ndi-sync-btn"
+                                  data-device-id="{{ row.extra_data.netbox_device_id }}"
+                                  data-field="{{ field_name }}"
+                                  data-value="{{ vals.file }}"
+                                  data-profile-id="{{ profile_id|default:'' }}"
+                                  data-row-id="{{ row.row_number }}"
+                                  title="Sync this field to NetBox now">
+                            <i class="mdi mdi-sync"></i>
+                          </button>
+                          {% else %}
+                          <span class="text-muted small">(manual)</span>
+                          {% endif %}
+                        </td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </td>
+            </tr>
+            {% endif %}
             {% empty %}
             <tr><td colspan="7" class="text-center text-muted">No rows found in file.</td></tr>
             {% endfor %}
@@ -430,14 +611,14 @@
                    oninput="reSplit()">
           </div>
 
-          <div class="row g-3" id="res_parts_row">
-            {# Dynamically populated parts #}
-          </div>
-
-          <div id="res_existing_notice" class="alert alert-info py-2 mt-3 d-none">
+          <div id="res_existing_notice" class="alert alert-info py-2 mb-3 d-none">
             <i class="mdi mdi-information"></i> <strong>Previously saved resolution:</strong>
             <code id="res_existing_display"></code>
-            — values below are pre-filled from that resolution; edit as needed.
+            — fields below are pre-filled from that resolution; edit as needed.
+          </div>
+
+          <div class="row g-3" id="res_parts_row">
+            {# Dynamically populated parts #}
           </div>
 
           <div id="res_device_check" class="mt-3 d-none">
@@ -461,6 +642,7 @@
   </div>
 </div>
 
+{{ existing_resolutions|json_script:"ndi-existing-resolutions" }}
 <script>
 // ── Row filter ──────────────────────────────────────────────────────────────
 (function() {
@@ -516,7 +698,7 @@ var TARGET_FIELDS = [
 ];
 
 // Existing saved resolutions keyed by source_id → source_column → {original_value, resolved_fields}
-var EXISTING_RESOLUTIONS = {{ existing_resolutions_json|default:"{}" }};
+var EXISTING_RESOLUTIONS = JSON.parse(document.getElementById('ndi-existing-resolutions').textContent);
 
 // Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
 document.addEventListener('DOMContentLoaded', function() {
@@ -563,11 +745,37 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('cm_source_class').value = sourceClass;
     document.getElementById('cm_profile_id').value = btn.dataset.profileId || '';
     document.getElementById('cm_source_class_display').textContent = sourceClass;
+    document.getElementById('cm_title_class').textContent = sourceClass;
     document.getElementById('cm_role_slug').value = '';
-    document.getElementById('cm_action_ignore').checked = true;
     document.getElementById('cm_role_row').style.display = 'none';
+    document.getElementById('cm_rack_type_row').style.display = 'none';
     document.getElementById('cm_creates_rack').value = '0';
     document.getElementById('cm_role_search_results').innerHTML = '';
+    document.getElementById('cm_rack_type_id').value = '';
+    document.getElementById('cm_rack_type_search_q').value = '';
+    document.getElementById('cm_rack_type_search_results').innerHTML = '';
+    document.getElementById('cm_rack_type_selected').style.display = 'none';
+
+    var initialAction = btn.dataset.initialAction || 'ignore';
+    if (initialAction === 'rack') {
+      document.getElementById('cm_action_rack').checked = true;
+    } else if (initialAction === 'role') {
+      document.getElementById('cm_action_role').checked = true;
+    } else {
+      document.getElementById('cm_action_ignore').checked = true;
+    }
+    cmToggleAction();
+
+    // Hydrate existing rack type when editing a rack row that already has one
+    if (initialAction === 'rack') {
+      var rtId = btn.dataset.currentRackTypeId || '';
+      var rtName = btn.dataset.currentRackTypeName || '';
+      if (rtId) {
+        document.getElementById('cm_rack_type_id').value = rtId;
+        document.getElementById('cm_rack_type_selected_name').textContent = rtName;
+        document.getElementById('cm_rack_type_selected').style.display = '';
+      }
+    }
   });
 
   document.getElementById('manufacturerMappingModal').addEventListener('show.bs.modal', function(event) {
@@ -674,11 +882,31 @@ function checkDevice(name) {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       div.classList.remove('d-none');
+      msg.textContent = '';
+      var icon = document.createElement('i');
+      var strong = document.createElement('strong');
+      strong.textContent = name;
       if (data.exists) {
-        msg.innerHTML = '<i class="mdi mdi-check-circle text-success"></i> Device <strong>' + name + '</strong> already exists in NetBox — ' +
-          (data.count > 1 ? data.count + ' matches' : '<a href="' + data.url + '" target="_blank">view it</a>');
+        icon.className = 'mdi mdi-check-circle text-success';
+        msg.appendChild(icon);
+        msg.appendChild(document.createTextNode(' Device '));
+        msg.appendChild(strong);
+        msg.appendChild(document.createTextNode(' already exists in NetBox \u2014 '));
+        if (data.count > 1) {
+          msg.appendChild(document.createTextNode(data.count + ' matches'));
+        } else {
+          var link = document.createElement('a');
+          link.href = data.url;
+          link.target = '_blank';
+          link.textContent = 'view it';
+          msg.appendChild(link);
+        }
       } else {
-        msg.innerHTML = '<i class="mdi mdi-plus-circle text-muted"></i> Device <strong>' + name + '</strong> not yet in NetBox — will be created on import.';
+        icon.className = 'mdi mdi-plus-circle text-muted';
+        msg.appendChild(icon);
+        msg.appendChild(document.createTextNode(' Device '));
+        msg.appendChild(strong);
+        msg.appendChild(document.createTextNode(' not yet in NetBox \u2014 will be created on import.'));
       }
     })
     .catch(function() { div.classList.add('d-none'); });
@@ -776,6 +1004,7 @@ function cmToggleAction() {
   var isRole = document.getElementById('cm_action_role').checked;
   var isRack = document.getElementById('cm_action_rack').checked;
   document.getElementById('cm_role_row').style.display = isRole ? '' : 'none';
+  document.getElementById('cm_rack_type_row').style.display = isRack ? '' : 'none';
   document.getElementById('cm_creates_rack').value = isRack ? '1' : '0';
 }
 
@@ -800,7 +1029,50 @@ function cmSearchRoles() {
         };
         container.appendChild(btn);
       });
+    })
+    .catch(function() {
+      document.getElementById('cm_role_search_results').innerHTML = '<p class="text-danger small">Search failed. Please try again.</p>';
     });
+}
+
+function cmSearchRackTypes() {
+  var q = document.getElementById('cm_rack_type_search_q').value.trim();
+  if (!q) return;
+  fetch('{% url "plugins:netbox_data_import:search_objects" %}?type=rack_type&q=' + encodeURIComponent(q))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var container = document.getElementById('cm_rack_type_search_results');
+      container.innerHTML = '';
+      if (!data.results.length) {
+        container.innerHTML = '<p class="text-muted small">No rack types found.</p>';
+        return;
+      }
+      data.results.forEach(function(rt) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-outline-secondary me-1 mb-1';
+        btn.textContent = rt.name;
+        btn.onclick = function() {
+          document.getElementById('cm_rack_type_id').value = rt.id;
+          document.getElementById('cm_rack_type_selected_name').textContent = rt.name;
+          document.getElementById('cm_rack_type_selected').style.display = '';
+          container.querySelectorAll('button').forEach(function(b) { b.classList.remove('btn-primary'); b.classList.add('btn-outline-secondary'); });
+          btn.classList.remove('btn-outline-secondary');
+          btn.classList.add('btn-primary');
+        };
+        container.appendChild(btn);
+      });
+    })
+    .catch(function() {
+      document.getElementById('cm_rack_type_search_results').textContent = 'Search failed. Please try again.';
+    });
+}
+
+function cmClearRackType() {
+  document.getElementById('cm_rack_type_id').value = '';
+  document.getElementById('cm_rack_type_selected').style.display = 'none';
+  document.getElementById('cm_rack_type_search_results').innerHTML = '';
+  document.getElementById('cm_rack_type_search_q').value = '';
 }
 
 // ---- Manufacturer Mapping modal ----
@@ -831,6 +1103,81 @@ function mmSearch() {
         };
         container.appendChild(btn);
       });
+    })
+    .catch(function() {
+      document.getElementById('mm_search_results').innerHTML = '<p class="text-danger small">Search failed. Please try again.</p>';
+    });
+}
+
+// ---- Create Role helpers (Configure Class modal) ----
+
+function cmToggleCreateRole() {
+  var form = document.getElementById('cm_create_role_form');
+  if (!form) return;
+  var visible = form.style.display !== 'none';
+  form.style.display = visible ? 'none' : '';
+  if (!visible) {
+    document.getElementById('cm_new_role_name').focus();
+  }
+}
+
+function cmAutoSlug() {
+  var name = document.getElementById('cm_new_role_name').value;
+  var slug = name.toLowerCase()
+    .replace(/[^a-z0-9\s-_]/g, '')
+    .replace(/[\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 64);
+  document.getElementById('cm_new_role_slug').value = slug;
+}
+
+function cmCreateRole() {
+  var name = document.getElementById('cm_new_role_name').value.trim();
+  var slug = document.getElementById('cm_new_role_slug').value.trim();
+  var errEl = document.getElementById('cm_create_role_error');
+  errEl.style.display = 'none';
+
+  if (!name || !slug) {
+    errEl.textContent = 'Name and slug are required.';
+    errEl.style.display = '';
+    return;
+  }
+
+  var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+  var body = new URLSearchParams({ name: name, slug: slug });
+  fetch('{% url "plugins:netbox_data_import:quick_create_role" %}', {
+    method: 'POST',
+    headers: { 'X-CSRFToken': csrfToken, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+    .then(function(result) {
+      if (!result.ok) {
+        errEl.textContent = result.data.error || 'Failed to create role.';
+        errEl.style.display = '';
+        return;
+      }
+      // Auto-select the newly created role
+      document.getElementById('cm_role_slug').value = result.data.slug;
+      document.getElementById('cm_create_role_form').style.display = 'none';
+      // Show brief success notice in results area
+      var resultsEl = document.getElementById('cm_role_search_results');
+      var icon = document.createElement('span');
+      icon.className = 'badge bg-success me-1';
+      icon.innerHTML = '<i class="mdi mdi-check"></i>';
+      var msg = document.createElement('small');
+      msg.className = 'text-success';
+      msg.append('Role ');
+      var strong = document.createElement('strong');
+      strong.textContent = result.data.name;
+      msg.append(strong);
+      msg.append(' ' + (result.data.created ? 'created' : 'already existed') + ' — slug set.');
+      resultsEl.textContent = '';
+      resultsEl.append(icon, msg);
+    })
+    .catch(function() {
+      errEl.textContent = 'Request failed. Please try again.';
+      errEl.style.display = '';
     });
 }
 
@@ -861,6 +1208,9 @@ function dmSearch() {
         };
         container.appendChild(btn);
       });
+    })
+    .catch(function() {
+      document.getElementById('dm_search_results').innerHTML = '<p class="text-danger small">Search failed. Please try again.</p>';
     });
 }
 </script>
@@ -948,7 +1298,7 @@ function dmSearch() {
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title"><i class="mdi mdi-plus-circle"></i> Add Class Mapping</h5>
+        <h5 class="modal-title"><i class="mdi mdi-cog"></i> Configure Class: <span id="cm_title_class"></span></h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <form method="post" action="{% url 'plugins:netbox_data_import:quick_add_class_mapping' %}">
@@ -957,30 +1307,33 @@ function dmSearch() {
           <input type="hidden" name="profile_id" id="cm_profile_id">
           <input type="hidden" name="source_class" id="cm_source_class">
 
-          <div class="mb-3">
-            <label class="form-label text-muted">Source class</label>
-            <div class="fw-bold" id="cm_source_class_display"></div>
-          </div>
+          <p class="text-muted mb-3">
+            Choose what to do with all rows that have device class
+            "<strong id="cm_source_class_display"></strong>".
+          </p>
 
           <div class="mb-3">
             <label class="form-label">Action</label>
-            <div class="d-flex gap-3">
+            <div class="d-flex flex-column gap-2">
               <div class="form-check">
                 <input class="form-check-input" type="radio" name="mapping_action" id="cm_action_ignore" value="ignore" onchange="cmToggleAction()" checked>
                 <label class="form-check-label" for="cm_action_ignore">
-                  <i class="mdi mdi-eye-off"></i> Ignore (skip silently)
+                  <i class="mdi mdi-eye-off"></i> <strong>Ignore</strong>
+                  <span class="text-muted d-block small">Skip these rows silently — they won't appear as errors</span>
                 </label>
               </div>
               <div class="form-check">
                 <input class="form-check-input" type="radio" name="mapping_action" id="cm_action_role" value="role" onchange="cmToggleAction()">
                 <label class="form-check-label" for="cm_action_role">
-                  <i class="mdi mdi-server"></i> Map to device role
+                  <i class="mdi mdi-server"></i> <strong>Import as device</strong>
+                  <span class="text-muted d-block small">Create devices with a specific NetBox role</span>
                 </label>
               </div>
               <div class="form-check">
                 <input class="form-check-input" type="radio" name="mapping_action" id="cm_action_rack" value="rack" onchange="cmToggleAction()">
                 <label class="form-check-label" for="cm_action_rack">
-                  <i class="mdi mdi-server-network"></i> Creates rack
+                  <i class="mdi mdi-server-network"></i> <strong>Import as rack</strong>
+                  <span class="text-muted d-block small">Create racks instead of devices</span>
                   <input type="hidden" name="creates_rack" id="cm_creates_rack" value="0">
                 </label>
               </div>
@@ -1001,6 +1354,55 @@ function dmSearch() {
                 </button>
               </div>
               <div class="mt-2" id="cm_role_search_results"></div>
+            </div>
+            {% if can_create_role %}
+            <div class="mt-2">
+              <button type="button" class="btn btn-sm btn-outline-primary" id="cm_create_role_toggle"
+                      onclick="cmToggleCreateRole()">
+                <i class="mdi mdi-plus"></i> Create new role
+              </button>
+              <div id="cm_create_role_form" style="display:none;" class="border rounded p-3 mt-2 bg-body-secondary">
+                <p class="text-muted small mb-2">Create a new DeviceRole directly in NetBox and use it here.</p>
+                <div class="row g-2 mb-2">
+                  <div class="col-7">
+                    <label class="form-label small mb-1" for="cm_new_role_name">Role name</label>
+                    <input type="text" id="cm_new_role_name" class="form-control form-control-sm"
+                           placeholder="e.g. Network Switch"
+                           oninput="cmAutoSlug()">
+                  </div>
+                  <div class="col-5">
+                    <label class="form-label small mb-1" for="cm_new_role_slug">Slug</label>
+                    <input type="text" id="cm_new_role_slug" class="form-control form-control-sm"
+                           placeholder="e.g. network-switch">
+                  </div>
+                </div>
+                <div id="cm_create_role_error" class="text-danger small mb-2" style="display:none;"></div>
+                <button type="button" class="btn btn-sm btn-success" onclick="cmCreateRole()">
+                  <i class="mdi mdi-check"></i> Create &amp; select
+                </button>
+                <button type="button" class="btn btn-sm btn-secondary ms-1" onclick="cmToggleCreateRole()">
+                  Cancel
+                </button>
+              </div>
+            </div>
+            {% endif %}
+          </div>
+
+          <div id="cm_rack_type_row" style="display:none;">
+            <input type="hidden" name="rack_type_id" id="cm_rack_type_id" value="">
+            <div class="mb-3">
+              <label class="form-label" for="cm_rack_type_search_q">Rack type <span class="text-muted">(optional)</span></label>
+              <div class="input-group">
+                <input type="text" id="cm_rack_type_search_q" class="form-control" placeholder="Search NetBox rack types…">
+                <button type="button" class="btn btn-outline-secondary" onclick="cmSearchRackTypes()">
+                  <i class="mdi mdi-magnify"></i>
+                </button>
+              </div>
+              <div class="mt-2" id="cm_rack_type_search_results"></div>
+              <div class="mt-1 small text-muted" id="cm_rack_type_selected" style="display:none;">
+                Selected: <strong id="cm_rack_type_selected_name"></strong>
+                <a href="#" onclick="cmClearRackType(); return false;" class="ms-2 text-danger"><i class="mdi mdi-close"></i> Clear</a>
+              </div>
             </div>
           </div>
         </div>
@@ -1112,5 +1514,215 @@ function dmSearch() {
     </div>
   </div>
 </div>
+
+{% if unused_columns %}
+{# Quick Map Column Modal — panel is inline above; this modal is shared #}
+{% endif %}
+{# ── Quick Map Column Modal ──────────────────────────────────────────────── #}
+<div class="modal fade" id="ndiQuickMapModal" tabindex="-1" aria-labelledby="ndiQuickMapModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_add_column_mapping' %}">
+        {% csrf_token %}
+        <input type="hidden" name="profile_id" value="{{ profile_id }}">
+        <input type="hidden" name="source_column" id="ndi_qmap_source_col">
+        <div class="modal-header">
+          <h5 class="modal-title" id="ndiQuickMapModalLabel">
+            <i class="mdi mdi-table-arrow-right me-1"></i>
+            Map column: <span id="ndi_qmap_col_label" class="text-info"></span>
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label fw-semibold d-block mb-1">Mapping type</label>
+            <div class="btn-group w-100" role="group">
+              <input type="radio" class="btn-check" name="ndi_map_mode" id="ndi_map_mode_std" value="standard" checked>
+              <label class="btn btn-outline-secondary" for="ndi_map_mode_std">NetBox field</label>
+              <input type="radio" class="btn-check" name="ndi_map_mode" id="ndi_map_mode_json" value="extra_json">
+              <label class="btn btn-outline-secondary" for="ndi_map_mode_json">Extra JSON key</label>
+            </div>
+          </div>
+          <div id="ndi_qmap_standard_div">
+            <label class="form-label fw-semibold">Target NetBox field</label>
+            <select name="target_field" id="ndi_qmap_target" class="form-select">
+              {% for value, label in target_field_choices %}
+              <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div id="ndi_qmap_extra_div" style="display:none;">
+            <label class="form-label fw-semibold" for="ndi_qmap_extra_key">Key name in extra JSON</label>
+            <input type="text" id="ndi_qmap_extra_key" class="form-control" placeholder="e.g. jira_id" pattern="[a-zA-Z0-9_-]{1,50}" oninput="this.setCustomValidity('')">
+            <div class="form-text text-muted">
+              Stored in <code>data_import_source["extra"]["&lt;key&gt;"]</code>. Use letters, digits, <code>_</code>, or <code>-</code>.
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="ndi_qmap_submit">
+            <i class="mdi mdi-content-save"></i> Save mapping
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+function ndiOpenQuickMapModal(colName, suggestedField) {
+  document.getElementById('ndi_qmap_source_col').value = colName;
+  document.getElementById('ndi_qmap_col_label').textContent = colName;
+
+  // Reset to standard mode
+  document.getElementById('ndi_map_mode_std').checked = true;
+  document.getElementById('ndi_qmap_standard_div').style.display = '';
+  document.getElementById('ndi_qmap_extra_div').style.display = 'none';
+
+  var sel = document.getElementById('ndi_qmap_target');
+  if (suggestedField) {
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === suggestedField) {
+        sel.selectedIndex = i;
+        break;
+      }
+    }
+  } else {
+    sel.selectedIndex = 0;
+  }
+  // NetBox/Tabler exposes Bootstrap as global `Modal`, not `bootstrap.Modal`
+  var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || Modal;
+  var modal = new ModalClass(document.getElementById('ndiQuickMapModal'));
+  modal.show();
+}
+
+(function () {
+  // Toggle standard / extra-json panels; clear any custom validity on mode switch
+  document.querySelectorAll('input[name="ndi_map_mode"]').forEach(function (radio) {
+    radio.addEventListener('change', function () {
+      var isExtra = this.value === 'extra_json';
+      document.getElementById('ndi_qmap_standard_div').style.display = isExtra ? 'none' : '';
+      document.getElementById('ndi_qmap_extra_div').style.display = isExtra ? '' : 'none';
+      if (!isExtra) {
+        document.getElementById('ndi_qmap_extra_key').setCustomValidity('');
+      }
+    });
+  });
+
+  // On submit, inject extra_json:<key> as the target_field when in JSON mode
+  var form = document.querySelector('#ndiQuickMapModal form');
+  if (form) {
+    form.addEventListener('submit', function (e) {
+      var mode = document.querySelector('input[name="ndi_map_mode"]:checked');
+      if (mode && mode.value === 'extra_json') {
+        var keyInput = document.getElementById('ndi_qmap_extra_key');
+        var key = (keyInput.value || '').trim();
+        if (!key || !/^[a-zA-Z0-9_-]{1,50}$/.test(key)) {
+          keyInput.setCustomValidity('Enter a valid key: letters, digits, _ or - (1–50 chars).');
+          keyInput.reportValidity();
+          e.preventDefault();
+          return;
+        }
+        keyInput.setCustomValidity('');
+        // Disable the standard select so it doesn't submit, inject the real value
+        document.getElementById('ndi_qmap_target').disabled = true;
+        var hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'target_field';
+        hidden.value = 'extra_json:' + key;
+        form.appendChild(hidden);
+      }
+    });
+  }
+}());
+</script>
+
+<script>
+// Toggle diff sub-table visibility
+document.addEventListener('click', function(e) {
+  const toggle = e.target.closest('.ndi-diff-toggle');
+  if (!toggle) return;
+  const targetId = toggle.dataset.diffTarget;
+  const row = document.getElementById(targetId);
+  if (!row) return;
+  row.classList.toggle('show');
+  const expanded = row.classList.contains('show');
+  toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  const icon = toggle.querySelector('.mdi');
+  if (icon) {
+    icon.classList.toggle('mdi-chevron-down');
+    icon.classList.toggle('mdi-chevron-up');
+  }
+});
+
+// Per-field sync via fetch
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.ndi-sync-btn');
+  if (!btn) return;
+
+  const deviceId = btn.dataset.deviceId;
+  const field = btn.dataset.field;
+  const value = btn.dataset.value;
+  const profileId = btn.dataset.profileId;
+
+  btn.disabled = true;
+  btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i>';
+
+  const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+  const body = new URLSearchParams({
+    device_id: deviceId,
+    field: field,
+    value: value,
+    profile_id: profileId,
+  });
+
+  fetch('{% url "plugins:netbox_data_import:sync_device_field" %}', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-CSRFToken': csrfToken,
+    },
+    body: body.toString(),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      const rowId = btn.dataset.rowId;
+      const fieldName = btn.dataset.field;
+      const fieldRow = document.getElementById(`diff-field-${rowId}-${fieldName}`);
+      if (fieldRow) {
+        const nbCell = fieldRow.querySelector('.ndi-diff-netbox-val');
+        if (nbCell) {
+          const synced = document.createElement('span');
+          synced.className = 'ndi-diff-synced';
+          synced.textContent = nbCell.textContent;
+          const updated = document.createElement('strong');
+          updated.textContent = data.display;
+          nbCell.textContent = '';
+          nbCell.appendChild(synced);
+          nbCell.appendChild(document.createTextNode(' '));
+          nbCell.appendChild(updated);
+        }
+      }
+      btn.innerHTML = '<i class="mdi mdi-check text-success"></i>';
+      btn.disabled = true;
+    } else {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="mdi mdi-sync"></i>';
+      btn.title = data.error || 'Sync failed';
+      btn.classList.add('btn-danger');
+      btn.classList.remove('btn-outline-primary');
+    }
+  })
+  .catch(() => {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="mdi mdi-sync"></i>';
+    btn.title = 'Network error — sync failed';
+    btn.classList.add('btn-danger');
+    btn.classList.remove('btn-outline-primary');
+  });
+});
+</script>
 
 {% endblock %}

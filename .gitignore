@@ -60,3 +60,8 @@ site/
 
 # direnv
 .envrc
+
+docs/superpowers/
+
+# Brainstorm session files
+.superpowers/

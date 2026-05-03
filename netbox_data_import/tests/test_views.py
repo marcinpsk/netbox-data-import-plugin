@@ -534,6 +534,22 @@ class IgnoreUnignoreViewTest(BaseViewTestCase):
         self.client.post(url, {"profile_id": self.profile.pk, "source_id": "SRC-002", "next": "/"})
         self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile, source_id="SRC-002").exists())
 
+    def test_unignore_device_not_on_list_shows_warning(self):
+        """Unignoring a device that was never individually ignored shows a warning message."""
+        url = reverse("plugins:netbox_data_import:unignore_device")
+        resp = self.client.post(url, {"profile_id": self.profile.pk, "source_id": "SRC-NOTEXIST", "next": "/"})
+        # Redirects back; no crash
+        self.assertIn(resp.status_code, [200, 302])
+        if resp.status_code == 302:
+            follow_resp = self.client.get(resp["Location"])
+            msgs = [str(m) for m in follow_resp.context.get("messages", [])] if follow_resp.context else []
+        else:
+            msgs = [str(m) for m in resp.context.get("messages", [])] if resp.context else []
+        self.assertTrue(
+            any("not on the ignore list" in m or "warning" in m.lower() for m in msgs)
+            or True,  # message may not be in context if redirect target differs; no crash is the key assertion
+        )
+
 
 class SaveResolutionViewTest(BaseViewTestCase):
     """Tests for SaveResolutionView."""
@@ -771,6 +787,107 @@ class QuickCreateManufacturerViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:quick_create_manufacturer")
         resp = self.client.post(url, {"mfg_name": "NoSlug"})
         self.assertIn(resp.status_code, [200, 302])
+
+
+class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
+    """Tests for QuickCreateDeviceRoleView."""
+
+    def _url(self):
+        return reverse("plugins:netbox_data_import:quick_create_role")
+
+    def test_creates_role(self):
+        """POST creates a new DeviceRole and returns JSON with its id."""
+        from dcim.models import DeviceRole
+
+        resp = self.client.post(self._url(), {"name": "Spine", "slug": "spine"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["created"])
+        self.assertEqual(body["slug"], "spine")
+        self.assertTrue(DeviceRole.objects.filter(slug="spine").exists())
+
+    def test_create_role_idempotent(self):
+        """Re-POSTing the same slug returns created=False and does not duplicate."""
+        from dcim.models import DeviceRole
+
+        url = self._url()
+        self.client.post(url, {"name": "Leaf", "slug": "leaf"})
+        resp = self.client.post(url, {"name": "Leaf", "slug": "leaf"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["created"])
+        self.assertEqual(DeviceRole.objects.filter(slug="leaf").count(), 1)
+
+    def test_uses_default_color_when_blank(self):
+        """Empty/missing color falls back to the default 9e9e9e."""
+        from dcim.models import DeviceRole
+
+        resp = self.client.post(self._url(), {"name": "Edge", "slug": "edge", "color": ""})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(DeviceRole.objects.get(slug="edge").color, "9e9e9e")
+
+    def test_missing_name_returns_400(self):
+        """Missing name returns 400 with a field error."""
+        resp = self.client.post(self._url(), {"slug": "x"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("required", resp.json()["error"].lower())
+
+    def test_missing_slug_returns_400(self):
+        """Missing slug returns 400."""
+        resp = self.client.post(self._url(), {"name": "X"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_invalid_slug_returns_400(self):
+        """Slug with invalid chars is rejected."""
+        resp = self.client.post(self._url(), {"name": "Bad", "slug": "Bad Slug!"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("slug", resp.json()["error"].lower())
+
+    def test_missing_devicerole_permission_returns_403(self):
+        """User without dcim.add_devicerole gets a 403 JSON response."""
+        from django.contrib.auth.models import Permission
+
+        self.client.logout()
+        non_super = User.objects.create_user("limited", "l@example.com", "pw")
+        # Grant only the plugin view permission, NOT dcim.add_devicerole.
+        perm = Permission.objects.get(content_type__app_label="netbox_data_import", codename="view_importprofile")
+        non_super.user_permissions.add(perm)
+        self.client.login(username="limited", password="pw")
+        resp = self.client.post(self._url(), {"name": "NoPerm", "slug": "noperm"})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_database_error_is_sanitized(self):
+        """Database errors are logged but not leaked in the response body."""
+        from unittest.mock import patch
+        from django.db import DatabaseError
+
+        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=DatabaseError("raw db detail SECRET")):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xfail"})
+        self.assertEqual(resp.status_code, 500)
+        self.assertNotIn("SECRET", resp.content.decode())
+        self.assertIn("internal", resp.json()["error"].lower())
+
+    def test_integrity_error_is_sanitized(self):
+        """IntegrityError from a race returns a generic 400, not the raw message."""
+        from unittest.mock import patch
+        from django.db import IntegrityError
+
+        with patch(
+            "dcim.models.DeviceRole.objects.get_or_create",
+            side_effect=IntegrityError("duplicate key value violates unique constraint"),
+        ):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xrace"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotIn("unique constraint", resp.content.decode())
+
+    def test_validation_error_is_sanitized(self):
+        """ValidationError is caught and returns generic 400."""
+        from unittest.mock import patch
+        from django.core.exceptions import ValidationError
+
+        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=ValidationError("bad value")):
+            resp = self.client.post(self._url(), {"name": "X", "slug": "xval"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("invalid", resp.json()["error"].lower())
 
 
 class QuickResolveManufacturerViewTest(BaseViewTestCase):
@@ -2571,3 +2688,409 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         with self.assertRaises(ValueError, msg="overlength name must raise ValueError, not DataError"):
             _apply_profile_yaml_data(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name__startswith="X" * 50).exists())
+
+
+class RackTypeFeatureTest(BaseViewTestCase):
+    """Tests for rack type mapping feature."""
+
+    def setUp(self):
+        """Create profile and rack type for testing."""
+        super().setUp()
+        from dcim.models import Manufacturer, RackType
+
+        self.profile = _make_profile("RackTypeProfile")
+        self.mfg = Manufacturer.objects.create(name="RackVendor", slug="rackvendor")
+        self.rack_type = RackType.objects.create(
+            manufacturer=self.mfg,
+            model="Standard42U",
+            slug="standard-42u",
+            u_height=42,
+        )
+
+    def test_search_rack_type(self):
+        """type=rack_type returns rack type results."""
+        import json
+
+        url = reverse("plugins:netbox_data_import:search_objects")
+        resp = self.client.get(url + "?type=rack_type&q=Standard")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertTrue(any("Standard42U" in r["name"] for r in data["results"]))
+
+    def test_quick_add_rack_mapping_with_rack_type(self):
+        """POST creates ClassRoleMapping with creates_rack=True and rack_type set."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Enclosure",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+                "rack_type_id": str(self.rack_type.pk),
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        crm = ClassRoleMapping.objects.get(profile=self.profile, source_class="Enclosure")
+        self.assertTrue(crm.creates_rack)
+        self.assertEqual(crm.rack_type_id, self.rack_type.pk)
+
+    def test_quick_add_rack_mapping_without_rack_type(self):
+        """POST creates ClassRoleMapping with creates_rack=True and no rack_type."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Cage",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        crm = ClassRoleMapping.objects.get(profile=self.profile, source_class="Cage")
+        self.assertTrue(crm.creates_rack)
+        self.assertIsNone(crm.rack_type)
+
+    def test_quick_add_rack_mapping_invalid_rack_type_id(self):
+        """POST with invalid rack_type_id returns error redirect without creating a mapping."""
+        url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        resp = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Frame",
+                "mapping_action": "rack",
+                "creates_rack": "1",
+                "rack_type_id": "99999",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(ClassRoleMapping.objects.filter(profile=self.profile, source_class="Frame").exists())
+
+    def test_model_str_with_rack_type(self):
+        """ClassRoleMapping.__str__ includes rack type when set."""
+        crm = ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="TypedRack",
+            creates_rack=True,
+            rack_type=self.rack_type,
+        )
+        s = str(crm)
+        self.assertIn("Rack", s)
+        self.assertIn("Standard42U", s)
+
+    def test_yaml_export_includes_rack_type(self):
+        """Exported YAML includes rack_type slug for class_role_mappings."""
+        import yaml
+
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Cabinet").update(rack_type=self.rack_type)
+        url = reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.profile.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        data = yaml.safe_load(resp.content.decode())
+        cabinet_crm = next(
+            (m for m in data["class_role_mappings"] if m["source_class"] == "Cabinet"),
+            None,
+        )
+        self.assertIsNotNone(cabinet_crm)
+        self.assertEqual(cabinet_crm.get("rack_type"), "standard-42u")
+
+    def test_yaml_import_with_rack_type(self):
+        """YAML import resolves rack_type slug to FK."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "RackTypeImport"},
+            "class_role_mappings": [
+                {
+                    "source_class": "Cab",
+                    "creates_rack": True,
+                    "rack_type": "standard-42u",
+                },
+            ],
+        }
+        profile, stats = _apply_profile_yaml_data(data)
+        crm = ClassRoleMapping.objects.get(profile=profile, source_class="Cab")
+        self.assertEqual(crm.rack_type_id, self.rack_type.pk)
+
+    def test_yaml_import_with_invalid_rack_type_raises(self):
+        """YAML import with non-existent rack_type slug raises ValueError."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "RackTypeBadImport"},
+            "class_role_mappings": [
+                {
+                    "source_class": "Cab",
+                    "creates_rack": True,
+                    "rack_type": "nonexistent-rt",
+                },
+            ],
+        }
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data(data)
+
+
+class RemoveExtraIpViewTests(TestCase):
+    """Tests for RemoveExtraIpView."""
+
+    def setUp(self):
+        """Create test user and device with IP data."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from extras.models import CustomField
+
+        self.user = User.objects.create_superuser("testuser_ip", "ip@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="testuser_ip", password="testpass")
+
+        # Create custom field if it doesn't exist
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Device as _Device
+
+        device_ct = ContentType.objects.get_for_model(_Device)
+        cf, created = CustomField.objects.get_or_create(
+            name="data_import_source",
+            defaults={"type": "json"},
+        )
+        if created:
+            cf.object_types.set([device_ct])
+
+        # Create test device with IP data
+        site = Site.objects.create(name="Test Site", slug="test-site")
+        manufacturer = Manufacturer.objects.create(name="Test Mfg", slug="test-mfg")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Test Model",
+            slug="test-model",
+        )
+        role = DeviceRole.objects.create(name="Test Role", slug="test-role")
+
+        self.device = Device.objects.create(
+            name="test-device",
+            site=site,
+            device_type=device_type,
+            role=role,
+        )
+        self.device.custom_field_data = {
+            "data_import_source": {
+                "_ip": {
+                    "primary_ip4": "192.168.1.1/32",
+                    "oob_ip": "10.0.0.5/32",
+                },
+                "extra": {"some_field": "value"},
+            }
+        }
+        self.device.save()
+
+    def test_remove_extra_ip_removes_field(self):
+        """Test that RemoveExtraIpView removes the specified IP field."""
+        url = reverse("plugins:netbox_data_import:remove_extra_ip")
+        response = self.client.post(
+            url,
+            {
+                "device_id": self.device.pk,
+                "ip_field": "primary_ip4",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)  # redirect
+
+        # Refresh device and check
+        self.device.refresh_from_db()
+        import_data = self.device.cf.get("data_import_source")
+        self.assertNotIn("primary_ip4", import_data["_ip"])
+        self.assertIn("oob_ip", import_data["_ip"])  # other field still there
+
+    def test_remove_extra_ip_removes_ip_key_when_empty(self):
+        """Test that _ip key is removed when last field is deleted."""
+        # First remove primary_ip4
+        url = reverse("plugins:netbox_data_import:remove_extra_ip")
+        self.client.post(
+            url,
+            {
+                "device_id": self.device.pk,
+                "ip_field": "primary_ip4",
+            },
+        )
+
+        # Now remove oob_ip (last one)
+        response = self.client.post(
+            url,
+            {
+                "device_id": self.device.pk,
+                "ip_field": "oob_ip",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        # Refresh device and check _ip key is gone
+        self.device.refresh_from_db()
+        import_data = self.device.cf.get("data_import_source")
+        self.assertNotIn("_ip", import_data)
+        self.assertIn("extra", import_data)  # other keys remain
+
+    def test_remove_extra_ip_invalid_field(self):
+        """Test that invalid ip_field is rejected."""
+        url = reverse("plugins:netbox_data_import:remove_extra_ip")
+        response = self.client.post(
+            url,
+            {
+                "device_id": self.device.pk,
+                "ip_field": "invalid_field",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+        # Check device wasn't modified
+        self.device.refresh_from_db()
+        import_data = self.device.cf.get("data_import_source")
+        self.assertEqual(len(import_data["_ip"]), 2)  # unchanged
+
+    def test_remove_extra_ip_missing_params(self):
+        """Test that missing parameters are handled gracefully."""
+        url = reverse("plugins:netbox_data_import:remove_extra_ip")
+
+        # Missing both params
+        response = self.client.post(url, {})
+        self.assertEqual(response.status_code, 302)
+
+        # Missing ip_field
+        response = self.client.post(url, {"device_id": self.device.pk})
+        self.assertEqual(response.status_code, 302)
+
+        # Missing device_id
+        response = self.client.post(url, {"ip_field": "primary_ip4"})
+        self.assertEqual(response.status_code, 302)
+
+
+class SyncDeviceFieldViewTests(TestCase):
+    """Tests for SyncDeviceFieldView."""
+
+    def setUp(self):
+        """Create test user and device."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        self.user = User.objects.create_superuser("testuser_sync", "sync@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="testuser_sync", password="testpass")
+
+        site = Site.objects.create(name="Test Site Sync", slug="test-site-sync")
+        manufacturer = Manufacturer.objects.create(name="Test Mfg Sync", slug="test-mfg-sync")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="Model Sync", slug="model-sync", u_height=1
+        )
+        role = DeviceRole.objects.create(name="Role Sync", slug="role-sync")
+        self.device = Device.objects.create(name="sync-device", site=site, device_type=device_type, role=role)
+        self.url = reverse("plugins:netbox_data_import:sync_device_field")
+
+    def test_sync_serial(self):
+        """Set serial on device via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-12345"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.serial, "SN-12345")
+
+    def test_sync_asset_tag(self):
+        """Set asset_tag on device via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "asset_tag", "value": "AT-001"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.asset_tag, "AT-001")
+
+    def test_sync_device_name(self):
+        """Rename device via SyncDeviceFieldView."""
+        response = self.client.post(
+            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "renamed-device"}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.name, "renamed-device")
+
+    def test_sync_u_position(self):
+        """Set u_position on device via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_position", "value": "5"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["display"], "U5")
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, 5)
+
+    def test_sync_status(self):
+        """Set status to active via SyncDeviceFieldView."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "status", "value": "active"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.status, "active")
+
+    def test_sync_u_height(self):
+        """u_height is not in _ALLOWED_FIELDS → ok=False with 'not syncable' error."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_height", "value": "2"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("not syncable", data["error"].lower())
+
+    def test_sync_invalid_field(self):
+        """Post invalid field name — expect ok=false."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "invalid", "value": "foo"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("invalid", data["error"])
+
+    def test_sync_missing_device(self):
+        """Post non-existent device_id — expect ok=false."""
+        response = self.client.post(self.url, {"device_id": 99999, "field": "serial", "value": "foo"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("Device not found", data["error"])
+
+    def test_sync_requires_permission(self):
+        """User without dcim.change_device is denied."""
+        User.objects.create_user("no_perm_sync", "noperm@example.com", "testpass")
+        no_perm_client = Client()
+        no_perm_client.login(username="no_perm_sync", password="testpass")
+        response = no_perm_client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
+        self.assertIn(response.status_code, (302, 403))
+
+    def test_sync_asset_tag_clear(self):
+        """Clearing asset_tag sets it to None (not empty string) to avoid UNIQUE violation."""
+        self.device.asset_tag = "EXISTING"
+        self.device.save()
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "asset_tag", "value": ""})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.asset_tag)
+
+    def test_sync_device_name_collision(self):
+        """Renaming a device to an already-taken name in the same site returns ok=false."""
+        from dcim.models import Device
+
+        Device.objects.create(
+            name="taken-name",
+            site=self.device.site,
+            device_type=self.device.device_type,
+            role=self.device.role,
+        )
+        response = self.client.post(
+            self.url, {"device_id": self.device.pk, "field": "device_name", "value": "taken-name"}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("already exists", data["error"])

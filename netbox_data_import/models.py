@@ -23,6 +23,9 @@ TARGET_FIELD_CHOICES = [
     ("u_height", "U height"),
     ("serial", "Serial number"),
     ("asset_tag", "Asset tag"),
+    ("primary_ip4", "Primary IPv4"),
+    ("primary_ip6", "Primary IPv6"),
+    ("oob_ip", "Out-of-band IP"),
     ("source_id", "Source ID (stored in custom field)"),
 ]
 
@@ -60,6 +63,12 @@ class ImportProfile(NetBoxModel):
         choices=PREVIEW_VIEW_CHOICES,
         default="rows",
         help_text="How to display the import preview (row table or rack diagrams)",
+    )
+    capture_extra_data = models.BooleanField(
+        default=False,
+        help_text=(
+            "Store unmapped source column values in the data_import_source['extra'] custom field key on each device."
+        ),
     )
 
     # Override tags reverse accessor to avoid clashes with other plugins
@@ -128,6 +137,14 @@ class ClassRoleMapping(models.Model):
         default=False,
         help_text="If checked, rows with this class create a Rack instead of a Device",
     )
+    rack_type = models.ForeignKey(
+        to="dcim.RackType",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="Optional rack type assigned when creating racks",
+    )
     role_slug = models.CharField(
         max_length=100,
         blank=True,
@@ -148,7 +165,8 @@ class ClassRoleMapping(models.Model):
 
     def __str__(self):
         if self.creates_rack:
-            return f"{self.source_class} → Rack"
+            suffix = f" ({self.rack_type})" if self.rack_type_id else ""
+            return f"{self.source_class} → Rack{suffix}"
         return f"{self.source_class} → {self.role_slug}"
 
     def get_absolute_url(self):

@@ -287,6 +287,184 @@ class PreviewDeviceRowTest(TestCase):
         )
         self.assertIn("RACK-99 (not found)", result_row.detail)
 
+    def test_extra_data_includes_slugs(self):
+        """extra_data includes mfg_slug and dt_slug for device rows."""
+        from dcim.models import Device, DeviceType, Rack
+
+        row = {
+            "_row_number": 3,
+            "rack_name": "",
+            "u_position": None,
+        }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
+        result_row = _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="Dell",
+            model="PowerEdge R640",
+            mfg_slug="dell",
+            dt_slug="poweredge-r640",
+            source_id="3",
+            device_name="server-03",
+            serial="SN12345",
+            asset_tag="AT789",
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+        )
+        # Verify we're on the success path (not error)
+        self.assertEqual(result_row.action, "create")
+        # Verify extra_data contains all required fields
+        self.assertIn("source_make", result_row.extra_data)
+        self.assertIn("source_model", result_row.extra_data)
+        self.assertIn("mfg_slug", result_row.extra_data)
+        self.assertIn("dt_slug", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["source_make"], "Dell")
+        self.assertEqual(result_row.extra_data["source_model"], "PowerEdge R640")
+        self.assertEqual(result_row.extra_data["mfg_slug"], "dell")
+        self.assertEqual(result_row.extra_data["dt_slug"], "poweredge-r640")
+        self.assertIn("u_height", result_row.extra_data)
+        self.assertIn("asset_tag", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["asset_tag"], "AT789")
+
+    def test_extra_data_includes_slugs_on_error(self):
+        """extra_data includes slugs even when device type is not found."""
+        from dcim.models import Device, DeviceType, Rack
+
+        # Disable create_missing_device_types to force error path
+        self.profile.create_missing_device_types = False
+        self.profile.save()
+
+        row = {
+            "_row_number": 4,
+            "rack_name": "",
+            "u_position": None,
+        }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
+        result_row = _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="UnknownMfg",
+            model="UnknownModel",
+            mfg_slug="unknownmfg",
+            dt_slug="unknownmodel",
+            source_id="4",
+            device_name="unknown-device",
+            serial="",
+            asset_tag="",
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+        )
+        # Should be an error action
+        self.assertEqual(result_row.action, "error")
+        # extra_data should still contain slugs
+        self.assertIn("source_make", result_row.extra_data)
+        self.assertIn("source_model", result_row.extra_data)
+        self.assertIn("mfg_slug", result_row.extra_data)
+        self.assertIn("dt_slug", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["mfg_slug"], "unknownmfg")
+        self.assertEqual(result_row.extra_data["dt_slug"], "unknownmodel")
+        self.assertIn("u_height", result_row.extra_data)
+        self.assertIn("asset_tag", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["asset_tag"], "")
+
+    def test_ip_fields_in_preview_extra_data(self):
+        """extra_data includes _ip dict when ip_fields is passed."""
+        from dcim.models import Device, DeviceType, Rack
+
+        row = {
+            "_row_number": 5,
+            "rack_name": "",
+            "u_position": None,
+        }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
+        result_row = _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="TestMake",
+            model="TestModel",
+            mfg_slug="test-mfg",
+            dt_slug="test-dt",
+            source_id="5",
+            device_name="test-device-05",
+            serial="",
+            asset_tag="",
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+            ip_fields={"primary_ip4": "192.168.1.1/32"},
+        )
+        # Verify we're on the success path
+        self.assertEqual(result_row.action, "create")
+        # Verify extra_data contains _ip
+        self.assertIn("_ip", result_row.extra_data)
+        self.assertEqual(result_row.extra_data["_ip"], {"primary_ip4": "192.168.1.1/32"})
+
+    def test_ip_fields_absent_when_not_provided(self):
+        """extra_data does NOT contain _ip key when ip_fields is empty/None."""
+        from dcim.models import Device, DeviceType, Rack
+
+        row = {
+            "_row_number": 6,
+            "rack_name": "",
+            "u_position": None,
+        }
+        ctx = ImportContext(
+            profile=self.profile, site=self.site, location=None, tenant=None, dry_run=True, result=ImportResult()
+        )
+        result_row = _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="TestMake",
+            model="TestModel",
+            mfg_slug="test-mfg",
+            dt_slug="test-dt",
+            source_id="6",
+            device_name="test-device-06",
+            serial="",
+            asset_tag="",
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+        )
+        # Verify we're on the success path
+        self.assertEqual(result_row.action, "create")
+        # Verify extra_data does NOT contain _ip
+        self.assertNotIn("_ip", result_row.extra_data)
+
+
+class ParseIPWithPrefixTest(TestCase):
+    """Tests for _parse_ip_with_prefix helper function."""
+
+    def test_parse_ip_with_prefix_adds_cidr(self):
+        """_parse_ip_with_prefix adds /32 or /128 prefix if absent."""
+        from netbox_data_import.engine import _parse_ip_with_prefix
+
+        # IPv4 without prefix
+        self.assertEqual(_parse_ip_with_prefix("192.168.1.1"), "192.168.1.1/32")
+
+        # IPv4 with prefix
+        self.assertEqual(_parse_ip_with_prefix("192.168.1.1/24"), "192.168.1.1/24")
+
+        # IPv6 without prefix
+        self.assertEqual(_parse_ip_with_prefix("::1"), "::1/128")
+
+        # Invalid IP
+        self.assertIsNone(_parse_ip_with_prefix("not-an-ip"))
+
+        # Empty string
+        self.assertIsNone(_parse_ip_with_prefix(""))
+
+        # IPv4 with prefix preserved
+        self.assertEqual(_parse_ip_with_prefix("192.168.1.1/24"), "192.168.1.1/24")
+
 
 class EnsureDeviceTypeExecuteModeTest(TestCase):
     """Tests that _ensure_device_type never appends RowResult rows in execute mode."""
@@ -429,3 +607,153 @@ class ParseFileEdgeCasesTest(TestCase):
         self.assertEqual(len(rows), 1)
         # tenant should be absent (no mapping target applied since column didn't exist)
         self.assertNotIn("tenant", rows[0])
+
+
+class FieldDiffComputationTest(TestCase):
+    """Tests for field_diff computation in _preview_device_row."""
+
+    def setUp(self):
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
+
+        self.site = Site.objects.create(name="Diff Site", slug="diff-site")
+        self.profile = _make_profile("FieldDiff")
+
+        mfg = Manufacturer.objects.create(name="TestMfg", slug="testmfg")
+        self.device_type = DeviceType.objects.create(
+            manufacturer=mfg,
+            model="TestModel",
+            slug="testmodel",
+            u_height=1,
+        )
+        self.role = DeviceRole.objects.create(name="Server", slug="server", color="000000")
+
+    def _make_existing_device(self, name="existing-server", serial="OLD123", asset_tag="OLD-TAG"):
+        from dcim.models import Device
+
+        return Device.objects.create(
+            name=name,
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial=serial,
+            asset_tag=asset_tag,
+            status="active",
+        )
+
+    def _call_preview(self, device_name, serial, asset_tag, device_status="active", ip_fields=None):
+        from dcim.models import Device, DeviceType, Rack
+
+        row = {"_row_number": 1, "rack_name": "", "u_position": None}
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=True,
+            result=ImportResult(),
+        )
+        return _preview_device_row(
+            row=row,
+            ctx=ctx,
+            make="TestMfg",
+            model="TestModel",
+            mfg_slug="testmfg",
+            dt_slug="testmodel",
+            source_id="99",
+            device_name=device_name,
+            serial=serial,
+            asset_tag=asset_tag,
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+            ip_fields=ip_fields,
+            device_face=None,
+            device_airflow=None,
+            device_status=device_status,
+            u_position=None,
+        )
+
+    def test_field_diff_on_update_row(self):
+        """Update rows include field_diff with changed serial and asset_tag."""
+        self._make_existing_device(serial="OLD123", asset_tag="OLD-TAG")
+        result = self._call_preview("existing-server", serial="NEW456", asset_tag="A-001")
+        self.assertEqual(result.action, "update")
+        self.assertIn("field_diff", result.extra_data)
+        diff = result.extra_data["field_diff"]
+        self.assertIn("serial", diff)
+        self.assertEqual(diff["serial"]["netbox"], "OLD123")
+        self.assertEqual(diff["serial"]["file"], "NEW456")
+        self.assertIn("asset_tag", diff)
+        self.assertEqual(diff["asset_tag"]["netbox"], "OLD-TAG")
+        self.assertEqual(diff["asset_tag"]["file"], "A-001")
+
+    def test_field_diff_absent_on_create_row(self):
+        """Create rows must not have field_diff in extra_data."""
+        result = self._call_preview("brand-new-device", serial="SN001", asset_tag="AT001")
+        self.assertEqual(result.action, "create")
+        self.assertNotIn("field_diff", result.extra_data)
+
+    def test_field_diff_absent_on_skip_row(self):
+        """Skip rows (update_existing=False) must not have field_diff in extra_data."""
+        self.profile.update_existing = False
+        self.profile.save()
+        self._make_existing_device(serial="OLD123", asset_tag="OLD-TAG")
+        result = self._call_preview("existing-server", serial="NEW456", asset_tag="A-001")
+        self.assertEqual(result.action, "skip")
+        self.assertNotIn("field_diff", result.extra_data)
+
+    def test_field_diff_excludes_ip_fields(self):
+        """field_diff must never include IP field keys even when ip_fields are passed."""
+        self._make_existing_device(serial="OLD123", asset_tag="OLD-TAG")
+        result = self._call_preview(
+            "existing-server",
+            serial="NEW456",
+            asset_tag="A-001",
+            ip_fields={"primary_ip4": "10.0.0.1/32"},
+        )
+        self.assertEqual(result.action, "update")
+        self.assertIn("field_diff", result.extra_data)
+        diff = result.extra_data["field_diff"]
+        self.assertNotIn("primary_ip4", diff)
+        self.assertNotIn("primary_ip6", diff)
+        self.assertNotIn("oob_ip", diff)
+
+    def test_field_diff_excludes_matching_fields(self):
+        """field_diff must not include a field when xls value matches the existing device value."""
+        self._make_existing_device(serial="SAME-SERIAL", asset_tag="DIFF-TAG")
+        result = self._call_preview("existing-server", serial="SAME-SERIAL", asset_tag="NEW-TAG")
+        self.assertEqual(result.action, "update")
+        diff = result.extra_data.get("field_diff", {})
+        self.assertNotIn("serial", diff)
+        self.assertIn("asset_tag", diff)
+
+    def test_field_diff_no_u_height_when_matches(self):
+        """u_height must not appear in diff when XLS value equals device type u_height."""
+        self._make_existing_device(serial="S1", asset_tag="A1")
+        # row has no u_height key → defaults to 1; device_type was created with u_height=1
+        result = self._call_preview("existing-server", serial="S1", asset_tag="A1")
+        diff = result.extra_data.get("field_diff", {})
+        self.assertNotIn("u_height", diff, "u_height must not appear in diff when values match")
+
+    def test_extra_data_includes_netbox_device_id_on_update(self):
+        """Update rows must include netbox_device_id in extra_data equal to matched device PK."""
+        device = self._make_existing_device(serial="SN-ID", asset_tag="AT-ID")
+        result = self._call_preview("existing-server", serial="SN-ID", asset_tag="NEW-TAG")
+        self.assertEqual(result.action, "update")
+        self.assertIn("netbox_device_id", result.extra_data)
+        self.assertEqual(result.extra_data["netbox_device_id"], device.pk)
+
+    def test_netbox_device_id_absent_on_skip_row(self):
+        """netbox_device_id must NOT be present on skip rows (update_existing=False)."""
+        self.profile.update_existing = False
+        self.profile.save()
+        self._make_existing_device(serial="SN-SKIP", asset_tag=None)
+        result = self._call_preview("existing-server", serial="SN-SKIP", asset_tag=None)
+        self.assertEqual(result.action, "skip")
+        self.assertNotIn("netbox_device_id", result.extra_data)
+
+    def test_netbox_device_id_absent_on_create_row(self):
+        """netbox_device_id must NOT be present on create rows (no matching device)."""
+        result = self._call_preview("brand-new-device-xyz", serial="SN-NEW-XYZ", asset_tag=None)
+        self.assertEqual(result.action, "create")
+        self.assertNotIn("netbox_device_id", result.extra_data)

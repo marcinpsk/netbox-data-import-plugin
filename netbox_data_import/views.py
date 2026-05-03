@@ -1,41 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+import difflib
+import logging
+
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
+from django.core.exceptions import ValidationError
+from django.db import DatabaseError, IntegrityError
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
 from utilities.permissions import get_permission_for_model
-from .models import (
-    ImportProfile,
-    ColumnMapping,
-    ClassRoleMapping,
-    DeviceTypeMapping,
-    ImportJob,
-    ColumnTransformRule,
-    DeviceExistingMatch,
-    ManufacturerMapping,
-)
+
+from .filters import ImportProfileFilterSet
 from .forms import (
+    ClassRoleMappingForm,
+    ColumnMappingForm,
+    ColumnTransformRuleForm,
+    DeviceTypeMappingForm,
     ImportProfileForm,
     ImportProfileImportForm,
-    ColumnMappingForm,
-    ClassRoleMappingForm,
-    DeviceTypeMappingForm,
-    ColumnTransformRuleForm,
     ImportSetupForm,
 )
-from .tables import (
-    ImportProfileTable,
-    ColumnMappingTable,
-    ClassRoleMappingTable,
-    DeviceTypeMappingTable,
-    ColumnTransformRuleTable,
-    ImportJobTable,
+from .models import (
+    ClassRoleMapping,
+    ColumnMapping,
+    ColumnTransformRule,
+    DeviceExistingMatch,
+    DeviceTypeMapping,
+    ImportJob,
+    ImportProfile,
+    ManufacturerMapping,
+    SourceResolution,
+    TARGET_FIELD_CHOICES,
 )
-from .filters import ImportProfileFilterSet
+from .tables import (
+    ClassRoleMappingTable,
+    ColumnMappingTable,
+    ColumnTransformRuleTable,
+    DeviceTypeMappingTable,
+    ImportJobTable,
+    ImportProfileTable,
+)
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -49,8 +57,91 @@ def _safe_next_url(request, fallback: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fuzzy matching: source column name → NetBox target field canonical name
+# ---------------------------------------------------------------------------
+
+_ALIAS_TO_CANONICAL: dict[str, str] = {
+    # rack_name
+    "rack": "rack_name",
+    "rack_name": "rack_name",
+    "rack name": "rack_name",
+    # device_name
+    "name": "device_name",
+    "device_name": "device_name",
+    "device name": "device_name",
+    "hostname": "device_name",
+    "host": "device_name",
+    # make
+    "make": "make",
+    "manufacturer": "make",
+    "vendor": "make",
+    "brand": "make",
+    # model
+    "model": "model",
+    "device_type": "model",
+    "device type": "model",
+    "product": "model",
+    # serial
+    "serial": "serial",
+    "serial_number": "serial",
+    "serial number": "serial",
+    "sn": "serial",
+    # asset_tag
+    "asset_tag": "asset_tag",
+    "asset tag": "asset_tag",
+    "asset": "asset_tag",
+    "tag": "asset_tag",
+    # source_id
+    "source_id": "source_id",
+    "source id": "source_id",
+    "id": "source_id",
+    "uid": "source_id",
+    # u_position
+    "u_position": "u_position",
+    "u position": "u_position",
+    "position": "u_position",
+    "unit": "u_position",
+    "u": "u_position",
+    # u_height
+    "u_height": "u_height",
+    "u height": "u_height",
+    "height": "u_height",
+    "size": "u_height",
+    # face
+    "face": "face",
+    "side": "face",
+    # airflow
+    "airflow": "airflow",
+    "air_flow": "airflow",
+    # status
+    "status": "status",
+    "state": "status",
+    # device_class
+    "device_class": "device_class",
+    "device class": "device_class",
+    "class": "device_class",
+    "type": "device_class",
+    "role": "device_class",
+}
+
+
+def _fuzzy_match_netbox_field(column_name: str) -> str | None:
+    """Return the best-matching canonical target field name for a source column, or None."""
+    normalised = column_name.strip().lower()
+    if normalised in _ALIAS_TO_CANONICAL:
+        return _ALIAS_TO_CANONICAL[normalised]
+    matches = difflib.get_close_matches(normalised, _ALIAS_TO_CANONICAL.keys(), n=1, cutoff=0.6)
+    if matches:
+        return _ALIAS_TO_CANONICAL[matches[0]]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # ImportProfile
 # ---------------------------------------------------------------------------
+
+
+logger = logging.getLogger(__name__)
 
 
 class ImportProfileListView(generic.ObjectListView):
@@ -197,6 +288,31 @@ def _delete_stale_device_type_mappings(profile, keep_keys):
     qs.delete()
 
 
+def _import_class_role_mappings(data, profile, stats):
+    """Import class_role_mappings from YAML data into the given profile."""
+    crm_source_classes = []
+    for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
+        instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
+        _set_if_present(instance, m, ("creates_rack", "role_slug", "ignore"))
+        if "rack_type" in m and m["rack_type"]:
+            from dcim.models import RackType
+
+            try:
+                instance.rack_type = RackType.objects.get(slug=m["rack_type"])
+            except RackType.DoesNotExist as exc:
+                raise ValueError(
+                    f"class_role_mappings[{m['source_class']}]: RackType with slug '{m['rack_type']}' not found"
+                ) from exc
+        elif "rack_type" in m:
+            instance.rack_type = None
+        _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
+        _save_or_refetch(instance, ClassRoleMapping, profile=profile, source_class=m["source_class"])
+        crm_source_classes.append(m["source_class"])
+        stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
+    if "class_role_mappings" in data:
+        ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
+
+
 def _apply_profile_yaml_data(data):
     """Create or update an ImportProfile and all its nested mappings from parsed YAML data.
 
@@ -243,16 +359,7 @@ def _apply_profile_yaml_data(data):
         if "column_mappings" in data:
             ColumnMapping.objects.filter(profile=profile).exclude(target_field__in=cm_target_fields).delete()
 
-        crm_source_classes = []
-        for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
-            instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
-            _set_if_present(instance, m, ("creates_rack", "role_slug", "ignore"))
-            _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
-            _save_or_refetch(instance, ClassRoleMapping, profile=profile, source_class=m["source_class"])
-            crm_source_classes.append(m["source_class"])
-            stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
-        if "class_role_mappings" in data:
-            ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
+        _import_class_role_mappings(data, profile, stats)
 
         dtm_keys = []
         for m in _iter_yaml_section(
@@ -332,13 +439,13 @@ class ImportProfileBulkImportView(generic.BulkImportView):
                 raw = upload.read().decode("utf-8-sig")
             except Exception as exc:  # pragma: no cover
                 messages.error(request, f"Could not read uploaded file: {exc}")
-                return redirect(request.path)
+                return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
         else:
             raw = request.POST.get("data", "").strip()
 
         if not raw:
             messages.error(request, "No data provided.")
-            return redirect(request.path)
+            return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
 
         try:
             data = yaml.safe_load(raw)
@@ -355,7 +462,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
                 profile, stats = _apply_profile_yaml_data(data)
             except ValueError as exc:  # KeyError no longer escapes since _iter_yaml_section validates required_keys
                 messages.error(request, str(exc))
-                return redirect(request.path)
+                return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
             summary = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items())
             messages.success(request, f"Profile '{profile.name}' imported/updated. {summary}.")
             return redirect(profile.get_absolute_url())
@@ -560,7 +667,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
         tenant = form.cleaned_data.get("tenant")
 
         try:
-            rows = engine.parse_file(excel_file, profile)
+            rows, unused_stats = engine.parse_file(excel_file, profile, return_stats=True)
         except engine.ParseError as exc:
             messages.error(request, f"Failed to parse file: {exc}")
             return render(request, "netbox_data_import/import_setup.html", {"form": form})
@@ -579,6 +686,14 @@ class ImportSetupView(PermissionRequiredMixin, View):
             "tenant_id": tenant.pk if tenant else None,
             "filename": excel_file.name,
         }
+        request.session["import_unused_columns"] = {
+            col: {
+                "count": int((stats or {}).get("count", 0)),
+                "samples": [str(s) for s in (stats or {}).get("samples", [])],
+            }
+            for col, stats in (unused_stats or {}).items()
+            if isinstance(stats, dict)
+        }
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
@@ -595,9 +710,10 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.warning(request, "No import in progress. Please start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        from . import engine
-        from dcim.models import Site, Location
+        from dcim.models import Location, Site
         from tenancy.models import Tenant
+
+        from . import engine
 
         profile = ImportProfile.objects.filter(pk=ctx.get("profile_id")).first()
         if not profile:
@@ -609,13 +725,18 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         tenant = Tenant.objects.filter(pk=ctx.get("tenant_id")).first() if ctx.get("tenant_id") else None
 
         context_obj = {"site": site, "location": location, "tenant": tenant}
+        # Re-apply saved resolutions so any resolution saved after the initial upload
+        # is reflected without requiring a file re-upload.
+        rows = engine.reapply_saved_resolutions(rows, profile)
+        request.session["import_rows"] = _serialize_rows(rows)
         # Always re-run so any new mappings/matches are immediately reflected
         result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
         request.session["import_result"] = result.to_session_dict()
 
         # Build existing resolutions map for the split-name modal preview
-        from .models import SourceResolution
         import json as _json
+
+        from .models import SourceResolution
 
         existing_resolutions = {}
         for res in SourceResolution.objects.filter(profile=profile):
@@ -625,6 +746,23 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             }
 
         view_mode = request.GET.get("view", profile.preview_view_mode)
+
+        # Build unused columns list: filter out any that are now mapped
+        mapped_source_cols = set(profile.column_mappings.values_list("source_column", flat=True))
+        _raw_unused = request.session.get("import_unused_columns")
+        raw_unused = _raw_unused if isinstance(_raw_unused, dict) else {}
+        unused_columns = [
+            {
+                "name": col,
+                "count": int(stats.get("count") or 0),
+                "samples": stats.get("samples") or [],
+                "suggested_field": _fuzzy_match_netbox_field(col),
+            }
+            for col, stats in raw_unused.items()
+            if isinstance(stats, dict) and col not in mapped_source_cols
+        ]
+        unused_columns.sort(key=lambda x: -x["count"])
+
         return render(
             request,
             "netbox_data_import/import_preview.html",
@@ -634,7 +772,14 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "profile_id": ctx.get("profile_id"),
                 "profile": profile,
                 "view_mode": view_mode,
-                "existing_resolutions_json": _json.dumps(existing_resolutions),
+                "existing_resolutions_json": _json.dumps(existing_resolutions).translate(
+                    {ord("<"): "\\u003C", ord(">"): "\\u003E", ord("&"): "\\u0026"}
+                ),
+                "existing_resolutions": existing_resolutions,
+                "can_create_role": request.user.has_perm("dcim.add_devicerole"),
+                "unused_columns": unused_columns,
+                "target_field_choices": TARGET_FIELD_CHOICES,
+                "syncable_fields": SyncDeviceFieldView._ALLOWED_FIELDS,
             },
         )
 
@@ -652,9 +797,10 @@ class ImportRunView(PermissionRequiredMixin, View):
             messages.warning(request, "No import in progress.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
+        from dcim.models import Location, Site
         from django.db import transaction
-        from dcim.models import Site, Location
         from tenancy.models import Tenant
+
         from . import engine
 
         profile = get_object_or_404(ImportProfile, pk=ctx_data["profile_id"])
@@ -758,6 +904,10 @@ class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 # Ignore / Unignore device
 # ---------------------------------------------------------------------------
+# The action views below (Ignore/Unignore/Sync/Quick*) are lightweight POST
+# endpoints that return JSON or an immediate redirect.  No NetBox generic base
+# class exists for this pattern; PermissionRequiredMixin + View is intentional.
+# ---------------------------------------------------------------------------
 
 
 class IgnoreDeviceView(PermissionRequiredMixin, View):
@@ -799,12 +949,166 @@ class UnignoreDeviceView(PermissionRequiredMixin, View):
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         if profile_id and source_id:
-            IgnoredDevice.objects.filter(
+            count, _ = IgnoredDevice.objects.filter(
                 profile_id=profile_id,
                 source_id=source_id,
             ).delete()
-            messages.success(request, "Device removed from ignore list.")
+            if count:
+                messages.success(request, "Device removed from ignore list.")
+            else:
+                messages.warning(request, "Device was not on the ignore list (may be ignored by class mapping).")
         return redirect(next_url)
+
+
+class RemoveExtraIpView(PermissionRequiredMixin, View):
+    """Remove a stored IP from extra_json['_ip'] on a device's data_import_source custom field."""
+
+    permission_required = "dcim.change_device"
+
+    def post(self, request):
+        """Remove an IP field from the device's data_import_source custom field."""
+        from dcim.models import Device
+
+        device_id = request.POST.get("device_id")
+        ip_field = request.POST.get("ip_field")
+
+        def _safe_return(device=None):
+            url = request.POST.get("next", "")
+            if url and url_has_allowed_host_and_scheme(
+                url, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+            ):
+                return redirect(url)
+            if device:
+                return redirect(device.get_absolute_url())
+            return redirect("/")
+
+        if not device_id or not ip_field:
+            messages.error(request, "Missing device_id or ip_field.")
+            return _safe_return()
+
+        if ip_field not in ("primary_ip4", "primary_ip6", "oob_ip"):
+            messages.error(request, f"Invalid ip_field: {ip_field}")
+            return _safe_return()
+
+        device = get_object_or_404(Device, pk=device_id)
+        import_data = device.cf.get("data_import_source")
+        import_data = import_data if isinstance(import_data, dict) else {}
+        ip_data = import_data.get("_ip")
+        ip_data = ip_data if isinstance(ip_data, dict) else {}
+
+        if ip_field in ip_data:
+            del ip_data[ip_field]
+            if ip_data:
+                import_data["_ip"] = ip_data
+            else:
+                import_data.pop("_ip", None)
+            device.custom_field_data["data_import_source"] = import_data
+            device.save(update_fields=["custom_field_data"])
+            messages.success(request, f"Removed {ip_field} from JSON storage.")
+        else:
+            messages.info(request, f"{ip_field} was not in JSON storage.")
+
+        return _safe_return(device)
+
+
+# ---------------------------------------------------------------------------
+# Sync single device field from import file value
+# ---------------------------------------------------------------------------
+
+
+class SyncDeviceFieldView(PermissionRequiredMixin, View):
+    """Apply a single field value from the import file to an existing NetBox device."""
+
+    permission_required = "dcim.change_device"
+
+    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face"}
+
+    def post(self, request):
+        """Apply the given field value to the specified device."""
+        from django.http import JsonResponse
+
+        from dcim.models import Device
+        from .engine import _STATUS_MAP
+
+        device_id = request.POST.get("device_id")
+        field = request.POST.get("field", "")
+        value = request.POST.get("value", "")
+
+        # Validate field first
+        if not field or field not in self._ALLOWED_FIELDS:
+            return JsonResponse({"ok": False, "error": f"Field '{field}' is not syncable"})
+
+        # Look up device
+        try:
+            device = Device.objects.select_related("device_type").get(pk=device_id)
+        except (Device.DoesNotExist, ValueError, TypeError):
+            return JsonResponse({"ok": False, "error": "Device not found"})
+
+        try:
+            display = self._apply_field(device, field, value, _STATUS_MAP)
+        except ValueError as exc:
+            return JsonResponse({"ok": False, "error": str(exc)})
+        except Exception:
+            logger.exception(
+                "SyncDeviceFieldView failed for device_id=%s field=%s",
+                device_id,
+                field,
+            )
+            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+
+        return JsonResponse({"ok": True, "display": display})
+
+    def _apply_field(self, device, field, value, status_map):
+        if field == "device_name":
+            new_name = str(value)[:64]
+            if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
+                raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
+            device.name = new_name
+            device.save(update_fields=["name"])
+            return new_name
+
+        if field == "u_position":
+            try:
+                pos = int(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"Cannot parse '{value}' as integer for u_position")
+            device.position = pos
+            device.save(update_fields=["position"])
+            return f"U{device.position}"
+
+        if field == "status":
+            v = str(value).strip().lower()
+            mapped = status_map.get(v)
+            # Also accept NetBox status slugs directly (e.g. "active", "offline")
+            if mapped is None and v in status_map.values():
+                mapped = v
+            if mapped is None:
+                raise ValueError(f"Unknown status value '{value}'")
+            device.status = mapped
+            device.save(update_fields=["status"])
+            return device.status
+
+        if field == "serial":
+            device.serial = str(value)[:50]
+            device.save(update_fields=["serial"])
+            return device.serial
+
+        if field == "asset_tag":
+            device.asset_tag = str(value)[:50] if value else None
+            device.save(update_fields=["asset_tag"])
+            return device.asset_tag
+
+        if field == "face":
+            v = str(value).strip().lower()
+            _FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
+            mapped = _FACE_MAP.get(v)
+            if mapped is None:
+                raise ValueError(f"Unknown face value '{value}' — expected 'front' or 'rear'")
+            device.face = mapped
+            device.save(update_fields=["face"])
+            return device.face
+
+        raise ValueError(f"Field '{field}' is not syncable")
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +1124,7 @@ class SaveResolutionView(PermissionRequiredMixin, View):
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
         import json
+
         from .models import SourceResolution
 
         profile_id = request.POST.get("profile_id")
@@ -926,6 +1231,77 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         profile = get_object_or_404(ImportProfile, pk=profile_pk)
         return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
 
+    def _import_class_role_rows(self, data, profile, errors):
+        """Import a list of class-role mapping items; return (created, skipped)."""
+        created = skipped = 0
+        for item in data:
+            try:
+                rack_type = None
+                rack_type_present = "rack_type" in item
+                rack_type_slug = item.get("rack_type") if rack_type_present else None
+                if rack_type_slug:
+                    from dcim.models import RackType
+
+                    try:
+                        rack_type = RackType.objects.get(slug=rack_type_slug)
+                    except RackType.DoesNotExist:
+                        errors.append(
+                            f"RackType with slug '{rack_type_slug}' not found for source_class '{item.get('source_class')}'"
+                        )
+                        continue
+
+                defaults = {
+                    "creates_rack": item.get("creates_rack", False),
+                    "role_slug": item.get("role_slug", ""),
+                    "ignore": item.get("ignore", False),
+                }
+                if rack_type_present:
+                    defaults["rack_type"] = rack_type
+
+                obj, was_created = ClassRoleMapping.objects.get_or_create(
+                    profile=profile,
+                    source_class=item["source_class"],
+                    defaults=defaults,
+                )
+                if not was_created and rack_type_present:
+                    obj.rack_type = rack_type
+                    obj.save(update_fields=["rack_type"])
+                if was_created:
+                    created += 1
+                else:
+                    skipped += 1
+            except (KeyError, ValueError) as exc:
+                errors.append(str(exc))
+            except Exception:
+                logger.exception("BulkYamlImportView class_role row failed for profile_id=%s", profile.pk)
+                errors.append("A row failed due to an unexpected error — see server logs.")
+        return created, skipped
+
+    def _import_device_type_rows(self, data, profile, errors):
+        """Import a list of device-type mapping items; return (created, skipped)."""
+        created = skipped = 0
+        for item in data:
+            try:
+                _, was_created = DeviceTypeMapping.objects.get_or_create(
+                    profile=profile,
+                    source_make=item["source_make"],
+                    source_model=item["source_model"],
+                    defaults={
+                        "netbox_manufacturer_slug": item["netbox_manufacturer_slug"],
+                        "netbox_device_type_slug": item["netbox_device_type_slug"],
+                    },
+                )
+                if was_created:
+                    created += 1
+                else:
+                    skipped += 1
+            except (KeyError, ValueError) as exc:
+                errors.append(str(exc))
+            except Exception:
+                logger.exception("BulkYamlImportView device_type row failed for profile_id=%s", profile.pk)
+                errors.append("A row failed due to an unexpected error — see server logs.")
+        return created, skipped
+
     def post(self, request, profile_pk):
         """Parse the uploaded YAML file and create mappings in bulk."""
         profile = get_object_or_404(ImportProfile, pk=profile_pk)
@@ -940,54 +1316,26 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
             import yaml
 
             data = yaml.safe_load(yaml_file.read())
-        except Exception as exc:
+        except yaml.YAMLError as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
+            return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
+        except Exception:
+            logger.exception("BulkYamlImportView: failed to read uploaded file for profile_id=%s", profile_pk)
+            messages.error(request, "Could not read the uploaded file.")
             return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
 
         if not isinstance(data, list):
             messages.error(request, "YAML must be a list of mapping objects.")
             return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
 
-        created = 0
-        skipped = 0
         errors = []
-
         if mapping_type == "class_role":
-            for item in data:
-                try:
-                    _, was_created = ClassRoleMapping.objects.get_or_create(
-                        profile=profile,
-                        source_class=item["source_class"],
-                        defaults={
-                            "creates_rack": item.get("creates_rack", False),
-                            "role_slug": item.get("role_slug", ""),
-                            "ignore": item.get("ignore", False),
-                        },
-                    )
-                    if was_created:
-                        created += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:
-                    errors.append(str(exc))
+            created, skipped = self._import_class_role_rows(data, profile, errors)
         elif mapping_type == "device_type":
-            for item in data:
-                try:
-                    _, was_created = DeviceTypeMapping.objects.get_or_create(
-                        profile=profile,
-                        source_make=item["source_make"],
-                        source_model=item["source_model"],
-                        defaults={
-                            "netbox_manufacturer_slug": item["netbox_manufacturer_slug"],
-                            "netbox_device_type_slug": item["netbox_device_type_slug"],
-                        },
-                    )
-                    if was_created:
-                        created += 1
-                    else:
-                        skipped += 1
-                except Exception as exc:
-                    errors.append(str(exc))
+            created, skipped = self._import_device_type_rows(data, profile, errors)
+        else:
+            messages.error(request, f"Unknown mapping type '{mapping_type}'.")
+            return redirect(profile.get_absolute_url())
 
         if errors:
             messages.warning(
@@ -1010,8 +1358,8 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
 
     def get(self, request, pk):
         """Serialize the profile and all its mappings to YAML and return as a file download."""
-        from django.http import HttpResponse
         import yaml
+        from django.http import HttpResponse
 
         profile = get_object_or_404(ImportProfile, pk=pk)
 
@@ -1032,12 +1380,19 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
             ],
             "class_role_mappings": [
                 {
-                    "source_class": m.source_class,
-                    "creates_rack": m.creates_rack,
-                    "role_slug": m.role_slug,
-                    "ignore": m.ignore,
+                    **{
+                        k: v
+                        for k, v in {
+                            "source_class": m.source_class,
+                            "creates_rack": m.creates_rack,
+                            "role_slug": m.role_slug,
+                            "ignore": m.ignore,
+                        }.items()
+                        if v != ""
+                    },
+                    "rack_type": m.rack_type.slug if m.rack_type_id else None,
                 }
-                for m in profile.class_role_mappings.all()
+                for m in profile.class_role_mappings.select_related("rack_type").all()
             ],
             "device_type_mappings": [
                 {
@@ -1127,8 +1482,8 @@ class CheckDeviceNameView(PermissionRequiredMixin, View):
 
     def get(self, request):
         """Return JSON indicating whether a device with the given name exists."""
-        from django.http import JsonResponse
         from dcim.models import Device
+        from django.http import JsonResponse
 
         if not request.user.has_perm("dcim.view_device"):  # pragma: no cover
             from django.http import HttpResponseForbidden
@@ -1175,8 +1530,6 @@ class SourceResolutionListView(PermissionRequiredMixin, View):
 
     def get(self, request, profile_pk):
         """Render the list of saved source resolutions for the given profile."""
-        from .models import SourceResolution
-
         profile = get_object_or_404(ImportProfile, pk=profile_pk)
         resolutions = SourceResolution.objects.filter(profile=profile).order_by("source_id")
         return render(
@@ -1189,34 +1542,11 @@ class SourceResolutionListView(PermissionRequiredMixin, View):
         )
 
 
-class SourceResolutionDeleteView(PermissionRequiredMixin, View):
+class SourceResolutionDeleteView(_ProfileChildDeleteView):
     """Delete a saved source resolution."""
 
+    queryset = SourceResolution.objects.all()
     permission_required = "netbox_data_import.delete_sourceresolution"
-
-    def get(self, request, pk):
-        """Render the delete confirmation page for a source resolution."""
-        from .models import SourceResolution
-
-        obj = get_object_or_404(SourceResolution, pk=pk)
-        return render(
-            request,
-            "netbox_data_import/confirm_delete.html",
-            {
-                "object": obj,
-                "return_url": reverse("plugins:netbox_data_import:source_resolution_list", args=[obj.profile_id]),
-            },
-        )
-
-    def post(self, request, pk):
-        """Delete the source resolution and redirect to the profile's resolution list."""
-        from .models import SourceResolution
-
-        obj = get_object_or_404(SourceResolution, pk=pk)
-        profile_pk = obj.profile_id
-        obj.delete()
-        messages.success(request, "Resolution deleted.")
-        return redirect(reverse("plugins:netbox_data_import:source_resolution_list", args=[profile_pk]))
 
 
 # ---------------------------------------------------------------------------
@@ -1294,7 +1624,7 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Save the device type mapping (and optionally create objects) then redirect."""
-        from dcim.models import Manufacturer, DeviceType
+        from dcim.models import DeviceType, Manufacturer
         from django.utils.text import slugify
 
         profile_id = request.POST.get("profile_id")
@@ -1369,15 +1699,39 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Save the class→role mapping and redirect back to preview."""
+        from dcim.models import RackType
+
         profile_id = request.POST.get("profile_id")
         profile = get_object_or_404(ImportProfile, pk=profile_id)
         source_class = request.POST.get("source_class", "").strip()
-        mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore" or "role"
+        mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore", "role", or "rack"
         role_slug = request.POST.get("role_slug", "").strip()
-        creates_rack = request.POST.get("creates_rack") == "1"
+        creates_rack = mapping_action == "rack"
+        rack_type_id = request.POST.get("rack_type_id", "").strip()
+
+        rack_type = None
+        if creates_rack and rack_type_id:
+            try:
+                rack_type = RackType.objects.get(pk=int(rack_type_id))
+            except (RackType.DoesNotExist, ValueError, TypeError):
+                messages.error(
+                    request, f"Invalid rack type selected for class '{source_class}'. Please choose a valid rack type."
+                )
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         if not source_class:
             messages.error(request, "Source class is required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        _valid_actions = ("ignore", "role", "rack")
+        if mapping_action not in _valid_actions:
+            messages.error(
+                request, f"Invalid mapping action '{mapping_action}'. Must be one of: {', '.join(_valid_actions)}."
+            )
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        if mapping_action == "role" and not role_slug:
+            messages.error(request, "A role slug is required when mapping action is 'role'.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         _, created = ClassRoleMapping.objects.update_or_create(
@@ -1386,6 +1740,7 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
             defaults={
                 "ignore": mapping_action == "ignore",
                 "creates_rack": creates_rack,
+                "rack_type": rack_type,
                 "role_slug": role_slug if mapping_action == "role" else "",
             },
         )
@@ -1393,10 +1748,70 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
         if mapping_action == "ignore":
             action_label = "ignore"
         elif mapping_action == "rack":
-            action_label = "creates rack"
+            rt_suffix = f" (type: {rack_type})" if rack_type else ""
+            action_label = f"creates rack{rt_suffix}"
         else:
             action_label = f"role '{role_slug}'"
         messages.success(request, f"{verb} mapping: class '{source_class}' → {action_label}")
+        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+
+class QuickAddColumnMappingView(PermissionRequiredMixin, View):
+    """Quickly map an unmapped source column to a NetBox target field from the preview panel."""
+
+    permission_required = "netbox_data_import.add_columnmapping"
+
+    def post(self, request):
+        """Save the column mapping and redirect back to preview."""
+        import re
+
+        profile_id = request.POST.get("profile_id")
+        profile = get_object_or_404(ImportProfile, pk=profile_id)
+        source_column = request.POST.get("source_column", "").strip()
+        target_field = request.POST.get("target_field", "").strip()
+
+        valid_standard_fields = {choice[0] for choice in TARGET_FIELD_CHOICES}
+        is_extra_json = target_field.startswith("extra_json:")
+        if is_extra_json:
+            key = target_field[len("extra_json:") :]
+            if not re.match(r"^[a-zA-Z0-9_-]{1,50}$", key):
+                is_extra_json = False  # invalid key → fall through to error below
+
+        if not source_column or (target_field not in valid_standard_fields and not is_extra_json):
+            messages.error(request, "Valid source column and target field are required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        # Remove any existing mapping that claims the same target_field (for a different source
+        # column) before upserting, to avoid the unique constraint violation.
+        displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
+            source_column=source_column
+        )
+        displaced_source = displaced.values_list("source_column", flat=True).first()
+        displaced.delete()
+
+        _, created = ColumnMapping.objects.update_or_create(
+            profile=profile,
+            source_column=source_column,
+            defaults={"target_field": target_field},
+        )
+        if displaced_source:
+            messages.success(
+                request,
+                f"Reassigned: '{source_column}' → {target_field} (previously mapped from '{displaced_source}')",
+            )
+        else:
+            verb = "Created" if created else "Updated"
+            messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
+
+        # Re-apply all column mappings to the in-session rows so the new
+        # mapping takes effect immediately without requiring a file re-upload.
+        from . import engine  # noqa: PLC0415
+
+        session_rows = request.session.get("import_rows")
+        if session_rows:
+            engine.apply_column_mappings(session_rows, profile)
+            request.session["import_rows"] = session_rows
+
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
@@ -1440,10 +1855,31 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
+def _device_name_filter(q: str):
+    """Build a Django Q filter for device name search.
+
+    Exact icontains is tried first; when the query contains separators (-, _, .)
+    individual tokens (≥3 chars) are OR-ed in so that e.g. "PROD-LAB03-SW3"
+    matches "prod-lab03-sw03.prod-lab.aorta.net" via the "LAB03" token.
+    """
+    import re as _re
+
+    from django.db.models import Q as _Q
+
+    base = _Q(name__icontains=q)
+    tokens = [t for t in _re.split(r"[-_.\s]+", q) if len(t) >= 3]
+    if len(tokens) > 1:
+        token_q = _Q()
+        for tok in tokens:
+            token_q |= _Q(name__icontains=tok)
+        return base | token_q
+    return base
+
+
 class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
-    GET params: type (manufacturer|device_type|device|role), q (search string).
+    GET params: type (manufacturer|device_type|device|role|rack_type), q (search string).
     Returns JSON list of {id, name, slug, url} dicts.
     """
 
@@ -1451,8 +1887,8 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
 
     def get(self, request):
         """Return a JSON list of matching NetBox objects for the given type and query."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, RackType
         from django.http import JsonResponse
-        from dcim.models import Manufacturer, DeviceType, Device, DeviceRole
 
         obj_type = request.GET.get("type", "device")
         q = request.GET.get("q", "").strip()
@@ -1463,6 +1899,7 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
             "device_type": "dcim.view_devicetype",
             "device": "dcim.view_device",
             "role": "dcim.view_devicerole",
+            "rack_type": "dcim.view_racktype",
         }
         required_perm = _perm_map.get(obj_type)
         if required_perm and not request.user.has_perm(required_perm):  # pragma: no cover
@@ -1498,7 +1935,7 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
                     }
                 )
         elif obj_type == "device":
-            for dev in Device.objects.filter(name__icontains=q).select_related("site")[:limit]:
+            for dev in Device.objects.filter(_device_name_filter(q)).distinct().select_related("site")[:limit]:
                 results.append(
                     {
                         "id": dev.pk,
@@ -1517,8 +1954,76 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
                         "url": request.build_absolute_uri(role.get_absolute_url()),
                     }
                 )
+        elif obj_type == "rack_type":
+            from django.db.models import Q
+
+            qs = RackType.objects.select_related("manufacturer").filter(
+                Q(model__icontains=q) | Q(manufacturer__name__icontains=q) | Q(slug__icontains=q)
+            )[:limit]
+            for rt in qs:
+                results.append(
+                    {
+                        "id": rt.pk,
+                        "name": f"{rt.manufacturer.name} / {rt.model}" if rt.manufacturer else rt.model,
+                        "slug": rt.slug,
+                        "url": request.build_absolute_uri(rt.get_absolute_url()),
+                    }
+                )
 
         return JsonResponse({"results": results})
+
+
+class QuickCreateDeviceRoleView(PermissionRequiredMixin, View):
+    """AJAX endpoint: create a new DeviceRole and return its details as JSON.
+
+    Used by the Configure Class modal so operators can create missing roles
+    without leaving the import preview page.
+    """
+
+    permission_required = "netbox_data_import.view_importprofile"
+
+    def post(self, request):
+        """Create the DeviceRole and return JSON {id, name, slug}."""
+        from dcim.models import DeviceRole
+        from django.http import JsonResponse
+
+        if not request.user.has_perm("dcim.add_devicerole"):
+            return JsonResponse({"error": "Permission denied: dcim.add_devicerole required."}, status=403)
+
+        name = request.POST.get("name", "").strip()
+        slug = request.POST.get("slug", "").strip()
+        color = request.POST.get("color", "9e9e9e").strip() or "9e9e9e"
+
+        if not name or not slug:
+            return JsonResponse({"error": "Role name and slug are required."}, status=400)
+
+        import re
+
+        if not re.match(r"^[-a-z0-9_]+$", slug):
+            return JsonResponse(
+                {"error": "Slug may only contain lowercase letters, numbers, hyphens, and underscores."}, status=400
+            )
+
+        try:
+            role, created = DeviceRole.objects.get_or_create(slug=slug, defaults={"name": name, "color": color})
+        except IntegrityError:
+            logger.exception("QuickCreateDeviceRoleView: integrity error creating role slug=%s", slug)
+            return JsonResponse({"error": "A device role with that slug already exists."}, status=400)
+        except (ValueError, ValidationError):
+            logger.exception("QuickCreateDeviceRoleView: validation error creating role slug=%s", slug)
+            return JsonResponse({"error": "Invalid role data."}, status=400)
+        except DatabaseError:
+            logger.exception("QuickCreateDeviceRoleView: database error creating role slug=%s", slug)
+            return JsonResponse({"error": "An internal error occurred."}, status=500)
+
+        return JsonResponse(
+            {
+                "id": role.pk,
+                "name": role.name,
+                "slug": role.slug,
+                "created": created,
+            }
+        )
 
 
 def _auto_match_single_device(device_model, device_name, serial, asset_tag):

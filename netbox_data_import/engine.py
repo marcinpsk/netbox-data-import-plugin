@@ -103,10 +103,18 @@ class ImportResult:
 
     @property
     def rack_groups(self) -> dict:
-        """Return rows grouped by rack name for the rack view template."""
+        """Return rows grouped by rack name for the rack view template.
+
+        Devices within each group are sorted by u_position (ascending, with
+        devices that have no position placed last).  Rack rows with an empty
+        name (caused by cabinet source rows that have no RACK column value) are
+        excluded so they don't produce a confusing unnamed card.
+        """
         groups: dict = {}
         for row in self.rows:
             if row.object_type == "rack":
+                if not row.name:
+                    continue
                 if row.name not in groups:
                     groups[row.name] = {"rack_row": row, "devices": []}
                 else:
@@ -116,6 +124,14 @@ class ImportResult:
                 if rack not in groups:
                     groups[rack] = {"rack_row": None, "devices": []}
                 groups[rack]["devices"].append(row)
+        # Sort each rack's device list by u_position ascending (None → last)
+        for group in groups.values():
+            group["devices"].sort(
+                key=lambda r: (
+                    r.extra_data.get("u_position") is None,
+                    r.extra_data.get("u_position") or 0,
+                )
+            )
         return groups
 
 
@@ -137,6 +153,25 @@ class ImportContext:
     rack_map: dict = field(default_factory=dict)
     pending_device_roles: set = field(default_factory=set)
     user: object | None = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_NONE_LIKE = frozenset({"none", "nan", "null", "n/a", "#n/a"})
+
+
+def _str_val(v) -> str:
+    """Safely convert a cell value to a stripped string.
+
+    None, NaN (pandas), and sentinel strings like "None"/"nan"/"null" are
+    returned as an empty string so callers never see the literal text "None".
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    return "" if s.lower() in _NONE_LIKE else s
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +216,56 @@ def _apply_transform_rules(row_dict: dict, raw_row, raw_headers: dict, transform
             row_dict[rule.group_2_target] = m.group(2)
 
 
-def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
+def _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra):
+    """Return extra dict for a single row and update unused_stats in-place."""
+    extra: dict[str, str] = {}
+    for col in unmapped_cols:
+        idx = raw_headers[col]
+        raw_val = row[idx] if idx < len(row) else None
+        str_val = _str_val(raw_val)
+        if not str_val:
+            continue
+        extra[col] = str_val
+        if return_stats:
+            entry = unused_stats.setdefault(col, {"count": 0, "samples": []})
+            entry["count"] += 1
+            if len(entry["samples"]) < 5:
+                entry["samples"].append(str_val)
+    return extra
+
+
+def _promote_extra_json_fields(row_dict: dict) -> None:
+    """Move any extra_json:<key> entries from row_dict into row_dict["_extra_columns"]."""
+    for k in [k for k in list(row_dict) if isinstance(k, str) and k.startswith("extra_json:")]:
+        json_key = k[len("extra_json:") :]
+        val = row_dict.pop(k)
+        if val not in (None, ""):
+            row_dict.setdefault("_extra_columns", {})[json_key] = val
+
+
+def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict]:
+    """Re-apply the profile's column mappings to already-parsed session rows.
+
+    This is used after a quick-add column mapping so that the in-session row
+    dicts reflect the new mapping without requiring the source file to be
+    re-uploaded.  Unmapped source-column keys (still present with their
+    original name) are renamed to the configured target_field.  Any
+    ``extra_json:<key>`` targets are promoted into ``_extra_columns`` as usual.
+    """
+    col_map: dict[str, str] = {cm.source_column: cm.target_field for cm in profile.column_mappings.all()}
+    for row in rows:
+        for source_col, target_field in col_map.items():
+            if source_col in row:
+                row[target_field] = row.pop(source_col)
+        _promote_extra_json_fields(row)
+    return rows
+
+
+def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     """Read the Excel file and return a list of row-dicts keyed by target_field name.
+
+    When return_stats=True, returns a tuple (rows, unused_stats) where unused_stats
+    is a dict mapping unmapped source column names to {"count": int, "samples": list[str]}.
 
     Raises ParseError if the file or sheet is invalid.
     """
@@ -202,6 +285,9 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
     # Build source_column→target_field map from profile
     col_map: dict[str, str] = {cm.source_column: cm.target_field for cm in profile.column_mappings.all()}
 
+    # Unmapped columns: present in the sheet but not configured in col_map
+    unmapped_cols = [col for col in raw_headers if col not in col_map]
+
     # Pre-fetch transform rules for efficiency
     transform_rules = list(profile.column_transform_rules.all())
 
@@ -209,6 +295,9 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
     resolutions_by_source_id: dict[str, list] = {}
     for res in profile.source_resolutions.all():
         resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
+
+    unused_stats: dict[str, dict] = {}
+    capture_extra = profile.capture_extra_data
 
     rows = []
     for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
@@ -226,6 +315,9 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
                 value = value.strip()
             row_dict[target_field] = value
 
+        # Promote explicit extra_json: mappings into _extra_columns
+        _promote_extra_json_fields(row_dict)
+
         _apply_transform_rules(row_dict, row, raw_headers, transform_rules)
 
         # Apply saved resolutions (rerere)
@@ -234,14 +326,65 @@ def parse_file(file_obj, profile: ImportProfile) -> list[dict]:
             for res in resolutions_by_source_id.get(str(source_id), []):
                 row_dict.update(res.resolved_fields)
 
+        if return_stats or capture_extra:
+            extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
+            if capture_extra and extra:
+                row_dict.setdefault("_extra_columns", {}).update(extra)
+
         rows.append(row_dict)
 
+    if return_stats:
+        return rows, unused_stats
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Device-type slug resolution
-# ---------------------------------------------------------------------------
+def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
+    """Re-apply all saved SourceResolutions for a profile to pre-parsed rows.
+
+    Called in the preview GET handler so newly-saved resolutions are reflected
+    without requiring the user to re-upload the file.  The session rows may
+    already have older resolutions baked in; re-applying is idempotent for those
+    and correctly applies any resolution saved after the initial upload.
+    """
+    resolutions_by_source_id: dict[str, list] = {}
+    for res in profile.source_resolutions.all():
+        resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
+
+    if not resolutions_by_source_id:
+        return rows
+
+    result = []
+    for row in rows:
+        source_id = str(row.get("source_id", ""))
+        if source_id and source_id in resolutions_by_source_id:
+            row = dict(row)  # shallow copy — don't mutate the session dict
+            for res in resolutions_by_source_id[source_id]:
+                row.update(res.resolved_fields)
+        result.append(row)
+    return result
+
+
+def _parse_ip_with_prefix(raw_value: str) -> str | None:
+    """Parse an IP address string, adding /32 or /128 prefix if absent.
+
+    Returns a normalised 'address/prefix' string or None if unparseable.
+    """
+    import ipaddress
+
+    raw = str(raw_value).strip()
+    if not raw:
+        return None
+    try:
+        # Try parsing as IP network (accepts CIDR notation)
+        if "/" in raw:
+            net = ipaddress.ip_interface(raw)
+            return str(net)
+        else:
+            addr = ipaddress.ip_address(raw)
+            prefix = "/32" if addr.version == 4 else "/128"
+            return f"{addr}{prefix}"
+    except ValueError:
+        return None
 
 
 def _resolve_device_type_slugs(make: str, model: str, profile: ImportProfile) -> tuple[str, str, bool]:
@@ -450,13 +593,13 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
     seen_roles: set[str] = set()
 
     for row in rows:
-        device_class = str(row.get("device_class", "")).strip()
+        device_class = _str_val(row.get("device_class"))
         crm = class_role_map.get(device_class)
         if crm is None or crm.creates_rack or crm.ignore:
             continue
 
-        make = " ".join(str(row.get("make", "Unknown")).split()) or "Unknown"
-        model = " ".join(str(row.get("model", "Unknown")).split()) or "Unknown"
+        make = " ".join((_str_val(row.get("make")) or "Unknown").split())
+        model = " ".join((_str_val(row.get("model")) or "Unknown").split())
         u_height_raw = row.get("u_height", 1)
         try:
             u_height = max(1, int(float(u_height_raw)))
@@ -480,7 +623,7 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
         _ensure_device_role(crm, seen_roles, ctx, DeviceRole)
 
 
-def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
+def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=None):
     """Write or update a rack in the database and record the result."""
     try:
         rack = Rack.objects.get(site=ctx.site, name=rack_name)
@@ -491,6 +634,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
                 return
             rack.u_height = u_height
             rack.serial = serial or rack.serial
+            rack.rack_type = rack_type
             if ctx.location:
                 rack.location = ctx.location
             if ctx.tenant:
@@ -525,7 +669,13 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack):
             ctx.result.rows.append(_perm_denied_row("dcim.add_rack", row, rack_name, "rack"))
             return
         rack = Rack.objects.create(
-            site=ctx.site, location=ctx.location, name=rack_name, tenant=ctx.tenant, u_height=u_height, serial=serial
+            site=ctx.site,
+            location=ctx.location,
+            name=rack_name,
+            tenant=ctx.tenant,
+            u_height=u_height,
+            serial=serial,
+            rack_type=rack_type,
         )
         _store_source_id(rack, ctx.profile, source_id)
         ctx.rack_map[rack_name] = rack
@@ -547,15 +697,15 @@ def _pass2_process_racks(rows, ctx, class_role_map):
     from dcim.models import Rack
 
     for row in rows:
-        device_class = str(row.get("device_class", "")).strip()
+        device_class = _str_val(row.get("device_class"))
         crm = class_role_map.get(device_class)
         if not (crm and crm.creates_rack):
             continue
 
-        rack_name = str(row.get("rack_name", "")).strip()
+        rack_name = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
         source_id = str(row.get("source_id", ""))
         u_height_raw = row.get("u_height", 42)
-        serial = str(row.get("serial", "")).strip()
+        serial = _str_val(row.get("serial"))
 
         try:
             u_height = max(1, int(float(u_height_raw)))
@@ -576,13 +726,14 @@ def _pass2_process_racks(rows, ctx, class_role_map):
             continue
 
         if ctx.dry_run:
+            rack_type_label = f", type={crm.rack_type}" if crm.rack_type_id else ""
             try:
                 Rack.objects.get(site=ctx.site, name=rack_name)
                 action = "update" if ctx.profile.update_existing else "skip"
                 detail = f"Rack '{rack_name}' already exists"
             except Rack.DoesNotExist:
                 action = "create"
-                detail = f"Would create rack '{rack_name}' ({u_height}U) at site '{ctx.site}'"
+                detail = f"Would create rack '{rack_name}' ({u_height}U{rack_type_label}) at site '{ctx.site}'"
             ctx.rack_map[rack_name] = rack_name
             ctx.result.rows.append(
                 RowResult(
@@ -592,10 +743,16 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                     action=action,
                     object_type="rack",
                     detail=detail,
+                    extra_data={
+                        "source_class": device_class,
+                        "rack_type_set": bool(crm.rack_type_id),
+                        "rack_type_id": crm.rack_type_id or "",
+                        "rack_type_name": str(crm.rack_type) if crm.rack_type_id else "",
+                    },
                 )
             )
         else:
-            _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack)
+            _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=crm.rack_type)
 
 
 def _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device):
@@ -649,6 +806,40 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
     return matched_device, match_method
 
 
+def _compute_field_diff(
+    matched_device, device_name, serial, asset_tag, device_face, device_airflow, device_status, u_height, u_position
+):
+    """Return a dict of fields that differ between the XLS row and the existing NetBox device."""
+    diff = {}
+    candidates = [
+        ("device_name", str(device_name), str(matched_device.name)),
+        ("status", str(device_status), str(matched_device.status)),
+        ("serial", str(serial or ""), str(matched_device.serial or "")),
+        ("asset_tag", str(asset_tag or ""), str(matched_device.asset_tag or "")),
+    ]
+    if device_face is not None:
+        candidates.append(("face", str(device_face), str(matched_device.face) if matched_device.face else ""))
+    if device_airflow is not None:
+        candidates.append(
+            ("airflow", str(device_airflow), str(matched_device.airflow) if matched_device.airflow else "")
+        )
+    for fname, xls_val, nb_val in candidates:
+        if xls_val != nb_val:
+            diff[fname] = {"netbox": nb_val, "file": xls_val}
+    nb_u_height = matched_device.device_type.u_height if matched_device.device_type_id else None
+    if nb_u_height is not None:
+        try:
+            if float(u_height) != float(nb_u_height):
+                diff["u_height"] = {"netbox": str(nb_u_height), "file": str(u_height)}
+        except (TypeError, ValueError):
+            pass
+    xls_pos = str(u_position) if u_position is not None else ""
+    nb_pos = str(matched_device.position) if matched_device.position is not None else ""
+    if xls_pos != nb_pos:
+        diff["u_position"] = {"netbox": nb_pos, "file": xls_pos}
+    return diff
+
+
 def _preview_device_row(
     row,
     ctx,
@@ -663,8 +854,20 @@ def _preview_device_row(
     DeviceType,
     Device,
     Rack,
+    ip_fields: dict | None = None,
+    device_face=None,
+    device_airflow=None,
+    device_status="active",
+    u_position=None,
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
+    # Parse u_height early so it's available in all return paths
+    u_height_raw = row.get("u_height", 1)
+    try:
+        u_height = max(1, int(float(u_height_raw)))
+    except (TypeError, ValueError):
+        u_height = 1
+
     dt_exists = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists()
     if not dt_exists and not ctx.profile.create_missing_device_types:
         return RowResult(
@@ -674,9 +877,18 @@ def _preview_device_row(
             action="error",
             object_type="device",
             detail=f"Device type not found: {make} / {model} (slug: {mfg_slug}/{dt_slug})",
+            extra_data={
+                "source_make": make,
+                "source_model": model,
+                "mfg_slug": mfg_slug,
+                "dt_slug": dt_slug,
+                "u_height": u_height,
+                "asset_tag": asset_tag or "",
+                **({"_ip": ip_fields} if ip_fields else {}),
+            },
         )
 
-    rack_name = str(row.get("rack_name", "")).strip()
+    rack_name = _str_val(row.get("rack_name"))
     if rack_name:
         if rack_name in ctx.rack_map:
             rack_label = rack_name
@@ -689,6 +901,7 @@ def _preview_device_row(
         rack_label = "(no rack)"
     raw_position = row.get("u_position")
     try:
+        # Re-derive position for display label; u_position param is the pre-resolved value for field_diff
         position = int(float(raw_position)) if raw_position is not None and str(raw_position).strip() != "" else None
     except (TypeError, ValueError):
         position = None
@@ -703,11 +916,36 @@ def _preview_device_row(
         if match_method == "name":
             detail = f"Device '{device_name}' already exists"
         else:
-            detail = f"Matched to existing device '{matched_device.name}' (by {match_method})"
+            # Clarify what happens to name: it is NOT updated on matched devices
+            name_note = ""
+            if matched_device.name != device_name:
+                name_note = f"; name stays '{matched_device.name}' (source: '{device_name}')"
+            else:
+                name_note = "; name unchanged"
+            if ctx.profile.update_existing:
+                detail = f"Will update '{matched_device.name}' (matched by {match_method}{name_note})"
+            else:
+                detail = (
+                    f"Matched to '{matched_device.name}' (by {match_method}{name_note}, skip — update_existing off)"
+                )
     else:
         action = "create"
         _pos_label = f" U{position}" if position is not None else ""
         detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
+
+    field_diff: dict | None = None
+    if action == "update" and matched_device is not None:
+        field_diff = _compute_field_diff(
+            matched_device,
+            device_name,
+            serial,
+            asset_tag,
+            device_face,
+            device_airflow,
+            device_status,
+            u_height,
+            u_position,
+        )
 
     return RowResult(
         row_number=row["_row_number"],
@@ -717,7 +955,18 @@ def _preview_device_row(
         object_type="device",
         detail=detail,
         rack_name=rack_name,
-        extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
+        extra_data={
+            "source_make": make,
+            "source_model": model,
+            "mfg_slug": mfg_slug,
+            "dt_slug": dt_slug,
+            "u_height": u_height,
+            "u_position": position,
+            "asset_tag": asset_tag or "",
+            **({"_ip": ip_fields} if ip_fields else {}),
+            **({"field_diff": field_diff} if field_diff is not None else {}),
+            **({"netbox_device_id": matched_device.pk} if action == "update" else {}),
+        },
     )
 
 
@@ -741,9 +990,10 @@ def _write_device_row(
     DeviceRole,
     Rack,
     Device,
+    ip_fields: dict | None = None,
 ):
     """Write or update a device in the DB and return a RowResult."""
-    rack_name = str(row.get("rack_name", "")).strip()
+    rack_name = _str_val(row.get("rack_name"))
     try:
         device_type = DeviceType.objects.get(manufacturer__slug=mfg_slug, slug=dt_slug)
     except DeviceType.DoesNotExist:
@@ -795,7 +1045,12 @@ def _write_device_row(
             if ctx.tenant:
                 device.tenant = ctx.tenant
             device.save()
-            _store_source_id(device, ctx.profile, source_id)
+            ip_json = {}
+            for ip_field, ip_str in (ip_fields or {}).items():
+                assigned = _assign_ip_to_device(device, ip_field, ip_str)
+                if not assigned:
+                    ip_json[ip_field] = ip_str
+            _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"), ip_json or None)
             return RowResult(
                 row_number=row["_row_number"],
                 source_id=source_id,
@@ -835,7 +1090,11 @@ def _write_device_row(
         asset_tag=asset_tag,
         tenant=ctx.tenant,
     )
-    _store_source_id(device, ctx.profile, source_id)
+    ip_json = {}
+    for ip_field, ip_str in (ip_fields or {}).items():
+        # New device — no interfaces yet, always store in JSON
+        ip_json[ip_field] = ip_str
+    _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"), ip_json or None)
     _rack_label = rack_name if rack_name else "(no rack)"
     _pos_label = f" U{position}" if position is not None else ""
     return RowResult(
@@ -851,6 +1110,45 @@ def _write_device_row(
     )
 
 
+def _assign_ip_to_device(device, ip_field: str, ip_str: str):
+    """Attempt to assign an IP natively to a device; returns True on success.
+
+    For existing devices: search interfaces for a subnet containing ip_str.
+    If found, create/get the IPAddress and set it on the device field.
+    If not found, returns False (caller should store in JSON).
+    """
+    from ipam.models import IPAddress
+    import ipaddress
+
+    try:
+        target_interface = ipaddress.ip_interface(ip_str)
+    except ValueError:
+        return False
+
+    # Search device interfaces for one whose assigned IPs or subnet matches
+    for iface in device.interfaces.prefetch_related("ip_addresses").all():
+        for existing_ip in iface.ip_addresses.all():
+            try:
+                existing_net = ipaddress.ip_interface(str(existing_ip.address)).network
+                if target_interface.ip in existing_net:
+                    # Found a matching interface - handle IPAddress safely
+                    vrf = getattr(iface, "vrf", None)
+                    ip_obj = IPAddress.objects.filter(address=ip_str, vrf=vrf).first()
+                    if ip_obj is None:
+                        ip_obj = IPAddress.objects.create(address=ip_str, assigned_object=iface, vrf=vrf)
+                    elif ip_obj.assigned_object is None:
+                        ip_obj.assigned_object = iface
+                        ip_obj.save(update_fields=["assigned_object_type", "assigned_object_id"])
+                    elif getattr(ip_obj.assigned_object, "device_id", None) != device.pk:
+                        return False
+                    setattr(device, ip_field, ip_obj)
+                    device.save(update_fields=[ip_field])
+                    return True
+            except (ValueError, AttributeError):
+                continue
+    return False
+
+
 def _pass3_process_devices(rows, ctx, class_role_map):
     """Pass 3: create or update Device objects."""
     from dcim.models import Device, DeviceRole, DeviceType, Rack
@@ -862,19 +1160,44 @@ def _pass3_process_devices(rows, ctx, class_role_map):
     ignored_source_ids = set(IgnoredDevice.objects.filter(profile=ctx.profile).values_list("source_id", flat=True))
 
     for row in rows:
-        device_class = str(row.get("device_class", "")).strip()
+        device_class = _str_val(row.get("device_class"))
         crm = class_role_map.get(device_class)
         if crm and crm.creates_rack:
             continue
 
         source_id = str(row.get("source_id", ""))
-        device_name = str(row.get("device_name", "")).strip()
-        rack_name = str(row.get("rack_name", "")).strip()
-        make = " ".join(str(row.get("make", "Unknown")).split()) or "Unknown"
-        model = " ".join(str(row.get("model", "Unknown")).split()) or "Unknown"
-        serial = str(row.get("serial", "")).strip()
-        asset_tag_raw = str(row.get("asset_tag", "")).strip() or None
+        device_name = _str_val(row.get("device_name"))
+        rack_name = _str_val(row.get("rack_name"))
+        make = " ".join((_str_val(row.get("make")) or "Unknown").split())
+        model = " ".join((_str_val(row.get("model")) or "Unknown").split())
+        serial = _str_val(row.get("serial"))
+        asset_tag_raw = _str_val(row.get("asset_tag")) or None
         asset_tag = asset_tag_raw[:50] if asset_tag_raw else None
+
+        ip_fields = {}
+        for ip_field in ("primary_ip4", "primary_ip6", "oob_ip"):
+            raw = str(row.get(ip_field, "")).strip()
+            if raw:
+                parsed = _parse_ip_with_prefix(raw)
+                if parsed:
+                    ip_fields[ip_field] = parsed
+                else:
+                    logger.warning("Row %s: unparseable IP value for %s: %r", row.get("_row_number"), ip_field, raw)
+
+        if source_id and source_id in ignored_source_ids:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="ignore",
+                    object_type="device",
+                    detail="Ignored device",
+                    rack_name=rack_name,
+                    extra_data={"ignore_kind": "individual"},
+                )
+            )
+            continue
 
         u_position_raw = row.get("u_position")
         try:
@@ -908,19 +1231,13 @@ def _pass3_process_devices(rows, ctx, class_role_map):
             )
             continue
 
-        if source_id in ignored_source_ids:
-            ctx.result.rows.append(
-                RowResult(
-                    row_number=row["_row_number"],
-                    source_id=source_id,
-                    name=device_name,
-                    action="ignore",
-                    object_type="device",
-                    detail="Ignored device",
-                    rack_name=rack_name,
-                )
-            )
-            continue
+        # Resolve device type slugs and u_height early for error cases
+        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
+        u_height_raw = row.get("u_height", 1)
+        try:
+            u_height = max(1, int(float(u_height_raw)))
+        except (TypeError, ValueError):
+            u_height = 1
 
         if not crm:
             ctx.result.rows.append(
@@ -937,6 +1254,9 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                         "source_make": make,
                         "source_model": model,
                         "asset_tag": asset_tag or "",
+                        "mfg_slug": mfg_slug,
+                        "dt_slug": dt_slug,
+                        "u_height": u_height,
                     },
                 )
             )
@@ -956,10 +1276,9 @@ def _pass3_process_devices(rows, ctx, class_role_map):
             )
             continue
 
-        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
-        device_status = status_map.get(str(row.get("status", "")).strip().lower(), "active")
-        device_face = side_map.get(str(row.get("face", "")).strip().lower())
-        device_airflow = airflow_map.get(str(row.get("airflow", "")).strip().lower())
+        device_status = status_map.get(_str_val(row.get("status")).lower(), "active")
+        device_face = side_map.get(_str_val(row.get("face")).lower())
+        device_airflow = airflow_map.get(_str_val(row.get("airflow")).lower())
 
         if ctx.dry_run:
             row_result = _preview_device_row(
@@ -976,6 +1295,11 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 DeviceType,
                 Device,
                 Rack,
+                ip_fields=ip_fields,
+                device_face=device_face,
+                device_airflow=device_airflow,
+                device_status=device_status,
+                u_position=position,
             )
         else:
             row_result = _write_device_row(
@@ -998,6 +1322,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 DeviceRole,
                 Rack,
                 Device,
+                ip_fields=ip_fields,
             )
         ctx.result.rows.append(row_result)
 
@@ -1026,7 +1351,9 @@ def run_import(
         user=user,
     )
 
-    class_role_map: dict[str, object] = {crm.source_class: crm for crm in profile.class_role_mappings.all()}
+    class_role_map: dict[str, object] = {
+        crm.source_class: crm for crm in profile.class_role_mappings.select_related("rack_type").all()
+    }
 
     _pass1_ensure_types(rows, ctx, class_role_map)
     _pass2_process_racks(rows, ctx, class_role_map)
@@ -1043,7 +1370,9 @@ def run_import(
 # ---------------------------------------------------------------------------
 
 
-def _store_source_id(obj, profile: ImportProfile, source_id: str):
+def _store_source_id(
+    obj, profile: ImportProfile, source_id: str, extra_columns: dict | None = None, ip_data: dict | None = None
+):
     """Store source ID in the configured custom field and in the plugin's JSON metadata field."""
     changed = False
 
@@ -1057,11 +1386,16 @@ def _store_source_id(obj, profile: ImportProfile, source_id: str):
 
     # Plugin-managed JSON field: data_import_source
     try:
-        obj.custom_field_data["data_import_source"] = {
+        data = {
             "source_id": source_id or "",
             "profile_id": profile.pk,
             "profile_name": profile.name,
         }
+        if extra_columns:
+            data["extra"] = extra_columns
+        if ip_data:
+            data["_ip"] = ip_data
+        obj.custom_field_data["data_import_source"] = data
         changed = True
     except (AttributeError, KeyError):  # pragma: no cover
         logger.warning("Failed to set data_import_source on %s", obj)
