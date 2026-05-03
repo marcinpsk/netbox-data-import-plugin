@@ -611,14 +611,14 @@
                    oninput="reSplit()">
           </div>
 
-          <div class="row g-3" id="res_parts_row">
-            {# Dynamically populated parts #}
-          </div>
-
-          <div id="res_existing_notice" class="alert alert-info py-2 mt-3 d-none">
+          <div id="res_existing_notice" class="alert alert-info py-2 mb-3 d-none">
             <i class="mdi mdi-information"></i> <strong>Previously saved resolution:</strong>
             <code id="res_existing_display"></code>
-            — values below are pre-filled from that resolution; edit as needed.
+            — fields below are pre-filled from that resolution; edit as needed.
+          </div>
+
+          <div class="row g-3" id="res_parts_row">
+            {# Dynamically populated parts #}
           </div>
 
           <div id="res_device_check" class="mt-3 d-none">

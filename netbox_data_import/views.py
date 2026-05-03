@@ -1237,7 +1237,8 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         for item in data:
             try:
                 rack_type = None
-                rack_type_slug = item.get("rack_type")
+                rack_type_present = "rack_type" in item
+                rack_type_slug = item.get("rack_type") if rack_type_present else None
                 if rack_type_slug:
                     from dcim.models import RackType
 
@@ -1249,17 +1250,20 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
                         )
                         continue
 
+                defaults = {
+                    "creates_rack": item.get("creates_rack", False),
+                    "role_slug": item.get("role_slug", ""),
+                    "ignore": item.get("ignore", False),
+                }
+                if rack_type_present:
+                    defaults["rack_type"] = rack_type
+
                 obj, was_created = ClassRoleMapping.objects.get_or_create(
                     profile=profile,
                     source_class=item["source_class"],
-                    defaults={
-                        "creates_rack": item.get("creates_rack", False),
-                        "role_slug": item.get("role_slug", ""),
-                        "ignore": item.get("ignore", False),
-                        "rack_type": rack_type,
-                    },
+                    defaults=defaults,
                 )
-                if not was_created and rack_type_slug is not None:
+                if not was_created and rack_type_present:
                     obj.rack_type = rack_type
                     obj.save(update_fields=["rack_type"])
                 if was_created:
