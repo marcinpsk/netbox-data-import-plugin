@@ -222,9 +222,7 @@ def _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, retu
     for col in unmapped_cols:
         idx = raw_headers[col]
         raw_val = row[idx] if idx < len(row) else None
-        if raw_val is None:
-            continue
-        str_val = str(raw_val).strip()
+        str_val = _str_val(raw_val)
         if not str_val:
             continue
         extra[col] = str_val

@@ -640,6 +640,7 @@
   </div>
 </div>
 
+{{ existing_resolutions|json_script:"ndi-existing-resolutions" }}
 <script>
 // ── Row filter ──────────────────────────────────────────────────────────────
 (function() {
@@ -694,7 +695,6 @@ var TARGET_FIELDS = [
   ['source_id', 'Source ID'],
 ];
 
-{{ existing_resolutions|json_script:"ndi-existing-resolutions" }}
 // Existing saved resolutions keyed by source_id → source_column → {original_value, resolved_fields}
 var EXISTING_RESOLUTIONS = JSON.parse(document.getElementById('ndi-existing-resolutions').textContent);
 

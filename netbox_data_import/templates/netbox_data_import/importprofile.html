@@ -17,8 +17,8 @@
           <tr><th scope="row">Sheet Name</th><td><code>{{ object.sheet_name }}</code></td></tr>
           <tr><th scope="row">Source ID Column</th><td>{{ object.source_id_column|placeholder }}</td></tr>
           <tr><th scope="row">Custom Field Name</th><td>{{ object.custom_field_name|placeholder }}</td></tr>
-          <tr><th scope="row">Update Existing</th><td>{% if object.update_existing %}<span class="badge bg-success">Yes</span>{% else %}<span class="badge bg-secondary text-white">No</span>{% endif %}</td></tr>
-          <tr><th scope="row">Create Missing Device Types</th><td>{% if object.create_missing_device_types %}<span class="badge bg-success">Yes</span>{% else %}<span class="badge bg-secondary text-white">No</span>{% endif %}</td></tr>
+          <tr><th scope="row">Update Existing</th><td>{% if object.update_existing %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td></tr>
+          <tr><th scope="row">Create Missing Device Types</th><td>{% if object.create_missing_device_types %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td></tr>
         </table>
       </div>
     </div>

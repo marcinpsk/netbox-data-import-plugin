@@ -686,7 +686,14 @@ class ImportSetupView(PermissionRequiredMixin, View):
             "tenant_id": tenant.pk if tenant else None,
             "filename": excel_file.name,
         }
-        request.session["import_unused_columns"] = unused_stats
+        request.session["import_unused_columns"] = {
+            col: {
+                "count": int((stats or {}).get("count", 0)),
+                "samples": [str(s) for s in (stats or {}).get("samples", [])],
+            }
+            for col, stats in (unused_stats or {}).items()
+            if isinstance(stats, dict)
+        }
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
@@ -1240,15 +1247,32 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         created = skipped = 0
         for item in data:
             try:
-                _, was_created = ClassRoleMapping.objects.get_or_create(
+                rack_type = None
+                rack_type_slug = item.get("rack_type")
+                if rack_type_slug:
+                    from dcim.models import RackType
+
+                    try:
+                        rack_type = RackType.objects.get(slug=rack_type_slug)
+                    except RackType.DoesNotExist:
+                        errors.append(
+                            f"RackType with slug '{rack_type_slug}' not found for source_class '{item.get('source_class')}'"
+                        )
+                        continue
+
+                obj, was_created = ClassRoleMapping.objects.get_or_create(
                     profile=profile,
                     source_class=item["source_class"],
                     defaults={
                         "creates_rack": item.get("creates_rack", False),
                         "role_slug": item.get("role_slug", ""),
                         "ignore": item.get("ignore", False),
+                        "rack_type": rack_type,
                     },
                 )
+                if not was_created and rack_type_slug is not None:
+                    obj.rack_type = rack_type
+                    obj.save(update_fields=["rack_type"])
                 if was_created:
                     created += 1
                 else:
