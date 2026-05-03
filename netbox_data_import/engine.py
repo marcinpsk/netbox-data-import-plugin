@@ -686,7 +686,7 @@ def _pass2_process_racks(rows, ctx, class_role_map):
         if not (crm and crm.creates_rack):
             continue
 
-        rack_name = _str_val(row.get("rack_name"))
+        rack_name = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
         source_id = str(row.get("source_id", ""))
         u_height_raw = row.get("u_height", 42)
         serial = _str_val(row.get("serial"))

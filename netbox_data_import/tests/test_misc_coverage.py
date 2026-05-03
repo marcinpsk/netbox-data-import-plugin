@@ -185,3 +185,15 @@ class StrValHelperTests(TestCase):
 
     def test_empty_string_returns_empty(self):
         self.assertEqual(_str_val(""), "")
+
+    def test_rack_name_falls_back_to_device_name_when_empty(self):
+        """Cabinet rows have rack_name=None (Rack column empty); device_name holds the cabinet name."""
+        row = {"device_name": "ITC-RACK-01", "rack_name": None}
+        resolved = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
+        self.assertEqual(resolved, "ITC-RACK-01")
+
+    def test_rack_name_wins_over_device_name_when_set(self):
+        """When rack_name is explicitly set it takes precedence over device_name."""
+        row = {"device_name": "CABINET-X", "rack_name": "RACK-01"}
+        resolved = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
+        self.assertEqual(resolved, "RACK-01")
