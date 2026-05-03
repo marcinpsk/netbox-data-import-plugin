@@ -1955,7 +1955,11 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
                     }
                 )
         elif obj_type == "rack_type":
-            qs = RackType.objects.select_related("manufacturer").filter(model__icontains=q)[:limit]
+            from django.db.models import Q
+
+            qs = RackType.objects.select_related("manufacturer").filter(
+                Q(model__icontains=q) | Q(manufacturer__name__icontains=q) | Q(slug__icontains=q)
+            )[:limit]
             for rt in qs:
                 results.append(
                     {
