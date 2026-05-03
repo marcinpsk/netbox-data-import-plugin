@@ -156,6 +156,25 @@ class ImportContext:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_NONE_LIKE = frozenset({"none", "nan", "null", "n/a", "#n/a"})
+
+
+def _str_val(v) -> str:
+    """Safely convert a cell value to a stripped string.
+
+    None, NaN (pandas), and sentinel strings like "None"/"nan"/"null" are
+    returned as an empty string so callers never see the literal text "None".
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    return "" if s.lower() in _NONE_LIKE else s
+
+
+# ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
 
@@ -558,13 +577,13 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
     seen_roles: set[str] = set()
 
     for row in rows:
-        device_class = str(row.get("device_class", "")).strip()
+        device_class = _str_val(row.get("device_class"))
         crm = class_role_map.get(device_class)
         if crm is None or crm.creates_rack or crm.ignore:
             continue
 
-        make = " ".join(str(row.get("make", "Unknown")).split()) or "Unknown"
-        model = " ".join(str(row.get("model", "Unknown")).split()) or "Unknown"
+        make = " ".join((_str_val(row.get("make")) or "Unknown").split())
+        model = " ".join((_str_val(row.get("model")) or "Unknown").split())
         u_height_raw = row.get("u_height", 1)
         try:
             u_height = max(1, int(float(u_height_raw)))
@@ -662,15 +681,15 @@ def _pass2_process_racks(rows, ctx, class_role_map):
     from dcim.models import Rack
 
     for row in rows:
-        device_class = str(row.get("device_class", "")).strip()
+        device_class = _str_val(row.get("device_class"))
         crm = class_role_map.get(device_class)
         if not (crm and crm.creates_rack):
             continue
 
-        rack_name = str(row.get("rack_name", "")).strip()
+        rack_name = _str_val(row.get("rack_name"))
         source_id = str(row.get("source_id", ""))
         u_height_raw = row.get("u_height", 42)
-        serial = str(row.get("serial", "")).strip()
+        serial = _str_val(row.get("serial"))
 
         try:
             u_height = max(1, int(float(u_height_raw)))
@@ -848,7 +867,7 @@ def _preview_device_row(
             },
         )
 
-    rack_name = str(row.get("rack_name", "")).strip()
+    rack_name = _str_val(row.get("rack_name"))
     if rack_name:
         if rack_name in ctx.rack_map:
             rack_label = rack_name
@@ -953,7 +972,7 @@ def _write_device_row(
     ip_fields: dict | None = None,
 ):
     """Write or update a device in the DB and return a RowResult."""
-    rack_name = str(row.get("rack_name", "")).strip()
+    rack_name = _str_val(row.get("rack_name"))
     try:
         device_type = DeviceType.objects.get(manufacturer__slug=mfg_slug, slug=dt_slug)
     except DeviceType.DoesNotExist:
@@ -1120,18 +1139,18 @@ def _pass3_process_devices(rows, ctx, class_role_map):
     ignored_source_ids = set(IgnoredDevice.objects.filter(profile=ctx.profile).values_list("source_id", flat=True))
 
     for row in rows:
-        device_class = str(row.get("device_class", "")).strip()
+        device_class = _str_val(row.get("device_class"))
         crm = class_role_map.get(device_class)
         if crm and crm.creates_rack:
             continue
 
         source_id = str(row.get("source_id", ""))
-        device_name = str(row.get("device_name", "")).strip()
-        rack_name = str(row.get("rack_name", "")).strip()
-        make = " ".join(str(row.get("make", "Unknown")).split()) or "Unknown"
-        model = " ".join(str(row.get("model", "Unknown")).split()) or "Unknown"
-        serial = str(row.get("serial", "")).strip()
-        asset_tag_raw = str(row.get("asset_tag", "")).strip() or None
+        device_name = _str_val(row.get("device_name"))
+        rack_name = _str_val(row.get("rack_name"))
+        make = " ".join((_str_val(row.get("make")) or "Unknown").split())
+        model = " ".join((_str_val(row.get("model")) or "Unknown").split())
+        serial = _str_val(row.get("serial"))
+        asset_tag_raw = _str_val(row.get("asset_tag")) or None
         asset_tag = asset_tag_raw[:50] if asset_tag_raw else None
 
         ip_fields = {}
@@ -1236,9 +1255,9 @@ def _pass3_process_devices(rows, ctx, class_role_map):
             )
             continue
 
-        device_status = status_map.get(str(row.get("status", "")).strip().lower(), "active")
-        device_face = side_map.get(str(row.get("face", "")).strip().lower())
-        device_airflow = airflow_map.get(str(row.get("airflow", "")).strip().lower())
+        device_status = status_map.get(_str_val(row.get("status")).lower(), "active")
+        device_face = side_map.get(_str_val(row.get("face")).lower())
+        device_airflow = airflow_map.get(_str_val(row.get("airflow")).lower())
 
         if ctx.dry_run:
             row_result = _preview_device_row(

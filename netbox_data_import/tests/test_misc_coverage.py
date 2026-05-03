@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 
+from netbox_data_import.engine import _str_val
 from netbox_data_import.models import ImportJob, ImportProfile
 from netbox_data_import.tables import ImportJobTable
 from netbox_data_import.template_content import DeviceImportDataExtension
@@ -153,3 +154,34 @@ class ImportJobTableRenderTest(TestCase):
         """render_devices_created() returns 0 when value is None."""
         table = ImportJobTable([])
         self.assertEqual(table.render_devices_created(None), 0)
+
+
+class StrValHelperTests(TestCase):
+    """Tests for engine._str_val — guards against None/NaN cells producing literal 'None'."""
+
+    def test_none_returns_empty(self):
+        self.assertEqual(_str_val(None), "")
+
+    def test_string_none_returns_empty(self):
+        """str(None) == 'None'; _str_val must not return that literal."""
+        self.assertEqual(_str_val("None"), "")
+
+    def test_string_nan_returns_empty(self):
+        self.assertEqual(_str_val("nan"), "")
+        self.assertEqual(_str_val("NaN"), "")
+
+    def test_string_null_returns_empty(self):
+        self.assertEqual(_str_val("null"), "")
+        self.assertEqual(_str_val("NULL"), "")
+
+    def test_normal_string_passes_through(self):
+        self.assertEqual(_str_val("RACK-01"), "RACK-01")
+
+    def test_strips_whitespace(self):
+        self.assertEqual(_str_val("  rack-01  "), "rack-01")
+
+    def test_integer_converts(self):
+        self.assertEqual(_str_val(42), "42")
+
+    def test_empty_string_returns_empty(self):
+        self.assertEqual(_str_val(""), "")
