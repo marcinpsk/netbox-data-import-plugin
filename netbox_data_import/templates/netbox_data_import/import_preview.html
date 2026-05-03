@@ -203,7 +203,7 @@
             <strong><i class="mdi mdi-server-network"></i> {{ rack_name }}</strong>
             <span class="d-flex align-items-center gap-1">
               {% if group.rack_row %}
-                <span class="badge bg-light text-dark" title="{{ group.rack_row.detail }}">
+                <span class="badge bg-white text-dark border" title="{{ group.rack_row.detail }}">
                   {% if group.rack_row.action == 'create' %}Create
                   {% elif group.rack_row.action == 'update' %}Update
                   {% elif group.rack_row.action == 'skip' %}Existing
@@ -211,9 +211,9 @@
                   {% endif %}
                 </span>
               {% else %}
-                <span class="badge bg-secondary">No rack row</span>
+                <span class="badge bg-warning text-dark">No rack row</span>
               {% endif %}
-              <span class="badge bg-light text-dark">{{ group.devices|length }} device{{ group.devices|length|pluralize }}</span>
+              <span class="badge ndi-count-badge">{{ group.devices|length }} device{{ group.devices|length|pluralize }}</span>
             </span>
           </div>
           <div class="card-body p-2">
@@ -224,11 +224,11 @@
                 {% if dev.action == 'ignore' %}text-decoration-line-through text-muted{% endif %}
               ">
                 <span>
-                  {% if dev.action == 'create' %}<span class="badge bg-success me-1">+</span>
-                  {% elif dev.action == 'update' %}<span class="badge bg-primary me-1">~</span>
-                  {% elif dev.action == 'skip' %}<span class="badge bg-secondary me-1">—</span>
-                  {% elif dev.action == 'error' %}<span class="badge bg-danger me-1">!</span>
-                  {% elif dev.action == 'ignore' %}<span class="badge bg-dark me-1">✕</span>
+                  {% if dev.action == 'create' %}<span class="badge ndi-badge-create me-1">+</span>
+                  {% elif dev.action == 'update' %}<span class="badge ndi-badge-update me-1">~</span>
+                  {% elif dev.action == 'skip' %}<span class="badge ndi-badge-skip me-1">—</span>
+                  {% elif dev.action == 'error' %}<span class="badge ndi-badge-error me-1">!</span>
+                  {% elif dev.action == 'ignore' %}<span class="badge ndi-badge-ignored me-1">✕</span>
                   {% endif %}
                   {% if dev.extra_data.u_position %}<small class="text-muted me-1">U{{ dev.extra_data.u_position }}</small>{% endif %}
                   {{ dev.name }}
