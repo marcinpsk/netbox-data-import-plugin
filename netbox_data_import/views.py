@@ -1088,17 +1088,6 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
             device.save(update_fields=["status"])
             return device.status
 
-        if field == "u_height":
-            # u_height is a DeviceType field — this change affects all devices sharing this type
-            try:
-                height = float(value)
-            except (ValueError, TypeError):
-                raise ValueError(f"Cannot parse '{value}' as number for u_height")
-            device.device_type.u_height = height
-            device.device_type.save(update_fields=["u_height"])
-            n = device.device_type.u_height
-            return f"{int(n)}U" if n == int(n) else f"{n}U"
-
         if field == "serial":
             device.serial = str(value)[:50]
             device.save(update_fields=["serial"])

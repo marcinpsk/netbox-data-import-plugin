@@ -1029,6 +1029,9 @@ function cmSearchRoles() {
         };
         container.appendChild(btn);
       });
+    })
+    .catch(function() {
+      document.getElementById('cm_role_search_results').innerHTML = '<p class="text-danger small">Search failed. Please try again.</p>';
     });
 }
 
@@ -1100,6 +1103,9 @@ function mmSearch() {
         };
         container.appendChild(btn);
       });
+    })
+    .catch(function() {
+      document.getElementById('mm_search_results').innerHTML = '<p class="text-danger small">Search failed. Please try again.</p>';
     });
 }
 
