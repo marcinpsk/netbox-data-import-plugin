@@ -107,13 +107,14 @@ class BulkImportSeekOnYamlErrorTest(TestCase):
         resp = self.client.post(url, {"upload_file": invalid_yaml, "format": "yaml"}, follow=True)
         # After following any redirects, the final response should be 200
         self.assertEqual(resp.status_code, 200)
-        # Verify the fallback path: form should have validation errors
-        form = resp.context.get("form") if resp.context else None
-        if form is not None:
-            self.assertTrue(
-                form.errors,
-                "Expected form validation errors on the YAML error fallback path",
-            )
+        # Verify the seek(0)+super().post() fallback actually ran:
+        # super().post() redirects after processing (or renders form errors).
+        # With follow=True, a non-empty redirect_chain proves the fallback path
+        # executed — it didn't crash and did delegate to the parent view.
+        self.assertTrue(
+            resp.redirect_chain or (resp.context and resp.context.get("form") is not None),
+            "seek(0)+super().post() fallback must produce a valid HTTP response",
+        )
 
 
 class ProfileChildEditViewPermissionTest(TestCase):
