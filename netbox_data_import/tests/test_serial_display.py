@@ -2,13 +2,16 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Tests for dmSearch() serial number display in device matching modal."""
 
+import os
+
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Permission
 from django.test import Client, TestCase
 from django.urls import reverse
 from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 
 User = get_user_model()
+
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
 
 
 class SearchDeviceSerialDisplayTest(TestCase):
@@ -17,14 +20,10 @@ class SearchDeviceSerialDisplayTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         """Set up test data for device search with serials."""
-        cls.user = User.objects.create_user(username="testuser", password="testpass")
-        perms = [
-            Permission.objects.get(content_type__app_label="dcim", codename="view_device"),
-            Permission.objects.get(content_type__app_label="dcim", codename="view_devicetype"),
-            Permission.objects.get(content_type__app_label="dcim", codename="view_manufacturer"),
-            Permission.objects.get(content_type__app_label="netbox_data_import", codename="view_importprofile"),
-        ]
-        cls.user.user_permissions.add(*perms)
+        # NetBox uses ObjectPermissionBackend — regular users need ObjectPermission
+        # objects, not standard Django Permission objects.  Use a superuser to
+        # bypass permission checks and avoid false 403 responses in tests.
+        cls.user = User.objects.create_superuser(username="testuser", password="testpass")
 
         # Create site
         cls.site = Site.objects.create(name="TestSite", slug="testsite")
@@ -60,6 +59,26 @@ class SearchDeviceSerialDisplayTest(TestCase):
         self.client = Client()
         self.client.force_login(self.user)
 
+    def _setup_preview_session(self, profile):
+        """Populate session so ImportPreviewView renders instead of redirecting."""
+        from netbox_data_import.engine import parse_file, run_import
+        from netbox_data_import.views import _serialize_rows
+
+        with open(FIXTURE_PATH, "rb") as f:
+            rows = parse_file(f, profile)
+        result = run_import(rows, profile, {"site": self.site}, dry_run=True)
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "sample_cans.xlsx",
+        }
+        session.save()
+
     def test_search_objects_includes_serial_in_response(self):
         """search_objects API returns device serial in results."""
         url = reverse("plugins:netbox_data_import:search_objects")
@@ -93,9 +112,12 @@ class SearchDeviceSerialDisplayTest(TestCase):
         resp = self.client.get(url, {"type": "device", "q": "server-001"})
         data = resp.json()
 
-        self.assertEqual(len(data["results"]), 1)
-        self.assertEqual(data["results"][0]["name"], "server-001")
-        self.assertEqual(data["results"][0]["serial"], "ABC123")
+        # _device_search_q tokenises on '-', so other devices sharing tokens
+        # ("server", "001") may also appear; assert the target is present with
+        # the correct serial number.
+        results_by_name = {r["name"]: r for r in data["results"]}
+        self.assertIn("server-001", results_by_name)
+        self.assertEqual(results_by_name["server-001"]["serial"], "ABC123")
 
     def test_search_objects_empty_query_returns_empty(self):
         """search_objects API with empty query returns empty results."""
@@ -136,54 +158,58 @@ class SearchDeviceSerialDisplayTest(TestCase):
 
         self.assertEqual(len(data["results"]), 0)
 
-    def test_dmSearch_results_table_structure(self):
-        """Import preview template includes dmSearch() function and table ID."""
-        from netbox_data_import.models import ColumnMapping, ImportProfile
+    def _make_preview_profile(self, name="SerialTestProfile"):
+        """Create an ImportProfile compatible with the test fixture file."""
+        from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile
 
         profile = ImportProfile.objects.create(
-            name="TestProfile",
+            name=name,
             sheet_name="Data",
             source_id_column="Id",
-            update_existing=False,
+            update_existing=True,
+            create_missing_device_types=True,
         )
         for src, tgt in {
             "Id": "source_id",
+            "Rack": "rack_name",
             "Name": "device_name",
-            "Serial": "serial",
+            "Class": "device_class",
+            "Make": "make",
+            "Model": "model",
+            "UHeight": "u_height",
+            "UPosition": "u_position",
+            "Serial Number": "serial",
+            "Asset Tag": "asset_tag",
+            "Status": "status",
         }.items():
             ColumnMapping.objects.create(profile=profile, source_column=src, target_field=tgt)
+        ClassRoleMapping.objects.create(profile=profile, source_class="Cabinet", creates_rack=True)
+        ClassRoleMapping.objects.create(profile=profile, source_class="Server", creates_rack=False, role_slug="server")
+        return profile
 
-        url = reverse("plugins:netbox_data_import:import_preview", kwargs={"pk": profile.pk})
+    def test_dmSearch_results_table_structure(self):
+        """Import preview template includes dmSearch() function and table ID."""
+        profile = self._make_preview_profile("StructureProfile")
+        self._setup_preview_session(profile)
+        url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
+        html = resp.content.decode()
         # Check that dmSearch function exists
-        self.assertIn("function dmSearch()", resp.content.decode())
-        # Check that table ID exists
-        self.assertIn('id="mm_search_results_table"', resp.content.decode())
-        # Check for serial column header
-        self.assertIn("Serial", resp.content.decode())
+        self.assertIn("function dmSearch()", html)
+        # Table ID is set via JS assignment, not as an HTML attribute
+        self.assertIn("mm_search_results_table", html)
+        # Check for serial column header in JS
+        self.assertIn("Serial", html)
         # Check for mismatch warning div
-        self.assertIn('id="mm_serial_mismatch_warning"', resp.content.decode())
+        self.assertIn('id="mm_serial_mismatch_warning"', html)
 
     def test_dmSearch_source_serial_in_modal(self):
         """Device Match modal captures source serial from button data."""
-        from netbox_data_import.models import ColumnMapping, ImportProfile
-
-        profile = ImportProfile.objects.create(
-            name="TestProfile",
-            sheet_name="Data",
-            source_id_column="Id",
-            update_existing=False,
-        )
-        for src, tgt in {
-            "Id": "source_id",
-            "Name": "device_name",
-            "Serial": "serial",
-        }.items():
-            ColumnMapping.objects.create(profile=profile, source_column=src, target_field=tgt)
-
-        url = reverse("plugins:netbox_data_import:import_preview", kwargs={"pk": profile.pk})
+        profile = self._make_preview_profile("SourceSerialProfile")
+        self._setup_preview_session(profile)
+        url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
@@ -194,22 +220,9 @@ class SearchDeviceSerialDisplayTest(TestCase):
 
     def test_dmSearch_mismatch_warning_banner(self):
         """Device Match modal includes mismatch warning banner."""
-        from netbox_data_import.models import ColumnMapping, ImportProfile
-
-        profile = ImportProfile.objects.create(
-            name="TestProfile",
-            sheet_name="Data",
-            source_id_column="Id",
-            update_existing=False,
-        )
-        for src, tgt in {
-            "Id": "source_id",
-            "Name": "device_name",
-            "Serial": "serial",
-        }.items():
-            ColumnMapping.objects.create(profile=profile, source_column=src, target_field=tgt)
-
-        url = reverse("plugins:netbox_data_import:import_preview", kwargs={"pk": profile.pk})
+        profile = self._make_preview_profile("MismatchProfile")
+        self._setup_preview_session(profile)
+        url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
@@ -221,22 +234,9 @@ class SearchDeviceSerialDisplayTest(TestCase):
 
     def test_dmSearch_escapes_html_in_warning(self):
         """dmSearch() includes HTML escape function for security."""
-        from netbox_data_import.models import ColumnMapping, ImportProfile
-
-        profile = ImportProfile.objects.create(
-            name="TestProfile",
-            sheet_name="Data",
-            source_id_column="Id",
-            update_existing=False,
-        )
-        for src, tgt in {
-            "Id": "source_id",
-            "Name": "device_name",
-            "Serial": "serial",
-        }.items():
-            ColumnMapping.objects.create(profile=profile, source_column=src, target_field=tgt)
-
-        url = reverse("plugins:netbox_data_import:import_preview", kwargs={"pk": profile.pk})
+        profile = self._make_preview_profile("EscapeProfile")
+        self._setup_preview_session(profile)
+        url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
@@ -245,22 +245,9 @@ class SearchDeviceSerialDisplayTest(TestCase):
 
     def test_serial_color_coding_logic(self):
         """dmSearch() function includes color coding logic for serial display."""
-        from netbox_data_import.models import ColumnMapping, ImportProfile
-
-        profile = ImportProfile.objects.create(
-            name="TestProfile",
-            sheet_name="Data",
-            source_id_column="Id",
-            update_existing=False,
-        )
-        for src, tgt in {
-            "Id": "source_id",
-            "Name": "device_name",
-            "Serial": "serial",
-        }.items():
-            ColumnMapping.objects.create(profile=profile, source_column=src, target_field=tgt)
-
-        url = reverse("plugins:netbox_data_import:import_preview", kwargs={"pk": profile.pk})
+        profile = self._make_preview_profile("ColorProfile")
+        self._setup_preview_session(profile)
+        url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
@@ -274,22 +261,9 @@ class SearchDeviceSerialDisplayTest(TestCase):
 
     def test_modal_trigger_button_has_source_serial(self):
         """Device Match modal trigger buttons include data-source-serial attribute."""
-        from netbox_data_import.models import ColumnMapping, ImportProfile
-
-        profile = ImportProfile.objects.create(
-            name="TestProfile",
-            sheet_name="Data",
-            source_id_column="Id",
-            update_existing=False,
-        )
-        for src, tgt in {
-            "Id": "source_id",
-            "Name": "device_name",
-            "Serial": "serial",
-        }.items():
-            ColumnMapping.objects.create(profile=profile, source_column=src, target_field=tgt)
-
-        url = reverse("plugins:netbox_data_import:import_preview", kwargs={"pk": profile.pk})
+        profile = self._make_preview_profile("TriggerButtonProfile")
+        self._setup_preview_session(profile)
+        url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 

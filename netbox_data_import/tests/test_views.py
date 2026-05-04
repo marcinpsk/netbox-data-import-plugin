@@ -1702,9 +1702,10 @@ class SearchNetBoxObjectsExtendedViewTest(BaseViewTestCase):
         resp = self.client.get(self.url + "?type=device&q=search-dev-with-serial")
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
-        self.assertEqual(len(data["results"]), 1)
-        result = data["results"][0]
-        self.assertEqual(result["name"], "search-dev-with-serial")
+        # _device_search_q tokenises on '-', so other devices sharing tokens may
+        # also appear; assert the target device is present with the correct serial.
+        result = next((r for r in data["results"] if r["name"] == "search-dev-with-serial"), None)
+        self.assertIsNotNone(result, "Expected 'search-dev-with-serial' in results")
         self.assertIn("serial", result)
         self.assertEqual(result["serial"], "ABC123XYZ")
 
@@ -1722,9 +1723,10 @@ class SearchNetBoxObjectsExtendedViewTest(BaseViewTestCase):
         resp = self.client.get(self.url + "?type=device&q=search-dev-no-serial")
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
-        self.assertEqual(len(data["results"]), 1)
-        result = data["results"][0]
-        self.assertEqual(result["name"], "search-dev-no-serial")
+        # _device_search_q tokenises on '-', so other devices sharing tokens may
+        # also appear; assert the target device is present with serial=null.
+        result = next((r for r in data["results"] if r["name"] == "search-dev-no-serial"), None)
+        self.assertIsNotNone(result, "Expected 'search-dev-no-serial' in results")
         self.assertIn("serial", result)
         self.assertIsNone(result["serial"])
 
