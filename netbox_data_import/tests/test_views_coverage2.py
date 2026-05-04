@@ -627,6 +627,53 @@ class SyncSingleRowViewTest(TestCase):
         self.assertIn("Row not found", data["error"])
 
     @patch("netbox_data_import.views.engine")
+    def test_non_create_preview_row_returns_400(self, mock_engine):
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "update"}]}
+        session.save()
+
+        resp = self.client.post(self._url(), {"row_number": "1"})
+
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "Only 'create' rows can be synced individually")
+        mock_engine.run_import.assert_not_called()
+
+    @patch("netbox_data_import.views.engine")
+    def test_missing_preview_result_returns_400(self, mock_engine):
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        resp = self.client.post(self._url(), {"row_number": "1"})
+
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "No preview data in session")
+        mock_engine.run_import.assert_not_called()
+
+    @patch("netbox_data_import.views.engine")
+    def test_missing_preview_row_returns_400(self, mock_engine):
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 2, "action": "create"}]}
+        session.save()
+
+        resp = self.client.post(self._url(), {"row_number": "1"})
+
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "Row not found in current preview data")
+        mock_engine.run_import.assert_not_called()
+
+    @patch("netbox_data_import.views.engine")
     def test_success_returns_ok_true(self, mock_engine):
         from netbox_data_import.engine import ImportResult, RowResult
 
@@ -647,6 +694,9 @@ class SyncSingleRowViewTest(TestCase):
         mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create"}]}
+        session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
         self.assertTrue(data["ok"])
@@ -677,6 +727,9 @@ class SyncSingleRowViewTest(TestCase):
         mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "R001"}]
 
         self._set_session([{"_row_number": 1, "source_id": "R001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create"}]}
+        session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
         self.assertTrue(data["ok"])
@@ -707,6 +760,9 @@ class SyncSingleRowViewTest(TestCase):
         mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create"}]}
+        session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
         self.assertFalse(data["ok"])

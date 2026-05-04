@@ -760,7 +760,6 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_name": match.device_name,
                 "device_serial": device.serial if device else "",
             }
-        device_match_info_json = _json.dumps(device_match_info)
 
         view_mode = request.GET.get("view", profile.preview_view_mode)
 
@@ -798,7 +797,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "target_field_choices": TARGET_FIELD_CHOICES,
                 "syncable_fields": SyncDeviceFieldView._ALLOWED_FIELDS,
                 "device_match_source_ids": device_match_source_ids,
-                "device_match_info_json": device_match_info_json,
+                "device_match_info": device_match_info,
             },
         )
 
@@ -2175,6 +2174,20 @@ class SyncSingleRowView(PermissionRequiredMixin, View):
         target = next((r for r in rows if r.get("_row_number") == row_number), None)
         if target is None:
             return JsonResponse({"ok": False, "error": "Row not found"})
+
+        import_result_data = request.session.get("import_result")
+        if not import_result_data:
+            return JsonResponse({"ok": False, "error": "No preview data in session"}, status=400)
+
+        preview_rows = import_result_data.get("rows", [])
+        preview_row = next((r for r in preview_rows if r.get("row_number") == row_number), None)
+        if preview_row is None:
+            return JsonResponse({"ok": False, "error": "Row not found in current preview data"}, status=400)
+        if preview_row.get("action") != "create":
+            return JsonResponse(
+                {"ok": False, "error": "Only 'create' rows can be synced individually"},
+                status=400,
+            )
 
         site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
         if not site:

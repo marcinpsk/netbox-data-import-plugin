@@ -676,7 +676,7 @@
 </div>
 
 {{ existing_resolutions|json_script:"ndi-existing-resolutions" }}
-{{ device_match_info_json|json_script:"ndi-device-match-info" }}
+{{ device_match_info|json_script:"ndi-device-match-info" }}
 <script>
 // ── Row filter ──────────────────────────────────────────────────────────────
 (function() {
@@ -1285,9 +1285,9 @@ function dmSearch() {
         if (!dev.serial && !sourceSerial) {
           serialHtml = '<span style="color:gray;">—</span>';
         } else if (dev.serial === sourceSerial) {
-          serialHtml = '<span style="color:green;"><i class="mdi mdi-check"></i> ' + (dev.serial || 'Empty') + '</span>';
+          serialHtml = '<span style="color:green;"><i class="mdi mdi-check"></i> ' + escapeHtml(dev.serial || 'Empty') + '</span>';
         } else {
-          serialHtml = '<span style="color:orange;"><i class="mdi mdi-alert"></i> ' + (dev.serial || 'Empty') + '</span>';
+          serialHtml = '<span style="color:orange;"><i class="mdi mdi-alert"></i> ' + escapeHtml(dev.serial || 'Empty') + '</span>';
           hasMismatch = true;
         }
         tdSerial.innerHTML = serialHtml;
@@ -1337,11 +1337,14 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-function unlinkFromModal() {
+function unlinkFromModal(btn) {
+  var profileId = document.getElementById('dm_profile_id').value;
   var sourceId = document.getElementById('dm_source_id').value;
-  if (!sourceId) return;
+  if (!profileId || !sourceId) {
+    alert('Cannot unlink: missing profile or source ID.');
+    return;
+  }
 
-  // Issue 2: Add null check for CSRF token element
   var csrfElement = document.querySelector('[name=csrfmiddlewaretoken]');
   if (!csrfElement) {
     console.error('CSRF token not found');
@@ -1349,46 +1352,29 @@ function unlinkFromModal() {
     return;
   }
 
-  // Issue 3: Prevent race condition with button disable + loading state
-  var btn = event.target;
-  if (btn.disabled) return; // Prevent double-clicks
+  if (btn.disabled) return;
   btn.disabled = true;
   var originalText = btn.textContent;
   btn.textContent = 'Unlinking...';
 
-  // Send unlink request via fetch
-  fetch('{% url "plugins:netbox_data_import:match_existing_device" %}', {
+  fetch('{% url "plugins:netbox_data_import:unlink_device" %}', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
       'X-CSRFToken': csrfElement.value
     },
-    body: JSON.stringify({
-      action: 'unlink',
-      profile_id: document.getElementById('dm_profile_id').value,
+    body: new URLSearchParams({
+      profile_id: profileId,
       source_id: sourceId
-    })
+    }).toString()
   })
-  .then(function(r) { return r.json(); })
-  .then(function(data) {
-    // Response validation: Always check data.success before using
-    if (!data || typeof data.success === 'undefined') {
-      throw new Error('Invalid response from server');
-    }
-    if (data.success) {
-      // Remove from DEVICE_MATCH_INFO
-      delete DEVICE_MATCH_INFO[sourceId];
-      // Display toggle: Use 'block' instead of empty string for consistency
-      document.getElementById('mm_current_link').style.display = 'none';
-    } else {
-      throw new Error(data.error || 'Unlink failed');
-    }
+  .then(function(r) {
+    if (!r.ok) throw new Error('Unlink failed');
+    window.location.reload();
   })
   .catch(function(err) {
     console.error('Unlink failed:', err);
     alert('Failed to unlink device. Please try again.');
-  })
-  .finally(function() {
     btn.disabled = false;
     btn.textContent = originalText;
   });
@@ -1628,7 +1614,7 @@ function unlinkFromModal() {
                 ID: <span id="mm_current_device_id">—</span><br>
                 Serial: <span id="mm_current_device_serial">—</span>
               </div>
-              <button type="button" class="btn btn-sm btn-danger" onclick="unlinkFromModal()">Unlink</button>
+              <button type="button" class="btn btn-sm btn-danger" onclick="unlinkFromModal(this)">Unlink</button>
             </div>
           </div>
 

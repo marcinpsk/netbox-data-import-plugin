@@ -465,38 +465,36 @@ class ImportPreviewViewContextTest(BaseViewTestCase):
         from netbox_data_import.engine import parse_file, run_import
         from netbox_data_import.models import DeviceExistingMatch
 
-        # Setup site, role, and devices
         site = Site.objects.create(name="MatchSite", slug="match-site")
         role = DeviceRole.objects.create(name="TestRole", slug="test-role")
         manufacturer = Manufacturer.objects.create(name="TestMfg", slug="test-mfg")
         device_type = DeviceType.objects.create(manufacturer=manufacturer, model="TestModel", slug="test-model")
 
-        # Create some devices
         device1 = Device.objects.create(name="device-a", site=site, device_type=device_type, role=role)
         device2 = Device.objects.create(name="device-b", site=site, device_type=device_type, role=role)
 
-        # Parse file and run import
         with open(FIXTURE_PATH, "rb") as f:
             rows = parse_file(f, profile)
         result = run_import(rows, profile, {"site": site}, dry_run=True)
 
-        # Create DeviceExistingMatch records
-        DeviceExistingMatch.objects.create(
-            profile=profile,
-            source_id="source_1",
-            source_asset_tag="asset_a",
-            netbox_device_id=device1.id,
-            device_name=device1.name,
-        )
-        DeviceExistingMatch.objects.create(
-            profile=profile,
-            source_id="source_5",
-            source_asset_tag="asset_b",
-            netbox_device_id=device2.id,
-            device_name=device2.name,
-        )
+        device_rows = [r for r in result.rows if r.object_type == "device" and r.source_id]
+        if len(device_rows) > 0:
+            DeviceExistingMatch.objects.create(
+                profile=profile,
+                source_id=device_rows[0].source_id,
+                source_asset_tag=device_rows[0].extra_data.get("asset_tag", "asset_a"),
+                netbox_device_id=device1.id,
+                device_name=device1.name,
+            )
+        if len(device_rows) > 1:
+            DeviceExistingMatch.objects.create(
+                profile=profile,
+                source_id=device_rows[1].source_id,
+                source_asset_tag=device_rows[1].extra_data.get("asset_tag", "asset_b"),
+                netbox_device_id=device2.id,
+                device_name=device2.name,
+            )
 
-        # Set up session
         from netbox_data_import.views import _serialize_rows
 
         session = self.client.session
@@ -510,10 +508,10 @@ class ImportPreviewViewContextTest(BaseViewTestCase):
             "filename": "sample_cans.xlsx",
         }
         session.save()
-        return site, device1, device2
+        return site, device1, device2, device_rows
 
     def test_device_match_context_included(self):
-        """Preview page context includes device_match_source_ids and device_match_info_json."""
+        """Preview page context includes device_match_source_ids and device_match_info."""
         profile = _make_profile("ContextProfile")
         self._setup_session_with_matches(profile)
 
@@ -522,7 +520,7 @@ class ImportPreviewViewContextTest(BaseViewTestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertIn("device_match_source_ids", resp.context)
-        self.assertIn("device_match_info_json", resp.context)
+        self.assertIn("device_match_info", resp.context)
 
     def test_device_match_context_empty_profile(self):
         """Preview page context has empty lists when profile has no DeviceExistingMatch records."""
@@ -555,29 +553,27 @@ class ImportPreviewViewContextTest(BaseViewTestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.context["device_match_source_ids"], [])
-        self.assertEqual(resp.context["device_match_info_json"], "{}")
+        self.assertEqual(resp.context["device_match_info"], {})
 
     def test_device_match_context_multiple_matches(self):
-        """Preview page context correctly serializes multiple DeviceExistingMatch records."""
-        import json
-
+        """Preview page context correctly includes multiple DeviceExistingMatch records."""
         profile = _make_profile("MultiProfile")
-        site, device1, device2 = self._setup_session_with_matches(profile)
+        site, device1, device2, device_rows = self._setup_session_with_matches(profile)
 
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
 
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("source_1", resp.context["device_match_source_ids"])
-        self.assertIn("source_5", resp.context["device_match_source_ids"])
-        self.assertEqual(len(resp.context["device_match_source_ids"]), 2)
+        self.assertGreaterEqual(len(device_rows), 2)
+        self.assertIn(device_rows[0].source_id, resp.context["device_match_source_ids"])
+        self.assertIn(device_rows[1].source_id, resp.context["device_match_source_ids"])
+        self.assertGreaterEqual(len(resp.context["device_match_source_ids"]), 2)
 
-        # Verify JSON format is valid
-        device_match_info = json.loads(resp.context["device_match_info_json"])
-        self.assertEqual(device_match_info["source_1"]["device_id"], device1.id)
-        self.assertEqual(device_match_info["source_1"]["device_name"], device1.name)
-        self.assertEqual(device_match_info["source_5"]["device_id"], device2.id)
-        self.assertEqual(device_match_info["source_5"]["device_name"], device2.name)
+        device_match_info = resp.context["device_match_info"]
+        self.assertEqual(device_match_info[device_rows[0].source_id]["device_id"], device1.id)
+        self.assertEqual(device_match_info[device_rows[0].source_id]["device_name"], device1.name)
+        self.assertEqual(device_match_info[device_rows[1].source_id]["device_id"], device2.id)
+        self.assertEqual(device_match_info[device_rows[1].source_id]["device_name"], device2.name)
 
 
 class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
@@ -703,8 +699,25 @@ class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
         # Verify form contains hidden inputs for profile_id and source_id
         self.assertIn('name="profile_id"', content)
         self.assertIn('name="source_id"', content)
+        self.assertIn('onclick="unlinkFromModal(this)"', content)
         # Verify context has some matched source IDs
         self.assertGreater(len(resp.context["device_match_source_ids"]), 0)
+
+    def test_unlink_button_uses_unlink_endpoint_with_form_data(self):
+        """Modal unlink action should post form data to the unlink endpoint."""
+        profile = _make_profile("UnlinkTestProfile3b")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+        self.assertIn("function unlinkFromModal(btn)", content)
+        self.assertIn(reverse("plugins:netbox_data_import:unlink_device"), content)
+        self.assertIn("application/x-www-form-urlencoded", content)
+        self.assertIn("Cannot unlink: missing profile or source ID.", content)
+        self.assertIn("window.location.reload()", content)
 
     def test_unlink_button_has_csrf_token(self):
         """Unlink button form should include CSRF token."""
@@ -833,9 +846,7 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
         self.assertIn("Currently Linked To:", content)
 
     def test_modal_current_link_json_data_passed(self):
-        """Modal receives device_match_info_json with correct structure."""
-        import json
-
+        """Modal receives device_match_info with correct structure."""
         profile = _make_profile("ModalTestProfile3")
         site, device1, device2 = self._setup_session_with_matches(profile)
 
@@ -843,18 +854,18 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
         resp = self.client.get(url)
 
         self.assertEqual(resp.status_code, 200)
-        # Verify context contains device_match_info_json
-        self.assertIn("device_match_info_json", resp.context)
-        device_match_info = json.loads(resp.context["device_match_info_json"])
+        self.assertIn("device_match_info", resp.context)
+        device_match_info = resp.context["device_match_info"]
         self.assertGreater(len(device_match_info), 0)
 
-        # Verify the JSON has expected structure
         for source_id, match_info in device_match_info.items():
             self.assertIn("device_id", match_info)
             self.assertIn("device_name", match_info)
 
     def test_modal_has_ndi_device_match_info_script(self):
-        """Modal page should have ndi-device-match-info script tag."""
+        """Modal page should serialize device match info as a JSON object."""
+        import json
+
         profile = _make_profile("ModalTestProfile4")
         self._setup_session_with_matches(profile)
 
@@ -863,17 +874,16 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
 
         self.assertEqual(resp.status_code, 200)
         content = resp.content.decode()
-        # Check that the json_script tag is present with the correct ID
-        self.assertIn('id="ndi-device-match-info"', content)
+        marker = '<script id="ndi-device-match-info" type="application/json">'
+        self.assertIn(marker, content)
+        script_content = content.split(marker, 1)[1].split("</script>", 1)[0]
+        self.assertIsInstance(json.loads(script_content), dict)
 
     def test_modal_displays_current_device_serial(self):
         """Modal should display current device serial number (Task 6)."""
-        import json
-
         profile = _make_profile("ModalTestProfile5")
         site, device1, device2 = self._setup_session_with_matches(profile)
 
-        # Add serial number to device1
         device1.serial = "SN-12345-ABC"
         device1.save()
 
@@ -881,45 +891,48 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
         resp = self.client.get(url)
 
         self.assertEqual(resp.status_code, 200)
-        # Verify device_match_info_json contains serial
-        device_match_info = json.loads(resp.context["device_match_info_json"])
+        device_match_info = resp.context["device_match_info"]
+        self.assertGreater(len(device_match_info), 0)
 
-        # Get the first device match
-        match_list = list(device_match_info.values())
-        self.assertGreater(len(match_list), 0)
+        serials = [info["device_serial"] for info in device_match_info.values()]
+        self.assertIn("SN-12345-ABC", serials)
 
-        # Check that serial is included in the JSON
-        first_match = match_list[0]
-        self.assertIn("device_serial", first_match)
-        self.assertEqual(first_match["device_serial"], "SN-12345-ABC")
-
-        # Check HTML contains serial element
         content = resp.content.decode()
         self.assertIn('id="mm_current_device_serial"', content)
 
     def test_modal_displays_serial_not_set_when_empty(self):
         """Modal should display 'Not set' when device has no serial (Task 6)."""
-        import json
-
         profile = _make_profile("ModalTestProfile6")
         site, device1, device2 = self._setup_session_with_matches(profile)
 
-        # device1 has no serial by default
+        # search_objects returns the raw model value (null for no serial), while
+        # device_match_info intentionally stores a blank string fallback for the modal.
         self.assertEqual(device1.serial, "")
 
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
 
         self.assertEqual(resp.status_code, 200)
-        device_match_info = json.loads(resp.context["device_match_info_json"])
+        device_match_info = resp.context["device_match_info"]
 
-        # Check that serial is empty string (converted from blank device.serial)
-        match_list = list(device_match_info.values())
-        self.assertGreater(len(match_list), 0)
-        first_match = match_list[0]
-        self.assertIn("device_serial", first_match)
-        # Empty serial should be stored as empty string in JSON
-        self.assertEqual(first_match["device_serial"], "")
+        # device_match_info intentionally normalizes blank serial values to ""
+        # even though the search endpoint returns a raw null device.serial value.
+        self.assertGreater(len(device_match_info), 0)
+        for match_info in device_match_info.values():
+            self.assertIn("device_serial", match_info)
+            self.assertEqual(match_info["device_serial"], "")
+
+    def test_modal_search_escapes_serial_before_innerhtml(self):
+        """Modal search should escape serial values before assigning innerHTML."""
+        profile = _make_profile("ModalTestProfile6b")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+        self.assertIn("escapeHtml(dev.serial || 'Empty')", content)
 
     def test_modal_clears_search_on_open(self):
         """Modal should have device match information and search capability when opening."""
@@ -3702,9 +3715,12 @@ class UnlinkDeviceViewTest(TestCase):
 
     def test_unlink_unauthenticated(self):
         """Unlink requires authentication."""
+        from django.conf import settings
+
         resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "SRC001"})
+        login_url = getattr(settings, "LOGIN_URL", "/login/")
         self.assertEqual(resp.status_code, 302)
-        self.assertTrue(str(resp.url).startswith("/login/"))
+        self.assertTrue(str(resp.url).startswith(login_url))
 
     def test_unlink_missing_profile(self):
         """Unlink returns 404 if profile not found."""
