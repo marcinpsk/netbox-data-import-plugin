@@ -433,6 +433,7 @@
                           data-bs-toggle="modal" data-bs-target="#deviceMatchModal"
                           data-source-id="{{ row.source_id}}"
                           data-source-name="{{ row.name}}"
+                          data-source-serial="{{ row.extra_data.source_serial|default:''}}"
                           data-source-asset-tag="{{ row.extra_data.asset_tag|default:''}}"
                           data-profile-id="{{ profile_id }}"
                           title="Link to an existing NetBox device">
@@ -456,6 +457,7 @@
                           data-bs-toggle="modal" data-bs-target="#deviceMatchModal"
                           data-source-id="{{ row.source_id}}"
                           data-source-name="{{ row.name}}"
+                          data-source-serial="{{ row.extra_data.source_serial|default:''}}"
                           data-source-asset-tag="{{ row.extra_data.asset_tag|default:''}}"
                           data-profile-id="{{ profile_id }}"
                           title="Link to an existing NetBox device instead of creating">
@@ -518,6 +520,37 @@
                           title="Map or create device type for '{{ row.extra_data.source_make }} / {{ row.extra_data.source_model }}'">
                     <i class="mdi mdi-chip"></i> Map DT
                   </button>
+                {% endif %}
+
+                {# Unlink from existing device #}
+                {% if row.object_type == 'device' and row.source_id in device_match_source_ids and profile_id %}
+                  <form method="post" action="{% url 'plugins:netbox_data_import:unlink_device' %}" class="d-inline ms-1">
+                    {% csrf_token %}
+                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                    <input type="hidden" name="source_id" value="{{ row.source_id }}">
+                    <button type="submit" class="btn btn-sm btn-danger" title="Unlink this device from existing NetBox device">
+                      <i class="mdi mdi-link-off"></i> Unlink
+                    </button>
+                  </form>
+                {% endif %}
+
+                {# Per-row sync button: show on create rows for devices and racks only #}
+                {% if row.action == 'create' and row.object_type == 'device' or row.action == 'create' and row.object_type == 'rack' %}
+                <button type="button" class="btn btn-sm btn-outline-success ms-1 ndi-sync-row-btn"
+                        data-bs-toggle="modal" data-bs-target="#syncRowModal"
+                        data-row-number="{{ row.row_number }}"
+                        data-object-type="{{ row.object_type }}"
+                        data-name="{{ row.name }}"
+                        data-source-id="{{ row.source_id }}"
+                        data-rack-name="{{ row.rack_name|default:'' }}"
+                        data-detail="{{ row.detail }}"
+                        data-source-make="{{ row.extra_data.source_make|default:'' }}"
+                        data-source-model="{{ row.extra_data.source_model|default:'' }}"
+                        data-asset-tag="{{ row.extra_data.asset_tag|default:'' }}"
+                        data-rack-type-name="{{ row.extra_data.rack_type_name|default:'' }}"
+                        title="Create this {{ row.object_type }} in NetBox now">
+                  <i class="mdi mdi-lightning-bolt"></i> Sync to NetBox
+                </button>
                 {% endif %}
 
               </td>
@@ -643,6 +676,7 @@
 </div>
 
 {{ existing_resolutions|json_script:"ndi-existing-resolutions" }}
+{{ device_match_info_json|json_script:"ndi-device-match-info" }}
 <script>
 // ── Row filter ──────────────────────────────────────────────────────────────
 (function() {
@@ -699,6 +733,11 @@ var TARGET_FIELDS = [
 
 // Existing saved resolutions keyed by source_id → source_column → {original_value, resolved_fields}
 var EXISTING_RESOLUTIONS = JSON.parse(document.getElementById('ndi-existing-resolutions').textContent);
+
+// Device match info keyed by source_id → {device_id, device_name}
+// Issue 1: Add null check for element to prevent uncaught errors
+var scriptElement = document.getElementById('ndi-device-match-info');
+var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : {};
 
 // Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
 document.addEventListener('DOMContentLoaded', function() {
@@ -794,13 +833,30 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('deviceMatchModal').addEventListener('show.bs.modal', function(event) {
     var btn = event.relatedTarget;
     var sourceName = btn.dataset.sourceName || '';
-    document.getElementById('dm_source_id').value = btn.dataset.sourceId || '';
+    var sourceId = btn.dataset.sourceId || '';
+    var sourceSerial = btn.dataset.sourceSerial || '';
+    document.getElementById('dm_source_id').value = sourceId;
     document.getElementById('dm_source_asset_tag').value = btn.dataset.sourceAssetTag || '';
+    document.getElementById('dm_source_serial').value = sourceSerial;
     document.getElementById('dm_profile_id').value = btn.dataset.profileId || '';
     document.getElementById('dm_source_name_display').textContent = sourceName;
     document.getElementById('dm_search_q').value = sourceName.split(' - ').pop().trim();
     document.getElementById('dm_netbox_device_id').value = '';
     document.getElementById('dm_search_results').innerHTML = '';
+    document.getElementById('mm_serial_mismatch_warning').style.display = 'none';
+
+    // Display current link if exists (Task 5 + Task 6)
+    var currentLink = document.getElementById('mm_current_link');
+    var matchInfo = DEVICE_MATCH_INFO[sourceId];
+    if (matchInfo) {
+      document.getElementById('mm_current_device_name').textContent = matchInfo.device_name || '—';
+      document.getElementById('mm_current_device_id').textContent = matchInfo.device_id || '—';
+      document.getElementById('mm_current_device_serial').textContent = matchInfo.device_serial || 'Not set';
+      currentLink.style.display = '';
+    } else {
+      currentLink.style.display = 'none';
+    }
+
     setTimeout(dmSearch, 200);
   });
 
@@ -1195,23 +1251,147 @@ function dmSearch() {
         container.innerHTML = '<p class="text-muted small">No devices found.</p>';
         return;
       }
+
+      var sourceSerial = document.getElementById('dm_source_serial').value || '';
+      var hasMismatch = false;
+
+      // Create table structure
+      var table = document.createElement('table');
+      table.className = 'table table-sm table-hover';
+      table.id = 'mm_search_results_table';
+
+      var thead = document.createElement('thead');
+      var headerRow = document.createElement('tr');
+      ['Device Name', 'Serial', 'Site', 'Actions'].forEach(function(colName) {
+        var th = document.createElement('th');
+        th.textContent = colName;
+        headerRow.appendChild(th);
+      });
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+
+      var tbody = document.createElement('tbody');
       data.results.forEach(function(dev) {
+        var tr = document.createElement('tr');
+
+        // Device Name column
+        var tdName = document.createElement('td');
+        tdName.textContent = dev.name;
+        tr.appendChild(tdName);
+
+        // Serial column with color coding
+        var tdSerial = document.createElement('td');
+        var serialHtml = '';
+        if (!dev.serial && !sourceSerial) {
+          serialHtml = '<span style="color:gray;">—</span>';
+        } else if (dev.serial === sourceSerial) {
+          serialHtml = '<span style="color:green;"><i class="mdi mdi-check"></i> ' + (dev.serial || 'Empty') + '</span>';
+        } else {
+          serialHtml = '<span style="color:orange;"><i class="mdi mdi-alert"></i> ' + (dev.serial || 'Empty') + '</span>';
+          hasMismatch = true;
+        }
+        tdSerial.innerHTML = serialHtml;
+        tr.appendChild(tdSerial);
+
+        // Site column
+        var tdSite = document.createElement('td');
+        tdSite.textContent = dev.site || '—';
+        tr.appendChild(tdSite);
+
+        // Actions column (Link button)
+        var tdActions = document.createElement('td');
         var btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'btn btn-sm btn-outline-secondary me-1 mb-1';
-        btn.textContent = dev.name + (dev.site ? ' (' + dev.site + ')' : '');
+        btn.className = 'btn btn-sm btn-outline-primary';
+        btn.textContent = 'Link';
         btn.onclick = function() {
           document.getElementById('dm_netbox_device_id').value = dev.id;
-          container.querySelectorAll('button').forEach(function(b) { b.classList.remove('btn-primary'); b.classList.add('btn-outline-secondary'); });
-          btn.classList.remove('btn-outline-secondary');
-          btn.classList.add('btn-primary');
+          table.querySelectorAll('tbody tr').forEach(function(r) { r.classList.remove('table-active'); });
+          tr.classList.add('table-active');
         };
-        container.appendChild(btn);
+        tdActions.appendChild(btn);
+        tr.appendChild(tdActions);
+
+        tbody.appendChild(tr);
       });
+      table.appendChild(tbody);
+      container.appendChild(table);
+
+      // Show/hide mismatch warning
+      var warningDiv = document.getElementById('mm_serial_mismatch_warning');
+      if (hasMismatch && sourceSerial) {
+        warningDiv.innerHTML = '<i class="mdi mdi-alert"></i> <strong>Serial number mismatch detected.</strong><br>Source: <strong>' + escapeHtml(sourceSerial) + '</strong> | NetBox devices show different serials above.';
+        warningDiv.style.display = '';
+      } else {
+        warningDiv.style.display = 'none';
+      }
     })
     .catch(function() {
       document.getElementById('dm_search_results').innerHTML = '<p class="text-danger small">Search failed. Please try again.</p>';
     });
+}
+
+function escapeHtml(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function unlinkFromModal() {
+  var sourceId = document.getElementById('dm_source_id').value;
+  if (!sourceId) return;
+
+  // Issue 2: Add null check for CSRF token element
+  var csrfElement = document.querySelector('[name=csrfmiddlewaretoken]');
+  if (!csrfElement) {
+    console.error('CSRF token not found');
+    alert('Security token missing. Please refresh the page.');
+    return;
+  }
+
+  // Issue 3: Prevent race condition with button disable + loading state
+  var btn = event.target;
+  if (btn.disabled) return; // Prevent double-clicks
+  btn.disabled = true;
+  var originalText = btn.textContent;
+  btn.textContent = 'Unlinking...';
+
+  // Send unlink request via fetch
+  fetch('{% url "plugins:netbox_data_import:match_existing_device" %}', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRFToken': csrfElement.value
+    },
+    body: JSON.stringify({
+      action: 'unlink',
+      profile_id: document.getElementById('dm_profile_id').value,
+      source_id: sourceId
+    })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    // Response validation: Always check data.success before using
+    if (!data || typeof data.success === 'undefined') {
+      throw new Error('Invalid response from server');
+    }
+    if (data.success) {
+      // Remove from DEVICE_MATCH_INFO
+      delete DEVICE_MATCH_INFO[sourceId];
+      // Display toggle: Use 'block' instead of empty string for consistency
+      document.getElementById('mm_current_link').style.display = 'none';
+    } else {
+      throw new Error(data.error || 'Unlink failed');
+    }
+  })
+  .catch(function(err) {
+    console.error('Unlink failed:', err);
+    alert('Failed to unlink device. Please try again.');
+  })
+  .finally(function() {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  });
 }
 </script>
 
@@ -1431,12 +1611,27 @@ function dmSearch() {
           <input type="hidden" name="profile_id" id="dm_profile_id">
           <input type="hidden" name="source_id" id="dm_source_id">
           <input type="hidden" name="source_asset_tag" id="dm_source_asset_tag">
+          <input type="hidden" name="source_serial" id="dm_source_serial">
           <input type="hidden" name="netbox_device_id" id="dm_netbox_device_id">
 
           <div class="mb-3">
             <label class="form-label text-muted">Source row name</label>
             <div class="fw-bold" id="dm_source_name_display"></div>
           </div>
+
+          <!-- Current device link display (Task 5) -->
+          <div id="mm_current_link" class="alert alert-warning" style="display:none;">
+            <div class="d-flex justify-content-between align-items-start">
+              <div>
+                <strong>Currently Linked To:</strong><br>
+                Device: <span id="mm_current_device_name">—</span><br>
+                ID: <span id="mm_current_device_id">—</span><br>
+                Serial: <span id="mm_current_device_serial">—</span>
+              </div>
+              <button type="button" class="btn btn-sm btn-danger" onclick="unlinkFromModal()">Unlink</button>
+            </div>
+          </div>
+
           <p class="text-muted small">
             Search for an existing device in NetBox. Selecting one will mark this source row
             as "update" instead of "create" — useful when the device already exists without a source ID.
@@ -1449,6 +1644,7 @@ function dmSearch() {
                 <i class="mdi mdi-magnify"></i>
               </button>
             </div>
+            <div id="mm_serial_mismatch_warning" class="alert alert-warning mt-2" style="display:none;"></div>
             <div class="mt-2" id="dm_search_results"></div>
           </div>
         </div>
@@ -1723,6 +1919,177 @@ document.addEventListener('click', function(e) {
     btn.classList.remove('btn-outline-primary');
   });
 });
+</script>
+
+{# ===== Per-row sync confirmation modal ===== #}
+<div class="modal fade" id="syncRowModal" tabindex="-1" aria-labelledby="syncRowModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="syncRowModalLabel">
+          <i class="mdi mdi-lightning-bolt text-success"></i>
+          Sync to NetBox — <span id="syncRowName"></span>
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-2">
+          <span id="syncRowBadge" class="badge text-bg-primary me-1"></span>
+          Row #<span id="syncRowNumber"></span>
+          &middot; ID: <span id="syncRowSourceId"></span>
+        </p>
+        <table class="table table-sm table-bordered">
+          <thead>
+            <tr class="table-light">
+              <th style="width:30%">Field</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+          <tbody id="syncRowFields"></tbody>
+        </table>
+        <div class="alert alert-warning mb-0">
+          <i class="mdi mdi-alert-outline"></i>
+          This will write to NetBox immediately. The preview will reload after syncing.
+        </div>
+        <div id="syncRowError" class="alert alert-danger mt-2 d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-success" id="syncRowConfirm">
+          <span class="ndi-sync-row-idle"><i class="mdi mdi-lightning-bolt"></i> Confirm &amp; Sync</span>
+          <span class="ndi-sync-row-loading d-none"><i class="mdi mdi-loading mdi-spin"></i> Syncing&hellip;</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var modal = document.getElementById('syncRowModal');
+  if (!modal) return;
+
+  var currentRowNumber = null;
+
+  modal.addEventListener('show.bs.modal', function (e) {
+    var btn = e.relatedTarget;
+    if (!btn) return;
+    currentRowNumber = btn.dataset.rowNumber;
+
+    document.getElementById('syncRowName').textContent = btn.dataset.name || '—';
+    document.getElementById('syncRowNumber').textContent = currentRowNumber || '—';
+    document.getElementById('syncRowSourceId').textContent = btn.dataset.sourceId || '—';
+    document.getElementById('syncRowBadge').textContent = 'Create ' + (btn.dataset.objectType || '');
+
+    var resolutions = (typeof EXISTING_RESOLUTIONS !== 'undefined' ? EXISTING_RESOLUTIONS : {});
+    var rowRes = resolutions[btn.dataset.sourceId] || {};
+    var resolvedFieldKeys = {};
+    for (var col in rowRes) {
+      var resolved = rowRes[col].resolved_fields || {};
+      for (var f in resolved) {
+        resolvedFieldKeys[f] = true;
+      }
+    }
+
+    function makeValueCell(value, fieldKey) {
+      var td = document.createElement('td');
+      td.appendChild(document.createTextNode(value || '—'));
+      if (resolvedFieldKeys[fieldKey]) {
+        var badge = document.createElement('span');
+        badge.className = 'badge text-bg-success ms-1';
+        badge.textContent = 'from resolution';
+        td.appendChild(badge);
+      }
+      return td;
+    }
+
+    var tbody = document.getElementById('syncRowFields');
+    tbody.innerHTML = '';
+
+    var fieldDefs = [
+      ['Name', btn.dataset.name, 'device_name'],
+      ['Rack', btn.dataset.rackName, 'rack_name'],
+      ['Source ID', btn.dataset.sourceId, 'source_id'],
+      ['Manufacturer', btn.dataset.sourceMake, 'source_make'],
+      ['Model', btn.dataset.sourceModel, 'source_model'],
+      ['Asset tag', btn.dataset.assetTag, 'asset_tag'],
+      ['Rack type', btn.dataset.rackTypeName, 'rack_type'],
+    ];
+
+    fieldDefs.forEach(function (def) {
+      var label = def[0], value = def[1], fieldKey = def[2];
+      if (!value) return;
+      var tr = document.createElement('tr');
+      var th = document.createElement('td');
+      th.className = 'fw-semibold';
+      th.textContent = label;
+      tr.appendChild(th);
+      tr.appendChild(makeValueCell(value, fieldKey));
+      tbody.appendChild(tr);
+    });
+
+    if (btn.dataset.detail) {
+      var tr = document.createElement('tr');
+      var th = document.createElement('td');
+      th.className = 'fw-semibold';
+      th.textContent = 'Detail';
+      tr.appendChild(th);
+      var td = document.createElement('td');
+      td.textContent = btn.dataset.detail;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+
+    var errorDiv = document.getElementById('syncRowError');
+    errorDiv.textContent = '';
+    errorDiv.classList.add('d-none');
+
+    var confirmBtn = document.getElementById('syncRowConfirm');
+    confirmBtn.disabled = false;
+    confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
+    confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
+  });
+
+  document.getElementById('syncRowConfirm').addEventListener('click', function () {
+    var confirmBtn = this;
+    confirmBtn.disabled = true;
+    confirmBtn.querySelector('.ndi-sync-row-idle').classList.add('d-none');
+    confirmBtn.querySelector('.ndi-sync-row-loading').classList.remove('d-none');
+
+    var errorDiv = document.getElementById('syncRowError');
+    errorDiv.classList.add('d-none');
+
+    var csrfToken = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || '';
+
+    fetch('{% url "plugins:netbox_data_import:sync_single_row" %}', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRFToken': csrfToken,
+      },
+      body: 'row_number=' + encodeURIComponent(currentRowNumber),
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (data.ok) {
+        window.location.reload();
+      } else {
+        confirmBtn.disabled = false;
+        confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
+        confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
+        var msgs = data.errors ? data.errors.join('\n') : (data.error || 'Sync failed');
+        errorDiv.textContent = msgs;
+        errorDiv.classList.remove('d-none');
+      }
+    })
+    .catch(function () {
+      confirmBtn.disabled = false;
+      confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
+      confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
+      errorDiv.textContent = 'Network error — sync failed';
+      errorDiv.classList.remove('d-none');
+    });
+  });
+}());
 </script>
 
 {% endblock %}

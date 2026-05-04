@@ -884,6 +884,7 @@ def _preview_device_row(
                 "dt_slug": dt_slug,
                 "u_height": u_height,
                 "asset_tag": asset_tag or "",
+                "source_serial": serial or "",
                 **({"_ip": ip_fields} if ip_fields else {}),
             },
         )
@@ -963,6 +964,7 @@ def _preview_device_row(
             "u_height": u_height,
             "u_position": position,
             "asset_tag": asset_tag or "",
+            "source_serial": serial or "",
             **({"_ip": ip_fields} if ip_fields else {}),
             **({"field_diff": field_diff} if field_diff is not None else {}),
             **({"netbox_device_id": matched_device.pk} if action == "update" else {}),
