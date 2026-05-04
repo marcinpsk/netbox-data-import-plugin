@@ -3718,9 +3718,10 @@ class UnlinkDeviceViewTest(TestCase):
     def test_unlink_unauthenticated(self):
         """Unlink requires authentication."""
         from django.conf import settings
+        from django.shortcuts import resolve_url
 
         resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "SRC001"})
-        login_url = getattr(settings, "LOGIN_URL", "/login/")
+        login_url = resolve_url(getattr(settings, "LOGIN_URL", "/login/"))
         self.assertEqual(resp.status_code, 302)
         self.assertTrue(str(resp.url).startswith(login_url))
 

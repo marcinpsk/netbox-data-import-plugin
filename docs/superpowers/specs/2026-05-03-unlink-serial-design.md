@@ -36,10 +36,10 @@ When a user manually links a source row to an existing NetBox device via the "Li
 Add `"serial"` to each device result dict:
 
 ```python
-{"id": dev.pk, "name": dev.name, "site": ..., "serial": dev.serial or "", "url": ...}
+{"id": dev.pk, "name": dev.name, "site": ..., "serial": dev.serial, "url": ...}
 ```
 
-No other changes to the endpoint.
+`dev.serial` is returned as-is (Python `None` → JSON `null` when the device has no serial). The template uses `escapeHtml(dev.serial || 'Empty')` to display a safe fallback.
 
 ### Changed: `ImportPreviewView.get()`
 
@@ -145,9 +145,9 @@ path("unlink-device/", views.UnlinkDeviceView.as_view(), name="unlink_device"),
 
 ## Tests
 
-- `UnlinkDeviceViewTest` — success (match deleted + redirect), missing match (graceful), unauthenticated (403), missing profile (404)
+- `UnlinkDeviceViewTest` — success (match deleted + redirect), missing match (graceful), unauthenticated (login redirect, not 403), missing profile (404)
 - `SearchNetBoxObjectsViewTest` — serial included in device results
-- `ImportPreviewViewContextTest` — `device_match_source_ids` and `device_match_info_json` in context
+- `ImportPreviewViewContextTest` — `device_match_source_ids` and `device_match_info` in context
 - Template test — unlink button present on manually-linked update row, absent on non-linked rows
 
 ---
