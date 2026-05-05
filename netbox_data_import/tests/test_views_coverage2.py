@@ -609,7 +609,7 @@ class SyncSingleRowViewTest(TestCase):
 
     def test_no_session_returns_ok_false(self):
         resp = self.client.post(self._url(), {"row_number": "1"})
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 400)
         data = resp.json()
         self.assertFalse(data["ok"])
         self.assertIn("No import in progress", data["error"])
@@ -622,6 +622,7 @@ class SyncSingleRowViewTest(TestCase):
     def test_row_not_found_returns_ok_false(self):
         self._set_session([{"_row_number": 1, "source_id": "X"}])
         resp = self.client.post(self._url(), {"row_number": "99"})
+        self.assertEqual(resp.status_code, 400)
         data = resp.json()
         self.assertFalse(data["ok"])
         self.assertIn("Row not found", data["error"])
@@ -766,7 +767,10 @@ class SyncSingleRowViewTest(TestCase):
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
         self.assertFalse(data["ok"])
-        self.assertIn("Missing rack", data["errors"])
+        self.assertTrue(
+            any("Missing rack" in detail for detail in data["errors"]),
+            f"Expected 'Missing rack' in {data['errors']!r}",
+        )
         mock_set_rollback.assert_called_with(True)
 
     @patch("netbox_data_import.views.engine")

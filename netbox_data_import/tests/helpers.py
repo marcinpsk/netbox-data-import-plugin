@@ -43,16 +43,13 @@ def setup_preview_with_device_matches(client, profile):
     Returns ``(site, device1, device2, device_rows)`` so callers can make
     assertions against the created objects.
     """
-    from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+    from dcim.models import Device
 
     from netbox_data_import.engine import parse_file, run_import
     from netbox_data_import.models import DeviceExistingMatch
     from netbox_data_import.views import _serialize_rows
 
-    site = Site.objects.create(name="MatchSite", slug="match-site")
-    role = DeviceRole.objects.create(name="TestRole", slug="test-role")
-    manufacturer = Manufacturer.objects.create(name="TestMfg", slug="test-mfg")
-    device_type = DeviceType.objects.create(manufacturer=manufacturer, model="TestModel", slug="test-model")
+    site, _manufacturer, device_type, role = make_dcim_objects("Match")
 
     device1 = Device.objects.create(name="device-a", site=site, device_type=device_type, role=role)
     device2 = Device.objects.create(name="device-b", site=site, device_type=device_type, role=role)

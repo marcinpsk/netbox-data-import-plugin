@@ -2172,7 +2172,7 @@ class SyncSingleRowView(_AjaxPermissionView):
         rows = request.session.get("import_rows")
         ctx_data = request.session.get("import_context")
         if not rows or not ctx_data:
-            return JsonResponse({"ok": False, "error": "No import in progress"})
+            return JsonResponse({"ok": False, "error": "No import in progress"}, status=400)
 
         raw_row_number = request.POST.get("row_number")
         if raw_row_number is None:
@@ -2184,13 +2184,13 @@ class SyncSingleRowView(_AjaxPermissionView):
 
         profile = ImportProfile.objects.filter(pk=ctx_data.get("profile_id")).first()
         if not profile:
-            return JsonResponse({"ok": False, "error": "Import profile not found"})
+            return JsonResponse({"ok": False, "error": "Import profile not found"}, status=400)
 
         rows = engine.reapply_saved_resolutions(rows, profile)
 
         target = next((r for r in rows if r.get("_row_number") == row_number), None)
         if target is None:
-            return JsonResponse({"ok": False, "error": "Row not found"})
+            return JsonResponse({"ok": False, "error": "Row not found"}, status=400)
 
         import_result_data = request.session.get("import_result")
         if not import_result_data:
@@ -2215,7 +2215,7 @@ class SyncSingleRowView(_AjaxPermissionView):
 
         site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
         if not site:
-            return JsonResponse({"ok": False, "error": "Site not found"})
+            return JsonResponse({"ok": False, "error": "Site not found"}, status=400)
 
         location = (
             Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
@@ -2232,7 +2232,10 @@ class SyncSingleRowView(_AjaxPermissionView):
                     return JsonResponse({"ok": False, "errors": [r.detail for r in error_rows]})
         except Exception:
             logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
-            return JsonResponse({"ok": False, "error": "An unexpected error occurred — see server logs."})
+            return JsonResponse(
+                {"ok": False, "error": "An unexpected error occurred — see server logs."},
+                status=500,
+            )
 
         row_result = result.rows[0] if result.rows else None
         return JsonResponse(

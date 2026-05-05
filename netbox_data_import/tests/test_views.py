@@ -3570,13 +3570,19 @@ class UnlinkDeviceViewTest(TestCase):
         from django.conf import settings
         from django.shortcuts import resolve_url
 
+        from netbox_data_import.models import DeviceExistingMatch
+
         resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "SRC001"})
         login_url = resolve_url(getattr(settings, "LOGIN_URL", "/login/"))
         self.assertEqual(resp.status_code, 302)
         self.assertTrue(str(resp.url).startswith(login_url))
+        self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
 
     def test_unlink_missing_profile(self):
         """Unlink returns 404 if profile not found."""
+        from netbox_data_import.models import DeviceExistingMatch
+
         self.client.force_login(self.user)
         resp = self.client.post(self.url, {"profile_id": 99999, "source_id": "SRC001"})
         self.assertEqual(resp.status_code, 404)
+        self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
