@@ -2,16 +2,14 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Tests for dmSearch() serial number display in device matching modal."""
 
-import os
-
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
-from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+from dcim.models import Device
+
+from netbox_data_import.tests.helpers import FIXTURE_PATH, make_dcim_objects
 
 User = get_user_model()
-
-FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
 
 
 class SearchDeviceSerialDisplayTest(TestCase):
@@ -25,15 +23,7 @@ class SearchDeviceSerialDisplayTest(TestCase):
         # bypass permission checks and avoid false 403 responses in tests.
         cls.user = User.objects.create_superuser(username="testuser", password="testpass")
 
-        # Create site
-        cls.site = Site.objects.create(name="TestSite", slug="testsite")
-
-        # Create manufacturer and device types
-        cls.mfg = Manufacturer.objects.create(name="Dell", slug="dell")
-        cls.dt = DeviceType.objects.create(manufacturer=cls.mfg, model="R640", slug="r640", u_height=2)
-
-        # Create device role
-        cls.role = DeviceRole.objects.create(name="Server", slug="server")
+        cls.site, cls.mfg, cls.dt, cls.role = make_dcim_objects("Test")
 
         # Create test devices with different serials
         cls.device_with_serial = Device.objects.create(

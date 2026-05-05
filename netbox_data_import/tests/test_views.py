@@ -17,6 +17,7 @@ from netbox_data_import.models import (
     ManufacturerMapping,
     SourceResolution,
 )
+from netbox_data_import.tests.helpers import setup_preview_with_device_matches
 
 User = get_user_model()
 
@@ -461,54 +462,7 @@ class ImportPreviewViewContextTest(BaseViewTestCase):
 
     def _setup_session_with_matches(self, profile):
         """Populate session with import state and DeviceExistingMatch records."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from netbox_data_import.engine import parse_file, run_import
-        from netbox_data_import.models import DeviceExistingMatch
-
-        site = Site.objects.create(name="MatchSite", slug="match-site")
-        role = DeviceRole.objects.create(name="TestRole", slug="test-role")
-        manufacturer = Manufacturer.objects.create(name="TestMfg", slug="test-mfg")
-        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="TestModel", slug="test-model")
-
-        device1 = Device.objects.create(name="device-a", site=site, device_type=device_type, role=role)
-        device2 = Device.objects.create(name="device-b", site=site, device_type=device_type, role=role)
-
-        with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-
-        device_rows = [r for r in result.rows if r.object_type == "device" and r.source_id]
-        if len(device_rows) > 0:
-            DeviceExistingMatch.objects.create(
-                profile=profile,
-                source_id=device_rows[0].source_id,
-                source_asset_tag=device_rows[0].extra_data.get("asset_tag", "asset_a"),
-                netbox_device_id=device1.id,
-                device_name=device1.name,
-            )
-        if len(device_rows) > 1:
-            DeviceExistingMatch.objects.create(
-                profile=profile,
-                source_id=device_rows[1].source_id,
-                source_asset_tag=device_rows[1].extra_data.get("asset_tag", "asset_b"),
-                netbox_device_id=device2.id,
-                device_name=device2.name,
-            )
-
-        from netbox_data_import.views import _serialize_rows
-
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_cans.xlsx",
-        }
-        session.save()
-        return site, device1, device2, device_rows
+        return setup_preview_with_device_matches(self.client, profile)
 
     def test_device_match_context_included(self):
         """Preview page context includes device_match_source_ids and device_match_info."""
@@ -581,59 +535,7 @@ class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
 
     def _setup_session_with_matches(self, profile):
         """Populate session with import state and DeviceExistingMatch records."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from netbox_data_import.engine import parse_file, run_import
-        from netbox_data_import.models import DeviceExistingMatch
-
-        # Setup site, role, and devices
-        site = Site.objects.create(name="MatchSite", slug="match-site")
-        role = DeviceRole.objects.create(name="TestRole", slug="test-role")
-        manufacturer = Manufacturer.objects.create(name="TestMfg", slug="test-mfg")
-        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="TestModel", slug="test-model")
-
-        # Create some devices
-        device1 = Device.objects.create(name="device-a", site=site, device_type=device_type, role=role)
-        device2 = Device.objects.create(name="device-b", site=site, device_type=device_type, role=role)
-
-        # Parse file and run import
-        with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-
-        # Extract actual device source_ids from result rows to create matches
-        device_rows = [r for r in result.rows if r.object_type == "device" and r.source_id]
-        # Create DeviceExistingMatch records for first 2 devices
-        if len(device_rows) > 0:
-            DeviceExistingMatch.objects.create(
-                profile=profile,
-                source_id=device_rows[0].source_id,
-                source_asset_tag=device_rows[0].extra_data.get("asset_tag", "asset_a"),
-                netbox_device_id=device1.id,
-                device_name=device1.name,
-            )
-        if len(device_rows) > 1:
-            DeviceExistingMatch.objects.create(
-                profile=profile,
-                source_id=device_rows[1].source_id,
-                source_asset_tag=device_rows[1].extra_data.get("asset_tag", "asset_b"),
-                netbox_device_id=device2.id,
-                device_name=device2.name,
-            )
-
-        # Set up session
-        from netbox_data_import.views import _serialize_rows
-
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_cans.xlsx",
-        }
-        session.save()
+        site, device1, device2, _ = setup_preview_with_device_matches(self.client, profile)
         return site, device1, device2
 
     def test_unlink_button_hidden_no_link(self):
@@ -738,59 +640,7 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
 
     def _setup_session_with_matches(self, profile):
         """Populate session with import state and DeviceExistingMatch records."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from netbox_data_import.engine import parse_file, run_import
-        from netbox_data_import.models import DeviceExistingMatch
-
-        # Setup site, role, and devices
-        site = Site.objects.create(name="MatchSite", slug="match-site")
-        role = DeviceRole.objects.create(name="TestRole", slug="test-role")
-        manufacturer = Manufacturer.objects.create(name="TestMfg", slug="test-mfg")
-        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="TestModel", slug="test-model")
-
-        # Create some devices
-        device1 = Device.objects.create(name="device-a", site=site, device_type=device_type, role=role)
-        device2 = Device.objects.create(name="device-b", site=site, device_type=device_type, role=role)
-
-        # Parse file and run import
-        with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-
-        # Extract actual device source_ids from result rows to create matches
-        device_rows = [r for r in result.rows if r.object_type == "device" and r.source_id]
-        # Create DeviceExistingMatch records for first 2 devices
-        if len(device_rows) > 0:
-            DeviceExistingMatch.objects.create(
-                profile=profile,
-                source_id=device_rows[0].source_id,
-                source_asset_tag=device_rows[0].extra_data.get("asset_tag", "asset_a"),
-                netbox_device_id=device1.id,
-                device_name=device1.name,
-            )
-        if len(device_rows) > 1:
-            DeviceExistingMatch.objects.create(
-                profile=profile,
-                source_id=device_rows[1].source_id,
-                source_asset_tag=device_rows[1].extra_data.get("asset_tag", "asset_b"),
-                netbox_device_id=device2.id,
-                device_name=device2.name,
-            )
-
-        # Set up session
-        from netbox_data_import.views import _serialize_rows
-
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_cans.xlsx",
-        }
-        session.save()
+        site, device1, device2, _ = setup_preview_with_device_matches(self.client, profile)
         return site, device1, device2
 
     def test_modal_current_link_section_hidden_no_link(self):
