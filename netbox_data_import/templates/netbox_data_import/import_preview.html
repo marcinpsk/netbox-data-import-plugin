@@ -319,9 +319,9 @@
                       <span class="text-muted">→</span>
                       <code class="small">{{ row.extra_data.mfg_slug }} / {{ row.extra_data.dt_slug }}</code>
                       {% if row.extra_data.dt_exists %}
-                        <span class="badge bg-success" title="This device type already exists in NetBox — no action needed">exists</span>
+                        <span class="badge bg-success" title="This device type already exists in NetBox — no action needed">type exists</span>
                       {% else %}
-                        <span class="badge bg-warning text-dark" title="This device type does not yet exist in NetBox">new</span>
+                        <span class="badge bg-warning text-dark" title="This device type does not yet exist in NetBox — it will be created during import">type missing</span>
                       {% endif %}
                     </div>
                   {% endif %}
