@@ -2237,7 +2237,10 @@ class SyncSingleRowView(_AjaxPermissionView):
                 status=500,
             )
 
-        row_result = result.rows[0] if result.rows else None
+        row_result = next(
+            (r for r in result.rows if r.row_number == row_number and r.object_type == preview_row.get("object_type")),
+            None,
+        )
         return JsonResponse(
             {
                 "ok": True,
