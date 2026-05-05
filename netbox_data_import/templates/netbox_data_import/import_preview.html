@@ -314,6 +314,17 @@
                 {# Show source make/model for device rows #}
                 {% if row.object_type == 'device' and row.extra_data.source_make %}
                   <div class="text-muted small" style="font-weight:normal;">{{ row.extra_data.source_make }} / {{ row.extra_data.source_model }}</div>
+                  {% if row.extra_data.is_explicit_mapping %}
+                    <div class="small mt-1" style="font-weight:normal;">
+                      <span class="text-muted">→</span>
+                      <code class="small">{{ row.extra_data.mfg_slug }} / {{ row.extra_data.dt_slug }}</code>
+                      {% if row.extra_data.dt_exists %}
+                        <span class="badge bg-success" title="This device type already exists in NetBox — no action needed">exists</span>
+                      {% else %}
+                        <span class="badge bg-warning text-dark" title="This device type does not yet exist in NetBox">new</span>
+                      {% endif %}
+                    </div>
+                  {% endif %}
                 {% endif %}
               </td>
               <td>

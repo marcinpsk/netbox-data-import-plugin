@@ -859,6 +859,7 @@ def _preview_device_row(
     device_airflow=None,
     device_status="active",
     u_position=None,
+    is_explicit_mapping: bool = False,
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     # Parse u_height early so it's available in all return paths
@@ -885,6 +886,8 @@ def _preview_device_row(
                 "u_height": u_height,
                 "asset_tag": asset_tag or "",
                 "source_serial": serial or "",
+                "is_explicit_mapping": is_explicit_mapping,
+                "dt_exists": dt_exists,
                 **({"_ip": ip_fields} if ip_fields else {}),
             },
         )
@@ -965,6 +968,8 @@ def _preview_device_row(
             "u_position": position,
             "asset_tag": asset_tag or "",
             "source_serial": serial or "",
+            "is_explicit_mapping": is_explicit_mapping,
+            "dt_exists": dt_exists,
             **({"_ip": ip_fields} if ip_fields else {}),
             **({"field_diff": field_diff} if field_diff is not None else {}),
             **({"netbox_device_id": matched_device.pk} if action == "update" else {}),
@@ -1233,8 +1238,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
             )
             continue
 
-        # Resolve device type slugs and u_height early for error cases
-        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
+        mfg_slug, dt_slug, is_explicit_mapping = _resolve_device_type_slugs(make, model, ctx.profile)
         u_height_raw = row.get("u_height", 1)
         try:
             u_height = max(1, int(float(u_height_raw)))
@@ -1259,6 +1263,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                         "mfg_slug": mfg_slug,
                         "dt_slug": dt_slug,
                         "u_height": u_height,
+                        "is_explicit_mapping": is_explicit_mapping,
                     },
                 )
             )
@@ -1302,6 +1307,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 device_airflow=device_airflow,
                 device_status=device_status,
                 u_position=position,
+                is_explicit_mapping=is_explicit_mapping,
             )
         else:
             row_result = _write_device_row(
