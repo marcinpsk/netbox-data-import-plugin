@@ -632,7 +632,7 @@ class SyncSingleRowViewTest(TestCase):
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
-        session["import_result"] = {"rows": [{"row_number": 1, "action": "update"}]}
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "update", "object_type": "device"}]}
         session.save()
 
         resp = self.client.post(self._url(), {"row_number": "1"})
@@ -695,7 +695,7 @@ class SyncSingleRowViewTest(TestCase):
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
-        session["import_result"] = {"rows": [{"row_number": 1, "action": "create"}]}
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "device"}]}
         session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
@@ -728,7 +728,7 @@ class SyncSingleRowViewTest(TestCase):
 
         self._set_session([{"_row_number": 1, "source_id": "R001"}])
         session = self.client.session
-        session["import_result"] = {"rows": [{"row_number": 1, "action": "create"}]}
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "rack"}]}
         session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
@@ -761,13 +761,43 @@ class SyncSingleRowViewTest(TestCase):
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
-        session["import_result"] = {"rows": [{"row_number": 1, "action": "create"}]}
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "device"}]}
         session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
         self.assertFalse(data["ok"])
         self.assertIn("Missing rack", data["errors"])
         mock_set_rollback.assert_called_with(True)
+
+    @patch("netbox_data_import.views.engine")
+    def test_manufacturer_create_but_device_update_rejected(self, mock_engine):
+        """Bug #24 regression: manufacturer 'create' + device 'update' must return 400.
+
+        Previously, ``next(r for r in rows if r["row_number"] == ...)`` picked the
+        *first* result row for that row_number — which could be the manufacturer entry
+        with action='create' — causing the guard to pass even though the device action
+        was 'update'.  The fix filters by ``object_type in ('device', 'rack')``.
+        """
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {
+            "rows": [
+                {"row_number": 1, "action": "create", "object_type": "manufacturer"},
+                {"row_number": 1, "action": "create", "object_type": "device_type"},
+                {"row_number": 1, "action": "update", "object_type": "device"},
+            ]
+        }
+        session.save()
+
+        resp = self.client.post(self._url(), {"row_number": "1"})
+
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "Only 'create' rows can be synced individually")
+        mock_engine.run_import.assert_not_called()
 
 
 class SyncRowButtonTemplateTest(TestCase):

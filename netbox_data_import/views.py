@@ -1888,7 +1888,24 @@ def _device_name_filter(q: str):
     return base
 
 
-class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
+class _AjaxPermissionView(PermissionRequiredMixin, View):
+    """Base for AJAX endpoints that require a permission.
+
+    Returns a JSON ``{"ok": false, "error": "Permission denied"}`` response
+    (HTTP 403) for authenticated users who lack the required permission,
+    instead of the default HTML 403 page.  Unauthenticated users are still
+    redirected to the login page.
+    """
+
+    def handle_no_permission(self):
+        from django.http import JsonResponse
+
+        if self.request.user.is_authenticated:
+            return JsonResponse({"ok": False, "error": "Permission denied"}, status=403)
+        return super().handle_no_permission()
+
+
+class SearchNetBoxObjectsView(_AjaxPermissionView):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
     GET params: type (manufacturer|device_type|device|role|rack_type), q (search string).
@@ -2136,7 +2153,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class SyncSingleRowView(PermissionRequiredMixin, View):
+class SyncSingleRowView(_AjaxPermissionView):
     """AJAX endpoint: execute a single row from the current import session.
 
     POST body: row_number=<int>
@@ -2180,7 +2197,14 @@ class SyncSingleRowView(PermissionRequiredMixin, View):
             return JsonResponse({"ok": False, "error": "No preview data in session"}, status=400)
 
         preview_rows = import_result_data.get("rows", [])
-        preview_row = next((r for r in preview_rows if r.get("row_number") == row_number), None)
+        preview_row = next(
+            (
+                r
+                for r in preview_rows
+                if r.get("row_number") == row_number and r.get("object_type") in ("device", "rack")
+            ),
+            None,
+        )
         if preview_row is None:
             return JsonResponse({"ok": False, "error": "Row not found in current preview data"}, status=400)
         if preview_row.get("action") != "create":
