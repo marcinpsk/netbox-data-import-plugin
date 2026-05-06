@@ -806,26 +806,42 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
     return matched_device, match_method
 
 
+def _normalize_for_compare(val) -> str:
+    """Normalize a value for field-diff comparison.
+
+    Whole-number floats (e.g. 35.0, "35.0") are normalized to their integer
+    string form ("35") to avoid false diffs caused by type differences between
+    the source file and what NetBox returns.
+    """
+    if val is None:
+        return ""
+    try:
+        f = float(val)
+        if f == int(f):
+            return str(int(f))
+        return str(f)
+    except (TypeError, ValueError, OverflowError):
+        return str(val).strip()
+
+
 def _compute_field_diff(
     matched_device, device_name, serial, asset_tag, device_face, device_airflow, device_status, u_height, u_position
 ):
     """Return a dict of fields that differ between the XLS row and the existing NetBox device."""
     diff = {}
     candidates = [
-        ("device_name", str(device_name), str(matched_device.name)),
-        ("status", str(device_status), str(matched_device.status)),
-        ("serial", str(serial or ""), str(matched_device.serial or "")),
-        ("asset_tag", str(asset_tag or ""), str(matched_device.asset_tag or "")),
+        ("device_name", device_name, matched_device.name),
+        ("status", device_status, matched_device.status),
+        ("serial", serial or "", matched_device.serial or ""),
+        ("asset_tag", asset_tag or "", matched_device.asset_tag or ""),
     ]
     if device_face is not None:
-        candidates.append(("face", str(device_face), str(matched_device.face) if matched_device.face else ""))
+        candidates.append(("face", device_face, matched_device.face if matched_device.face else ""))
     if device_airflow is not None:
-        candidates.append(
-            ("airflow", str(device_airflow), str(matched_device.airflow) if matched_device.airflow else "")
-        )
+        candidates.append(("airflow", device_airflow, matched_device.airflow if matched_device.airflow else ""))
     for fname, xls_val, nb_val in candidates:
-        if xls_val != nb_val:
-            diff[fname] = {"netbox": nb_val, "file": xls_val}
+        if _normalize_for_compare(xls_val) != _normalize_for_compare(nb_val):
+            diff[fname] = {"netbox": _normalize_for_compare(nb_val), "file": _normalize_for_compare(xls_val)}
     nb_u_height = matched_device.device_type.u_height if matched_device.device_type_id else None
     if nb_u_height is not None:
         try:
@@ -833,10 +849,11 @@ def _compute_field_diff(
                 diff["u_height"] = {"netbox": str(nb_u_height), "file": str(u_height)}
         except (TypeError, ValueError):
             pass
-    xls_pos = str(u_position) if u_position is not None else ""
-    nb_pos = str(matched_device.position) if matched_device.position is not None else ""
-    if xls_pos != nb_pos:
-        diff["u_position"] = {"netbox": nb_pos, "file": xls_pos}
+    if _normalize_for_compare(u_position) != _normalize_for_compare(matched_device.position):
+        diff["u_position"] = {
+            "netbox": _normalize_for_compare(matched_device.position),
+            "file": _normalize_for_compare(u_position),
+        }
     return diff
 
 

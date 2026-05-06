@@ -13,6 +13,7 @@ from netbox_data_import.engine import (
     ParseError,
     RowResult,
     _ensure_device_type,
+    _normalize_for_compare,
     _preview_device_row,
     parse_file,
     run_import,
@@ -640,10 +641,10 @@ class FieldDiffComputationTest(TestCase):
             status="active",
         )
 
-    def _call_preview(self, device_name, serial, asset_tag, device_status="active", ip_fields=None):
+    def _call_preview(self, device_name, serial, asset_tag, device_status="active", ip_fields=None, u_position=None):
         from dcim.models import Device, DeviceType, Rack
 
-        row = {"_row_number": 1, "rack_name": "", "u_position": None}
+        row = {"_row_number": 1, "rack_name": "", "u_position": u_position}
         ctx = ImportContext(
             profile=self.profile,
             site=self.site,
@@ -670,7 +671,7 @@ class FieldDiffComputationTest(TestCase):
             device_face=None,
             device_airflow=None,
             device_status=device_status,
-            u_position=None,
+            u_position=u_position,
         )
 
     def test_field_diff_on_update_row(self):
@@ -735,6 +736,49 @@ class FieldDiffComputationTest(TestCase):
         diff = result.extra_data.get("field_diff", {})
         self.assertNotIn("u_height", diff, "u_height must not appear in diff when values match")
 
+    def test_field_diff_u_position_float_vs_int(self):
+        """u_position 35.0 from NetBox vs 35 from file must NOT appear in diff."""
+        self._make_existing_device(serial="SN-POS", asset_tag="AT-POS")
+        from dcim.models import Device
+
+        dev = Device.objects.get(name="existing-server")
+        dev.position = 35
+        dev.save()
+
+        result = self._call_preview("existing-server", serial="SN-POS", asset_tag="AT-POS", u_position=35)
+        diff = result.extra_data.get("field_diff", {})
+        self.assertNotIn("u_position", diff, "35 vs 35 must not appear as a diff")
+
+    def test_field_diff_generic_float_normalization(self):
+        """Normalization applies to all candidates, not just u_position."""
+        from unittest.mock import MagicMock
+
+        from netbox_data_import.engine import _compute_field_diff
+
+        mock_device = MagicMock()
+        mock_device.name = "some-device"
+        mock_device.status = "active"
+        mock_device.serial = "35.0"
+        mock_device.asset_tag = "AT-001"
+        mock_device.face = ""
+        mock_device.airflow = ""
+        mock_device.position = None
+        mock_device.device_type_id = None
+
+        diff = _compute_field_diff(
+            matched_device=mock_device,
+            device_name="some-device",
+            serial="35",
+            asset_tag="AT-001",
+            device_face=None,
+            device_airflow=None,
+            device_status="active",
+            u_height=1,
+            u_position=None,
+        )
+
+        self.assertNotIn("serial", diff, "'35' vs '35.0' must not appear as a diff after normalization")
+
     def test_extra_data_includes_netbox_device_id_on_update(self):
         """Update rows must include netbox_device_id in extra_data equal to matched device PK."""
         device = self._make_existing_device(serial="SN-ID", asset_tag="AT-ID")
@@ -757,3 +801,39 @@ class FieldDiffComputationTest(TestCase):
         result = self._call_preview("brand-new-device-xyz", serial="SN-NEW-XYZ", asset_tag=None)
         self.assertEqual(result.action, "create")
         self.assertNotIn("netbox_device_id", result.extra_data)
+
+
+class NormalizeForCompareTest(TestCase):
+    """Tests for _normalize_for_compare helper."""
+
+    def test_integer_string_unchanged(self):
+        self.assertEqual(_normalize_for_compare("35"), "35")
+
+    def test_float_whole_number_normalized(self):
+        """35.0 → '35'"""
+        self.assertEqual(_normalize_for_compare("35.0"), "35")
+
+    def test_float_whole_number_direct(self):
+        """float(35.0) → '35'"""
+        self.assertEqual(_normalize_for_compare(35.0), "35")
+
+    def test_float_with_fraction_unchanged(self):
+        """1.5 stays '1.5'"""
+        self.assertEqual(_normalize_for_compare(1.5), "1.5")
+
+    def test_none_returns_empty(self):
+        self.assertEqual(_normalize_for_compare(None), "")
+
+    def test_non_numeric_string_unchanged(self):
+        self.assertEqual(_normalize_for_compare("ABC-123"), "ABC-123")
+
+    def test_zero(self):
+        self.assertEqual(_normalize_for_compare(0), "0")
+
+    def test_zero_float(self):
+        self.assertEqual(_normalize_for_compare(0.0), "0")
+
+    def test_infinity_string_returns_stripped_value(self):
+        for value in ("inf", "Infinity", "-inf"):
+            with self.subTest(value=value):
+                self.assertEqual(_normalize_for_compare(value), value.strip())
