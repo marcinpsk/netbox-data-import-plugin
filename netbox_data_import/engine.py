@@ -243,21 +243,93 @@ def _promote_extra_json_fields(row_dict: dict) -> None:
             row_dict.setdefault("_extra_columns", {})[json_key] = val
 
 
+def _build_grouped_col_map(profile: ImportProfile) -> dict[str, list[str]]:
+    """Return a target-field keyed map of all mapped source columns."""
+    grouped: dict[str, list[str]] = {}
+    for cm in profile.column_mappings.all():
+        grouped.setdefault(cm.target_field, []).append(cm.source_column)
+    return grouped
+
+
+def _merge_row_values(
+    row_num: int,
+    raw_row,
+    raw_headers: dict[str, int],
+    grouped_col_map: dict[str, list[str]],
+) -> dict[str, object]:
+    """Build a parsed row dict using multi-source merge semantics."""
+    row_dict: dict[str, object] = {"_row_number": row_num}
+    for target_field, source_cols in grouped_col_map.items():
+        values: dict[str, object] = {}
+        for source_col in source_cols:
+            idx = raw_headers.get(source_col)
+            if idx is None:
+                continue
+            value = raw_row[idx] if idx < len(raw_row) else None
+            if isinstance(value, str):
+                value = value.strip()
+            if value is not None and str(value).strip():
+                values[source_col] = value
+
+        if not values:
+            continue
+        if len({str(v) for v in values.values()}) == 1:
+            row_dict[target_field] = next(iter(values.values()))
+        else:
+            row_dict[target_field] = None
+            row_dict.setdefault("_conflicts", {})[target_field] = {k: str(v) for k, v in values.items()}
+    return row_dict
+
+
+def _clear_resolved_conflicts(row_dict: dict[str, object], resolved_fields: dict) -> None:
+    """Remove conflicts for fields overridden by saved resolutions."""
+    for resolved_field in resolved_fields:
+        row_dict.get("_conflicts", {}).pop(resolved_field, None)
+    if not row_dict.get("_conflicts"):
+        row_dict.pop("_conflicts", None)
+
+
 def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict]:
     """Re-apply the profile's column mappings to already-parsed session rows.
 
-    This is used after a quick-add column mapping so that the in-session row
-    dicts reflect the new mapping without requiring the source file to be
-    re-uploaded.  Unmapped source-column keys (still present with their
-    original name) are renamed to the configured target_field.  Any
-    ``extra_json:<key>`` targets are promoted into ``_extra_columns`` as usual.
+    Used after a quick-add column mapping so that in-session row dicts reflect
+    the new mapping without requiring the source file to be re-uploaded.
+    Handles multi-source merge: if a newly-mapped source column conflicts with an
+    already-mapped value for the same target field, a _conflicts entry is recorded.
     """
-    col_map: dict[str, str] = {cm.source_column: cm.target_field for cm in profile.column_mappings.all()}
+    grouped = _build_grouped_col_map(profile)
+
     for row in rows:
-        for source_col, target_field in col_map.items():
-            if source_col in row:
-                row[target_field] = row.pop(source_col)
+        for target_field, source_cols in grouped.items():
+            unmapped = {}
+            for sc in source_cols:
+                if sc in row:
+                    val = row.pop(sc)
+                    if val is not None and str(val).strip():
+                        unmapped[sc] = val
+
+            if not unmapped:
+                continue
+
+            existing = row.get(target_field)
+            existing_nonempty = existing is not None and str(existing).strip() != ""
+
+            if not existing_nonempty:
+                unique = {str(v) for v in unmapped.values()}
+                if len(unique) == 1:
+                    row[target_field] = next(iter(unmapped.values()))
+                else:
+                    row[target_field] = None
+                    row.setdefault("_conflicts", {})[target_field] = {k: str(v) for k, v in unmapped.items()}
+            else:
+                all_candidates = {target_field: str(existing), **{k: str(v) for k, v in unmapped.items()}}
+                unique = set(all_candidates.values())
+                if len(unique) > 1:
+                    row[target_field] = None
+                    row.setdefault("_conflicts", {})[target_field] = all_candidates
+
         _promote_extra_json_fields(row)
+
     return rows
 
 
@@ -282,11 +354,12 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     ws = wb[profile.sheet_name]
     raw_headers = _build_header_index_map(ws)
 
-    # Build source_column→target_field map from profile
-    col_map: dict[str, str] = {cm.source_column: cm.target_field for cm in profile.column_mappings.all()}
+    # Build grouped source-column map from profile
+    col_map = _build_grouped_col_map(profile)
 
-    # Unmapped columns: present in the sheet but not configured in col_map
-    unmapped_cols = [col for col in raw_headers if col not in col_map]
+    # Unmapped columns: present in the sheet but not in any mapping
+    all_mapped_sources = {src for srcs in col_map.values() for src in srcs}
+    unmapped_cols = [col for col in raw_headers if col not in all_mapped_sources]
 
     # Pre-fetch transform rules for efficiency
     transform_rules = list(profile.column_transform_rules.all())
@@ -305,15 +378,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
         if all(v is None for v in row):
             continue
 
-        row_dict: dict[str, object] = {"_row_number": row_num}
-        for source_col, target_field in col_map.items():
-            idx = raw_headers.get(source_col)
-            if idx is None:
-                continue
-            value = row[idx] if idx < len(row) else None
-            if isinstance(value, str):
-                value = value.strip()
-            row_dict[target_field] = value
+        row_dict = _merge_row_values(row_num, row, raw_headers, col_map)
 
         # Promote explicit extra_json: mappings into _extra_columns
         _promote_extra_json_fields(row_dict)
@@ -325,6 +390,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
         if source_id:
             for res in resolutions_by_source_id.get(str(source_id), []):
                 row_dict.update(res.resolved_fields)
+                _clear_resolved_conflicts(row_dict, res.resolved_fields)
 
         if return_stats or capture_extra:
             extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
@@ -358,8 +424,11 @@ def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
         source_id = str(row.get("source_id", ""))
         if source_id and source_id in resolutions_by_source_id:
             row = dict(row)  # shallow copy — don't mutate the session dict
+            if "_conflicts" in row:
+                row["_conflicts"] = dict(row["_conflicts"])
             for res in resolutions_by_source_id[source_id]:
                 row.update(res.resolved_fields)
+                _clear_resolved_conflicts(row, res.resolved_fields)
         result.append(row)
     return result
 

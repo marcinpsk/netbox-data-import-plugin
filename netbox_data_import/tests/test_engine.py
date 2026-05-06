@@ -126,6 +126,93 @@ class ParseFileTest(TestCase):
             parse_file(garbage, profile)
 
 
+class MultiColumnMergeTest(TestCase):
+    """Tests for multi-source column merging in parse_file."""
+
+    def _make_merge_profile(self) -> ImportProfile:
+        """Profile with 'Serial Number' and 'Service Tag' both mapping to 'serial'."""
+        profile = ImportProfile.objects.create(
+            name="MergeTest",
+            sheet_name="Data",
+            update_existing=True,
+            create_missing_device_types=True,
+        )
+        for src, tgt in [
+            ("Id", "source_id"),
+            ("Rack", "rack_name"),
+            ("Name", "device_name"),
+            ("Class", "device_class"),
+            ("Make", "make"),
+            ("Model", "model"),
+            ("Serial Number", "serial"),
+            ("Service Tag", "serial"),
+        ]:
+            ColumnMapping.objects.create(profile=profile, source_column=src, target_field=tgt)
+        return profile
+
+    def _make_single_row_workbook(
+        self,
+        serial_number: str | None,
+        service_tag: str | None,
+    ) -> BytesIO:
+        """Build an in-memory Excel file with one data row."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(["Id", "Rack", "Name", "Class", "Make", "Model", "Serial Number", "Service Tag"])
+        ws.append(["100", "Rack-01", "Dev-01", "Server", "Cisco", "C9300", serial_number, service_tag])
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    def test_single_source_no_conflict(self):
+        """When only one source column has a value, it is used with no conflict."""
+        profile = self._make_merge_profile()
+        rows = parse_file(self._make_single_row_workbook("SN-001", None), profile)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["serial"], "SN-001")
+        self.assertNotIn("_conflicts", rows[0])
+
+    def test_both_sources_same_value_no_conflict(self):
+        """When both sources have identical values, the value is used with no conflict."""
+        profile = self._make_merge_profile()
+        rows = parse_file(self._make_single_row_workbook("SAME-42", "SAME-42"), profile)
+        self.assertEqual(rows[0]["serial"], "SAME-42")
+        self.assertNotIn("_conflicts", rows[0])
+
+    def test_both_sources_different_values_conflict(self):
+        """When both sources have different non-empty values, _conflicts is populated."""
+        profile = self._make_merge_profile()
+        rows = parse_file(self._make_single_row_workbook("ABC-111", "XYZ-999"), profile)
+        self.assertIsNone(rows[0].get("serial"))
+        self.assertIn("_conflicts", rows[0])
+        conflict = rows[0]["_conflicts"]["serial"]
+        self.assertIn("Serial Number", conflict)
+        self.assertIn("Service Tag", conflict)
+        self.assertEqual(conflict["Serial Number"], "ABC-111")
+        self.assertEqual(conflict["Service Tag"], "XYZ-999")
+
+    def test_conflict_cleared_by_saved_resolution(self):
+        """A saved SourceResolution for the target field clears the conflict."""
+        from netbox_data_import.models import SourceResolution
+
+        profile = self._make_merge_profile()
+        SourceResolution.objects.create(
+            profile=profile,
+            source_id="100",
+            source_column="_merge_serial",
+            original_value="",
+            resolved_fields={"serial": "ABC-111"},
+        )
+
+        rows = parse_file(self._make_single_row_workbook("ABC-111", "XYZ-999"), profile)
+        self.assertEqual(rows[0]["serial"], "ABC-111")
+        self.assertFalse(rows[0].get("_conflicts", {}).get("serial"))
+
+
 class RunImportDryRunTest(TestCase):
     """Tests for engine.run_import with dry_run=True (no DB writes)."""
 
