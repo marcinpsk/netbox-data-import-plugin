@@ -728,7 +728,17 @@ class FieldDiffComputationTest(TestCase):
             status="active",
         )
 
-    def _call_preview(self, device_name, serial, asset_tag, device_status="active", ip_fields=None, u_position=None):
+    def _call_preview(
+        self,
+        device_name,
+        serial,
+        asset_tag,
+        device_status="active",
+        ip_fields=None,
+        u_position=None,
+        device_face=None,
+        device_airflow=None,
+    ):
         from dcim.models import Device, DeviceType, Rack
 
         row = {"_row_number": 1, "rack_name": "", "u_position": u_position}
@@ -755,10 +765,53 @@ class FieldDiffComputationTest(TestCase):
             Device=Device,
             Rack=Rack,
             ip_fields=ip_fields,
-            device_face=None,
-            device_airflow=None,
+            device_face=device_face,
+            device_airflow=device_airflow,
             device_status=device_status,
             u_position=u_position,
+        )
+
+    def _call_preview_with_row(self, device_name, extra_row_fields=None, **kwargs):
+        """Like _call_preview but allows injecting extra row dict keys."""
+        from dcim.models import DeviceType, Device, Rack
+        from netbox_data_import.engine import ImportContext, _preview_device_row
+
+        row = {
+            "_row_number": 1,
+            "source_id": "test-id",
+            "device_name": device_name,
+            "rack_name": None,
+            "make": "TestMfg",
+            "model": "TestModel",
+            "u_height": 1,
+            "serial": None,
+            "asset_tag": None,
+        }
+        if extra_row_fields:
+            row.update(extra_row_fields)
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=True,
+            result=ImportResult(),
+        )
+        return _preview_device_row(
+            row,
+            ctx,
+            make="TestMfg",
+            model="TestModel",
+            mfg_slug="testmfg",
+            dt_slug="testmodel",
+            source_id="test-id",
+            device_name=device_name,
+            serial=row.get("serial"),
+            asset_tag=row.get("asset_tag"),
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+            **kwargs,
         )
 
     def test_field_diff_on_update_row(self):
@@ -822,6 +875,40 @@ class FieldDiffComputationTest(TestCase):
         result = self._call_preview("existing-server", serial="S1", asset_tag="A1")
         diff = result.extra_data.get("field_diff", {})
         self.assertNotIn("u_height", diff, "u_height must not appear in diff when values match")
+
+    def test_extra_data_includes_face_airflow_status(self):
+        """_preview_device_row must include face, airflow, status in extra_data."""
+        result = self._call_preview(
+            "new-device-face",
+            serial="SN-FIELDS",
+            asset_tag="AT-FIELDS",
+            device_face="front",
+            device_airflow="front-to-rear",
+            device_status="staged",
+        )
+        self.assertEqual(result.action, "create")
+        self.assertEqual(result.extra_data.get("face"), "front")
+        self.assertEqual(result.extra_data.get("airflow"), "front-to-rear")
+        self.assertEqual(result.extra_data.get("status"), "staged")
+
+    def test_extra_data_includes_extra_columns(self):
+        """_preview_device_row must pass through _extra_columns from the row."""
+        result = self._call_preview_with_row(
+            "new-device-extra",
+            extra_row_fields={"_extra_columns": {"cf_location": "DC1"}},
+        )
+        self.assertEqual(result.action, "create")
+        self.assertEqual(result.extra_data.get("extra_columns"), {"cf_location": "DC1"})
+
+    def test_extra_data_includes_conflicts(self):
+        """_preview_device_row must pass through _conflicts from the row."""
+        result = self._call_preview_with_row(
+            "new-device-conflict",
+            extra_row_fields={"_conflicts": {"serial": {"Serial Number": "AAA", "Service Tag": "BBB"}}},
+        )
+        self.assertEqual(result.action, "create")
+        self.assertIn("conflicts", result.extra_data)
+        self.assertIn("serial", result.extra_data["conflicts"])
 
     def test_field_diff_u_position_float_vs_int(self):
         """u_position 35.0 from NetBox vs 35 from file must NOT appear in diff."""
