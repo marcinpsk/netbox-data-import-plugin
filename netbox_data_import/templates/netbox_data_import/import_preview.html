@@ -545,6 +545,19 @@
                   </form>
                 {% endif %}
 
+                {# Conflict badge: shown when two source columns disagree on the same target field #}
+                {% if row.extra_data.conflicts %}
+                <span class="badge text-bg-warning ms-1 ndi-conflict-badge"
+                      style="cursor:pointer;"
+                      data-bs-toggle="modal"
+                      data-bs-target="#conflictModal"
+                      data-row-number="{{ row.row_number }}"
+                      data-source-id="{{ row.source_id }}"
+                      title="This row has field conflicts that require manual resolution before import">
+                  <i class="mdi mdi-alert"></i> {{ row.extra_data.conflicts|length }} conflict{{ row.extra_data.conflicts|length|pluralize }}
+                </span>
+                {% endif %}
+
                 {# Per-row sync button: show on create rows for devices and racks only #}
                 {% if row.action == 'create' and row.object_type == 'device' or row.action == 'create' and row.object_type == 'rack' %}
                 <button type="button" class="btn btn-sm btn-outline-success ms-1 ndi-sync-row-btn"
@@ -559,6 +572,12 @@
                         data-source-model="{{ row.extra_data.source_model|default:'' }}"
                         data-asset-tag="{{ row.extra_data.asset_tag|default:'' }}"
                         data-rack-type-name="{{ row.extra_data.rack_type_name|default:'' }}"
+                        data-serial="{{ row.extra_data.source_serial|default:'' }}"
+                        data-u-position="{{ row.extra_data.u_position|default:'' }}"
+                        data-u-height="{{ row.extra_data.u_height|default:'' }}"
+                        data-face="{{ row.extra_data.face|default:'' }}"
+                        data-airflow="{{ row.extra_data.airflow|default:'' }}"
+                        data-status="{{ row.extra_data.status|default:'' }}"
                         title="Create this {{ row.object_type }} in NetBox now">
                   <i class="mdi mdi-lightning-bolt"></i> Sync to NetBox
                 </button>
@@ -686,8 +705,45 @@
   </div>
 </div>
 
+{# ── Conflict Resolution Modal ─────────────────────────────────────────── #}
+<div class="modal fade" id="conflictModal" tabindex="-1" aria-labelledby="conflictModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="conflictModalLabel">
+          <i class="mdi mdi-alert-circle-outline"></i> Resolve Field Conflict
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}" id="conflictForm">
+        {% csrf_token %}
+        <input type="hidden" name="profile_id" value="{{ profile_id }}">
+        <input type="hidden" name="source_id" id="conf_source_id">
+        <input type="hidden" name="source_column" id="conf_source_column">
+        <input type="hidden" name="original_value" id="conf_original_value" value="">
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <input type="hidden" name="resolved_fields" id="conf_resolved_fields">
+        <div class="modal-body">
+          <p class="text-muted small mb-3">
+            Multiple source columns provide different values for the same field.
+            Select which value to use. Your choice will be saved and applied automatically on future imports.
+          </p>
+          <div id="conflictModalBody">
+            {# Populated by JS #}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 {{ existing_resolutions|json_script:"ndi-existing-resolutions" }}
 {{ device_match_info|json_script:"ndi-device-match-info" }}
+{{ conflicts_by_row|json_script:"ndi-conflicts-by-row" }}
+{{ extra_columns_by_row|json_script:"ndi-extra-columns-by-row" }}
 <script>
 // ── Row filter ──────────────────────────────────────────────────────────────
 (function() {
@@ -2010,6 +2066,12 @@ document.addEventListener('click', function(e) {
       ['Model', btn.dataset.sourceModel, 'source_model'],
       ['Asset tag', btn.dataset.assetTag, 'asset_tag'],
       ['Rack type', btn.dataset.rackTypeName, 'rack_type'],
+      ['Serial', btn.dataset.serial, 'serial'],
+      ['U Position', btn.dataset.uPosition, 'u_position'],
+      ['U Height', btn.dataset.uHeight, 'u_height'],
+      ['Face', btn.dataset.face, 'face'],
+      ['Airflow', btn.dataset.airflow, 'airflow'],
+      ['Status', btn.dataset.status, 'status'],
     ];
 
     fieldDefs.forEach(function (def) {
@@ -2023,6 +2085,26 @@ document.addEventListener('click', function(e) {
       tr.appendChild(makeValueCell(value, fieldKey));
       tbody.appendChild(tr);
     });
+
+    // Append extra_columns (custom fields / unmapped columns) below standard fields
+    var EXTRA_COLUMNS_BY_ROW = JSON.parse(
+      (document.getElementById('ndi-extra-columns-by-row') || {textContent: '{}'}).textContent
+    );
+    var rowNumber = btn.dataset.rowNumber;
+    var extraCols = EXTRA_COLUMNS_BY_ROW[rowNumber] || {};
+    for (var ecKey in extraCols) {
+      var ecVal = String(extraCols[ecKey]);
+      if (!ecVal) continue;
+      var ecTr = document.createElement('tr');
+      var ecTd1 = document.createElement('td');
+      ecTd1.className = 'text-muted small';
+      ecTd1.textContent = ecKey;
+      var ecTd2 = document.createElement('td');
+      ecTd2.textContent = ecVal;
+      ecTr.appendChild(ecTd1);
+      ecTr.appendChild(ecTd2);
+      tbody.appendChild(ecTr);
+    }
 
     if (btn.dataset.detail) {
       var tr = document.createElement('tr');
@@ -2087,6 +2169,93 @@ document.addEventListener('click', function(e) {
     });
   });
 }());
+</script>
+<script>
+(function () {
+  var CONFLICTS_BY_ROW = JSON.parse(
+    (document.getElementById('ndi-conflicts-by-row') || {textContent: '{}'}).textContent
+  );
+
+  var conflictModal = document.getElementById('conflictModal');
+  if (!conflictModal) return;
+
+  conflictModal.addEventListener('show.bs.modal', function (e) {
+    var trigger = e.relatedTarget;
+    if (!trigger) return;
+
+    var rowNumber = trigger.dataset.rowNumber;
+    var sourceId = trigger.dataset.sourceId;
+    document.getElementById('conf_source_id').value = sourceId || '';
+
+    var conflicts = CONFLICTS_BY_ROW[rowNumber] || {};
+    var body = document.getElementById('conflictModalBody');
+    body.innerHTML = '';
+
+    var FIELD_LABELS = {
+      serial: 'Serial Number', asset_tag: 'Asset Tag', device_name: 'Device Name',
+      rack_name: 'Rack', u_position: 'U Position', u_height: 'U Height',
+      face: 'Face', airflow: 'Airflow', status: 'Status', make: 'Make', model: 'Model',
+    };
+
+    for (var fieldName in conflicts) {
+      var candidates = conflicts[fieldName];
+      var section = document.createElement('div');
+      section.className = 'mb-3';
+
+      var heading = document.createElement('h6');
+      heading.textContent = FIELD_LABELS[fieldName] || fieldName;
+      section.appendChild(heading);
+
+      var table = document.createElement('table');
+      table.className = 'table table-sm table-bordered mb-0';
+
+      for (var sourceName in candidates) {
+        var value = candidates[sourceName];
+        var tr = document.createElement('tr');
+
+        var tdSource = document.createElement('td');
+        tdSource.className = 'text-muted';
+        tdSource.textContent = sourceName;
+
+        var tdValue = document.createElement('td');
+        tdValue.textContent = value;
+
+        var tdBtn = document.createElement('td');
+        tdBtn.style.width = '100px';
+        var useBtn = document.createElement('button');
+        useBtn.type = 'button';
+        useBtn.className = 'btn btn-sm btn-outline-primary ndi-conflict-resolve-btn';
+        useBtn.textContent = 'Use this';
+        useBtn.dataset.fieldName = fieldName;
+        useBtn.dataset.value = value;
+        tdBtn.appendChild(useBtn);
+
+        tr.appendChild(tdSource);
+        tr.appendChild(tdValue);
+        tr.appendChild(tdBtn);
+        table.appendChild(tr);
+      }
+
+      section.appendChild(table);
+      body.appendChild(section);
+    }
+  });
+
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.ndi-conflict-resolve-btn');
+    if (!btn) return;
+
+    var fieldName = btn.dataset.fieldName;
+    var value = btn.dataset.value;
+    var resolved = {};
+    resolved[fieldName] = value;
+
+    document.getElementById('conf_source_column').value = '_merge_' + fieldName;
+    document.getElementById('conf_original_value').value = '';
+    document.getElementById('conf_resolved_fields').value = JSON.stringify(resolved);
+    document.getElementById('conflictForm').submit();
+  });
+})();
 </script>
 
 {% endblock %}
