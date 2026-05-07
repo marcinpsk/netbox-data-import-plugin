@@ -273,7 +273,7 @@ def _merge_row_values(
 
         if not values:
             continue
-        if len({str(v) for v in values.values()}) == 1:
+        if len({_normalize_for_compare(v) for v in values.values()}) == 1:
             row_dict[target_field] = next(iter(values.values()))
         else:
             row_dict[target_field] = None
@@ -315,16 +315,17 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
             existing_nonempty = existing is not None and str(existing).strip() != ""
 
             if not existing_nonempty:
-                unique = {str(v) for v in unmapped.values()}
+                unique = {_normalize_for_compare(v) for v in unmapped.values()}
                 if len(unique) == 1:
                     row[target_field] = next(iter(unmapped.values()))
                 else:
                     row[target_field] = None
                     row.setdefault("_conflicts", {})[target_field] = {k: str(v) for k, v in unmapped.items()}
             else:
-                all_candidates = {target_field: str(existing), **{k: str(v) for k, v in unmapped.items()}}
-                unique = set(all_candidates.values())
-                if len(unique) > 1:
+                norm_existing = _normalize_for_compare(existing)
+                norm_unmapped = {_normalize_for_compare(v) for v in unmapped.values()}
+                if len({norm_existing} | norm_unmapped) > 1:
+                    all_candidates = {target_field: str(existing), **{k: str(v) for k, v in unmapped.items()}}
                     row[target_field] = None
                     row.setdefault("_conflicts", {})[target_field] = all_candidates
 
@@ -898,19 +899,23 @@ def _compute_field_diff(
 ):
     """Return a dict of fields that differ between the XLS row and the existing NetBox device."""
     diff = {}
-    candidates = [
+
+    def _str_cmp(v) -> str:
+        return "" if v is None else str(v).strip()
+
+    text_candidates = [
         ("device_name", device_name, matched_device.name),
         ("status", device_status, matched_device.status),
         ("serial", serial or "", matched_device.serial or ""),
         ("asset_tag", asset_tag or "", matched_device.asset_tag or ""),
     ]
     if device_face is not None:
-        candidates.append(("face", device_face, matched_device.face if matched_device.face else ""))
+        text_candidates.append(("face", device_face, matched_device.face or ""))
     if device_airflow is not None:
-        candidates.append(("airflow", device_airflow, matched_device.airflow if matched_device.airflow else ""))
-    for fname, xls_val, nb_val in candidates:
-        if _normalize_for_compare(xls_val) != _normalize_for_compare(nb_val):
-            diff[fname] = {"netbox": _normalize_for_compare(nb_val), "file": _normalize_for_compare(xls_val)}
+        text_candidates.append(("airflow", device_airflow, matched_device.airflow or ""))
+    for fname, xls_val, nb_val in text_candidates:
+        if _str_cmp(xls_val) != _str_cmp(nb_val):
+            diff[fname] = {"netbox": _str_cmp(nb_val), "file": _str_cmp(xls_val)}
     nb_u_height = matched_device.device_type.u_height if matched_device.device_type_id else None
     if nb_u_height is not None:
         try:
