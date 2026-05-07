@@ -778,6 +778,14 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if isinstance(stats, dict) and col not in mapped_source_cols
         ]
         unused_columns.sort(key=lambda x: -x["count"])
+        conflicts_by_row = {
+            str(r.row_number): r.extra_data.get("conflicts", {}) for r in result.rows if r.extra_data.get("conflicts")
+        }
+        extra_columns_by_row = {
+            str(r.row_number): r.extra_data.get("extra_columns", {})
+            for r in result.rows
+            if r.extra_data.get("extra_columns")
+        }
 
         return render(
             request,
@@ -798,6 +806,8 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "syncable_fields": SyncDeviceFieldView._ALLOWED_FIELDS,
                 "device_match_source_ids": device_match_source_ids,
                 "device_match_info": device_match_info,
+                "conflicts_by_row": conflicts_by_row,
+                "extra_columns_by_row": extra_columns_by_row,
             },
         )
 
