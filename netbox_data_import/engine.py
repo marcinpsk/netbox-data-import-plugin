@@ -243,6 +243,16 @@ def _promote_extra_json_fields(row_dict: dict) -> None:
             row_dict.setdefault("_extra_columns", {})[json_key] = val
 
 
+_NUMERIC_TARGET_FIELDS: frozenset[str] = frozenset({"u_position", "u_height"})
+
+
+def _cmp_for_field(field: str, val) -> str:
+    """Return the comparison key for *val* appropriate to *field* type."""
+    if field in _NUMERIC_TARGET_FIELDS:
+        return _normalize_for_compare(val)
+    return "" if val is None else str(val).strip()
+
+
 def _build_grouped_col_map(profile: ImportProfile) -> dict[str, list[str]]:
     """Return a target-field keyed map of all mapped source columns."""
     grouped: dict[str, list[str]] = {}
@@ -273,7 +283,7 @@ def _merge_row_values(
 
         if not values:
             continue
-        if len({_normalize_for_compare(v) for v in values.values()}) == 1:
+        if len({_cmp_for_field(target_field, v) for v in values.values()}) == 1:
             row_dict[target_field] = next(iter(values.values()))
         else:
             row_dict[target_field] = None
@@ -300,13 +310,18 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
     grouped = _build_grouped_col_map(profile)
 
     for row in rows:
+        extra_columns = row.get("_extra_columns", {})
         for target_field, source_cols in grouped.items():
             unmapped = {}
             for sc in source_cols:
                 if sc in row:
                     val = row.pop(sc)
-                    if val is not None and str(val).strip():
-                        unmapped[sc] = val
+                elif sc in extra_columns:
+                    val = extra_columns.pop(sc)
+                else:
+                    continue
+                if val is not None and str(val).strip():
+                    unmapped[sc] = val
 
             if not unmapped:
                 continue
@@ -315,20 +330,22 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
             existing_nonempty = existing is not None and str(existing).strip() != ""
 
             if not existing_nonempty:
-                unique = {_normalize_for_compare(v) for v in unmapped.values()}
+                unique = {_cmp_for_field(target_field, v) for v in unmapped.values()}
                 if len(unique) == 1:
                     row[target_field] = next(iter(unmapped.values()))
                 else:
                     row[target_field] = None
                     row.setdefault("_conflicts", {})[target_field] = {k: str(v) for k, v in unmapped.items()}
             else:
-                norm_existing = _normalize_for_compare(existing)
-                norm_unmapped = {_normalize_for_compare(v) for v in unmapped.values()}
-                if len({norm_existing} | norm_unmapped) > 1:
+                cmp_existing = _cmp_for_field(target_field, existing)
+                cmp_unmapped = {_cmp_for_field(target_field, v) for v in unmapped.values()}
+                if len({cmp_existing} | cmp_unmapped) > 1:
                     all_candidates = {target_field: str(existing), **{k: str(v) for k, v in unmapped.items()}}
                     row[target_field] = None
                     row.setdefault("_conflicts", {})[target_field] = all_candidates
 
+        if not extra_columns:
+            row.pop("_extra_columns", None)
         _promote_extra_json_fields(row)
 
     return rows

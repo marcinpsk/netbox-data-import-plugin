@@ -290,6 +290,39 @@ class ApplyColumnMappingsTest(TestCase):
         self.assertEqual(result[0].get("serial"), "SAME-001")
         self.assertNotIn("_conflicts", result[0])
 
+    def test_serial_exact_comparison_no_false_merge(self):
+        """Serial numbers '0042' and '42' must NOT be merged — they differ as text identifiers."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = ImportProfile.objects.create(name="SerialExact", sheet_name="Data")
+        ColumnMapping.objects.create(profile=profile, source_column="SN1", target_field="serial")
+        ColumnMapping.objects.create(profile=profile, source_column="SN2", target_field="serial")
+        rows = [{"SN1": "0042", "SN2": "42"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertIsNone(result[0].get("serial"))
+        self.assertIn("serial", result[0].get("_conflicts", {}))
+
+    def test_u_position_float_int_no_false_conflict(self):
+        """u_position '35.0' and '35' should merge without conflict (numeric normalization)."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = ImportProfile.objects.create(name="UPosFloat", sheet_name="Data")
+        ColumnMapping.objects.create(profile=profile, source_column="Pos1", target_field="u_position")
+        ColumnMapping.objects.create(profile=profile, source_column="Pos2", target_field="u_position")
+        rows = [{"Pos1": "35.0", "Pos2": "35"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertNotIn("_conflicts", result[0])
+
+    def test_source_in_extra_columns_is_promoted(self):
+        """A source column stored under _extra_columns is promoted to the target field."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = self._make_profile_with_mapping("Asset Tag", "asset_tag")
+        rows = [{"_extra_columns": {"Asset Tag": "TAG-EXTRA"}, "device_name": "Dev-01"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertEqual(result[0]["asset_tag"], "TAG-EXTRA")
+        self.assertNotIn("Asset Tag", result[0].get("_extra_columns", {}))
+
     def test_returns_rows(self):
         """apply_column_mappings returns the modified rows list."""
         from netbox_data_import.engine import apply_column_mappings

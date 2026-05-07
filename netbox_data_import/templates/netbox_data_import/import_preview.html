@@ -547,21 +547,22 @@
 
                 {# Conflict badge: shown when two source columns disagree on the same target field #}
                 {% if row.extra_data.conflicts %}
-                <span class="badge text-bg-warning ms-1 ndi-conflict-badge"
-                      style="cursor:pointer;"
+                <button type="button"
+                      class="badge text-bg-warning ms-1 border-0 ndi-conflict-badge"
                       data-bs-toggle="modal"
                       data-bs-target="#conflictModal"
                       data-row-number="{{ row.row_number }}"
                       data-source-id="{{ row.source_id }}"
+                      aria-label="Show conflicts for row {{ row.row_number }}"
                       title="This row has field conflicts that require manual resolution before import">
                   <i class="mdi mdi-alert"></i> {{ row.extra_data.conflicts|length }} conflict{{ row.extra_data.conflicts|length|pluralize }}
-                </span>
+                </button>
                 {% endif %}
 
-                {# Per-row sync button: show on create rows for devices and racks only #}
+                {# Per-row sync button: show on create rows for devices and racks only; disabled when conflicts present #}
                 {% if row.action == 'create' and row.object_type == 'device' or row.action == 'create' and row.object_type == 'rack' %}
                 <button type="button" class="btn btn-sm btn-outline-success ms-1 ndi-sync-row-btn"
-                        data-bs-toggle="modal" data-bs-target="#syncRowModal"
+                        {% if row.extra_data.conflicts %}disabled title="Resolve all conflicts before syncing"{% else %}data-bs-toggle="modal" data-bs-target="#syncRowModal"{% endif %}
                         data-row-number="{{ row.row_number }}"
                         data-object-type="{{ row.object_type }}"
                         data-name="{{ row.name }}"
@@ -2155,7 +2156,7 @@ document.addEventListener('click', function(e) {
         confirmBtn.disabled = false;
         confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
         confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
-        var msgs = data.errors ? data.errors.join('\n') : (data.error || 'Sync failed');
+        var msgs = data.errors ? data.errors.join('\n') : (data.detail || data.error || 'Sync failed');
         errorDiv.textContent = '';
         if (data.errors && data.errors.length > 1) {
           var ul = document.createElement('ul');
