@@ -13,6 +13,7 @@ from netbox_data_import.engine import (
     ParseError,
     RowResult,
     _ensure_device_type,
+    _normalize_for_compare,
     _preview_device_row,
     parse_file,
     run_import,
@@ -125,7 +126,212 @@ class ParseFileTest(TestCase):
             parse_file(garbage, profile)
 
 
-class RunImportDryRunTest(TestCase):
+class MultiColumnMergeTest(TestCase):
+    """Tests for multi-source column merging in parse_file."""
+
+    def _make_merge_profile(self) -> ImportProfile:
+        """Profile with 'Serial Number' and 'Service Tag' both mapping to 'serial'."""
+        profile = ImportProfile.objects.create(
+            name="MergeTest",
+            sheet_name="Data",
+            update_existing=True,
+            create_missing_device_types=True,
+        )
+        for src, tgt in [
+            ("Id", "source_id"),
+            ("Rack", "rack_name"),
+            ("Name", "device_name"),
+            ("Class", "device_class"),
+            ("Make", "make"),
+            ("Model", "model"),
+            ("Serial Number", "serial"),
+            ("Service Tag", "serial"),
+        ]:
+            ColumnMapping.objects.create(profile=profile, source_column=src, target_field=tgt)
+        return profile
+
+    def _make_single_row_workbook(
+        self,
+        serial_number: str | None,
+        service_tag: str | None,
+    ) -> BytesIO:
+        """Build an in-memory Excel file with one data row."""
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(["Id", "Rack", "Name", "Class", "Make", "Model", "Serial Number", "Service Tag"])
+        ws.append(["100", "Rack-01", "Dev-01", "Server", "Cisco", "C9300", serial_number, service_tag])
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    def test_single_source_no_conflict(self):
+        """When only one source column has a value, it is used with no conflict."""
+        profile = self._make_merge_profile()
+        rows = parse_file(self._make_single_row_workbook("SN-001", None), profile)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["serial"], "SN-001")
+        self.assertNotIn("_conflicts", rows[0])
+
+    def test_both_sources_same_value_no_conflict(self):
+        """When both sources have identical values, the value is used with no conflict."""
+        profile = self._make_merge_profile()
+        rows = parse_file(self._make_single_row_workbook("SAME-42", "SAME-42"), profile)
+        self.assertEqual(rows[0]["serial"], "SAME-42")
+        self.assertNotIn("_conflicts", rows[0])
+
+    def test_both_sources_different_values_conflict(self):
+        """When both sources have different non-empty values, _conflicts is populated."""
+        profile = self._make_merge_profile()
+        rows = parse_file(self._make_single_row_workbook("ABC-111", "XYZ-999"), profile)
+        self.assertIsNone(rows[0].get("serial"))
+        self.assertIn("_conflicts", rows[0])
+        conflict = rows[0]["_conflicts"]["serial"]
+        self.assertIn("Serial Number", conflict)
+        self.assertIn("Service Tag", conflict)
+        self.assertEqual(conflict["Serial Number"], "ABC-111")
+        self.assertEqual(conflict["Service Tag"], "XYZ-999")
+
+    def test_conflict_cleared_by_saved_resolution(self):
+        """A saved SourceResolution for the target field clears the conflict."""
+        from netbox_data_import.models import SourceResolution
+
+        profile = self._make_merge_profile()
+        SourceResolution.objects.create(
+            profile=profile,
+            source_id="100",
+            source_column="_merge_serial",
+            original_value="",
+            resolved_fields={"serial": "ABC-111"},
+        )
+
+        rows = parse_file(self._make_single_row_workbook("ABC-111", "XYZ-999"), profile)
+        self.assertEqual(rows[0]["serial"], "ABC-111")
+        self.assertFalse(rows[0].get("_conflicts", {}).get("serial"))
+
+
+class ApplyColumnMappingsTest(TestCase):
+    """Tests for apply_column_mappings — re-applying mappings to already-parsed rows."""
+
+    def _make_profile_with_mapping(self, source: str, target: str) -> ImportProfile:
+        profile = ImportProfile.objects.create(
+            name="ApplyMapTest",
+            sheet_name="Data",
+            update_existing=True,
+            create_missing_device_types=True,
+        )
+        ColumnMapping.objects.create(profile=profile, source_column=source, target_field=target)
+        return profile
+
+    def test_basic_mapping_applies_value(self):
+        """A raw source column is replaced with the target field key."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = self._make_profile_with_mapping("Asset Tag", "asset_tag")
+        rows = [{"Asset Tag": "TAG-001", "device_name": "Dev-01"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertEqual(result[0]["asset_tag"], "TAG-001")
+        self.assertNotIn("Asset Tag", result[0])
+
+    def test_empty_source_value_skipped(self):
+        """A source column with an empty value is skipped, leaving target field absent."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = self._make_profile_with_mapping("Asset Tag", "asset_tag")
+        rows = [{"Asset Tag": "", "device_name": "Dev-01"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertNotIn("asset_tag", result[0])
+
+    def test_multi_source_same_value_no_conflict(self):
+        """Two source columns with identical values merge without a conflict."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = ImportProfile.objects.create(name="MultiSame", sheet_name="Data")
+        ColumnMapping.objects.create(profile=profile, source_column="SN1", target_field="serial")
+        ColumnMapping.objects.create(profile=profile, source_column="SN2", target_field="serial")
+        rows = [{"SN1": "ABC-100", "SN2": "ABC-100"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertEqual(result[0]["serial"], "ABC-100")
+        self.assertNotIn("_conflicts", result[0])
+
+    def test_multi_source_different_values_conflict(self):
+        """Two source columns with different values produce a conflict entry."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = ImportProfile.objects.create(name="MultiDiff", sheet_name="Data")
+        ColumnMapping.objects.create(profile=profile, source_column="SN1", target_field="serial")
+        ColumnMapping.objects.create(profile=profile, source_column="SN2", target_field="serial")
+        rows = [{"SN1": "ABC-100", "SN2": "XYZ-999"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertIsNone(result[0].get("serial"))
+        self.assertIn("serial", result[0].get("_conflicts", {}))
+
+    def test_existing_target_with_new_conflicting_source_records_conflict(self):
+        """When a target field already has a value and a new mapping brings a different value, conflict is recorded."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = self._make_profile_with_mapping("Service Tag", "serial")
+        rows = [{"Service Tag": "NEW-999", "serial": "OLD-001"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertIsNone(result[0].get("serial"))
+        conflicts = result[0].get("_conflicts", {})
+        self.assertIn("serial", conflicts)
+
+    def test_existing_target_with_same_value_no_conflict(self):
+        """When a new source column provides the same value as the existing target, no conflict is recorded."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = self._make_profile_with_mapping("Service Tag", "serial")
+        rows = [{"Service Tag": "SAME-001", "serial": "SAME-001"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertEqual(result[0].get("serial"), "SAME-001")
+        self.assertNotIn("_conflicts", result[0])
+
+    def test_serial_exact_comparison_no_false_merge(self):
+        """Serial numbers '0042' and '42' must NOT be merged — they differ as text identifiers."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = ImportProfile.objects.create(name="SerialExact", sheet_name="Data")
+        ColumnMapping.objects.create(profile=profile, source_column="SN1", target_field="serial")
+        ColumnMapping.objects.create(profile=profile, source_column="SN2", target_field="serial")
+        rows = [{"SN1": "0042", "SN2": "42"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertIsNone(result[0].get("serial"))
+        self.assertIn("serial", result[0].get("_conflicts", {}))
+
+    def test_u_position_float_int_no_false_conflict(self):
+        """u_position '35.0' and '35' should merge without conflict (numeric normalization)."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = ImportProfile.objects.create(name="UPosFloat", sheet_name="Data")
+        ColumnMapping.objects.create(profile=profile, source_column="Pos1", target_field="u_position")
+        ColumnMapping.objects.create(profile=profile, source_column="Pos2", target_field="u_position")
+        rows = [{"Pos1": "35.0", "Pos2": "35"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertNotIn("_conflicts", result[0])
+
+    def test_source_in_extra_columns_is_promoted(self):
+        """A source column stored under _extra_columns is promoted to the target field."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = self._make_profile_with_mapping("Asset Tag", "asset_tag")
+        rows = [{"_extra_columns": {"Asset Tag": "TAG-EXTRA"}, "device_name": "Dev-01"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertEqual(result[0]["asset_tag"], "TAG-EXTRA")
+        self.assertNotIn("Asset Tag", result[0].get("_extra_columns", {}))
+
+    def test_returns_rows(self):
+        """apply_column_mappings returns the modified rows list."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = self._make_profile_with_mapping("Asset Tag", "asset_tag")
+        rows = [{"device_name": "X"}]
+        result = apply_column_mappings(rows, profile)
+        self.assertIsInstance(result, list)
+
     """Tests for engine.run_import with dry_run=True (no DB writes)."""
 
     def setUp(self):
@@ -640,10 +846,20 @@ class FieldDiffComputationTest(TestCase):
             status="active",
         )
 
-    def _call_preview(self, device_name, serial, asset_tag, device_status="active", ip_fields=None):
+    def _call_preview(
+        self,
+        device_name,
+        serial,
+        asset_tag,
+        device_status="active",
+        ip_fields=None,
+        u_position=None,
+        device_face=None,
+        device_airflow=None,
+    ):
         from dcim.models import Device, DeviceType, Rack
 
-        row = {"_row_number": 1, "rack_name": "", "u_position": None}
+        row = {"_row_number": 1, "rack_name": "", "u_position": u_position}
         ctx = ImportContext(
             profile=self.profile,
             site=self.site,
@@ -667,10 +883,53 @@ class FieldDiffComputationTest(TestCase):
             Device=Device,
             Rack=Rack,
             ip_fields=ip_fields,
-            device_face=None,
-            device_airflow=None,
+            device_face=device_face,
+            device_airflow=device_airflow,
             device_status=device_status,
-            u_position=None,
+            u_position=u_position,
+        )
+
+    def _call_preview_with_row(self, device_name, extra_row_fields=None, **kwargs):
+        """Like _call_preview but allows injecting extra row dict keys."""
+        from dcim.models import DeviceType, Device, Rack
+        from netbox_data_import.engine import ImportContext, _preview_device_row
+
+        row = {
+            "_row_number": 1,
+            "source_id": "test-id",
+            "device_name": device_name,
+            "rack_name": None,
+            "make": "TestMfg",
+            "model": "TestModel",
+            "u_height": 1,
+            "serial": None,
+            "asset_tag": None,
+        }
+        if extra_row_fields:
+            row.update(extra_row_fields)
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=True,
+            result=ImportResult(),
+        )
+        return _preview_device_row(
+            row,
+            ctx,
+            make="TestMfg",
+            model="TestModel",
+            mfg_slug="testmfg",
+            dt_slug="testmodel",
+            source_id="test-id",
+            device_name=device_name,
+            serial=row.get("serial"),
+            asset_tag=row.get("asset_tag"),
+            DeviceType=DeviceType,
+            Device=Device,
+            Rack=Rack,
+            **kwargs,
         )
 
     def test_field_diff_on_update_row(self):
@@ -735,6 +994,89 @@ class FieldDiffComputationTest(TestCase):
         diff = result.extra_data.get("field_diff", {})
         self.assertNotIn("u_height", diff, "u_height must not appear in diff when values match")
 
+    def test_extra_data_includes_face_airflow_status(self):
+        """_preview_device_row must include face, airflow, status in extra_data."""
+        result = self._call_preview(
+            "new-device-face",
+            serial="SN-FIELDS",
+            asset_tag="AT-FIELDS",
+            device_face="front",
+            device_airflow="front-to-rear",
+            device_status="staged",
+        )
+        self.assertEqual(result.action, "create")
+        self.assertEqual(result.extra_data.get("face"), "front")
+        self.assertEqual(result.extra_data.get("airflow"), "front-to-rear")
+        self.assertEqual(result.extra_data.get("status"), "staged")
+
+    def test_extra_data_includes_extra_columns(self):
+        """_preview_device_row must pass through _extra_columns from the row."""
+        result = self._call_preview_with_row(
+            "new-device-extra",
+            extra_row_fields={"_extra_columns": {"cf_location": "DC1"}},
+        )
+        self.assertEqual(result.action, "create")
+        self.assertEqual(result.extra_data.get("extra_columns"), {"cf_location": "DC1"})
+
+    def test_extra_data_includes_conflicts(self):
+        """_preview_device_row must pass through _conflicts from the row."""
+        result = self._call_preview_with_row(
+            "new-device-conflict",
+            extra_row_fields={"_conflicts": {"serial": {"Serial Number": "AAA", "Service Tag": "BBB"}}},
+        )
+        self.assertEqual(result.action, "create")
+        self.assertIn("conflicts", result.extra_data)
+        self.assertIn("serial", result.extra_data["conflicts"])
+
+    def test_field_diff_u_position_float_vs_int(self):
+        """u_position 35.0 from NetBox vs 35 from file must NOT appear in diff."""
+        self._make_existing_device(serial="SN-POS", asset_tag="AT-POS")
+        from dcim.models import Device
+
+        dev = Device.objects.get(name="existing-server")
+        dev.position = 35
+        dev.save()
+
+        result = self._call_preview("existing-server", serial="SN-POS", asset_tag="AT-POS", u_position=35)
+        diff = result.extra_data.get("field_diff", {})
+        self.assertNotIn("u_position", diff, "35 vs 35 must not appear as a diff")
+
+    def test_field_diff_text_fields_use_exact_comparison(self):
+        """Text fields (serial, asset_tag, device_name) use exact str comparison, not float normalization.
+
+        Serial numbers and asset tags are identifiers where '35.0' and '35' are meaningfully
+        different — float normalization must NOT be applied to them.
+        """
+        from unittest.mock import MagicMock
+
+        from netbox_data_import.engine import _compute_field_diff
+
+        mock_device = MagicMock()
+        mock_device.name = "some-device"
+        mock_device.status = "active"
+        mock_device.serial = "35.0"
+        mock_device.asset_tag = "AT-001"
+        mock_device.face = ""
+        mock_device.airflow = ""
+        mock_device.position = None
+        mock_device.device_type_id = None
+
+        diff = _compute_field_diff(
+            matched_device=mock_device,
+            device_name="some-device",
+            serial="35",
+            asset_tag="AT-001",
+            device_face=None,
+            device_airflow=None,
+            device_status="active",
+            u_height=1,
+            u_position=None,
+        )
+
+        self.assertIn("serial", diff, "'35' vs '35.0' must appear as a diff for serial (text field)")
+        self.assertEqual(diff["serial"]["netbox"], "35.0")
+        self.assertEqual(diff["serial"]["file"], "35")
+
     def test_extra_data_includes_netbox_device_id_on_update(self):
         """Update rows must include netbox_device_id in extra_data equal to matched device PK."""
         device = self._make_existing_device(serial="SN-ID", asset_tag="AT-ID")
@@ -757,3 +1099,39 @@ class FieldDiffComputationTest(TestCase):
         result = self._call_preview("brand-new-device-xyz", serial="SN-NEW-XYZ", asset_tag=None)
         self.assertEqual(result.action, "create")
         self.assertNotIn("netbox_device_id", result.extra_data)
+
+
+class NormalizeForCompareTest(TestCase):
+    """Tests for _normalize_for_compare helper."""
+
+    def test_integer_string_unchanged(self):
+        self.assertEqual(_normalize_for_compare("35"), "35")
+
+    def test_float_whole_number_normalized(self):
+        """35.0 → '35'"""
+        self.assertEqual(_normalize_for_compare("35.0"), "35")
+
+    def test_float_whole_number_direct(self):
+        """float(35.0) → '35'"""
+        self.assertEqual(_normalize_for_compare(35.0), "35")
+
+    def test_float_with_fraction_unchanged(self):
+        """1.5 stays '1.5'"""
+        self.assertEqual(_normalize_for_compare(1.5), "1.5")
+
+    def test_none_returns_empty(self):
+        self.assertEqual(_normalize_for_compare(None), "")
+
+    def test_non_numeric_string_unchanged(self):
+        self.assertEqual(_normalize_for_compare("ABC-123"), "ABC-123")
+
+    def test_zero(self):
+        self.assertEqual(_normalize_for_compare(0), "0")
+
+    def test_zero_float(self):
+        self.assertEqual(_normalize_for_compare(0.0), "0")
+
+    def test_infinity_string_returns_stripped_value(self):
+        for value in ("inf", "Infinity", "-inf"):
+            with self.subTest(value=value):
+                self.assertEqual(_normalize_for_compare(value), value.strip())

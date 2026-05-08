@@ -44,6 +44,7 @@ from .tables import (
     ImportJobTable,
     ImportProfileTable,
 )
+from . import engine
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -658,8 +659,6 @@ class ImportSetupView(PermissionRequiredMixin, View):
         if not form.is_valid():
             return render(request, "netbox_data_import/import_setup.html", {"form": form})
 
-        from . import engine
-
         profile = form.cleaned_data["profile"]
         excel_file = form.cleaned_data["excel_file"]
         site = form.cleaned_data["site"]
@@ -713,8 +712,6 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         from dcim.models import Location, Site
         from tenancy.models import Tenant
 
-        from . import engine
-
         profile = ImportProfile.objects.filter(pk=ctx.get("profile_id")).first()
         if not profile:
             messages.warning(request, "Import profile not found.")
@@ -745,6 +742,25 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "resolved_fields": res.resolved_fields,
             }
 
+        # Build device matching context for template
+        device_matches = DeviceExistingMatch.objects.filter(profile=profile)
+        device_match_source_ids = [m.source_id for m in device_matches]
+        device_match_info = {}
+
+        # Fetch device serial numbers from NetBox Device objects
+        from dcim.models import Device
+
+        netbox_device_ids = [m.netbox_device_id for m in device_matches]
+        devices_by_id = {d.id: d for d in Device.objects.filter(id__in=netbox_device_ids)}
+
+        for match in device_matches:
+            device = devices_by_id.get(match.netbox_device_id)
+            device_match_info[match.source_id] = {
+                "device_id": match.netbox_device_id,
+                "device_name": match.device_name,
+                "device_serial": device.serial if device else "",
+            }
+
         view_mode = request.GET.get("view", profile.preview_view_mode)
 
         # Build unused columns list: filter out any that are now mapped
@@ -762,6 +778,14 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if isinstance(stats, dict) and col not in mapped_source_cols
         ]
         unused_columns.sort(key=lambda x: -x["count"])
+        conflicts_by_row = {
+            str(r.row_number): r.extra_data.get("conflicts", {}) for r in result.rows if r.extra_data.get("conflicts")
+        }
+        extra_columns_by_row = {
+            str(r.row_number): r.extra_data.get("extra_columns", {})
+            for r in result.rows
+            if r.extra_data.get("extra_columns")
+        }
 
         return render(
             request,
@@ -780,6 +804,10 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "unused_columns": unused_columns,
                 "target_field_choices": TARGET_FIELD_CHOICES,
                 "syncable_fields": SyncDeviceFieldView._ALLOWED_FIELDS,
+                "device_match_source_ids": device_match_source_ids,
+                "device_match_info": device_match_info,
+                "conflicts_by_row": conflicts_by_row,
+                "extra_columns_by_row": extra_columns_by_row,
             },
         )
 
@@ -800,8 +828,6 @@ class ImportRunView(PermissionRequiredMixin, View):
         from dcim.models import Location, Site
         from django.db import transaction
         from tenancy.models import Tenant
-
-        from . import engine
 
         profile = get_object_or_404(ImportProfile, pk=ctx_data["profile_id"])
         site = get_object_or_404(Site, pk=ctx_data["site_id"])
@@ -845,8 +871,6 @@ class ImportResultsView(PermissionRequiredMixin, View):
         session_data = request.session.get("import_result")
         if not session_data:
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
-
-        from . import engine
 
         result = engine.ImportResult.from_session_dict(session_data)
         job_id = request.session.get("import_job_id")
@@ -1805,8 +1829,6 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
 
         # Re-apply all column mappings to the in-session rows so the new
         # mapping takes effect immediately without requiring a file re-upload.
-        from . import engine  # noqa: PLC0415
-
         session_rows = request.session.get("import_rows")
         if session_rows:
             engine.apply_column_mappings(session_rows, profile)
@@ -1876,7 +1898,24 @@ def _device_name_filter(q: str):
     return base
 
 
-class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
+class _AjaxPermissionView(PermissionRequiredMixin, View):
+    """Base for AJAX endpoints that require a permission.
+
+    Returns a JSON ``{"ok": false, "error": "Permission denied"}`` response
+    (HTTP 403) for authenticated users who lack the required permission,
+    instead of the default HTML 403 page.  Unauthenticated users are still
+    redirected to the login page.
+    """
+
+    def handle_no_permission(self):
+        from django.http import JsonResponse
+
+        if self.request.user.is_authenticated:
+            return JsonResponse({"ok": False, "error": "Permission denied"}, status=403)
+        return super().handle_no_permission()
+
+
+class SearchNetBoxObjectsView(_AjaxPermissionView):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
     GET params: type (manufacturer|device_type|device|role|rack_type), q (search string).
@@ -1940,6 +1979,7 @@ class SearchNetBoxObjectsView(PermissionRequiredMixin, View):
                     {
                         "id": dev.pk,
                         "name": dev.name,
+                        "serial": dev.serial or None,
                         "site": dev.site.name if dev.site else "",
                         "url": request.build_absolute_uri(dev.get_absolute_url()),
                     }
@@ -2121,6 +2161,125 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
             msg_parts.append(f"{already} already matched")
         messages.success(request, f"Auto-match: {', '.join(msg_parts) or 'nothing found'}.")
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+
+class SyncSingleRowView(_AjaxPermissionView):
+    """AJAX endpoint: execute a single row from the current import session.
+
+    POST body: row_number=<int>
+    Returns JSON: {ok: true, detail, url} or {ok: false, error} / {ok: false, errors: [...]}
+    """
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Execute a single import row identified by ``row_number`` and return JSON."""
+        from django.db import transaction
+        from django.http import JsonResponse
+        from dcim.models import Location, Site
+        from tenancy.models import Tenant
+
+        rows = request.session.get("import_rows")
+        ctx_data = request.session.get("import_context")
+        if not rows or not ctx_data:
+            return JsonResponse({"ok": False, "error": "No import in progress"}, status=400)
+
+        raw_row_number = request.POST.get("row_number")
+        if raw_row_number is None:
+            return JsonResponse({"ok": False, "error": "row_number is required"}, status=400)
+        try:
+            row_number = int(raw_row_number)
+        except (TypeError, ValueError):
+            return JsonResponse({"ok": False, "error": "Invalid row number"}, status=400)
+
+        profile = ImportProfile.objects.filter(pk=ctx_data.get("profile_id")).first()
+        if not profile:
+            return JsonResponse({"ok": False, "error": "Import profile not found"}, status=400)
+
+        rows = engine.reapply_saved_resolutions(rows, profile)
+
+        target = next((r for r in rows if r.get("_row_number") == row_number), None)
+        if target is None:
+            return JsonResponse({"ok": False, "error": "Row not found"}, status=400)
+
+        import_result_data = request.session.get("import_result")
+        if not import_result_data:
+            return JsonResponse({"ok": False, "error": "No preview data in session"}, status=400)
+
+        preview_rows = import_result_data.get("rows", [])
+        preview_row = next(
+            (
+                r
+                for r in preview_rows
+                if r.get("row_number") == row_number and r.get("object_type") in ("device", "rack")
+            ),
+            None,
+        )
+        if preview_row is None:
+            return JsonResponse({"ok": False, "error": "Row not found in current preview data"}, status=400)
+        if preview_row.get("action") != "create":
+            return JsonResponse(
+                {"ok": False, "error": "Only 'create' rows can be synced individually"},
+                status=400,
+            )
+
+        site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
+        if not site:
+            return JsonResponse({"ok": False, "error": "Site not found"}, status=400)
+
+        location = (
+            Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
+        )
+        tenant = Tenant.objects.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
+        context = {"site": site, "location": location, "tenant": tenant}
+
+        try:
+            with transaction.atomic():
+                result = engine.run_import([target], profile, context, dry_run=False, user=request.user)
+                error_rows = [r for r in result.rows if r.action == "error"]
+                if error_rows:
+                    transaction.set_rollback(True)
+                    return JsonResponse({"ok": False, "errors": [r.detail for r in error_rows]})
+        except Exception:
+            logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
+            return JsonResponse(
+                {"ok": False, "error": "An unexpected error occurred — see server logs."},
+                status=500,
+            )
+
+        row_result = next(
+            (r for r in result.rows if r.row_number == row_number and r.object_type == preview_row.get("object_type")),
+            None,
+        )
+        return JsonResponse(
+            {
+                "ok": True,
+                "detail": row_result.detail if row_result else "",
+                "url": row_result.netbox_url if row_result else "",
+            }
+        )
+
+
+class UnlinkDeviceView(PermissionRequiredMixin, View):
+    """Remove a DeviceExistingMatch (unlink a manually-linked device)."""
+
+    permission_required = "netbox_data_import.delete_deviceexistingmatch"
+
+    def post(self, request):
+        """Delete the DeviceExistingMatch and redirect back to preview."""
+        profile_id = request.POST.get("profile_id", "").strip()
+        source_id = request.POST.get("source_id", "").strip()
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+
+        if profile_id and source_id:
+            profile = get_object_or_404(ImportProfile, pk=profile_id)
+            DeviceExistingMatch.objects.filter(
+                profile=profile,
+                source_id=source_id,
+            ).delete()
+            messages.success(request, f"Unlinked source '{source_id}'.")
+
+        return redirect(next_url)
 
 
 # ---------------------------------------------------------------------------

@@ -107,9 +107,6 @@ class ColumnMapping(models.Model):
 
     class Meta:
         ordering = ["profile", "target_field"]
-        constraints = [
-            models.UniqueConstraint(fields=["profile", "target_field"], name="ndi_columnmapping_profile_target"),
-        ]
         verbose_name = "Column Mapping"
         verbose_name_plural = "Column Mappings"
 

@@ -243,21 +243,111 @@ def _promote_extra_json_fields(row_dict: dict) -> None:
             row_dict.setdefault("_extra_columns", {})[json_key] = val
 
 
+_NUMERIC_TARGET_FIELDS: frozenset[str] = frozenset({"u_position", "u_height"})
+
+
+def _cmp_for_field(field: str, val) -> str:
+    """Return the comparison key for *val* appropriate to *field* type."""
+    if field in _NUMERIC_TARGET_FIELDS:
+        return _normalize_for_compare(val)
+    return "" if val is None else str(val).strip()
+
+
+def _build_grouped_col_map(profile: ImportProfile) -> dict[str, list[str]]:
+    """Return a target-field keyed map of all mapped source columns."""
+    grouped: dict[str, list[str]] = {}
+    for cm in profile.column_mappings.all():
+        grouped.setdefault(cm.target_field, []).append(cm.source_column)
+    return grouped
+
+
+def _merge_row_values(
+    row_num: int,
+    raw_row,
+    raw_headers: dict[str, int],
+    grouped_col_map: dict[str, list[str]],
+) -> dict[str, object]:
+    """Build a parsed row dict using multi-source merge semantics."""
+    row_dict: dict[str, object] = {"_row_number": row_num}
+    for target_field, source_cols in grouped_col_map.items():
+        values: dict[str, object] = {}
+        for source_col in source_cols:
+            idx = raw_headers.get(source_col)
+            if idx is None:
+                continue
+            value = raw_row[idx] if idx < len(raw_row) else None
+            if isinstance(value, str):
+                value = value.strip()
+            if value is not None and str(value).strip():
+                values[source_col] = value
+
+        if not values:
+            continue
+        if len({_cmp_for_field(target_field, v) for v in values.values()}) == 1:
+            row_dict[target_field] = next(iter(values.values()))
+        else:
+            row_dict[target_field] = None
+            row_dict.setdefault("_conflicts", {})[target_field] = {k: str(v) for k, v in values.items()}
+    return row_dict
+
+
+def _clear_resolved_conflicts(row_dict: dict[str, object], resolved_fields: dict) -> None:
+    """Remove conflicts for fields overridden by saved resolutions."""
+    for resolved_field in resolved_fields:
+        row_dict.get("_conflicts", {}).pop(resolved_field, None)
+    if not row_dict.get("_conflicts"):
+        row_dict.pop("_conflicts", None)
+
+
 def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict]:
     """Re-apply the profile's column mappings to already-parsed session rows.
 
-    This is used after a quick-add column mapping so that the in-session row
-    dicts reflect the new mapping without requiring the source file to be
-    re-uploaded.  Unmapped source-column keys (still present with their
-    original name) are renamed to the configured target_field.  Any
-    ``extra_json:<key>`` targets are promoted into ``_extra_columns`` as usual.
+    Used after a quick-add column mapping so that in-session row dicts reflect
+    the new mapping without requiring the source file to be re-uploaded.
+    Handles multi-source merge: if a newly-mapped source column conflicts with an
+    already-mapped value for the same target field, a _conflicts entry is recorded.
     """
-    col_map: dict[str, str] = {cm.source_column: cm.target_field for cm in profile.column_mappings.all()}
+    grouped = _build_grouped_col_map(profile)
+
     for row in rows:
-        for source_col, target_field in col_map.items():
-            if source_col in row:
-                row[target_field] = row.pop(source_col)
+        extra_columns = row.get("_extra_columns", {})
+        for target_field, source_cols in grouped.items():
+            unmapped = {}
+            for sc in source_cols:
+                if sc in row:
+                    val = row.pop(sc)
+                elif sc in extra_columns:
+                    val = extra_columns.pop(sc)
+                else:
+                    continue
+                if val is not None and str(val).strip():
+                    unmapped[sc] = val
+
+            if not unmapped:
+                continue
+
+            existing = row.get(target_field)
+            existing_nonempty = existing is not None and str(existing).strip() != ""
+
+            if not existing_nonempty:
+                unique = {_cmp_for_field(target_field, v) for v in unmapped.values()}
+                if len(unique) == 1:
+                    row[target_field] = next(iter(unmapped.values()))
+                else:
+                    row[target_field] = None
+                    row.setdefault("_conflicts", {})[target_field] = {k: str(v) for k, v in unmapped.items()}
+            else:
+                cmp_existing = _cmp_for_field(target_field, existing)
+                cmp_unmapped = {_cmp_for_field(target_field, v) for v in unmapped.values()}
+                if len({cmp_existing} | cmp_unmapped) > 1:
+                    all_candidates = {target_field: str(existing), **{k: str(v) for k, v in unmapped.items()}}
+                    row[target_field] = None
+                    row.setdefault("_conflicts", {})[target_field] = all_candidates
+
+        if not extra_columns:
+            row.pop("_extra_columns", None)
         _promote_extra_json_fields(row)
+
     return rows
 
 
@@ -282,11 +372,12 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     ws = wb[profile.sheet_name]
     raw_headers = _build_header_index_map(ws)
 
-    # Build source_column→target_field map from profile
-    col_map: dict[str, str] = {cm.source_column: cm.target_field for cm in profile.column_mappings.all()}
+    # Build grouped source-column map from profile
+    col_map = _build_grouped_col_map(profile)
 
-    # Unmapped columns: present in the sheet but not configured in col_map
-    unmapped_cols = [col for col in raw_headers if col not in col_map]
+    # Unmapped columns: present in the sheet but not in any mapping
+    all_mapped_sources = {src for srcs in col_map.values() for src in srcs}
+    unmapped_cols = [col for col in raw_headers if col not in all_mapped_sources]
 
     # Pre-fetch transform rules for efficiency
     transform_rules = list(profile.column_transform_rules.all())
@@ -305,15 +396,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
         if all(v is None for v in row):
             continue
 
-        row_dict: dict[str, object] = {"_row_number": row_num}
-        for source_col, target_field in col_map.items():
-            idx = raw_headers.get(source_col)
-            if idx is None:
-                continue
-            value = row[idx] if idx < len(row) else None
-            if isinstance(value, str):
-                value = value.strip()
-            row_dict[target_field] = value
+        row_dict = _merge_row_values(row_num, row, raw_headers, col_map)
 
         # Promote explicit extra_json: mappings into _extra_columns
         _promote_extra_json_fields(row_dict)
@@ -325,6 +408,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
         if source_id:
             for res in resolutions_by_source_id.get(str(source_id), []):
                 row_dict.update(res.resolved_fields)
+                _clear_resolved_conflicts(row_dict, res.resolved_fields)
 
         if return_stats or capture_extra:
             extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
@@ -358,8 +442,11 @@ def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
         source_id = str(row.get("source_id", ""))
         if source_id and source_id in resolutions_by_source_id:
             row = dict(row)  # shallow copy — don't mutate the session dict
+            if "_conflicts" in row:
+                row["_conflicts"] = dict(row["_conflicts"])
             for res in resolutions_by_source_id[source_id]:
                 row.update(res.resolved_fields)
+                _clear_resolved_conflicts(row, res.resolved_fields)
         result.append(row)
     return result
 
@@ -806,26 +893,46 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
     return matched_device, match_method
 
 
+def _normalize_for_compare(val) -> str:
+    """Normalize a value for field-diff comparison.
+
+    Whole-number floats (e.g. 35.0, "35.0") are normalized to their integer
+    string form ("35") to avoid false diffs caused by type differences between
+    the source file and what NetBox returns.
+    """
+    if val is None:
+        return ""
+    try:
+        f = float(val)
+        if f == int(f):
+            return str(int(f))
+        return str(f)
+    except (TypeError, ValueError, OverflowError):
+        return str(val).strip()
+
+
 def _compute_field_diff(
     matched_device, device_name, serial, asset_tag, device_face, device_airflow, device_status, u_height, u_position
 ):
     """Return a dict of fields that differ between the XLS row and the existing NetBox device."""
     diff = {}
-    candidates = [
-        ("device_name", str(device_name), str(matched_device.name)),
-        ("status", str(device_status), str(matched_device.status)),
-        ("serial", str(serial or ""), str(matched_device.serial or "")),
-        ("asset_tag", str(asset_tag or ""), str(matched_device.asset_tag or "")),
+
+    def _str_cmp(v) -> str:
+        return "" if v is None else str(v).strip()
+
+    text_candidates = [
+        ("device_name", device_name, matched_device.name),
+        ("status", device_status, matched_device.status),
+        ("serial", serial or "", matched_device.serial or ""),
+        ("asset_tag", asset_tag or "", matched_device.asset_tag or ""),
     ]
     if device_face is not None:
-        candidates.append(("face", str(device_face), str(matched_device.face) if matched_device.face else ""))
+        text_candidates.append(("face", device_face, matched_device.face or ""))
     if device_airflow is not None:
-        candidates.append(
-            ("airflow", str(device_airflow), str(matched_device.airflow) if matched_device.airflow else "")
-        )
-    for fname, xls_val, nb_val in candidates:
-        if xls_val != nb_val:
-            diff[fname] = {"netbox": nb_val, "file": xls_val}
+        text_candidates.append(("airflow", device_airflow, matched_device.airflow or ""))
+    for fname, xls_val, nb_val in text_candidates:
+        if _str_cmp(xls_val) != _str_cmp(nb_val):
+            diff[fname] = {"netbox": _str_cmp(nb_val), "file": _str_cmp(xls_val)}
     nb_u_height = matched_device.device_type.u_height if matched_device.device_type_id else None
     if nb_u_height is not None:
         try:
@@ -833,10 +940,11 @@ def _compute_field_diff(
                 diff["u_height"] = {"netbox": str(nb_u_height), "file": str(u_height)}
         except (TypeError, ValueError):
             pass
-    xls_pos = str(u_position) if u_position is not None else ""
-    nb_pos = str(matched_device.position) if matched_device.position is not None else ""
-    if xls_pos != nb_pos:
-        diff["u_position"] = {"netbox": nb_pos, "file": xls_pos}
+    if _normalize_for_compare(u_position) != _normalize_for_compare(matched_device.position):
+        diff["u_position"] = {
+            "netbox": _normalize_for_compare(matched_device.position),
+            "file": _normalize_for_compare(u_position),
+        }
     return diff
 
 
@@ -859,6 +967,7 @@ def _preview_device_row(
     device_airflow=None,
     device_status="active",
     u_position=None,
+    is_explicit_mapping: bool = False,
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     # Parse u_height early so it's available in all return paths
@@ -883,7 +992,15 @@ def _preview_device_row(
                 "mfg_slug": mfg_slug,
                 "dt_slug": dt_slug,
                 "u_height": u_height,
+                "face": device_face or "",
+                "airflow": device_airflow or "",
+                "status": device_status,
                 "asset_tag": asset_tag or "",
+                "source_serial": serial or "",
+                "is_explicit_mapping": is_explicit_mapping,
+                "dt_exists": dt_exists,
+                "extra_columns": row.get("_extra_columns", {}),
+                "conflicts": row.get("_conflicts", {}),
                 **({"_ip": ip_fields} if ip_fields else {}),
             },
         )
@@ -962,7 +1079,15 @@ def _preview_device_row(
             "dt_slug": dt_slug,
             "u_height": u_height,
             "u_position": position,
+            "face": device_face or "",
+            "airflow": device_airflow or "",
+            "status": device_status,
             "asset_tag": asset_tag or "",
+            "source_serial": serial or "",
+            "is_explicit_mapping": is_explicit_mapping,
+            "dt_exists": dt_exists,
+            "extra_columns": row.get("_extra_columns", {}),
+            "conflicts": row.get("_conflicts", {}),
             **({"_ip": ip_fields} if ip_fields else {}),
             **({"field_diff": field_diff} if field_diff is not None else {}),
             **({"netbox_device_id": matched_device.pk} if action == "update" else {}),
@@ -1231,8 +1356,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
             )
             continue
 
-        # Resolve device type slugs and u_height early for error cases
-        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
+        mfg_slug, dt_slug, is_explicit_mapping = _resolve_device_type_slugs(make, model, ctx.profile)
         u_height_raw = row.get("u_height", 1)
         try:
             u_height = max(1, int(float(u_height_raw)))
@@ -1257,6 +1381,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                         "mfg_slug": mfg_slug,
                         "dt_slug": dt_slug,
                         "u_height": u_height,
+                        "is_explicit_mapping": is_explicit_mapping,
                     },
                 )
             )
@@ -1300,6 +1425,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 device_airflow=device_airflow,
                 device_status=device_status,
                 u_position=position,
+                is_explicit_mapping=is_explicit_mapping,
             )
         else:
             row_result = _write_device_row(
