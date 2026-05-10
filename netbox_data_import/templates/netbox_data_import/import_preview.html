@@ -952,10 +952,14 @@ function reSplitWithExisting(originalValue, resolvedFields) {
   var container = document.getElementById('res_parts_row');
   container.innerHTML = '';
 
+  // Default field assignments mirror reSplit() so unrecorded parts get a
+  // sensible field pre-selected rather than an empty dropdown.
+  var defaultFields = ['asset_tag', 'device_name'];
+
   // Build ordered list of resolved entries
   var entries = Object.entries(resolvedFields);
   parts.forEach(function(part, idx) {
-    var field = entries[idx] ? entries[idx][0] : '';
+    var field = entries[idx] ? entries[idx][0] : (defaultFields[idx] || '');
     var val = entries[idx] ? entries[idx][1] : part.trim();
     _addResolutionPart(container, idx, val, field);
   });
