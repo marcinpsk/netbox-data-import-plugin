@@ -1370,16 +1370,24 @@ function dmSearch() {
         tdSite.textContent = dev.site || '—';
         tr.appendChild(tdSite);
 
-        // Actions column (Link button)
+        // Actions column (Select button)
         var tdActions = document.createElement('td');
         var btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'btn btn-sm btn-outline-primary';
-        btn.textContent = 'Link';
+        btn.className = 'btn btn-sm btn-outline-secondary';
+        btn.innerHTML = '<i class="mdi mdi-checkbox-blank-circle-outline"></i> Select';
         btn.onclick = function() {
           document.getElementById('dm_netbox_device_id').value = dev.id;
+          // Reset all rows and buttons
           table.querySelectorAll('tbody tr').forEach(function(r) { r.classList.remove('table-active'); });
+          table.querySelectorAll('tbody .btn').forEach(function(b) {
+            b.className = 'btn btn-sm btn-outline-secondary';
+            b.innerHTML = '<i class="mdi mdi-checkbox-blank-circle-outline"></i> Select';
+          });
+          // Mark this row/button as selected
           tr.classList.add('table-active');
+          btn.className = 'btn btn-sm btn-success';
+          btn.innerHTML = '<i class="mdi mdi-check-circle"></i> Selected';
         };
         tdActions.appendChild(btn);
         tr.appendChild(tdActions);
@@ -1709,7 +1717,7 @@ function unlinkFromModal(btn) {
         <div class="modal-footer justify-content-between">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
           <button type="submit" class="btn btn-primary">
-            <i class="mdi mdi-link"></i> Link selected device
+            <i class="mdi mdi-link"></i> Confirm link
           </button>
         </div>
       </form>
