@@ -787,6 +787,12 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if r.extra_data.get("extra_columns")
         }
 
+        non_card_error_rows = [
+            r
+            for r in result.rows
+            if r.action == "error" and not (r.object_type == "device" or (r.object_type == "rack" and r.name))
+        ]
+
         return render(
             request,
             "netbox_data_import/import_preview.html",
@@ -808,6 +814,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_match_info": device_match_info,
                 "conflicts_by_row": conflicts_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
+                "non_card_error_rows": non_card_error_rows,
             },
         )
 

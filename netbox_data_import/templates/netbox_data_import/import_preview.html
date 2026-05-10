@@ -131,6 +131,11 @@
             <i class="mdi mdi-alert-circle"></i>
             {{ result.counts.errors }} error{{ result.counts.errors|pluralize }} — resolve before import
           </button>
+          <div id="ndi-hidden-err-warn" class="alert alert-danger py-1 px-2 small mb-0 mt-1" style="display:none;">
+            <i class="mdi mdi-eye-off"></i>
+            <span id="ndi-hidden-err-count">0</span> error row(s) hidden by filter —
+            <a href="#" id="ndi-show-errors-link">show errors</a>
+          </div>
           {% endif %}
         </div>
 
@@ -187,7 +192,54 @@
     </div>
 
     {% if view_mode == 'racks' %}
-    {# Rack view #}
+    {# Rack view — error rows not shown in any rack card (device_type, unnamed rack, etc.) #}
+    {% if non_card_error_rows %}
+    <div class="card border-danger mb-3">
+      <div class="card-header bg-danger text-white d-flex align-items-center gap-2 py-2">
+        <i class="mdi mdi-alert-circle"></i>
+        <strong>Errors not shown in rack cards — resolve before import</strong>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>Row</th><th>Source ID</th><th>Name</th><th>Type</th><th>Detail</th><th></th></tr></thead>
+          <tbody>
+          {% for row in non_card_error_rows %}
+            <tr class="table-danger">
+              <td class="text-muted small">{{ row.row_number }}</td>
+              <td><code class="small">{{ row.source_id|default:"—" }}</code></td>
+              <td class="fw-semibold">{{ row.name|default:"—" }}</td>
+              <td><span class="badge ndi-badge-generic">{{ row.object_type }}</span></td>
+              <td class="small text-muted">{{ row.detail }}</td>
+              <td class="text-end" style="white-space:nowrap;">
+                {% if row.object_type == 'device_type' and profile_id %}
+                  <button type="button" class="btn btn-sm btn-outline-warning"
+                          data-bs-toggle="modal" data-bs-target="#deviceTypeMappingModal"
+                          data-source-make="{{ row.extra_data.source_make }}"
+                          data-source-model="{{ row.extra_data.source_model }}"
+                          data-mfg-slug="{{ row.extra_data.mfg_slug }}"
+                          data-dt-slug="{{ row.extra_data.dt_slug }}"
+                          data-u-height="{{ row.extra_data.u_height|default:1 }}"
+                          data-profile-id="{{ profile_id }}">
+                    <i class="mdi mdi-link-variant"></i> Map / Create
+                  </button>
+                {% elif row.object_type == 'manufacturer' and profile_id %}
+                  <button type="button" class="btn btn-sm btn-outline-warning"
+                          data-bs-toggle="modal" data-bs-target="#manufacturerMappingModal"
+                          data-source-make="{{ row.name }}"
+                          data-profile-id="{{ profile_id }}">
+                    <i class="mdi mdi-link-variant"></i> Map
+                  </button>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
+    {# Rack view — cards #}
     <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3">
       {% for rack_name, group in result.rack_groups.items %}
       <div class="col">
@@ -774,12 +826,23 @@
 
     var noResults = document.getElementById('previewNoFilterResults');
     if (noResults) noResults.style.display = shown === 0 ? '' : 'none';
+
+    // Warn if any error rows are hidden by the filter
+    var hiddenErrors = Array.from(document.querySelectorAll('#previewRowsBody tr[data-action="error"]'))
+      .filter(function(tr) { return tr.style.display === 'none'; }).length;
+    var warn = document.getElementById('ndi-hidden-err-warn');
+    if (warn) {
+      warn.style.display = hiddenErrors > 0 ? '' : 'none';
+      var cnt = document.getElementById('ndi-hidden-err-count');
+      if (cnt) cnt.textContent = hiddenErrors;
+    }
   }
 
   document.addEventListener('DOMContentLoaded', function() {
     var filterInput = document.getElementById('previewRowFilter');
     var actionSelect = document.getElementById('previewActionFilter');
     var clearBtn = document.getElementById('previewRowFilterClear');
+    var showErrorsLink = document.getElementById('ndi-show-errors-link');
     if (filterInput) {
       filterInput.addEventListener('input', applyFilters);
       filterInput.addEventListener('keydown', function(e) {
@@ -790,6 +853,12 @@
     if (clearBtn) clearBtn.addEventListener('click', function() {
       if (filterInput) filterInput.value = '';
       if (actionSelect) actionSelect.value = '';
+      applyFilters();
+    });
+    if (showErrorsLink) showErrorsLink.addEventListener('click', function(e) {
+      e.preventDefault();
+      if (filterInput) filterInput.value = '';
+      if (actionSelect) actionSelect.value = 'error';
       applyFilters();
     });
   });
