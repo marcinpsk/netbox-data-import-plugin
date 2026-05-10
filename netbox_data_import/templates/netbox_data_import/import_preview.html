@@ -562,7 +562,14 @@
                 {# Per-row sync button: show on create rows for devices and racks only; disabled when conflicts present #}
                 {% if row.action == 'create' and row.object_type == 'device' or row.action == 'create' and row.object_type == 'rack' %}
                 <button type="button" class="btn btn-sm btn-outline-success ms-1 ndi-sync-row-btn"
-                        {% if row.extra_data.conflicts %}disabled title="Resolve all conflicts before syncing"{% else %}data-bs-toggle="modal" data-bs-target="#syncRowModal"{% endif %}
+                        {% if row.extra_data.conflicts %}
+                          disabled
+                          title="Resolve all conflicts before syncing"
+                        {% else %}
+                          data-bs-toggle="modal"
+                          data-bs-target="#syncRowModal"
+                          title="Create this {{ row.object_type }} in NetBox now"
+                        {% endif %}
                         data-row-number="{{ row.row_number }}"
                         data-object-type="{{ row.object_type }}"
                         data-name="{{ row.name }}"
@@ -578,8 +585,7 @@
                         data-u-height="{{ row.extra_data.u_height|default:'' }}"
                         data-face="{{ row.extra_data.face|default:'' }}"
                         data-airflow="{{ row.extra_data.airflow|default:'' }}"
-                        data-status="{{ row.extra_data.status|default:'' }}"
-                        title="Create this {{ row.object_type }} in NetBox now">
+                        data-status="{{ row.extra_data.status|default:'' }}">
                   <i class="mdi mdi-lightning-bolt"></i> Sync to NetBox
                 </button>
                 {% endif %}
