@@ -101,21 +101,22 @@ class ColumnMappingModelTest(TestCase):
         self.assertIn("Name", str(cm))
         self.assertIn("Device name", str(cm))  # get_target_field_display() is used in __str__
 
-    def test_unique_target_field_per_profile(self):
-        """Two column mappings for the same profile+target_field are rejected."""
-        from django.db import IntegrityError
-
+    def test_multiple_source_columns_can_share_target_field(self):
+        """Two column mappings for the same profile+target_field are allowed."""
         ColumnMapping.objects.create(
             profile=self.profile,
             source_column="Name",
             target_field="device_name",
         )
-        with self.assertRaises(IntegrityError):
-            ColumnMapping.objects.create(
-                profile=self.profile,
-                source_column="DeviceName",
-                target_field="device_name",
-            )
+        ColumnMapping.objects.create(
+            profile=self.profile,
+            source_column="DeviceName",
+            target_field="device_name",
+        )
+
+        mappings = ColumnMapping.objects.filter(profile=self.profile, target_field="device_name")
+        self.assertEqual(mappings.count(), 2)
+        self.assertCountEqual(mappings.values_list("source_column", flat=True), ["Name", "DeviceName"])
 
     def test_cascade_delete_with_profile(self):
         """Deleting a profile removes its column mappings."""

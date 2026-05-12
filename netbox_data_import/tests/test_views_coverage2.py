@@ -578,3 +578,318 @@ class BulkYamlImportErrorsPathTest(TestCase):
         # The warning message format is "Created X, skipped Y, N errors: ..."
         # Only the warning path (not success path) contains "errors:"
         self.assertTrue(any("errors:" in str(m) for m in messages))
+
+
+class SyncSingleRowViewTest(TestCase):
+    """Tests for SyncSingleRowView."""
+
+    def setUp(self):
+        from dcim.models import Site
+
+        self.user = _make_superuser("sync_row_user")
+        self.client = Client()
+        self.client.login(username="sync_row_user", password="testpass")
+        self.profile = _make_profile("SyncRowProfile")
+        self.site = Site.objects.create(name="SyncRow-Site", slug="syncrow-site")
+
+    def _set_session(self, rows):
+        session = self.client.session
+        session["import_rows"] = rows
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "test.xlsx",
+        }
+        session.save()
+
+    def _url(self):
+        return reverse("plugins:netbox_data_import:sync_single_row")
+
+    def test_no_session_returns_ok_false(self):
+        resp = self.client.post(self._url(), {"row_number": "1"})
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("No import in progress", data["error"])
+
+    def test_missing_row_number_returns_400(self):
+        self._set_session([{"_row_number": 1, "source_id": "X"}])
+        resp = self.client.post(self._url(), {})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_row_not_found_returns_ok_false(self):
+        self._set_session([{"_row_number": 1, "source_id": "X"}])
+        resp = self.client.post(self._url(), {"row_number": "99"})
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("Row not found", data["error"])
+
+    @patch("netbox_data_import.views.engine")
+    def test_non_create_preview_row_returns_400(self, mock_engine):
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "update", "object_type": "device"}]}
+        session.save()
+
+        resp = self.client.post(self._url(), {"row_number": "1"})
+
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "Only 'create' rows can be synced individually")
+        mock_engine.run_import.assert_not_called()
+
+    @patch("netbox_data_import.views.engine")
+    def test_missing_preview_result_returns_400(self, mock_engine):
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        resp = self.client.post(self._url(), {"row_number": "1"})
+
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "No preview data in session")
+        mock_engine.run_import.assert_not_called()
+
+    @patch("netbox_data_import.views.engine")
+    def test_missing_preview_row_returns_400(self, mock_engine):
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 2, "action": "create"}]}
+        session.save()
+
+        resp = self.client.post(self._url(), {"row_number": "1"})
+
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "Row not found in current preview data")
+        mock_engine.run_import.assert_not_called()
+
+    @patch("netbox_data_import.views.engine")
+    def test_success_returns_ok_true(self, mock_engine):
+        from netbox_data_import.engine import ImportResult, RowResult
+
+        mock_result = ImportResult()
+        mock_result.rows = [
+            RowResult(
+                row_number=1,
+                source_id="D001",
+                name="test-device",
+                action="create",
+                object_type="device",
+                detail="Would create device 'test-device'",
+                netbox_url="/dcim/devices/1/",
+            )
+        ]
+        mock_result.has_errors = False
+        mock_engine.run_import.return_value = mock_result
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "device"}]}
+        session.save()
+        resp = self.client.post(self._url(), {"row_number": "1"})
+        data = resp.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["detail"], "Would create device 'test-device'")
+        self.assertEqual(data["url"], "/dcim/devices/1/")
+        mock_engine.run_import.assert_called_once()
+        call_kwargs = mock_engine.run_import.call_args
+        self.assertFalse(call_kwargs.kwargs.get("dry_run", True))
+
+    @patch("netbox_data_import.views.engine")
+    def test_success_rack_row_returns_ok_true(self, mock_engine):
+        from netbox_data_import.engine import ImportResult, RowResult
+
+        mock_result = ImportResult()
+        mock_result.rows = [
+            RowResult(
+                row_number=1,
+                source_id="R001",
+                name="test-rack",
+                action="create",
+                object_type="rack",
+                detail="Would create rack 'test-rack'",
+                netbox_url="/dcim/racks/1/",
+            )
+        ]
+        mock_result.has_errors = False
+        mock_engine.run_import.return_value = mock_result
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "R001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "R001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "rack"}]}
+        session.save()
+        resp = self.client.post(self._url(), {"row_number": "1"})
+        data = resp.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["detail"], "Would create rack 'test-rack'")
+        self.assertEqual(data["url"], "/dcim/racks/1/")
+        mock_engine.run_import.assert_called_once()
+        call_kwargs = mock_engine.run_import.call_args
+        self.assertFalse(call_kwargs.kwargs.get("dry_run", True))
+
+    @patch("django.db.transaction.set_rollback")
+    @patch("netbox_data_import.views.engine")
+    def test_engine_error_returns_ok_false(self, mock_engine, mock_set_rollback):
+        from netbox_data_import.engine import ImportResult, RowResult
+
+        mock_result = ImportResult()
+        mock_result.rows = [
+            RowResult(
+                row_number=1,
+                source_id="D001",
+                name="bad-device",
+                action="error",
+                object_type="device",
+                detail="Missing rack",
+            )
+        ]
+        mock_result.has_errors = True
+        mock_engine.run_import.return_value = mock_result
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "device"}]}
+        session.save()
+        resp = self.client.post(self._url(), {"row_number": "1"})
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertTrue(
+            any("Missing rack" in detail for detail in data["errors"]),
+            f"Expected 'Missing rack' in {data['errors']!r}",
+        )
+        mock_set_rollback.assert_called_with(True)
+
+    @patch("netbox_data_import.views.engine")
+    def test_manufacturer_create_but_device_update_rejected(self, mock_engine):
+        """Bug #24 regression: manufacturer 'create' + device 'update' must return 400.
+
+        Previously, ``next(r for r in rows if r["row_number"] == ...)`` picked the
+        *first* result row for that row_number — which could be the manufacturer entry
+        with action='create' — causing the guard to pass even though the device action
+        was 'update'.  The fix filters by ``object_type in ('device', 'rack')``.
+        """
+        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+
+        self._set_session([{"_row_number": 1, "source_id": "D001"}])
+        session = self.client.session
+        session["import_result"] = {
+            "rows": [
+                {"row_number": 1, "action": "create", "object_type": "manufacturer"},
+                {"row_number": 1, "action": "create", "object_type": "device_type"},
+                {"row_number": 1, "action": "update", "object_type": "device"},
+            ]
+        }
+        session.save()
+
+        resp = self.client.post(self._url(), {"row_number": "1"})
+
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "Only 'create' rows can be synced individually")
+        mock_engine.run_import.assert_not_called()
+
+
+class SyncRowButtonTemplateTest(TestCase):
+    """Verify the Sync to NetBox button appears on create rows and not on others."""
+
+    def setUp(self):
+        from dcim.models import Site
+
+        self.user = _make_superuser("sync_btn_user")
+        self.client = Client()
+        self.client.login(username="sync_btn_user", password="testpass")
+        self.profile = _make_profile("SyncBtnProfile")
+        self.site = Site.objects.create(name="SyncBtn-Site", slug="syncbtn-site")
+
+    @patch("netbox_data_import.views.engine")
+    def test_sync_button_present_on_create_rows(self, mock_engine):
+        from netbox_data_import.engine import ImportResult, RowResult
+
+        mock_result = ImportResult()
+        mock_result.rows = [
+            RowResult(
+                row_number=1,
+                source_id="D001",
+                name="new-device",
+                action="create",
+                object_type="device",
+                detail="Would create device 'new-device'",
+            ),
+        ]
+        mock_result.counts = {}
+        mock_result.has_errors = False
+        mock_engine.run_import.return_value = mock_result
+        mock_engine.reapply_saved_resolutions.return_value = [
+            {"_row_number": 1, "source_id": "D001", "device_name": "new-device"}
+        ]
+        mock_engine.ImportResult = ImportResult
+
+        session = self.client.session
+        session["import_rows"] = [{"_row_number": 1, "source_id": "D001", "device_name": "new-device"}]
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "test.xlsx",
+        }
+        session.save()
+
+        resp = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"ndi-sync-row-btn", resp.content)
+        self.assertIn(b"Sync to NetBox", resp.content)
+        self.assertIn(b"syncRowModal", resp.content)
+
+    @patch("netbox_data_import.views.engine")
+    def test_sync_button_absent_on_update_rows(self, mock_engine):
+        from netbox_data_import.engine import ImportResult, RowResult
+
+        mock_result = ImportResult()
+        mock_result.rows = [
+            RowResult(
+                row_number=1,
+                source_id="D002",
+                name="existing-device",
+                action="update",
+                object_type="device",
+                detail="Would update device 'existing-device'",
+            ),
+        ]
+        mock_result.counts = {}
+        mock_result.has_errors = False
+        mock_engine.run_import.return_value = mock_result
+        mock_engine.reapply_saved_resolutions.return_value = [
+            {"_row_number": 1, "source_id": "D002", "device_name": "existing-device"}
+        ]
+        mock_engine.ImportResult = ImportResult
+
+        session = self.client.session
+        session["import_rows"] = [{"_row_number": 1, "source_id": "D002", "device_name": "existing-device"}]
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "test.xlsx",
+        }
+        session.save()
+
+        resp = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn(b"ndi-sync-row-btn", resp.content)

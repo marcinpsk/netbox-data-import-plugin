@@ -101,6 +101,9 @@ urlpatterns = [
     path("quick-create-role/", views.QuickCreateDeviceRoleView.as_view(), name="quick_create_role"),
     path("match-existing-device/", views.MatchExistingDeviceView.as_view(), name="match_existing_device"),
     path("auto-match-devices/", views.AutoMatchDevicesView.as_view(), name="auto_match_devices"),
+    # Per-row sync
+    path("sync-single-row/", views.SyncSingleRowView.as_view(), name="sync_single_row"),
+    path("unlink-device/", views.UnlinkDeviceView.as_view(), name="unlink_device"),
     # Import Job history
     path("jobs/", views.ImportJobListView.as_view(), name="importjob_list"),
 ]

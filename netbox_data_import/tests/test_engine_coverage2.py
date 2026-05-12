@@ -9,6 +9,7 @@ from netbox_data_import.engine import (
     ImportContext,
     ImportResult,
     _assign_ip_to_device,
+    _clear_resolved_conflicts,
     _compute_field_diff,
     _ensure_device_role,
     _ensure_device_type,
@@ -86,6 +87,41 @@ class ReapplySavedResolutionsTest(TestCase):
         ]
         result = reapply_saved_resolutions(rows, self.profile)
         self.assertEqual(len(result), 2)
+
+    def test_copies_conflicts_before_clearing_resolved_fields(self):
+        """Nested _conflicts data stays on the original row and is cleaned from the result."""
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="SRC-CONFLICT",
+            source_column="Name",
+            original_value="orig",
+            resolved_fields={"device_name": "resolved"},
+        )
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "SRC-CONFLICT",
+                "device_name": "orig",
+                "_conflicts": {"device_name": {"Name": "orig", "Alias": "override"}},
+            }
+        ]
+
+        result = reapply_saved_resolutions(rows, self.profile)
+
+        self.assertNotIn("_conflicts", result[0])
+        self.assertEqual(rows[0]["_conflicts"], {"device_name": {"Name": "orig", "Alias": "override"}})
+
+
+class ClearResolvedConflictsTest(TestCase):
+    """Tests for _clear_resolved_conflicts cleanup behavior."""
+
+    def test_removes_empty_conflicts_dict(self):
+        """Clearing the last resolved conflict removes the empty _conflicts wrapper."""
+        row = {"_conflicts": {"device_name": {"Name": "orig"}}}
+
+        _clear_resolved_conflicts(row, {"device_name": "resolved"})
+
+        self.assertNotIn("_conflicts", row)
 
 
 class EnsureManufacturerPermDeniedTest(TestCase):

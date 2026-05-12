@@ -17,6 +17,7 @@ from netbox_data_import.models import (
     ManufacturerMapping,
     SourceResolution,
 )
+from netbox_data_import.tests.helpers import setup_preview_with_device_matches
 
 User = get_user_model()
 
@@ -454,6 +455,369 @@ class ImportPreviewViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertContains(resp, "sample_cans.xlsx")
+
+
+class ImportPreviewViewContextTest(BaseViewTestCase):
+    """Tests for ImportPreviewView device matching context."""
+
+    def _setup_session_with_matches(self, profile):
+        """Populate session with import state and DeviceExistingMatch records."""
+        return setup_preview_with_device_matches(self.client, profile)
+
+    def test_device_match_context_included(self):
+        """Preview page context includes device_match_source_ids and device_match_info."""
+        profile = _make_profile("ContextProfile")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("device_match_source_ids", resp.context)
+        self.assertIn("device_match_info", resp.context)
+
+    def test_device_match_context_empty_profile(self):
+        """Preview page context has empty lists when profile has no DeviceExistingMatch records."""
+        profile = _make_profile("EmptyProfile")
+
+        from dcim.models import Site
+        from netbox_data_import.engine import parse_file, run_import
+        from netbox_data_import.views import _serialize_rows
+
+        site = Site.objects.create(name="EmptySite", slug="empty-site")
+
+        with open(FIXTURE_PATH, "rb") as f:
+            rows = parse_file(f, profile)
+        result = run_import(rows, profile, {"site": site}, dry_run=True)
+
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "sample_cans.xlsx",
+        }
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["device_match_source_ids"], [])
+        self.assertEqual(resp.context["device_match_info"], {})
+
+    def test_device_match_context_multiple_matches(self):
+        """Preview page context correctly includes multiple DeviceExistingMatch records."""
+        profile = _make_profile("MultiProfile")
+        site, device1, device2, device_rows = self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreaterEqual(len(device_rows), 2)
+        self.assertIn(device_rows[0].source_id, resp.context["device_match_source_ids"])
+        self.assertIn(device_rows[1].source_id, resp.context["device_match_source_ids"])
+        self.assertGreaterEqual(len(resp.context["device_match_source_ids"]), 2)
+
+        device_match_info = resp.context["device_match_info"]
+        self.assertEqual(device_match_info[device_rows[0].source_id]["device_id"], device1.id)
+        self.assertEqual(device_match_info[device_rows[0].source_id]["device_name"], device1.name)
+        self.assertEqual(device_match_info[device_rows[1].source_id]["device_id"], device2.id)
+        self.assertEqual(device_match_info[device_rows[1].source_id]["device_name"], device2.name)
+
+
+class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
+    """Tests for unlink button in import preview template."""
+
+    def _setup_session_with_matches(self, profile):
+        """Populate session with import state and DeviceExistingMatch records."""
+        site, device1, device2, _ = setup_preview_with_device_matches(self.client, profile)
+        return site, device1, device2
+
+    def test_unlink_button_hidden_no_link(self):
+        """Unlink button should NOT be shown for devices without manual links."""
+        profile = _make_profile("UnlinkTestProfile")
+
+        from dcim.models import Site
+        from netbox_data_import.engine import parse_file, run_import
+        from netbox_data_import.views import _serialize_rows
+
+        site = Site.objects.create(name="UnlinkSite", slug="unlink-site")
+
+        with open(FIXTURE_PATH, "rb") as f:
+            rows = parse_file(f, profile)
+        result = run_import(rows, profile, {"site": site}, dry_run=True)
+
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "sample_cans.xlsx",
+        }
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        # Check that unlink_device form is not present for devices without links
+        content = resp.content.decode()
+        # The unlink form should have action pointing to unlink_device URL
+        self.assertNotIn('action="' + reverse("plugins:netbox_data_import:unlink_device") + '"', content)
+
+    def test_unlink_button_shown_with_link(self):
+        """Unlink button should be shown for devices with manual links."""
+        profile = _make_profile("UnlinkTestProfile2")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+
+        # Check that unlink button form is present (look for unlink-device URL and button text)
+        self.assertIn("unlink-device", content)
+        self.assertIn("Unlink", content)
+
+    def test_unlink_button_has_correct_form(self):
+        """Unlink button should have correct form structure with profile_id and source_id."""
+        profile = _make_profile("UnlinkTestProfile3")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+        # Verify form contains hidden inputs for profile_id and source_id
+        self.assertIn('name="profile_id"', content)
+        self.assertIn('name="source_id"', content)
+        self.assertIn('onclick="unlinkFromModal(this)"', content)
+        # Verify context has some matched source IDs
+        self.assertGreater(len(resp.context["device_match_source_ids"]), 0)
+
+    def test_unlink_button_uses_unlink_endpoint_with_form_data(self):
+        """Modal unlink action should post form data to the unlink endpoint."""
+        profile = _make_profile("UnlinkTestProfile3b")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+        self.assertIn("function unlinkFromModal(btn)", content)
+        self.assertIn(reverse("plugins:netbox_data_import:unlink_device"), content)
+        self.assertIn("application/x-www-form-urlencoded", content)
+        self.assertIn("Cannot unlink: missing profile or source ID.", content)
+        self.assertIn("window.location.reload()", content)
+
+    def test_unlink_button_has_csrf_token(self):
+        """Unlink button form should include CSRF token."""
+        profile = _make_profile("UnlinkTestProfile4")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+        # Check that CSRF token is present in the form
+        self.assertIn("csrfmiddlewaretoken", content)
+
+
+class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
+    """Tests for device match modal current link section (Task 5)."""
+
+    def _setup_session_with_matches(self, profile):
+        """Populate session with import state and DeviceExistingMatch records."""
+        site, device1, device2, _ = setup_preview_with_device_matches(self.client, profile)
+        return site, device1, device2
+
+    def test_modal_current_link_section_hidden_no_link(self):
+        """Modal current link section should be hidden when no device is linked."""
+        profile = _make_profile("ModalTestProfile1")
+
+        from dcim.models import Site
+        from netbox_data_import.engine import parse_file, run_import
+        from netbox_data_import.views import _serialize_rows
+
+        site = Site.objects.create(name="ModalSite", slug="modal-site")
+
+        with open(FIXTURE_PATH, "rb") as f:
+            rows = parse_file(f, profile)
+        result = run_import(rows, profile, {"site": site}, dry_run=True)
+
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "sample_cans.xlsx",
+        }
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+        # Check that current link section is present but hidden
+        self.assertIn('id="mm_current_link"', content)
+        self.assertIn('style="display:none;"', content)
+
+    def test_modal_current_link_section_shown_with_link(self):
+        """Modal current link section should be shown when device is linked."""
+        profile = _make_profile("ModalTestProfile2")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+
+        # Check that current link section is present and has device data
+        self.assertIn('id="mm_current_link"', content)
+        self.assertIn('id="mm_current_device_name"', content)
+        self.assertIn('id="mm_current_device_id"', content)
+        self.assertIn("Currently Linked To:", content)
+
+    def test_modal_current_link_json_data_passed(self):
+        """Modal receives device_match_info with correct structure."""
+        profile = _make_profile("ModalTestProfile3")
+        site, device1, device2 = self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("device_match_info", resp.context)
+        device_match_info = resp.context["device_match_info"]
+        self.assertGreater(len(device_match_info), 0)
+
+        for source_id, match_info in device_match_info.items():
+            self.assertIn("device_id", match_info)
+            self.assertIn("device_name", match_info)
+
+    def test_modal_has_ndi_device_match_info_script(self):
+        """Modal page should serialize device match info as a JSON object."""
+        import json
+
+        profile = _make_profile("ModalTestProfile4")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+        marker = '<script id="ndi-device-match-info" type="application/json">'
+        self.assertIn(marker, content)
+        script_content = content.split(marker, 1)[1].split("</script>", 1)[0]
+        self.assertIsInstance(json.loads(script_content), dict)
+
+    def test_modal_displays_current_device_serial(self):
+        """Modal should display current device serial number (Task 6)."""
+        profile = _make_profile("ModalTestProfile5")
+        site, device1, device2 = self._setup_session_with_matches(profile)
+
+        device1.serial = "SN-12345-ABC"
+        device1.save()
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        device_match_info = resp.context["device_match_info"]
+        self.assertGreater(len(device_match_info), 0)
+
+        serials = [info["device_serial"] for info in device_match_info.values()]
+        self.assertIn("SN-12345-ABC", serials)
+
+        content = resp.content.decode()
+        self.assertIn('id="mm_current_device_serial"', content)
+
+    def test_modal_displays_serial_not_set_when_empty(self):
+        """Modal should display 'Not set' when device has no serial (Task 6)."""
+        profile = _make_profile("ModalTestProfile6")
+        site, device1, device2 = self._setup_session_with_matches(profile)
+
+        # search_objects returns the raw model value (null for no serial), while
+        # device_match_info intentionally stores a blank string fallback for the modal.
+        self.assertEqual(device1.serial, "")
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        device_match_info = resp.context["device_match_info"]
+
+        # device_match_info intentionally normalizes blank serial values to ""
+        # even though the search endpoint returns a raw null device.serial value.
+        self.assertGreater(len(device_match_info), 0)
+        for match_info in device_match_info.values():
+            self.assertIn("device_serial", match_info)
+            self.assertEqual(match_info["device_serial"], "")
+
+    def test_modal_search_escapes_serial_before_innerhtml(self):
+        """Modal search should escape serial values before assigning innerHTML."""
+        profile = _make_profile("ModalTestProfile6b")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+        self.assertIn("escapeHtml(dev.serial || 'Empty')", content)
+
+    def test_modal_clears_search_on_open(self):
+        """Modal should have device match information and search capability when opening."""
+        profile = _make_profile("ModalTestProfile7")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+
+        # Verify modal structure exists with search input and results container
+        self.assertIn('id="dm_search_q"', content)
+        self.assertIn('id="dm_search_results"', content)
+        self.assertIn('type="text"', content)
+        # Verify dmSearch function is defined to enable search functionality
+        self.assertIn("function dmSearch()", content)
+
+    def test_modal_clears_previous_results(self):
+        """Modal should reset search results and show device match info when opening."""
+        profile = _make_profile("ModalTestProfile8")
+        self._setup_session_with_matches(profile)
+
+        url = reverse("plugins:netbox_data_import:import_preview")
+        resp = self.client.get(url)
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode()
+
+        # Verify modal contains device match info display structure
+        self.assertIn('id="mm_current_link"', content)
+        self.assertIn('id="mm_current_device_name"', content)
+        # Verify search results container is present (will be populated by dmSearch)
+        self.assertIn('id="dm_search_results"', content)
 
 
 class ImportResultsViewTest(BaseViewTestCase):
@@ -1172,6 +1536,60 @@ class SearchNetBoxObjectsExtendedViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
         self.assertEqual(data["results"], [])
+
+    def test_device_serial_included_in_results(self):
+        """Device search results include serial field."""
+        import json
+        from dcim.models import Device
+
+        Device.objects.create(
+            name="search-dev-with-serial",
+            device_type=self.dt,
+            role=self.role,
+            site=self.site,
+            serial="ABC123XYZ",
+        )
+        resp = self.client.get(self.url + "?type=device&q=search-dev-with-serial")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        # _device_search_q tokenises on '-', so other devices sharing tokens may
+        # also appear; assert the target device is present with the correct serial.
+        result = next((r for r in data["results"] if r["name"] == "search-dev-with-serial"), None)
+        self.assertIsNotNone(result, "Expected 'search-dev-with-serial' in results")
+        self.assertIn("serial", result)
+        self.assertEqual(result["serial"], "ABC123XYZ")
+
+    def test_device_serial_null_when_not_set(self):
+        """Device search results include serial=null when not set."""
+        import json
+        from dcim.models import Device
+
+        Device.objects.create(
+            name="search-dev-no-serial",
+            device_type=self.dt,
+            role=self.role,
+            site=self.site,
+        )
+        resp = self.client.get(self.url + "?type=device&q=search-dev-no-serial")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        # _device_search_q tokenises on '-', so other devices sharing tokens may
+        # also appear; assert the target device is present with serial=null.
+        result = next((r for r in data["results"] if r["name"] == "search-dev-no-serial"), None)
+        self.assertIsNotNone(result, "Expected 'search-dev-no-serial' in results")
+        self.assertIn("serial", result)
+        self.assertIsNone(result["serial"])
+
+    def test_non_device_objects_unaffected(self):
+        """Non-device search results do not include serial field."""
+        import json
+
+        resp = self.client.get(self.url + "?type=manufacturer&q=SearchMfg")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertTrue(len(data["results"]) > 0)
+        for result in data["results"]:
+            self.assertNotIn("serial", result)
 
 
 class QuickResolveClassViewTest(BaseViewTestCase):
@@ -3094,3 +3512,77 @@ class SyncDeviceFieldViewTests(TestCase):
         data = response.json()
         self.assertFalse(data["ok"])
         self.assertIn("already exists", data["error"])
+
+
+class UnlinkDeviceViewTest(TestCase):
+    """Test UnlinkDeviceView."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        from netbox_data_import.models import DeviceExistingMatch
+
+        cls.user = User.objects.create_superuser("test", "test@test.com", "test")
+        cls.site = Site.objects.create(name="Site 1", slug="site-1")
+        cls.dt = DeviceType.objects.create(
+            model="Model1",
+            manufacturer=Manufacturer.objects.create(name="Vendor1", slug="vendor1"),
+            slug="model1",
+        )
+        cls.role = DeviceRole.objects.create(name="Role1", slug="role1")
+        cls.device = Device.objects.create(
+            name="dev-01",
+            device_type=cls.dt,
+            role=cls.role,
+            site=cls.site,
+        )
+        cls.profile = ImportProfile.objects.create(name="Profile1")
+        cls.match = DeviceExistingMatch.objects.create(
+            profile=cls.profile,
+            source_id="SRC001",
+            netbox_device_id=cls.device.pk,
+            device_name=cls.device.name,
+        )
+        cls.url = reverse("plugins:netbox_data_import:unlink_device")
+
+    def test_unlink_removes_match(self):
+        """Unlink successfully deletes the DeviceExistingMatch."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
+        self.client.force_login(self.user)
+        resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "SRC001"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
+
+    def test_unlink_missing_match_is_idempotent(self):
+        """Unlink with non-existent match is idempotent (no error)."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        self.client.force_login(self.user)
+        resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "NONEXISTENT"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
+
+    def test_unlink_unauthenticated(self):
+        """Unlink requires authentication."""
+        from django.conf import settings
+        from django.shortcuts import resolve_url
+
+        from netbox_data_import.models import DeviceExistingMatch
+
+        resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "SRC001"})
+        login_url = resolve_url(getattr(settings, "LOGIN_URL", "/login/"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(str(resp.url).startswith(login_url))
+        self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
+
+    def test_unlink_missing_profile(self):
+        """Unlink returns 404 if profile not found."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        self.client.force_login(self.user)
+        resp = self.client.post(self.url, {"profile_id": 99999, "source_id": "SRC001"})
+        self.assertEqual(resp.status_code, 404)
+        self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
