@@ -332,6 +332,8 @@ class ApplyColumnMappingsTest(TestCase):
         result = apply_column_mappings(rows, profile)
         self.assertIsInstance(result, list)
 
+
+class RunImportDryRunTest(TestCase):
     """Tests for engine.run_import with dry_run=True (no DB writes)."""
 
     def setUp(self):

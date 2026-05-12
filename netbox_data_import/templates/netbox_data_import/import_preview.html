@@ -1429,8 +1429,10 @@ function dmSearch() {
         // Serial column with color coding
         var tdSerial = document.createElement('td');
         var serialHtml = '';
-        if (!dev.serial && !sourceSerial) {
-          serialHtml = '<span style="color:gray;">—</span>';
+        if (!sourceSerial) {
+          serialHtml = dev.serial
+            ? '<span>' + escapeHtml(dev.serial) + '</span>'
+            : '<span style="color:gray;">—</span>';
         } else if (dev.serial === sourceSerial) {
           serialHtml = '<span style="color:green;"><i class="mdi mdi-check"></i> ' + escapeHtml(dev.serial || 'Empty') + '</span>';
         } else {
