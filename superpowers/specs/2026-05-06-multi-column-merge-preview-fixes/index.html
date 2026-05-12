@@ -1,0 +1,880 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/superpowers/specs/2026-05-06-multi-column-merge-preview-fixes/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Multi-Column Merge, Full Preview Fields, Numeric Comparison Fix - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#multi-column-merge-full-preview-fields-numeric-comparison-fix" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Multi-Column Merge, Full Preview Fields, Numeric Comparison Fix
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feature-1-multi-column-merge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature 1: Multi-Column Merge
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Feature 1: Multi-Column Merge">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#design" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Design
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Design">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#engine-parse_file-and-apply_column_mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Engine — parse_file and apply_column_mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#session-storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session Storage
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#preview-display" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Preview Display
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#conflict-resolution-modal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conflict Resolution Modal
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ui-column-mapping-admin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UI — Column Mapping Admin
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feature-2-show-all-fields-in-sync-modal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature 2: Show All Fields in Sync Modal
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Feature 2: Show All Fields in Sync Modal">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#problem_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#design_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Design
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Design">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#engine-_preview_device_row" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Engine — _preview_device_row
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#template-sync-button-data-attributes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Template — sync button data attributes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#js-modal-syncrowmodal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JS Modal — syncRowModal
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feature-3-numeric-comparison-normalization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature 3: Numeric Comparison Normalization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Feature 3: Numeric Comparison Normalization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#problem_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#design_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Design
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#out-of-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Out of Scope
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="multi-column-merge-full-preview-fields-numeric-comparison-fix">Multi-Column Merge, Full Preview Fields, Numeric Comparison Fix</h1>
+<p><strong>Date:</strong> 2026-05-06
+<strong>Branch target:</strong> <code>feat/per-row-sync</code></p>
+<hr />
+<h2 id="overview">Overview</h2>
+<p>Three related improvements to the import preview workflow:</p>
+<ol>
+<li><strong>Multi-column merge</strong> — allow multiple source columns to map to the same target field, with conflict detection and manual resolution.</li>
+<li><strong>Show all fields in sync modal</strong> — the "Sync to NetBox" confirmation modal only shows 7 hardcoded fields; extend it to show all mapped fields including custom fields.</li>
+<li><strong>Numeric comparison normalization</strong> — <code>_field_diff</code> compares some numeric values as strings, causing false positives (e.g. <code>35.0</code> vs <code>35</code> shows as different).</li>
+</ol>
+<hr />
+<h2 id="feature-1-multi-column-merge">Feature 1: Multi-Column Merge</h2>
+<h3 id="problem">Problem</h3>
+<p><code>ColumnMapping</code> has <code>UniqueConstraint(fields=["profile", "target_field"])</code>, so only one source column can map to each target field. Users with data spread across columns (e.g. 'Service Tag' and 'Serial Number' both containing serial-like values) cannot configure a merge.</p>
+<h3 id="design">Design</h3>
+<h4 id="model">Model</h4>
+<p>Remove <code>UniqueConstraint(["profile", "target_field"])</code> from <code>ColumnMapping</code>. The <code>(profile, source_column)</code> combination remains unique (one source column cannot be mapped twice in the same profile). A migration is required.</p>
+<p>No new model or priority field is needed.</p>
+<h4 id="engine-parse_file-and-apply_column_mappings">Engine — <code>parse_file</code> and <code>apply_column_mappings</code></h4>
+<p>Refactor <code>col_map</code> from <code>{source_col: target_field}</code> to <code>{target_field: [source_col, …]}</code> (grouped by target).</p>
+<p>When building each row dict:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>for target_field, source_cols in col_map.items():
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    values = {col: row[col] for col in source_cols if row[col] is not None and str(row[col]).strip()}
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    if len(values) == 0:
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>        row_dict[target_field] = None
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    elif len(set(values.values())) == 1:
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>        row_dict[target_field] = next(iter(values.values()))  # one value or all identical
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    else:
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>        row_dict[target_field] = None
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        row_dict.setdefault(&quot;_conflicts&quot;, {})[target_field] = values  # {col_name: value}
+</code></pre></div>
+<p>After applying saved <code>SourceResolution</code> records (existing <code>row_dict.update(res.resolved_fields)</code>), any conflict field covered by the resolution is cleared from <code>_conflicts</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">for</span> <span class="n">field</span> <span class="ow">in</span> <span class="n">res</span><span class="o">.</span><span class="n">resolved_fields</span><span class="p">:</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">row_dict</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;_conflicts&quot;</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">field</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</code></pre></div>
+<p><code>apply_column_mappings</code> (used after quick-add column mapping) applies the same grouped logic.</p>
+<h4 id="session-storage">Session Storage</h4>
+<p><code>_conflicts</code> is a plain dict key in the row dict; it serializes naturally with the existing import_rows session storage. No schema change.</p>
+<h4 id="preview-display">Preview Display</h4>
+<p>In <code>_preview_device_row</code> and <code>_preview_rack_row</code>: pass <code>row.get("_conflicts", {})</code> through to <code>RowResult.extra_data["conflicts"]</code>.</p>
+<p>In <code>import_preview.html</code>:
+- Rows with non-empty <code>extra_data.conflicts</code>: show an inline warning badge <code>⚠ N conflict(s)</code> (amber/warning color).
+- Clicking the badge opens a conflict resolution modal.</p>
+<h4 id="conflict-resolution-modal">Conflict Resolution Modal</h4>
+<p>A new modal (or reuse of the existing <code>resolveRowModal</code> pattern):
+- Title: "Resolve field conflict — [device name]"
+- One section per conflicting target field showing: field name, all competing source columns and their values, a "Use this" button per candidate.
+- Clicking "Use this" POSTs to the existing <code>SaveResolutionView</code> (or equivalent) with <code>source_id</code>, <code>target_field</code>, and chosen <code>value</code>. This stores a <code>SourceResolution</code> record.
+- After saving, the preview refreshes (existing <code>htmx</code>/page-reload pattern).</p>
+<p>On next preview load, the saved resolution applies automatically and the conflict disappears.</p>
+<h4 id="ui-column-mapping-admin">UI — Column Mapping Admin</h4>
+<p>The column mapping admin (profile edit form) should:
+- No longer reject saving two mappings with the same <code>target_field</code> at the form/view level.
+- Optionally: show a visual indicator when multiple mappings share a target field.</p>
+<hr />
+<h2 id="feature-2-show-all-fields-in-sync-modal">Feature 2: Show All Fields in Sync Modal</h2>
+<h3 id="problem_1">Problem</h3>
+<p>The "Sync to NetBox" confirmation modal (<code>syncRowModal</code>) shows only 7 hardcoded fields (Name, Rack, Source ID, Manufacturer, Model, Asset tag, Rack type). Fields like serial, u_position, u_height, face, airflow, status, and any custom fields mapped via <code>extra_json:</code> are invisible.</p>
+<h3 id="design_1">Design</h3>
+<h4 id="engine-_preview_device_row">Engine — <code>_preview_device_row</code></h4>
+<p>Add the currently missing standard fields to <code>extra_data</code>:
+- <code>serial</code> (already available as function arg, stored as <code>source_serial</code> — rename or add <code>serial</code> key)
+- <code>face</code> (function arg <code>device_face</code>)
+- <code>airflow</code> (function arg <code>device_airflow</code>)
+- <code>status</code> (function arg <code>device_status</code>)
+- <code>u_position</code> and <code>u_height</code> are already in <code>extra_data</code>
+- <code>extra_columns</code>: populate from <code>row.get("_extra_columns", {})</code> — the dict of unmapped/custom-field values</p>
+<h4 id="template-sync-button-data-attributes">Template — sync button data attributes</h4>
+<p>Add to the <code>ndi-sync-row-btn</code> button:
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>data-serial=&quot;{{ row.extra_data.serial|default:&#39;&#39; }}&quot;
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>data-u-position=&quot;{{ row.extra_data.u_position|default:&#39;&#39; }}&quot;
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>data-u-height=&quot;{{ row.extra_data.u_height|default:&#39;&#39; }}&quot;
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>data-face=&quot;{{ row.extra_data.face|default:&#39;&#39; }}&quot;
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>data-airflow=&quot;{{ row.extra_data.airflow|default:&#39;&#39; }}&quot;
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>data-status=&quot;{{ row.extra_data.status|default:&#39;&#39; }}&quot;
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>data-extra-columns=&#39;{{ row.extra_data.extra_columns|default:&quot;{}&quot; | tojson }}&#39;
+</code></pre></div></p>
+<p>For the extra_columns JSON blob, use a template filter or <code>json_script</code> tag.</p>
+<h4 id="js-modal-syncrowmodal">JS Modal — <code>syncRowModal</code></h4>
+<p>Replace the hardcoded 7-item <code>fieldDefs</code> array with:</p>
+<ol>
+<li>A comprehensive standard field list (all standard target fields with human-readable labels):
+   <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kd">var</span><span class="w"> </span><span class="nx">FIELD_LABELS</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nx">device_name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Name&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">rack_name</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Rack&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">source_id</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Source ID&#39;</span><span class="p">,</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nx">source_make</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Manufacturer&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">source_model</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Model&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">asset_tag</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Asset Tag&#39;</span><span class="p">,</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="nx">rack_type</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Rack Type&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">serial</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Serial&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">u_position</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;U Position&#39;</span><span class="p">,</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span><span class="nx">u_height</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;U Height&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">face</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Face&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">airflow</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Airflow&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">status</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;Status&#39;</span><span class="p">,</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="p">};</span>
+</code></pre></div></li>
+<li>Build <code>fieldDefs</code> from <code>btn.dataset.*</code> for all standard fields.</li>
+<li>After standard fields, iterate over <code>JSON.parse(btn.dataset.extraColumns || '{}')</code> and render each key-value pair using the raw key as label.</li>
+</ol>
+<p>Fields with empty/falsy values continue to be skipped.</p>
+<hr />
+<h2 id="feature-3-numeric-comparison-normalization">Feature 3: Numeric Comparison Normalization</h2>
+<h3 id="problem_2">Problem</h3>
+<p><code>_field_diff</code> compares most fields as <code>str(val)</code>. This causes false diffs when a value stored in NetBox returns as a float (e.g. <code>35.0</code>) while the import file contains an integer (e.g. <code>35</code>).</p>
+<h3 id="design_2">Design</h3>
+<p>Add a helper in <code>engine.py</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">def</span><span class="w"> </span><span class="nf">_normalize_for_compare</span><span class="p">(</span><span class="n">val</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Normalize a value for diff comparison.</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="sd">    Whole-number floats (e.g. 35.0, &quot;35.0&quot;) are normalized to their integer</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="sd">    string form (&quot;35&quot;) to avoid false diffs caused by type differences.</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="sd">    &quot;&quot;&quot;</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="k">if</span> <span class="n">val</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>        <span class="k">return</span> <span class="s2">&quot;&quot;</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="k">try</span><span class="p">:</span>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>        <span class="n">f</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>        <span class="k">if</span> <span class="n">f</span> <span class="o">==</span> <span class="nb">int</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+<a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>            <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">f</span><span class="p">))</span>
+<a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a>        <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+<a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>    <span class="k">except</span> <span class="p">(</span><span class="ne">TypeError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">):</span>
+<a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>        <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">val</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+</code></pre></div>
+<p>Replace all <code>str(x)</code> comparisons in <code>_field_diff</code> with <code>_normalize_for_compare(x)</code>. The <code>u_height</code> comparison (which already uses <code>float()</code>) is already correct and unchanged.</p>
+<hr />
+<h2 id="testing">Testing</h2>
+<ul>
+<li><strong>Multi-column merge</strong>: unit tests for <code>parse_file</code> with profiles having two source columns targeting the same field (no conflict, conflict, post-resolution auto-clear).</li>
+<li><strong>Show all fields</strong>: test that <code>_preview_device_row</code> includes serial/face/airflow/status in <code>extra_data</code>.</li>
+<li><strong>Normalization</strong>: unit tests for <code>_normalize_for_compare</code> and for <code>_field_diff</code> with float/int pairs.</li>
+<li>All 522 existing tests must continue to pass.</li>
+</ul>
+<hr />
+<h2 id="out-of-scope">Out of Scope</h2>
+<ul>
+<li>Priority/default-winner per profile (possible future enhancement).</li>
+<li>Conflict resolution for <code>extra_json:</code> custom field values (same mechanism applies, but not explicitly tested in this spec).</li>
+<li>Adding new target fields (e.g. <code>contact</code>) — separate spec if needed.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
