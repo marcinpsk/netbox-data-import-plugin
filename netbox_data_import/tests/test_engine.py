@@ -1031,7 +1031,7 @@ class FieldDiffComputationTest(TestCase):
         self.assertIn("serial", result.extra_data["conflicts"])
 
     def test_field_diff_u_position_float_vs_int(self):
-        """u_position 35.0 from NetBox vs 35 from file must NOT appear in diff."""
+        """u_position '35.0' from source file vs 35 (int) from NetBox must NOT appear in diff."""
         self._make_existing_device(serial="SN-POS", asset_tag="AT-POS")
         from dcim.models import Device
 
@@ -1039,9 +1039,10 @@ class FieldDiffComputationTest(TestCase):
         dev.position = 35
         dev.save()
 
-        result = self._call_preview("existing-server", serial="SN-POS", asset_tag="AT-POS", u_position=35)
+        # Pass "35.0" to simulate the float-like string that comes from an Excel cell
+        result = self._call_preview("existing-server", serial="SN-POS", asset_tag="AT-POS", u_position="35.0")
         diff = result.extra_data.get("field_diff", {})
-        self.assertNotIn("u_position", diff, "35 vs 35 must not appear as a diff")
+        self.assertNotIn("u_position", diff, "'35.0' vs 35 must not appear as a diff after float normalisation")
 
     def test_field_diff_text_fields_use_exact_comparison(self):
         """Text fields (serial, asset_tag, device_name) use exact str comparison, not float normalization.
