@@ -119,7 +119,7 @@
           </form>
           {% endif %}
 
-          {% if result.counts.errors == 0 %}
+          {% if not result.has_errors %}
           <form method="post" action="{% url 'plugins:netbox_data_import:import_run' %}">
             {% csrf_token %}
             <button type="submit" class="btn btn-success">
