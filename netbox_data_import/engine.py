@@ -156,7 +156,7 @@ class ImportContext:
     user: object | None = None
     # Tracks (rack_pk, position, face) tuples claimed by "create" rows in the
     # current file so that within-file rack position duplicates are flagged.
-    claimed_positions: set = field(default_factory=set)
+    claimed_positions: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -952,13 +952,14 @@ def _compute_field_diff(
     return diff
 
 
-def _check_rack_position_conflict(rack_name, position, device_face, ctx):
+def _check_rack_position_conflict(rack_name, position, device_face, ctx, row_number=None, device_name=None):
     """Detect within-file rack position duplicates during dry-run preview.
 
     Two rows in the same import claiming the same (rack, position, face)
     would cause an IntegrityError on the second write.  Registers the
-    position as claimed and returns an error message on conflict, or
-    ``None`` when the position is available.
+    position as claimed (with the row_number / device_name that claimed
+    it first) and returns ``(message, conflicting_row_number)`` on
+    conflict, or ``None`` when the position is available.
     """
     if not rack_name or position is None:
         return None
@@ -966,10 +967,21 @@ def _check_rack_position_conflict(rack_name, position, device_face, ctx):
     pos_key = (rack_name, position, effective_face)
     if pos_key in ctx.claimed_positions:
         face_label = f" ({effective_face})" if effective_face else ""
+        prev = ctx.claimed_positions[pos_key]
+        prev_row, prev_name = prev if isinstance(prev, tuple) else (None, None)
+        if prev_row is not None:
+            other = f"row {prev_row}"
+            if prev_name:
+                other = f"{other} ('{prev_name}')"
+            return (
+                f"Rack position conflict: {rack_name} U{position}{face_label} also claimed by {other}",
+                prev_row,
+            )
         return (
-            f"Rack position conflict: {rack_name} U{position}{face_label} already claimed by another row in this file"
+            f"Rack position conflict: {rack_name} U{position}{face_label} already claimed by another row in this file",
+            None,
         )
-    ctx.claimed_positions.add(pos_key)
+    ctx.claimed_positions[pos_key] = (row_number, device_name)
     return None
 
 
@@ -1053,6 +1065,7 @@ def _preview_device_row(
     matched_device, match_method = _find_existing_device(
         ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device
     )
+    conflict_row_number = None
     if matched_device is not None:
         action = "update" if ctx.profile.update_existing else "skip"
         if match_method == "name":
@@ -1074,10 +1087,12 @@ def _preview_device_row(
         action = "create"
         _pos_label = f" U{position}" if position is not None else ""
         detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
-        conflict = _check_rack_position_conflict(rack_name, position, device_face, ctx)
+        conflict = _check_rack_position_conflict(
+            rack_name, position, device_face, ctx, row_number=row.get("_row_number"), device_name=device_name
+        )
         if conflict:
             action = "error"
-            detail = conflict
+            detail, conflict_row_number = conflict
 
     field_diff: dict | None = None
     if action == "update" and matched_device is not None:
@@ -1120,6 +1135,7 @@ def _preview_device_row(
             **({"_ip": ip_fields} if ip_fields else {}),
             **({"field_diff": field_diff} if field_diff is not None else {}),
             **({"netbox_device_id": matched_device.pk} if action == "update" else {}),
+            **({"conflict_row_number": conflict_row_number} if action == "error" and conflict_row_number else {}),
         },
     )
 
