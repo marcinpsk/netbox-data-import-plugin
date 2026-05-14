@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 from io import BytesIO
 
+from django.db import IntegrityError
 from django.utils.text import slugify
 import openpyxl
 
@@ -1095,6 +1096,27 @@ def _preview_device_row(
     )
 
 
+def _rack_position_error_row(row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, action):
+    """Convert an IntegrityError on device create/update to a descriptive error RowResult."""
+    _rack_label = rack_name if rack_name else "(no rack)"
+    _pos_label = f" U{position}" if position is not None else ""
+    msg = str(exc).split("\n")[0]
+    if "unique_rack_position" in msg or ("rack_id" in msg and "position" in msg):
+        detail = f"Cannot {action} '{device_name}': rack position {_rack_label}{_pos_label} is already occupied"
+    else:
+        detail = f"Cannot {action} '{device_name}': database constraint violation — {msg}"
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=device_name,
+        action="error",
+        object_type="device",
+        detail=detail,
+        rack_name=rack_name,
+        extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
+    )
+
+
 def _write_device_row(
     row,
     ctx,
@@ -1169,7 +1191,12 @@ def _write_device_row(
                 device.asset_tag = asset_tag
             if ctx.tenant:
                 device.tenant = ctx.tenant
-            device.save()
+            try:
+                device.save()
+            except IntegrityError as exc:
+                return _rack_position_error_row(
+                    row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "update"
+                )
             ip_json = {}
             for ip_field, ip_str in (ip_fields or {}).items():
                 assigned = _assign_ip_to_device(device, ip_field, ip_str)
@@ -1200,21 +1227,26 @@ def _write_device_row(
 
     if ctx.user is not None and not ctx.user.has_perm("dcim.add_device"):
         return _perm_denied_row("dcim.add_device", row, device_name, "device")
-    device = Device.objects.create(
-        site=ctx.site,
-        location=ctx.location,
-        name=device_name,
-        device_type=device_type,
-        role=device_role,
-        rack=rack if isinstance(rack, Rack) else None,
-        position=position,
-        face=face,
-        airflow=airflow,
-        status=status,
-        serial=serial,
-        asset_tag=asset_tag,
-        tenant=ctx.tenant,
-    )
+    try:
+        device = Device.objects.create(
+            site=ctx.site,
+            location=ctx.location,
+            name=device_name,
+            device_type=device_type,
+            role=device_role,
+            rack=rack if isinstance(rack, Rack) else None,
+            position=position,
+            face=face,
+            airflow=airflow,
+            status=status,
+            serial=serial,
+            asset_tag=asset_tag,
+            tenant=ctx.tenant,
+        )
+    except IntegrityError as exc:
+        return _rack_position_error_row(
+            row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "create"
+        )
     ip_json = {}
     for ip_field, ip_str in (ip_fields or {}).items():
         # New device — no interfaces yet, always store in JSON
