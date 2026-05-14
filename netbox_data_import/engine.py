@@ -154,6 +154,9 @@ class ImportContext:
     rack_map: dict = field(default_factory=dict)
     pending_device_roles: set = field(default_factory=set)
     user: object | None = None
+    # Tracks (rack_pk, position, face) tuples claimed by "create" rows in the
+    # current file so that within-file rack position duplicates are flagged.
+    claimed_positions: set = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -949,6 +952,34 @@ def _compute_field_diff(
     return diff
 
 
+def _check_rack_position_conflict(rack_name, position, device_face, ctx, Device, Rack):
+    """Check if a rack position would be occupied after this import.
+
+    Checks both existing NetBox devices and positions already claimed by
+    earlier rows in the same file.  Returns an error message string if
+    there is a conflict, or ``None`` if the position is available.  On
+    success, registers the position as claimed so later rows can detect
+    within-file duplicates.
+    """
+    if not rack_name or position is None:
+        return None
+    rack_obj = Rack.objects.filter(site=ctx.site, name=rack_name).first()
+    if rack_obj is None:
+        return None
+    effective_face = device_face or ""
+    pos_key = (rack_obj.pk, position, effective_face)
+    if pos_key in ctx.claimed_positions:
+        face_label = f" ({effective_face})" if effective_face else ""
+        return (
+            f"Rack position conflict: {rack_name} U{position}{face_label} already claimed by another row in this file"
+        )
+    if Device.objects.filter(rack=rack_obj, position=position, face=effective_face).exists():
+        face_label = f" ({effective_face})" if effective_face else ""
+        return f"Rack position conflict: {rack_name} U{position}{face_label} is already occupied in NetBox"
+    ctx.claimed_positions.add(pos_key)
+    return None
+
+
 def _preview_device_row(
     row,
     ctx,
@@ -1050,6 +1081,10 @@ def _preview_device_row(
         action = "create"
         _pos_label = f" U{position}" if position is not None else ""
         detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
+        conflict = _check_rack_position_conflict(rack_name, position, device_face, ctx, Device, Rack)
+        if conflict:
+            action = "error"
+            detail = conflict
 
     field_diff: dict | None = None
     if action == "update" and matched_device is not None:
