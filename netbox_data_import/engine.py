@@ -265,6 +265,49 @@ def _build_grouped_col_map(profile: ImportProfile) -> dict[str, list[str]]:
     return grouped
 
 
+def _build_source_to_targets_map(profile: ImportProfile) -> dict[str, list[str]]:
+    """Return a source-column keyed map of all target fields that column feeds."""
+    rev: dict[str, list[str]] = {}
+    for cm in profile.column_mappings.all():
+        rev.setdefault(cm.source_column, []).append(cm.target_field)
+    return rev
+
+
+def _apply_one_resolution(row_dict: dict, res, source_to_targets: dict[str, list[str]]) -> None:
+    """Apply a single SourceResolution to a row dict.
+
+    The user's split modal lets them assign each split part to a target field
+    OR ignore it (no field selected).  Ignored parts must result in the
+    corresponding target field being cleared — otherwise the original
+    pre-split value (e.g. ``"65JP27 - Loan from VFD ..."``) silently
+    persists in the device_name field.
+
+    Logic:
+      1. Apply explicit ``resolved_fields`` overrides.
+      2. For each target_field that the resolution's source_column originally
+         feeds: if it's not in ``resolved_fields`` and its current value still
+         equals the resolution's ``original_value`` (i.e. no other column
+         contributed a different value via multi-source merge), clear it.
+    """
+    row_dict.update(res.resolved_fields)
+    _clear_resolved_conflicts(row_dict, res.resolved_fields)
+
+    # The split modal's data-source-column attribute stores the target field
+    # name (e.g. "device_name"), not the original CSV column header — so we
+    # treat the resolution's source_column as a candidate target_field too.
+    candidate_targets = list(source_to_targets.get(res.source_column, []))
+    if res.source_column not in candidate_targets:
+        candidate_targets.append(res.source_column)
+    for target_field in candidate_targets:
+        if target_field in res.resolved_fields:
+            continue
+        current = row_dict.get(target_field)
+        if current is None:
+            continue
+        if str(current) == str(res.original_value):
+            row_dict[target_field] = None
+
+
 def _merge_row_values(
     row_num: int,
     raw_row,
@@ -390,6 +433,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     resolutions_by_source_id: dict[str, list] = {}
     for res in profile.source_resolutions.all():
         resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
+    source_to_targets = _build_source_to_targets_map(profile)
 
     unused_stats: dict[str, dict] = {}
     capture_extra = profile.capture_extra_data
@@ -411,8 +455,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
         source_id = row_dict.get("source_id", "")
         if source_id:
             for res in resolutions_by_source_id.get(str(source_id), []):
-                row_dict.update(res.resolved_fields)
-                _clear_resolved_conflicts(row_dict, res.resolved_fields)
+                _apply_one_resolution(row_dict, res, source_to_targets)
 
         if return_stats or capture_extra:
             extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
@@ -441,6 +484,8 @@ def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
     if not resolutions_by_source_id:
         return rows
 
+    source_to_targets = _build_source_to_targets_map(profile)
+
     result = []
     for row in rows:
         source_id = str(row.get("source_id", ""))
@@ -449,8 +494,7 @@ def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
             if "_conflicts" in row:
                 row["_conflicts"] = dict(row["_conflicts"])
             for res in resolutions_by_source_id[source_id]:
-                row.update(res.resolved_fields)
-                _clear_resolved_conflicts(row, res.resolved_fields)
+                _apply_one_resolution(row, res, source_to_targets)
         result.append(row)
     return result
 
