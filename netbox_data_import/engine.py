@@ -952,6 +952,21 @@ def _compute_field_diff(
     return diff
 
 
+def _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType):
+    """Return True when the resolved DeviceType has u_height == 0."""
+    if not dt_exists:
+        return False
+    dt_obj = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).only("u_height").first()
+    return dt_obj is not None and dt_obj.u_height == 0
+
+
+def _zero_u_overrides(device_type, position, face):
+    """Drop position/face when device_type is zero-U (e.g. vertical PDU)."""
+    if device_type is not None and device_type.u_height == 0:
+        return None, ""
+    return position, face
+
+
 def _check_rack_position_conflict(rack_name, position, device_face, ctx, row_number=None, device_name=None):
     """Detect within-file rack position duplicates during dry-run preview.
 
@@ -1060,6 +1075,14 @@ def _preview_device_row(
     except (TypeError, ValueError):
         position = None
 
+    # Zero-U devices (e.g. vertical PDUs) live in the rack but don't claim a U-position.
+    # If the resolved DeviceType has u_height == 0, drop position/face so multiple zero-U
+    # devices in the same rack don't trigger spurious rack position conflicts.
+    is_zero_u = _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType)
+    if is_zero_u:
+        position = None
+        device_face = None
+
     # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
     # ensuring explicit operator mappings always take precedence over coincidental name matches.
     matched_device, match_method = _find_existing_device(
@@ -1085,8 +1108,11 @@ def _preview_device_row(
                 )
     else:
         action = "create"
-        _pos_label = f" U{position}" if position is not None else ""
-        detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
+        if is_zero_u:
+            detail = f"Would create device '{device_name}' in {rack_label} (zero-U)"
+        else:
+            _pos_label = f" U{position}" if position is not None else ""
+            detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
         conflict = _check_rack_position_conflict(
             rack_name, position, device_face, ctx, row_number=row.get("_row_number"), device_name=device_name
         )
@@ -1196,6 +1222,10 @@ def _write_device_row(
             object_type="device",
             detail=f"Device type not found: {mfg_slug}/{dt_slug}",
         )
+
+    # Zero-U devices (vertical PDUs etc.) don't occupy a U-position; clear
+    # position/face so they can coexist in the same rack without conflicts.
+    position, face = _zero_u_overrides(device_type, position, face)
 
     try:
         device_role = DeviceRole.objects.get(slug=crm.role_slug)
