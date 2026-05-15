@@ -2509,3 +2509,33 @@ class PreviewRackPositionConflictMultiURangeTest(TestCase):
         self.assertEqual(intr[0].action, "error")
         self.assertIn("conflict", intr[0].detail.lower())
         self.assertIn("row 1", intr[0].detail)
+
+    def test_update_moves_into_range_then_create_overlap_yields_error(self):
+        """Update path must reserve its target U-range.
+
+        Row 1 matches an existing device (update_existing=True) and moves it into
+        U1..U4 of MU-RACK. Row 2 tries to create a new 2U device at U3..U4 in the
+        same rack/face. Without the update-path reservation the second row would
+        preview clean and then fail on write.
+        """
+        from dcim.models import Device, Manufacturer, DeviceType, DeviceRole
+
+        mfg = Manufacturer.objects.create(name="Dell", slug="dell")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="PowerEdge R940", slug="poweredge-r940", u_height=4)
+        role = DeviceRole.objects.create(name="Server", slug="server")
+        # Pre-existing device matched by name; first row will update it into the new range.
+        Device.objects.create(name="big-4u", site=self.site, device_type=dt, role=role)
+
+        rows = [
+            self._row(_row_number=1, source_id="MU-BIG", device_name="big-4u", u_height="4", u_position="1"),
+            self._row(_row_number=2, source_id="MU-INTR", device_name="intr-2u", u_height="2", u_position="3"),
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        big = [r for r in device_rows if r.name == "big-4u"]
+        self.assertTrue(big and big[0].action == "update")
+        intr = [r for r in device_rows if r.name == "intr-2u"]
+        self.assertTrue(intr)
+        self.assertEqual(intr[0].action, "error")
+        self.assertIn("conflict", intr[0].detail.lower())
+        self.assertIn("row 1", intr[0].detail)

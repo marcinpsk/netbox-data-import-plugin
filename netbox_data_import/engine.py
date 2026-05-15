@@ -1076,6 +1076,32 @@ def _check_rack_position_conflict(rack_name, position, device_face, ctx, row_num
     return None
 
 
+def _claim_rack_slots_for_preview(action, detail, rack_name, position, device_face, ctx, row, device_name, u_height):
+    """Reserve the row's target U-range for create/update intents during preview.
+
+    Rows that will actually write to the rack — both creates and updates that
+    move a matched device into a new ``(rack, face, position, u_height)`` — must
+    claim their target slots so later overlapping rows are flagged here instead
+    of failing later as an ``IntegrityError`` on write. Skips and ignores make
+    no claim. Returns ``(action, detail, conflict_row_number)``.
+    """
+    if action not in ("create", "update"):
+        return action, detail, None
+    conflict = _check_rack_position_conflict(
+        rack_name,
+        position,
+        device_face,
+        ctx,
+        row_number=row.get("_row_number"),
+        device_name=device_name,
+        u_height=u_height,
+    )
+    if conflict:
+        new_detail, conflict_row_number = conflict
+        return "error", new_detail, conflict_row_number
+    return action, detail, None
+
+
 def _preview_device_row(
     row,
     ctx,
@@ -1189,18 +1215,10 @@ def _preview_device_row(
         else:
             _pos_label = f" U{position}" if position is not None else ""
             detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
-        conflict = _check_rack_position_conflict(
-            rack_name,
-            position,
-            device_face,
-            ctx,
-            row_number=row.get("_row_number"),
-            device_name=device_name,
-            u_height=u_height,
-        )
-        if conflict:
-            action = "error"
-            detail, conflict_row_number = conflict
+
+    action, detail, conflict_row_number = _claim_rack_slots_for_preview(
+        action, detail, rack_name, position, device_face, ctx, row, device_name, u_height
+    )
 
     field_diff: dict | None = None
     if action == "update" and matched_device is not None:
