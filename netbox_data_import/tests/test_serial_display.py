@@ -2,8 +2,6 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Tests for dmSearch() serial number display in device matching modal."""
 
-import os
-
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -12,8 +10,6 @@ from dcim.models import Device
 from netbox_data_import.tests.helpers import FIXTURE_PATH, make_dcim_objects
 
 User = get_user_model()
-
-FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
 
 
 class SearchDeviceSerialDisplayTest(TestCase):
