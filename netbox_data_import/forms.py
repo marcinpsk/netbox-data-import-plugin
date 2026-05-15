@@ -63,6 +63,19 @@ class ClassRoleMappingForm(forms.ModelForm):
         fields = ["profile", "source_class", "creates_rack", "rack_type", "role_slug", "ignore"]
         widgets = {"profile": forms.HiddenInput()}
 
+    def clean(self):
+        """Require role_slug unless creates_rack or ignore is set."""
+        cleaned = super().clean()
+        creates_rack = cleaned.get("creates_rack")
+        ignore = cleaned.get("ignore")
+        role_slug = (cleaned.get("role_slug") or "").strip()
+        if not creates_rack and not ignore and not role_slug:
+            self.add_error(
+                "role_slug",
+                "A device role slug is required unless 'creates rack' or 'ignore' is checked.",
+            )
+        return cleaned
+
 
 class DeviceTypeMappingForm(forms.ModelForm):
     """Form for creating and editing DeviceTypeMapping instances."""

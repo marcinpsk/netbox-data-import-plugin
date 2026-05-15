@@ -1539,8 +1539,15 @@ def _assign_ip_to_device(device, ip_field: str, ip_str: str):
     return False
 
 
-def _pass3_process_devices(rows, ctx, class_role_map):
-    """Pass 3: create or update Device objects."""
+def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
+    """Pass 3: create or update Device objects.
+
+    Cyclomatic complexity sits at 16 due to a stack of flat early-return guard
+    clauses (ignored-id, position < 1, missing name, no class mapping, ignored
+    class, no role slug, etc.). Each clause is simple and self-contained; the
+    threshold-exceeding count is accumulation, not nesting, so a per-function
+    suppression is preferred over a project-wide bump.
+    """
     from dcim.models import Device, DeviceRole, DeviceType, Rack
     from .models import IgnoredDevice
 
@@ -1670,6 +1677,34 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                     object_type="device",
                     detail=f"Ignored: class '{device_class}'",
                     rack_name=rack_name,
+                )
+            )
+            continue
+
+        if not crm.role_slug:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="error",
+                    object_type="device",
+                    detail=(
+                        f"Class '{device_class}' has no device role configured "
+                        "— edit the class→role mapping to set a role slug"
+                    ),
+                    rack_name=rack_name,
+                    extra_data={
+                        "source_class": device_class,
+                        "profile_id": ctx.profile.pk,
+                        "source_make": make,
+                        "source_model": model,
+                        "asset_tag": asset_tag or "",
+                        "mfg_slug": mfg_slug,
+                        "dt_slug": dt_slug,
+                        "u_height": u_height,
+                        "is_explicit_mapping": is_explicit_mapping,
+                    },
                 )
             )
             continue
