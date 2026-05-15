@@ -2464,6 +2464,57 @@ class CheckRackPositionConflictRangeTest(TestCase):
         )
         self.assertEqual(ctx.claimed_positions, {})
 
+    def test_same_matched_device_pk_not_flagged(self):
+        """Two rows resolving to the same existing Device must not conflict on shared slots."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        # Row 1 claims U1-U4 for device pk=42 (e.g. matched by name).
+        self.assertIsNone(
+            _check_rack_position_conflict(
+                "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4, matched_device_pk=42
+            )
+        )
+        # Row 2 also resolves to pk=42 (e.g. matched by serial) and overlaps U3-U4.
+        # Same matched device → not a rack-position conflict.
+        self.assertIsNone(
+            _check_rack_position_conflict(
+                "R1", 3, "front", ctx, row_number=2, device_name="a-by-serial", u_height=2, matched_device_pk=42
+            )
+        )
+
+    def test_different_matched_device_pk_still_conflicts(self):
+        """Different matched_device_pk → overlap is a real conflict."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        _check_rack_position_conflict(
+            "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4, matched_device_pk=42
+        )
+        result = _check_rack_position_conflict(
+            "R1", 3, "front", ctx, row_number=2, device_name="b", u_height=2, matched_device_pk=99
+        )
+        self.assertIsNotNone(result)
+        _, prev_row = result
+        self.assertEqual(prev_row, 1)
+
+    def test_none_pk_does_not_collapse_with_none_pk(self):
+        """Two rows with matched_device_pk=None on the same slot must still conflict.
+
+        A None pk represents an unmatched (create) row, not a shared identity;
+        two creates at the same slot are a real conflict.
+        """
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        _check_rack_position_conflict(
+            "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=1, matched_device_pk=None
+        )
+        result = _check_rack_position_conflict(
+            "R1", 1, "front", ctx, row_number=2, device_name="b", u_height=1, matched_device_pk=None
+        )
+        self.assertIsNotNone(result)
+
 
 class PreviewRackPositionConflictMultiURangeTest(TestCase):
     """End-to-end: preview surfaces a multi-U range conflict on the second offending row."""
@@ -2539,3 +2590,40 @@ class PreviewRackPositionConflictMultiURangeTest(TestCase):
         self.assertEqual(intr[0].action, "error")
         self.assertIn("conflict", intr[0].detail.lower())
         self.assertIn("row 1", intr[0].detail)
+
+    def test_two_rows_matching_same_device_do_not_falsely_conflict(self):
+        """Two preview rows resolving to the same existing Device on overlapping slots must both update.
+
+        Row 1 matches the existing device by name; row 2 matches the same device
+        by serial. Their target U-ranges overlap, but since execute mode would
+        just update one record twice, the preview must not flag either as an
+        error.
+        """
+        from dcim.models import Device, Manufacturer, DeviceType, DeviceRole
+
+        mfg = Manufacturer.objects.create(name="Dell", slug="dell")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="PowerEdge R940", slug="poweredge-r940", u_height=4)
+        role = DeviceRole.objects.create(name="Server", slug="server")
+        # Pre-existing device — row 1 matches by name, row 2 by serial.
+        Device.objects.create(name="dup-4u", site=self.site, device_type=dt, role=role, serial="SN-DUP")
+
+        rows = [
+            self._row(_row_number=1, source_id="DUP-A", device_name="dup-4u", u_height="4", u_position="1"),
+            self._row(
+                _row_number=2,
+                source_id="DUP-B",
+                device_name="other-name",
+                u_height="2",
+                u_position="3",
+                serial="SN-DUP",
+            ),
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertEqual(len(device_rows), 2)
+        for r in device_rows:
+            self.assertEqual(r.action, "update", f"Row {r.row_number} unexpectedly errored: {r.detail}")
+        # Both rows reference the same netbox_device_id.
+        device_ids = {r.extra_data.get("netbox_device_id") for r in device_rows}
+        self.assertEqual(len(device_ids), 1)
+        self.assertIsNotNone(next(iter(device_ids)))
