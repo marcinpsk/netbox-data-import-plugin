@@ -23,6 +23,12 @@
   [data-bs-theme="dark"] .ndi-count-badge { background-color: #818cf8 !important; color: #1e1b4b !important; }
   .ndi-unused-badge  { cursor: pointer; border: none; }
   .ndi-unused-badge:hover { opacity: 0.85; }
+  /* Flash highlight applied to a row when "Jump to row N" is clicked */
+  @keyframes ndi-jump-flash-anim {
+    0%   { background-color: var(--tblr-warning); }
+    100% { background-color: transparent; }
+  }
+  tr.ndi-jump-flash > td { animation: ndi-jump-flash-anim 2s ease-out; }
   [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
   [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
   /* In dark mode --tblr-dark blends into the page bg; use a slate that stands out */
@@ -119,7 +125,7 @@
           </form>
           {% endif %}
 
-          {% if result.counts.errors == 0 %}
+          {% if not result.has_errors %}
           <form method="post" action="{% url 'plugins:netbox_data_import:import_run' %}">
             {% csrf_token %}
             <button type="submit" class="btn btn-success">
@@ -348,7 +354,7 @@
           </thead>
           <tbody id="previewRowsBody">
             {% for row in result.rows %}
-            <tr data-action="{{ row.action }}" class="
+            <tr id="row-{{ row.row_number }}" data-action="{{ row.action }}" class="
               {% if row.action == 'create' and row.object_type == 'device' %}table-success
               {% elif row.action == 'create' and row.object_type == 'rack' %}table-success
               {% elif row.action == 'create' %}table-warning
@@ -407,6 +413,14 @@
               </td>
               <td class="small text-muted">
                 {{ row.detail }}
+                {% if row.action == 'error' and row.extra_data.conflict_row_number %}
+                  <a href="#row-{{ row.extra_data.conflict_row_number }}"
+                     class="badge bg-warning text-dark text-decoration-none ms-1 ndi-jump-to-row"
+                     data-target-row="{{ row.extra_data.conflict_row_number }}"
+                     title="Scroll to the conflicting row">
+                    <i class="mdi mdi-arrow-right-thin"></i> Jump to row {{ row.extra_data.conflict_row_number }}
+                  </a>
+                {% endif %}
                 {% if row.action == 'update' and row.extra_data.field_diff %}
                   {% with diff=row.extra_data.field_diff %}
                   <br>
@@ -884,6 +898,20 @@ var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : 
 
 // Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
 document.addEventListener('DOMContentLoaded', function() {
+
+  // Highlight the conflicting row when a "Jump to row N" link is clicked.
+  document.querySelectorAll('.ndi-jump-to-row').forEach(function(link) {
+    link.addEventListener('click', function(e) {
+      var targetRow = link.dataset.targetRow;
+      var el = document.getElementById('row-' + targetRow);
+      if (el) {
+        e.preventDefault();
+        el.scrollIntoView({behavior: 'smooth', block: 'center'});
+        el.classList.add('ndi-jump-flash');
+        setTimeout(function() { el.classList.remove('ndi-jump-flash'); }, 2000);
+      }
+    });
+  });
 
   document.getElementById('splitNameModal').addEventListener('show.bs.modal', function(event) {
     var btn = event.relatedTarget;

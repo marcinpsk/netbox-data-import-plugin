@@ -11,6 +11,7 @@ urlpatterns = [
     path("profiles/<int:pk>/", views.ImportProfileView.as_view(), name="importprofile"),
     path("profiles/<int:pk>/edit/", views.ImportProfileEditView.as_view(), name="importprofile_edit"),
     path("profiles/<int:pk>/delete/", views.ImportProfileDeleteView.as_view(), name="importprofile_delete"),
+    path("profiles/delete/", views.ImportProfileBulkDeleteView.as_view(), name="importprofile_bulk_delete"),
     # Column Mappings
     path("profiles/<int:profile_pk>/columns/add/", views.ColumnMappingAddView.as_view(), name="columnmapping_add"),
     path("column-mappings/<int:pk>/edit/", views.ColumnMappingEditView.as_view(), name="columnmapping_edit"),

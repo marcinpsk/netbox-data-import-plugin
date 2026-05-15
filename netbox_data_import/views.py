@@ -186,6 +186,13 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
     queryset = ImportProfile.objects.all()
 
 
+class ImportProfileBulkDeleteView(generic.BulkDeleteView):
+    """Bulk-delete selected ImportProfiles."""
+
+    queryset = ImportProfile.objects.all()
+    table = ImportProfileTable
+
+
 # Scalar profile fields handled by _apply_profile_yaml_data.
 # 'tags' (M2M) is intentionally excluded — use the edit UI or the flat import path.
 _PROFILE_FIELDS = (
