@@ -1493,6 +1493,14 @@ def _pass3_process_devices(rows, ctx, class_role_map):
         except (TypeError, ValueError):
             position = None
 
+        if not device_name and asset_tag:
+            # Fallback: if a saved split-resolution cleared device_name (e.g.
+            # user split "TAG - free-text comment" → asset_tag and ignored
+            # the comment), reuse the asset_tag as the device name rather
+            # than failing the row.  One-way only (asset_tag never falls back
+            # to device_name) to avoid circular resolution.
+            device_name = asset_tag
+
         if not device_name:
             ctx.result.rows.append(
                 RowResult(

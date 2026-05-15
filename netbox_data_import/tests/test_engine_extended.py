@@ -1159,6 +1159,20 @@ class Pass3EdgeCasesTest(TestCase):
         error_rows = [r for r in result.rows if r.action == "error" and "Missing device name" in r.detail]
         self.assertGreater(len(error_rows), 0)
 
+    def test_empty_device_name_falls_back_to_asset_tag(self):
+        """When device_name is empty but asset_tag is present, asset_tag is used as the name.
+
+        Covers the saved-split-resolution scenario where the user splits a value
+        into asset_tag + ignored comment, leaving device_name cleared.  The row
+        should not error — the asset_tag becomes the device name.
+        """
+        rows = [self._device_row(device_name="", asset_tag="65JP27", source_id="P3-FB")]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        error_rows = [r for r in result.rows if r.action == "error" and "Missing device name" in r.detail]
+        self.assertEqual(len(error_rows), 0)
+        named_rows = [r for r in result.rows if r.object_type == "device" and r.name == "65JP27"]
+        self.assertGreater(len(named_rows), 0)
+
     def test_unmapped_device_class_produces_error(self):
         """A row with a device_class that has no ClassRoleMapping results in action='error'."""
         rows = [self._device_row(device_class="UnknownClass", source_id="P3003")]
