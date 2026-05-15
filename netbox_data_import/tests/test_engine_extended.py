@@ -2084,3 +2084,124 @@ class PermissionDeniedEngineTest(TestCase):
         )
         self.assertEqual(result.action, "error")
         self.assertIn("dcim.change_device", result.detail)
+
+
+class MissingRoleSlugErrorTest(TestCase):
+    """Class mapping with no role_slug must surface as preview/sync error, not crash."""
+
+    def setUp(self):
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="MissingRoleSite", slug="missing-role-site")
+        self.profile = ImportProfile.objects.create(name="MissingRoleProfile")
+        for src, tgt in {
+            "Id": "source_id",
+            "Rack": "rack_name",
+            "Name": "device_name",
+            "Class": "device_class",
+            "Make": "make",
+            "Model": "model",
+            "UHeight": "u_height",
+            "UPosition": "u_position",
+        }.items():
+            ColumnMapping.objects.create(profile=self.profile, source_column=src, target_field=tgt)
+        # Class mapping with NO role_slug, NOT creating a rack, NOT ignored — invalid state.
+        ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="Patch Panel",
+            creates_rack=False,
+            ignore=False,
+            role_slug="",
+        )
+
+    def _row(self):
+        return {
+            "_row_number": 2,
+            "source_id": "307359",
+            "rack_name": "V1",
+            "device_name": "DH4-V1-52-F",
+            "device_class": "Patch Panel",
+            "make": "Commscope",
+            "model": "Systimax 360G2-1U-MOD-FX",
+            "u_height": 1,
+            "u_position": 52,
+        }
+
+    def test_preview_reports_missing_role_error(self):
+        result = run_import([self._row()], self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertEqual(len(device_rows), 1)
+        self.assertEqual(device_rows[0].action, "error")
+        self.assertIn("no device role configured", device_rows[0].detail)
+
+    def test_sync_does_not_crash_with_missing_role(self):
+        """Execute path must error gracefully, not raise DeviceRole.DoesNotExist."""
+        result = run_import([self._row()], self.profile, {"site": self.site}, dry_run=False)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertEqual(len(device_rows), 1)
+        self.assertEqual(device_rows[0].action, "error")
+        self.assertIn("no device role configured", device_rows[0].detail)
+
+
+class ClassRoleMappingFormValidationTest(TestCase):
+    """Form-level validation: role_slug required unless creates_rack/ignore set."""
+
+    def setUp(self):
+        self.profile = ImportProfile.objects.create(name="FormValidProfile")
+
+    def test_form_rejects_empty_role_slug_when_no_other_action(self):
+        from netbox_data_import.forms import ClassRoleMappingForm
+
+        form = ClassRoleMappingForm(
+            data={
+                "profile": self.profile.pk,
+                "source_class": "Server",
+                "creates_rack": False,
+                "ignore": False,
+                "role_slug": "",
+            }
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("role_slug", form.errors)
+
+    def test_form_accepts_empty_role_slug_when_creates_rack(self):
+        from netbox_data_import.forms import ClassRoleMappingForm
+
+        form = ClassRoleMappingForm(
+            data={
+                "profile": self.profile.pk,
+                "source_class": "Cabinet",
+                "creates_rack": True,
+                "ignore": False,
+                "role_slug": "",
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_form_accepts_empty_role_slug_when_ignore(self):
+        from netbox_data_import.forms import ClassRoleMappingForm
+
+        form = ClassRoleMappingForm(
+            data={
+                "profile": self.profile.pk,
+                "source_class": "Misc",
+                "creates_rack": False,
+                "ignore": True,
+                "role_slug": "",
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_form_accepts_role_slug(self):
+        from netbox_data_import.forms import ClassRoleMappingForm
+
+        form = ClassRoleMappingForm(
+            data={
+                "profile": self.profile.pk,
+                "source_class": "Server",
+                "creates_rack": False,
+                "ignore": False,
+                "role_slug": "server",
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors)

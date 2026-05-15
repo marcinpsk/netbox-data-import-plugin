@@ -1401,6 +1401,34 @@ def _pass3_process_devices(rows, ctx, class_role_map):
             )
             continue
 
+        if not crm.role_slug:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="error",
+                    object_type="device",
+                    detail=(
+                        f"Class '{device_class}' has no device role configured "
+                        "— edit the class→role mapping to set a role slug"
+                    ),
+                    rack_name=rack_name,
+                    extra_data={
+                        "source_class": device_class,
+                        "profile_id": ctx.profile.pk,
+                        "source_make": make,
+                        "source_model": model,
+                        "asset_tag": asset_tag or "",
+                        "mfg_slug": mfg_slug,
+                        "dt_slug": dt_slug,
+                        "u_height": u_height,
+                        "is_explicit_mapping": is_explicit_mapping,
+                    },
+                )
+            )
+            continue
+
         device_status = status_map.get(_str_val(row.get("status")).lower(), "active")
         device_face = side_map.get(_str_val(row.get("face")).lower())
         device_airflow = airflow_map.get(_str_val(row.get("airflow")).lower())
