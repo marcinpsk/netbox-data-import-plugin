@@ -1032,37 +1032,74 @@ def _zero_u_overrides(device_type, position, face):
     return position, face
 
 
-def _check_rack_position_conflict(rack_name, position, device_face, ctx, row_number=None, device_name=None):
-    """Detect within-file rack position duplicates during dry-run preview.
+def _check_rack_position_conflict(rack_name, position, device_face, ctx, row_number=None, device_name=None, u_height=1):
+    """Detect within-file rack position conflicts (incl. multi-U range overlaps).
 
-    Two rows in the same import claiming the same (rack, position, face)
-    would cause an IntegrityError on the second write.  Registers the
-    position as claimed (with the row_number / device_name that claimed
-    it first) and returns ``(message, conflicting_row_number)`` on
-    conflict, or ``None`` when the position is available.
+    A device occupying ``u_height`` units starting at ``position`` covers the
+    range ``position .. position + u_height - 1``.  Two rows overlap if any
+    slot in their ranges collides on the same ``(rack, face)``.
+
+    The first claim wins: subsequent overlapping claims return
+    ``(message, conflicting_row_number)``; non-overlapping claims register
+    every covered slot in ``ctx.claimed_positions`` and return ``None``.
     """
     if not rack_name or position is None:
         return None
+    try:
+        height = max(1, int(u_height))
+    except (TypeError, ValueError):
+        height = 1
     effective_face = device_face or ""
-    pos_key = (rack_name, position, effective_face)
-    if pos_key in ctx.claimed_positions:
-        face_label = f" ({effective_face})" if effective_face else ""
-        prev = ctx.claimed_positions[pos_key]
-        prev_row, prev_name = prev if isinstance(prev, tuple) else (None, None)
-        if prev_row is not None:
-            other = f"row {prev_row}"
-            if prev_name:
-                other = f"{other} ('{prev_name}')"
+    face_label = f" ({effective_face})" if effective_face else ""
+    slots = range(position, position + height)
+    for slot in slots:
+        pos_key = (rack_name, slot, effective_face)
+        if pos_key in ctx.claimed_positions:
+            prev = ctx.claimed_positions[pos_key]
+            prev_row, prev_name = prev if isinstance(prev, tuple) else (None, None)
+            # Surface the slot that actually collided rather than the new row's
+            # starting position — clearer when ranges overlap partially.
+            if prev_row is not None:
+                other = f"row {prev_row}"
+                if prev_name:
+                    other = f"{other} ('{prev_name}')"
+                return (
+                    f"Rack position conflict: {rack_name} U{slot}{face_label} also claimed by {other}",
+                    prev_row,
+                )
             return (
-                f"Rack position conflict: {rack_name} U{position}{face_label} also claimed by {other}",
-                prev_row,
+                f"Rack position conflict: {rack_name} U{slot}{face_label} already claimed by another row in this file",
+                None,
             )
-        return (
-            f"Rack position conflict: {rack_name} U{position}{face_label} already claimed by another row in this file",
-            None,
-        )
-    ctx.claimed_positions[pos_key] = (row_number, device_name)
+    for slot in slots:
+        ctx.claimed_positions[(rack_name, slot, effective_face)] = (row_number, device_name)
     return None
+
+
+def _claim_rack_slots_for_preview(action, detail, rack_name, position, device_face, ctx, row, device_name, u_height):
+    """Reserve the row's target U-range for create/update intents during preview.
+
+    Rows that will actually write to the rack — both creates and updates that
+    move a matched device into a new ``(rack, face, position, u_height)`` — must
+    claim their target slots so later overlapping rows are flagged here instead
+    of failing later as an ``IntegrityError`` on write. Skips and ignores make
+    no claim. Returns ``(action, detail, conflict_row_number)``.
+    """
+    if action not in ("create", "update"):
+        return action, detail, None
+    conflict = _check_rack_position_conflict(
+        rack_name,
+        position,
+        device_face,
+        ctx,
+        row_number=row.get("_row_number"),
+        device_name=device_name,
+        u_height=u_height,
+    )
+    if conflict:
+        new_detail, conflict_row_number = conflict
+        return "error", new_detail, conflict_row_number
+    return action, detail, None
 
 
 def _preview_device_row(
@@ -1178,12 +1215,10 @@ def _preview_device_row(
         else:
             _pos_label = f" U{position}" if position is not None else ""
             detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
-        conflict = _check_rack_position_conflict(
-            rack_name, position, device_face, ctx, row_number=row.get("_row_number"), device_name=device_name
-        )
-        if conflict:
-            action = "error"
-            detail, conflict_row_number = conflict
+
+    action, detail, conflict_row_number = _claim_rack_slots_for_preview(
+        action, detail, rack_name, position, device_face, ctx, row, device_name, u_height
+    )
 
     field_diff: dict | None = None
     if action == "update" and matched_device is not None:

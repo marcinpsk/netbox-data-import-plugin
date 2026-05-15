@@ -13,6 +13,7 @@ path = [
     "netbox_data_import/tests/fixtures/**",
     ".gitignore",
     ".envrc",
+    "uv.lock",
     ".devcontainer/devcontainer.json",
     ".devcontainer/.env.example",
     ".github/copilot-instructions.md",
