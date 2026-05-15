@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 from io import BytesIO
 
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.utils.text import slugify
 import openpyxl
 
@@ -154,9 +154,14 @@ class ImportContext:
     rack_map: dict = field(default_factory=dict)
     pending_device_roles: set = field(default_factory=set)
     user: object | None = None
-    # Tracks (rack_pk, position, face) tuples claimed by "create" rows in the
-    # current file so that within-file rack position duplicates are flagged.
+    # Tracks ``(rack_name, position, face) -> (row_number, device_name)`` for
+    # rows that claim a rack position in the current file, so within-file
+    # rack-position duplicates are flagged before they would cause an
+    # IntegrityError on save.
     claimed_positions: dict = field(default_factory=dict)
+    # Memoizes ``DeviceType.u_height == 0`` lookups by ``(mfg_slug, dt_slug)``
+    # to avoid an N+1 query in preview for large imports.
+    zero_u_cache: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -996,18 +1001,34 @@ def _compute_field_diff(
     return diff
 
 
-def _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType):
-    """Return True when the resolved DeviceType has u_height == 0."""
+def _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType, cache=None):
+    """Return True when the resolved DeviceType has u_height == 0.
+
+    ``cache`` is an optional dict (typically ``ctx.zero_u_cache``) that
+    memoizes results by ``(mfg_slug, dt_slug)`` so a large import doesn't
+    issue one query per row.
+    """
     if not dt_exists:
         return False
+    key = (mfg_slug, dt_slug)
+    if cache is not None and key in cache:
+        return cache[key]
     dt_obj = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).only("u_height").first()
-    return dt_obj is not None and dt_obj.u_height == 0
+    result = dt_obj is not None and dt_obj.u_height == 0
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 def _zero_u_overrides(device_type, position, face):
-    """Drop position/face when device_type is zero-U (e.g. vertical PDU)."""
+    """Drop position/face when device_type is zero-U (e.g. vertical PDU).
+
+    Returns ``(None, None)`` to harmonize with the preview path; both ``""``
+    and ``None`` persist the same in NetBox but using ``None`` everywhere
+    avoids subtle drift.
+    """
     if device_type is not None and device_type.u_height == 0:
-        return None, ""
+        return None, None
     return position, face
 
 
@@ -1122,7 +1143,7 @@ def _preview_device_row(
     # Zero-U devices (e.g. vertical PDUs) live in the rack but don't claim a U-position.
     # If the resolved DeviceType has u_height == 0, drop position/face so multiple zero-U
     # devices in the same rack don't trigger spurious rack position conflicts.
-    is_zero_u = _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType)
+    is_zero_u = _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType, ctx.zero_u_cache)
     if is_zero_u:
         position = None
         device_face = None
@@ -1310,7 +1331,8 @@ def _write_device_row(
             if ctx.tenant:
                 device.tenant = ctx.tenant
             try:
-                device.save()
+                with transaction.atomic():
+                    device.save()
             except IntegrityError as exc:
                 return _rack_position_error_row(
                     row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "update"
@@ -1346,21 +1368,22 @@ def _write_device_row(
     if ctx.user is not None and not ctx.user.has_perm("dcim.add_device"):
         return _perm_denied_row("dcim.add_device", row, device_name, "device")
     try:
-        device = Device.objects.create(
-            site=ctx.site,
-            location=ctx.location,
-            name=device_name,
-            device_type=device_type,
-            role=device_role,
-            rack=rack if isinstance(rack, Rack) else None,
-            position=position,
-            face=face,
-            airflow=airflow,
-            status=status,
-            serial=serial,
-            asset_tag=asset_tag,
-            tenant=ctx.tenant,
-        )
+        with transaction.atomic():
+            device = Device.objects.create(
+                site=ctx.site,
+                location=ctx.location,
+                name=device_name,
+                device_type=device_type,
+                role=device_role,
+                rack=rack if isinstance(rack, Rack) else None,
+                position=position,
+                face=face,
+                airflow=airflow,
+                status=status,
+                serial=serial,
+                asset_tag=asset_tag,
+                tenant=ctx.tenant,
+            )
     except IntegrityError as exc:
         return _rack_position_error_row(
             row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "create"

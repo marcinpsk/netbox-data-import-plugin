@@ -2098,3 +2098,237 @@ class PermissionDeniedEngineTest(TestCase):
         )
         self.assertEqual(result.action, "error")
         self.assertIn("dcim.change_device", result.detail)
+
+
+# ---------------------------------------------------------------------------
+# PR #27 review-feedback tests: zero-U cache, savepoint isolation
+# ---------------------------------------------------------------------------
+
+
+class IsZeroUDeviceTypeCacheTest(TestCase):
+    """Verify _is_zero_u_device_type memoizes by (mfg_slug, dt_slug) to avoid N+1."""
+
+    def test_repeated_lookups_hit_cache(self):
+        """Second call for the same (mfg, dt) reads from the cache instead of querying again."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import _is_zero_u_device_type
+
+        mfg = Manufacturer.objects.create(name="ZUMfg", slug="zu-mfg")
+        DeviceType.objects.create(manufacturer=mfg, model="ZU PDU", slug="zu-pdu", u_height=0)
+
+        cache: dict = {}
+        # First call populates the cache.
+        first = _is_zero_u_device_type("zu-mfg", "zu-pdu", True, DeviceType, cache=cache)
+        self.assertTrue(first)
+        self.assertIn(("zu-mfg", "zu-pdu"), cache)
+        self.assertTrue(cache[("zu-mfg", "zu-pdu")])
+
+        # Mutating the cache to a sentinel proves the second call returns the cached
+        # value rather than re-querying (which would return True again).
+        cache[("zu-mfg", "zu-pdu")] = "SENTINEL"
+        second = _is_zero_u_device_type("zu-mfg", "zu-pdu", True, DeviceType, cache=cache)
+        self.assertEqual(second, "SENTINEL")
+
+    def test_dt_exists_false_short_circuits(self):
+        """When dt_exists=False, the function returns False without querying or caching."""
+        from dcim.models import DeviceType
+
+        from netbox_data_import.engine import _is_zero_u_device_type
+
+        cache: dict = {}
+        result = _is_zero_u_device_type("nope", "nope", False, DeviceType, cache=cache)
+        self.assertFalse(result)
+        self.assertEqual(cache, {})
+
+    def test_distinct_dts_cached_separately(self):
+        """Two DeviceTypes with different u_height get distinct cache entries."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import _is_zero_u_device_type
+
+        mfg = Manufacturer.objects.create(name="MixMfg", slug="mix-mfg")
+        DeviceType.objects.create(manufacturer=mfg, model="ZeroU", slug="zero-u", u_height=0)
+        DeviceType.objects.create(manufacturer=mfg, model="OneU", slug="one-u", u_height=1)
+
+        cache: dict = {}
+        self.assertTrue(_is_zero_u_device_type("mix-mfg", "zero-u", True, DeviceType, cache=cache))
+        self.assertFalse(_is_zero_u_device_type("mix-mfg", "one-u", True, DeviceType, cache=cache))
+        self.assertEqual(cache[("mix-mfg", "zero-u")], True)
+        self.assertEqual(cache[("mix-mfg", "one-u")], False)
+
+
+class WriteDeviceRowSavepointIsolationTest(TestCase):
+    """An IntegrityError inside _write_device_row must NOT poison an outer atomic block.
+
+    The view layer wraps engine.run_import in transaction.atomic().  Without
+    nested savepoints around device.save() / Device.objects.create(), a
+    duplicate-rack-position IntegrityError aborts the outer transaction, and
+    any subsequent ORM call raises TransactionManagementError.  This test
+    pins the savepoint behavior in place so the protection isn't accidentally
+    removed.
+    """
+
+    def setUp(self):
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        self.site = Site.objects.create(name="SPSite", slug="sp-site")
+        self.profile = _make_profile("SPProfile")
+        self.mfg = Manufacturer.objects.create(name="SP Mfg", slug="sp-mfg")
+        self.dt = DeviceType.objects.create(manufacturer=self.mfg, model="SP DT", slug="sp-mfg-sp-dt", u_height=1)
+        self.role = DeviceRole.objects.create(name="SP Role", slug="sp-role")
+        self.rack = Rack.objects.create(site=self.site, name="SP-RACK", u_height=10)
+        # Pre-create a device occupying U1/front so subsequent inserts at the same
+        # slot fail with IntegrityError on the unique_rack_position_face constraint.
+        from dcim.models import Device
+
+        # Map a "Face" column so the engine reads face from rows; without this
+        # mapping the engine would default face to None, never colliding with
+        # the pre-existing front-faced device on the rack-position constraint.
+        from netbox_data_import.models import ColumnMapping
+
+        ColumnMapping.objects.create(profile=self.profile, source_column="Face", target_field="face")
+        Device.objects.create(
+            site=self.site,
+            name="sp-existing",
+            device_type=self.dt,
+            role=self.role,
+            rack=self.rack,
+            position=1,
+            face="front",
+        )
+
+    def test_run_import_inside_outer_atomic_recovers_from_integrity_error(self):
+        """run_import called within transaction.atomic() must leave the outer txn usable."""
+        from django.db import transaction
+
+        from dcim.models import Site
+
+        rows = [
+            {
+                "_row_number": 7,
+                "source_id": "SP-DUP",
+                "device_name": "sp-dup",
+                "device_class": "Server",
+                "make": "SP Mfg",
+                "model": "SP DT",
+                "u_height": "1",
+                "rack_name": "SP-RACK",
+                "u_position": "1",
+                "face": "front",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            },
+        ]
+        # Map "Server" class to the existing role used above so the device-role
+        # lookup succeeds without creating a new role mid-test.
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Server").update(role_slug="sp-role")
+
+        with transaction.atomic():
+            result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
+            # If the savepoint were missing, the outer atomic would be tainted and
+            # this query would raise TransactionManagementError.
+            site_count_after = Site.objects.count()
+
+        self.assertGreaterEqual(site_count_after, 1)
+        # The duplicate-position row must surface as an error (not silently swallowed).
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertTrue(
+            device_rows,
+            f"expected device rows, got actions={[(r.object_type, r.action, r.detail) for r in result.rows]}",
+        )
+        bad = [r for r in device_rows if r.action in ("create", "update")]
+        self.assertFalse(
+            bad,
+            f"duplicate row should NOT have created/updated; got {[(r.action, r.detail) for r in bad]}",
+        )
+
+    def test_subsequent_row_succeeds_after_integrity_error(self):
+        """After one row hits IntegrityError, an unrelated later row still creates successfully."""
+        from dcim.models import Device, Rack
+
+        rack2 = Rack.objects.create(site=self.site, name="SP-RACK-2", u_height=10)
+        rows = [
+            {
+                "_row_number": 8,
+                "source_id": "SP-DUP-2",
+                "device_name": "sp-dup-2",
+                "device_class": "Server",
+                "make": "SP Mfg",
+                "model": "SP DT",
+                "u_height": "1",
+                "rack_name": "SP-RACK",
+                "u_position": "1",
+                "face": "front",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            },
+            {
+                "_row_number": 9,
+                "source_id": "SP-OK",
+                "device_name": "sp-ok",
+                "device_class": "Server",
+                "make": "SP Mfg",
+                "model": "SP DT",
+                "u_height": "1",
+                "rack_name": "SP-RACK-2",
+                "u_position": "5",
+                "face": "front",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            },
+        ]
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Server").update(role_slug="sp-role")
+
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
+
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertTrue(
+            device_rows,
+            f"expected device rows, got {[(r.object_type, r.action, r.detail) for r in result.rows]}",
+        )
+        # The duplicate row should not have created a device.
+        self.assertFalse(Device.objects.filter(name="sp-dup-2").exists())
+        # The unrelated later row must succeed despite the earlier IntegrityError.
+        self.assertTrue(Device.objects.filter(name="sp-ok", rack=rack2).exists())
+
+
+class ZeroUOverridesTest(TestCase):
+    """_zero_u_overrides drops position/face for zero-U device types and harmonizes on None."""
+
+    def test_zero_u_dt_returns_none_none(self):
+        """A zero-U device type causes both position and face to be cleared to None."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import _zero_u_overrides
+
+        mfg = Manufacturer.objects.create(name="ZOMfg", slug="zo-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="ZO PDU", slug="zo-pdu", u_height=0)
+
+        pos, face = _zero_u_overrides(dt, 1, "front")
+        self.assertIsNone(pos)
+        self.assertIsNone(face)
+
+    def test_non_zero_u_dt_preserves_values(self):
+        """A non-zero-U device type leaves position and face untouched."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import _zero_u_overrides
+
+        mfg = Manufacturer.objects.create(name="NZMfg", slug="nz-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="NZ Server", slug="nz-server", u_height=2)
+
+        pos, face = _zero_u_overrides(dt, 5, "rear")
+        self.assertEqual(pos, 5)
+        self.assertEqual(face, "rear")
+
+    def test_none_device_type_preserves_values(self):
+        """When device_type is None (unresolved), position/face are passed through."""
+        from netbox_data_import.engine import _zero_u_overrides
+
+        pos, face = _zero_u_overrides(None, 3, "front")
+        self.assertEqual(pos, 3)
+        self.assertEqual(face, "front")
