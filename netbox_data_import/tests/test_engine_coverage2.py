@@ -111,6 +111,58 @@ class ReapplySavedResolutionsTest(TestCase):
         self.assertNotIn("_conflicts", result[0])
         self.assertEqual(rows[0]["_conflicts"], {"device_name": {"Name": "orig", "Alias": "override"}})
 
+    def test_clears_target_field_when_split_resolution_omits_it(self):
+        """Split resolution that ignores a part should clear the original mapped field.
+
+        Regression: user splits 'Name' column "X - comment" with delimiter " - ",
+        assigns "X" → asset_tag and ignores "comment".  Saved resolution is
+        {"asset_tag": "X"} (no device_name).  Without this fix the original
+        device_name "X - comment" silently persisted into the imported device.
+
+        The split modal saves source_column as the *target field name*
+        (e.g. "device_name"), not the source CSV header.
+        """
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="SRC-SPLIT",
+            source_column="device_name",
+            original_value="65JP27 - Loan from VFD",
+            resolved_fields={"asset_tag": "65JP27"},
+        )
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "SRC-SPLIT",
+                "device_name": "65JP27 - Loan from VFD",
+            }
+        ]
+
+        result = reapply_saved_resolutions(rows, self.profile)
+
+        self.assertEqual(result[0]["asset_tag"], "65JP27")
+        self.assertIsNone(result[0]["device_name"])
+
+    def test_does_not_clear_target_field_when_value_diverged(self):
+        """If multi-source merge produced a different value, leave it alone."""
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="SRC-MERGED",
+            source_column="device_name",
+            original_value="65JP27 - Loan",
+            resolved_fields={"asset_tag": "65JP27"},
+        )
+        rows = [
+            {
+                "_row_number": 1,
+                "source_id": "SRC-MERGED",
+                "device_name": "merged-from-other-column",
+            }
+        ]
+
+        result = reapply_saved_resolutions(rows, self.profile)
+
+        self.assertEqual(result[0]["device_name"], "merged-from-other-column")
+
 
 class ClearResolvedConflictsTest(TestCase):
     """Tests for _clear_resolved_conflicts cleanup behavior."""

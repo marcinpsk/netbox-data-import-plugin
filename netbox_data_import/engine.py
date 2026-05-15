@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 from io import BytesIO
 
+from django.db import IntegrityError, transaction
 from django.utils.text import slugify
 import openpyxl
 
@@ -153,6 +154,14 @@ class ImportContext:
     rack_map: dict = field(default_factory=dict)
     pending_device_roles: set = field(default_factory=set)
     user: object | None = None
+    # Tracks ``(rack_name, position, face) -> (row_number, device_name)`` for
+    # rows that claim a rack position in the current file, so within-file
+    # rack-position duplicates are flagged before they would cause an
+    # IntegrityError on save.
+    claimed_positions: dict = field(default_factory=dict)
+    # Memoizes ``DeviceType.u_height == 0`` lookups by ``(mfg_slug, dt_slug)``
+    # to avoid an N+1 query in preview for large imports.
+    zero_u_cache: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +268,49 @@ def _build_grouped_col_map(profile: ImportProfile) -> dict[str, list[str]]:
     for cm in profile.column_mappings.all():
         grouped.setdefault(cm.target_field, []).append(cm.source_column)
     return grouped
+
+
+def _build_source_to_targets_map(profile: ImportProfile) -> dict[str, list[str]]:
+    """Return a source-column keyed map of all target fields that column feeds."""
+    rev: dict[str, list[str]] = {}
+    for cm in profile.column_mappings.all():
+        rev.setdefault(cm.source_column, []).append(cm.target_field)
+    return rev
+
+
+def _apply_one_resolution(row_dict: dict, res, source_to_targets: dict[str, list[str]]) -> None:
+    """Apply a single SourceResolution to a row dict.
+
+    The user's split modal lets them assign each split part to a target field
+    OR ignore it (no field selected).  Ignored parts must result in the
+    corresponding target field being cleared — otherwise the original
+    pre-split value (e.g. ``"65JP27 - Loan from VFD ..."``) silently
+    persists in the device_name field.
+
+    Logic:
+      1. Apply explicit ``resolved_fields`` overrides.
+      2. For each target_field that the resolution's source_column originally
+         feeds: if it's not in ``resolved_fields`` and its current value still
+         equals the resolution's ``original_value`` (i.e. no other column
+         contributed a different value via multi-source merge), clear it.
+    """
+    row_dict.update(res.resolved_fields)
+    _clear_resolved_conflicts(row_dict, res.resolved_fields)
+
+    # The split modal's data-source-column attribute stores the target field
+    # name (e.g. "device_name"), not the original CSV column header — so we
+    # treat the resolution's source_column as a candidate target_field too.
+    candidate_targets = list(source_to_targets.get(res.source_column, []))
+    if res.source_column not in candidate_targets:
+        candidate_targets.append(res.source_column)
+    for target_field in candidate_targets:
+        if target_field in res.resolved_fields:
+            continue
+        current = row_dict.get(target_field)
+        if current is None:
+            continue
+        if str(current) == str(res.original_value):
+            row_dict[target_field] = None
 
 
 def _merge_row_values(
@@ -386,6 +438,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     resolutions_by_source_id: dict[str, list] = {}
     for res in profile.source_resolutions.all():
         resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
+    source_to_targets = _build_source_to_targets_map(profile)
 
     unused_stats: dict[str, dict] = {}
     capture_extra = profile.capture_extra_data
@@ -407,8 +460,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
         source_id = row_dict.get("source_id", "")
         if source_id:
             for res in resolutions_by_source_id.get(str(source_id), []):
-                row_dict.update(res.resolved_fields)
-                _clear_resolved_conflicts(row_dict, res.resolved_fields)
+                _apply_one_resolution(row_dict, res, source_to_targets)
 
         if return_stats or capture_extra:
             extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
@@ -437,6 +489,8 @@ def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
     if not resolutions_by_source_id:
         return rows
 
+    source_to_targets = _build_source_to_targets_map(profile)
+
     result = []
     for row in rows:
         source_id = str(row.get("source_id", ""))
@@ -445,8 +499,7 @@ def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
             if "_conflicts" in row:
                 row["_conflicts"] = dict(row["_conflicts"])
             for res in resolutions_by_source_id[source_id]:
-                row.update(res.resolved_fields)
-                _clear_resolved_conflicts(row, res.resolved_fields)
+                _apply_one_resolution(row, res, source_to_targets)
         result.append(row)
     return result
 
@@ -948,6 +1001,155 @@ def _compute_field_diff(
     return diff
 
 
+def _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType, cache=None):
+    """Return True when the resolved DeviceType has u_height == 0.
+
+    ``cache`` is an optional dict (typically ``ctx.zero_u_cache``) that
+    memoizes results by ``(mfg_slug, dt_slug)`` so a large import doesn't
+    issue one query per row.
+    """
+    if not dt_exists:
+        return False
+    key = (mfg_slug, dt_slug)
+    if cache is not None and key in cache:
+        return cache[key]
+    dt_obj = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).only("u_height").first()
+    result = dt_obj is not None and dt_obj.u_height == 0
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def _zero_u_overrides(device_type, position, face):
+    """Drop position/face when device_type is zero-U (e.g. vertical PDU).
+
+    Returns ``(None, None)`` to harmonize with the preview path; both ``""``
+    and ``None`` persist the same in NetBox but using ``None`` everywhere
+    avoids subtle drift.
+    """
+    if device_type is not None and device_type.u_height == 0:
+        return None, None
+    return position, face
+
+
+def _check_rack_position_conflict(
+    rack_name,
+    position,
+    device_face,
+    ctx,
+    row_number=None,
+    device_name=None,
+    u_height=1,
+    matched_device_pk=None,
+):
+    """Detect within-file rack position conflicts (incl. multi-U range overlaps).
+
+    A device occupying ``u_height`` units starting at ``position`` covers the
+    range ``position .. position + u_height - 1``.  Two rows overlap if any
+    slot in their ranges collides on the same ``(rack, face)``.
+
+    Claims are keyed by ``(rack_name, slot, face)`` and store
+    ``(row_number, device_name, matched_device_pk)``.  When ``matched_device_pk``
+    matches a previous claim's pk, the overlap is treated as legitimate (two
+    rows resolving to the same existing ``Device`` — execute mode would just
+    update one record twice) rather than a conflict.
+
+    Returns ``(message, conflicting_row_number)`` on the first real overlap,
+    otherwise registers each uncovered slot and returns ``None``.
+    """
+    if not rack_name or position is None:
+        return None
+    try:
+        height = max(1, int(u_height))
+    except (TypeError, ValueError):
+        height = 1
+    effective_face = device_face or ""
+    face_label = f" ({effective_face})" if effective_face else ""
+    slots = range(position, position + height)
+    for slot in slots:
+        pos_key = (rack_name, slot, effective_face)
+        if pos_key not in ctx.claimed_positions:
+            continue
+        prev_row, prev_name, prev_pk = _unpack_claim(ctx.claimed_positions[pos_key])
+        # Same matched Device → not a conflict; execute mode would update once.
+        if matched_device_pk is not None and prev_pk == matched_device_pk:
+            continue
+        if prev_row is not None:
+            other = f"row {prev_row}"
+            if prev_name:
+                other = f"{other} ('{prev_name}')"
+            return (
+                f"Rack position conflict: {rack_name} U{slot}{face_label} also claimed by {other}",
+                prev_row,
+            )
+        return (
+            f"Rack position conflict: {rack_name} U{slot}{face_label} already claimed by another row in this file",
+            None,
+        )
+    # First claim wins: only register slots that aren't already claimed.
+    for slot in slots:
+        pos_key = (rack_name, slot, effective_face)
+        if pos_key not in ctx.claimed_positions:
+            ctx.claimed_positions[pos_key] = (row_number, device_name, matched_device_pk)
+    return None
+
+
+def _unpack_claim(prev):
+    """Unpack a ``ctx.claimed_positions`` value into ``(row, name, pk)``.
+
+    Tolerates legacy 2-tuple claims (no ``matched_device_pk``) so the function
+    remains safe if older code paths stored shorter tuples.
+    """
+    if not isinstance(prev, tuple):
+        return None, None, None
+    prev_row = prev[0] if len(prev) > 0 else None
+    prev_name = prev[1] if len(prev) > 1 else None
+    prev_pk = prev[2] if len(prev) > 2 else None
+    return prev_row, prev_name, prev_pk
+
+
+def _claim_rack_slots_for_preview(
+    action,
+    detail,
+    rack_name,
+    position,
+    device_face,
+    ctx,
+    row,
+    device_name,
+    u_height,
+    matched_device_pk=None,
+):
+    """Reserve the row's target U-range for create/update intents during preview.
+
+    Rows that will actually write to the rack — both creates and updates that
+    move a matched device into a new ``(rack, face, position, u_height)`` — must
+    claim their target slots so later overlapping rows are flagged here instead
+    of failing later as an ``IntegrityError`` on write. Skips and ignores make
+    no claim.
+
+    ``matched_device_pk`` is threaded through so multiple rows that resolve to
+    the same existing ``Device`` are not falsely flagged as conflicting with
+    each other. Returns ``(action, detail, conflict_row_number)``.
+    """
+    if action not in ("create", "update"):
+        return action, detail, None
+    conflict = _check_rack_position_conflict(
+        rack_name,
+        position,
+        device_face,
+        ctx,
+        row_number=row.get("_row_number"),
+        device_name=device_name,
+        u_height=u_height,
+        matched_device_pk=matched_device_pk,
+    )
+    if conflict:
+        new_detail, conflict_row_number = conflict
+        return "error", new_detail, conflict_row_number
+    return action, detail, None
+
+
 def _preview_device_row(
     row,
     ctx,
@@ -1023,11 +1225,20 @@ def _preview_device_row(
     except (TypeError, ValueError):
         position = None
 
+    # Zero-U devices (e.g. vertical PDUs) live in the rack but don't claim a U-position.
+    # If the resolved DeviceType has u_height == 0, drop position/face so multiple zero-U
+    # devices in the same rack don't trigger spurious rack position conflicts.
+    is_zero_u = _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType, ctx.zero_u_cache)
+    if is_zero_u:
+        position = None
+        device_face = None
+
     # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
     # ensuring explicit operator mappings always take precedence over coincidental name matches.
     matched_device, match_method = _find_existing_device(
         ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device
     )
+    conflict_row_number = None
     if matched_device is not None:
         action = "update" if ctx.profile.update_existing else "skip"
         if match_method == "name":
@@ -1047,8 +1258,24 @@ def _preview_device_row(
                 )
     else:
         action = "create"
-        _pos_label = f" U{position}" if position is not None else ""
-        detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
+        if is_zero_u:
+            detail = f"Would create device '{device_name}' in {rack_label} (zero-U)"
+        else:
+            _pos_label = f" U{position}" if position is not None else ""
+            detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
+
+    action, detail, conflict_row_number = _claim_rack_slots_for_preview(
+        action,
+        detail,
+        rack_name,
+        position,
+        device_face,
+        ctx,
+        row,
+        device_name,
+        u_height,
+        matched_device_pk=matched_device.pk if matched_device is not None else None,
+    )
 
     field_diff: dict | None = None
     if action == "update" and matched_device is not None:
@@ -1091,7 +1318,29 @@ def _preview_device_row(
             **({"_ip": ip_fields} if ip_fields else {}),
             **({"field_diff": field_diff} if field_diff is not None else {}),
             **({"netbox_device_id": matched_device.pk} if action == "update" else {}),
+            **({"conflict_row_number": conflict_row_number} if action == "error" and conflict_row_number else {}),
         },
+    )
+
+
+def _rack_position_error_row(row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, action):
+    """Convert an IntegrityError on device create/update to a descriptive error RowResult."""
+    _rack_label = rack_name if rack_name else "(no rack)"
+    _pos_label = f" U{position}" if position is not None else ""
+    msg = str(exc).split("\n")[0]
+    if "unique_rack_position" in msg or ("rack_id" in msg and "position" in msg):
+        detail = f"Cannot {action} '{device_name}': rack position {_rack_label}{_pos_label} is already occupied"
+    else:
+        detail = f"Cannot {action} '{device_name}': database constraint violation — {msg}"
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=device_name,
+        action="error",
+        object_type="device",
+        detail=detail,
+        rack_name=rack_name,
+        extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
     )
 
 
@@ -1131,6 +1380,10 @@ def _write_device_row(
             detail=f"Device type not found: {mfg_slug}/{dt_slug}",
         )
 
+    # Zero-U devices (vertical PDUs etc.) don't occupy a U-position; clear
+    # position/face so they can coexist in the same rack without conflicts.
+    position, face = _zero_u_overrides(device_type, position, face)
+
     try:
         device_role = DeviceRole.objects.get(slug=crm.role_slug)
     except DeviceRole.DoesNotExist:
@@ -1169,7 +1422,13 @@ def _write_device_row(
                 device.asset_tag = asset_tag
             if ctx.tenant:
                 device.tenant = ctx.tenant
-            device.save()
+            try:
+                with transaction.atomic():
+                    device.save()
+            except IntegrityError as exc:
+                return _rack_position_error_row(
+                    row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "update"
+                )
             ip_json = {}
             for ip_field, ip_str in (ip_fields or {}).items():
                 assigned = _assign_ip_to_device(device, ip_field, ip_str)
@@ -1200,21 +1459,27 @@ def _write_device_row(
 
     if ctx.user is not None and not ctx.user.has_perm("dcim.add_device"):
         return _perm_denied_row("dcim.add_device", row, device_name, "device")
-    device = Device.objects.create(
-        site=ctx.site,
-        location=ctx.location,
-        name=device_name,
-        device_type=device_type,
-        role=device_role,
-        rack=rack if isinstance(rack, Rack) else None,
-        position=position,
-        face=face,
-        airflow=airflow,
-        status=status,
-        serial=serial,
-        asset_tag=asset_tag,
-        tenant=ctx.tenant,
-    )
+    try:
+        with transaction.atomic():
+            device = Device.objects.create(
+                site=ctx.site,
+                location=ctx.location,
+                name=device_name,
+                device_type=device_type,
+                role=device_role,
+                rack=rack if isinstance(rack, Rack) else None,
+                position=position,
+                face=face,
+                airflow=airflow,
+                status=status,
+                serial=serial,
+                asset_tag=asset_tag,
+                tenant=ctx.tenant,
+            )
+    except IntegrityError as exc:
+        return _rack_position_error_row(
+            row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "create"
+        )
     ip_json = {}
     for ip_field, ip_str in (ip_fields or {}).items():
         # New device — no interfaces yet, always store in JSON
@@ -1274,8 +1539,15 @@ def _assign_ip_to_device(device, ip_field: str, ip_str: str):
     return False
 
 
-def _pass3_process_devices(rows, ctx, class_role_map):
-    """Pass 3: create or update Device objects."""
+def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
+    """Pass 3: create or update Device objects.
+
+    Cyclomatic complexity sits at 16 due to a stack of flat early-return guard
+    clauses (ignored-id, position < 1, missing name, no class mapping, ignored
+    class, no role slug, etc.). Each clause is simple and self-contained; the
+    threshold-exceeding count is accumulation, not nesting, so a per-function
+    suppression is preferred over a project-wide bump.
+    """
     from dcim.models import Device, DeviceRole, DeviceType, Rack
     from .models import IgnoredDevice
 
@@ -1342,6 +1614,14 @@ def _pass3_process_devices(rows, ctx, class_role_map):
                 continue
         except (TypeError, ValueError):
             position = None
+
+        if not device_name and asset_tag:
+            # Fallback: if a saved split-resolution cleared device_name (e.g.
+            # user split "TAG - free-text comment" → asset_tag and ignored
+            # the comment), reuse the asset_tag as the device name rather
+            # than failing the row.  One-way only (asset_tag never falls back
+            # to device_name) to avoid circular resolution.
+            device_name = asset_tag
 
         if not device_name:
             ctx.result.rows.append(

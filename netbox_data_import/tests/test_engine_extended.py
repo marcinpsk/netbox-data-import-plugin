@@ -1159,6 +1159,20 @@ class Pass3EdgeCasesTest(TestCase):
         error_rows = [r for r in result.rows if r.action == "error" and "Missing device name" in r.detail]
         self.assertGreater(len(error_rows), 0)
 
+    def test_empty_device_name_falls_back_to_asset_tag(self):
+        """When device_name is empty but asset_tag is present, asset_tag is used as the name.
+
+        Covers the saved-split-resolution scenario where the user splits a value
+        into asset_tag + ignored comment, leaving device_name cleared.  The row
+        should not error — the asset_tag becomes the device name.
+        """
+        rows = [self._device_row(device_name="", asset_tag="65JP27", source_id="P3-FB")]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        error_rows = [r for r in result.rows if r.action == "error" and "Missing device name" in r.detail]
+        self.assertEqual(len(error_rows), 0)
+        named_rows = [r for r in result.rows if r.object_type == "device" and r.name == "65JP27"]
+        self.assertGreater(len(named_rows), 0)
+
     def test_unmapped_device_class_produces_error(self):
         """A row with a device_class that has no ClassRoleMapping results in action='error'."""
         rows = [self._device_row(device_class="UnknownClass", source_id="P3003")]
@@ -2084,6 +2098,535 @@ class PermissionDeniedEngineTest(TestCase):
         )
         self.assertEqual(result.action, "error")
         self.assertIn("dcim.change_device", result.detail)
+
+
+# ---------------------------------------------------------------------------
+# PR #27 review-feedback tests: zero-U cache, savepoint isolation
+# ---------------------------------------------------------------------------
+
+
+class IsZeroUDeviceTypeCacheTest(TestCase):
+    """Verify _is_zero_u_device_type memoizes by (mfg_slug, dt_slug) to avoid N+1."""
+
+    def test_repeated_lookups_hit_cache(self):
+        """Second call for the same (mfg, dt) reads from the cache instead of querying again."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import _is_zero_u_device_type
+
+        mfg = Manufacturer.objects.create(name="ZUMfg", slug="zu-mfg")
+        DeviceType.objects.create(manufacturer=mfg, model="ZU PDU", slug="zu-pdu", u_height=0)
+
+        cache: dict = {}
+        # First call populates the cache.
+        first = _is_zero_u_device_type("zu-mfg", "zu-pdu", True, DeviceType, cache=cache)
+        self.assertTrue(first)
+        self.assertIn(("zu-mfg", "zu-pdu"), cache)
+        self.assertTrue(cache[("zu-mfg", "zu-pdu")])
+
+        # Mutating the cache to a sentinel proves the second call returns the cached
+        # value rather than re-querying (which would return True again).
+        cache[("zu-mfg", "zu-pdu")] = "SENTINEL"
+        second = _is_zero_u_device_type("zu-mfg", "zu-pdu", True, DeviceType, cache=cache)
+        self.assertEqual(second, "SENTINEL")
+
+    def test_dt_exists_false_short_circuits(self):
+        """When dt_exists=False, the function returns False without querying or caching."""
+        from dcim.models import DeviceType
+
+        from netbox_data_import.engine import _is_zero_u_device_type
+
+        cache: dict = {}
+        result = _is_zero_u_device_type("nope", "nope", False, DeviceType, cache=cache)
+        self.assertFalse(result)
+        self.assertEqual(cache, {})
+
+    def test_distinct_dts_cached_separately(self):
+        """Two DeviceTypes with different u_height get distinct cache entries."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import _is_zero_u_device_type
+
+        mfg = Manufacturer.objects.create(name="MixMfg", slug="mix-mfg")
+        DeviceType.objects.create(manufacturer=mfg, model="ZeroU", slug="zero-u", u_height=0)
+        DeviceType.objects.create(manufacturer=mfg, model="OneU", slug="one-u", u_height=1)
+
+        cache: dict = {}
+        self.assertTrue(_is_zero_u_device_type("mix-mfg", "zero-u", True, DeviceType, cache=cache))
+        self.assertFalse(_is_zero_u_device_type("mix-mfg", "one-u", True, DeviceType, cache=cache))
+        self.assertEqual(cache[("mix-mfg", "zero-u")], True)
+        self.assertEqual(cache[("mix-mfg", "one-u")], False)
+
+
+class WriteDeviceRowSavepointIsolationTest(TestCase):
+    """An IntegrityError inside _write_device_row must NOT poison an outer atomic block.
+
+    The view layer wraps engine.run_import in transaction.atomic().  Without
+    nested savepoints around device.save() / Device.objects.create(), a
+    duplicate-rack-position IntegrityError aborts the outer transaction, and
+    any subsequent ORM call raises TransactionManagementError.  This test
+    pins the savepoint behavior in place so the protection isn't accidentally
+    removed.
+    """
+
+    def setUp(self):
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        self.site = Site.objects.create(name="SPSite", slug="sp-site")
+        self.profile = _make_profile("SPProfile")
+        self.mfg = Manufacturer.objects.create(name="SP Mfg", slug="sp-mfg")
+        self.dt = DeviceType.objects.create(manufacturer=self.mfg, model="SP DT", slug="sp-mfg-sp-dt", u_height=1)
+        self.role = DeviceRole.objects.create(name="SP Role", slug="sp-role")
+        self.rack = Rack.objects.create(site=self.site, name="SP-RACK", u_height=10)
+        # Pre-create a device occupying U1/front so subsequent inserts at the same
+        # slot fail with IntegrityError on the unique_rack_position_face constraint.
+        from dcim.models import Device
+
+        # Map a "Face" column so the engine reads face from rows; without this
+        # mapping the engine would default face to None, never colliding with
+        # the pre-existing front-faced device on the rack-position constraint.
+        from netbox_data_import.models import ColumnMapping
+
+        ColumnMapping.objects.create(profile=self.profile, source_column="Face", target_field="face")
+        Device.objects.create(
+            site=self.site,
+            name="sp-existing",
+            device_type=self.dt,
+            role=self.role,
+            rack=self.rack,
+            position=1,
+            face="front",
+        )
+
+    def test_run_import_inside_outer_atomic_recovers_from_integrity_error(self):
+        """run_import called within transaction.atomic() must leave the outer txn usable."""
+        from django.db import transaction
+
+        from dcim.models import Site
+
+        rows = [
+            {
+                "_row_number": 7,
+                "source_id": "SP-DUP",
+                "device_name": "sp-dup",
+                "device_class": "Server",
+                "make": "SP Mfg",
+                "model": "SP DT",
+                "u_height": "1",
+                "rack_name": "SP-RACK",
+                "u_position": "1",
+                "face": "front",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            },
+        ]
+        # Map "Server" class to the existing role used above so the device-role
+        # lookup succeeds without creating a new role mid-test.
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Server").update(role_slug="sp-role")
+
+        with transaction.atomic():
+            result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
+            # If the savepoint were missing, the outer atomic would be tainted and
+            # this query would raise TransactionManagementError.
+            site_count_after = Site.objects.count()
+
+        self.assertGreaterEqual(site_count_after, 1)
+        # The duplicate-position row must surface as an error (not silently swallowed).
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertTrue(
+            device_rows,
+            f"expected device rows, got actions={[(r.object_type, r.action, r.detail) for r in result.rows]}",
+        )
+        bad = [r for r in device_rows if r.action in ("create", "update")]
+        self.assertFalse(
+            bad,
+            f"duplicate row should NOT have created/updated; got {[(r.action, r.detail) for r in bad]}",
+        )
+
+    def test_subsequent_row_succeeds_after_integrity_error(self):
+        """After one row hits IntegrityError, an unrelated later row still creates successfully."""
+        from dcim.models import Device, Rack
+
+        rack2 = Rack.objects.create(site=self.site, name="SP-RACK-2", u_height=10)
+        rows = [
+            {
+                "_row_number": 8,
+                "source_id": "SP-DUP-2",
+                "device_name": "sp-dup-2",
+                "device_class": "Server",
+                "make": "SP Mfg",
+                "model": "SP DT",
+                "u_height": "1",
+                "rack_name": "SP-RACK",
+                "u_position": "1",
+                "face": "front",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            },
+            {
+                "_row_number": 9,
+                "source_id": "SP-OK",
+                "device_name": "sp-ok",
+                "device_class": "Server",
+                "make": "SP Mfg",
+                "model": "SP DT",
+                "u_height": "1",
+                "rack_name": "SP-RACK-2",
+                "u_position": "5",
+                "face": "front",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            },
+        ]
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Server").update(role_slug="sp-role")
+
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
+
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertTrue(
+            device_rows,
+            f"expected device rows, got {[(r.object_type, r.action, r.detail) for r in result.rows]}",
+        )
+        # The duplicate row should not have created a device.
+        self.assertFalse(Device.objects.filter(name="sp-dup-2").exists())
+        # The unrelated later row must succeed despite the earlier IntegrityError.
+        self.assertTrue(Device.objects.filter(name="sp-ok", rack=rack2).exists())
+
+
+class ZeroUOverridesTest(TestCase):
+    """_zero_u_overrides drops position/face for zero-U device types and harmonizes on None."""
+
+    def test_zero_u_dt_returns_none_none(self):
+        """A zero-U device type causes both position and face to be cleared to None."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import _zero_u_overrides
+
+        mfg = Manufacturer.objects.create(name="ZOMfg", slug="zo-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="ZO PDU", slug="zo-pdu", u_height=0)
+
+        pos, face = _zero_u_overrides(dt, 1, "front")
+        self.assertIsNone(pos)
+        self.assertIsNone(face)
+
+    def test_non_zero_u_dt_preserves_values(self):
+        """A non-zero-U device type leaves position and face untouched."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_data_import.engine import _zero_u_overrides
+
+        mfg = Manufacturer.objects.create(name="NZMfg", slug="nz-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="NZ Server", slug="nz-server", u_height=2)
+
+        pos, face = _zero_u_overrides(dt, 5, "rear")
+        self.assertEqual(pos, 5)
+        self.assertEqual(face, "rear")
+
+    def test_none_device_type_preserves_values(self):
+        """When device_type is None (unresolved), position/face are passed through."""
+        from netbox_data_import.engine import _zero_u_overrides
+
+        pos, face = _zero_u_overrides(None, 3, "front")
+        self.assertEqual(pos, 3)
+        self.assertEqual(face, "front")
+
+
+# ---------------------------------------------------------------------------
+# Issue #28: rack position conflict — multi-U range overlaps
+# ---------------------------------------------------------------------------
+
+
+class CheckRackPositionConflictRangeTest(TestCase):
+    """_check_rack_position_conflict must detect range overlaps for multi-U devices."""
+
+    def _ctx(self):
+        # _check_rack_position_conflict only touches ctx.claimed_positions, so
+        # a lightweight stand-in avoids needing a full ImportContext (which
+        # requires a profile, site, ImportResult, etc.).
+        from types import SimpleNamespace
+
+        return SimpleNamespace(claimed_positions={})
+
+    def test_single_u_no_conflict_when_distinct_positions(self):
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 1, "front", ctx, row_number=1, device_name="a", u_height=1)
+        )
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 2, "front", ctx, row_number=2, device_name="b", u_height=1)
+        )
+
+    def test_exact_collision_returns_conflict(self):
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        _check_rack_position_conflict("R1", 1, "front", ctx, row_number=1, device_name="a", u_height=1)
+        result = _check_rack_position_conflict("R1", 1, "front", ctx, row_number=2, device_name="b", u_height=1)
+        self.assertIsNotNone(result)
+        msg, prev_row = result
+        self.assertEqual(prev_row, 1)
+        self.assertIn("R1 U1 (front)", msg)
+        self.assertIn("'a'", msg)
+
+    def test_4u_device_blocks_subsequent_claim_in_same_range(self):
+        """A 4U device at U1 occupies U1-U4; another row at U2 must conflict."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        _check_rack_position_conflict("R1", 1, "front", ctx, row_number=10, device_name="big", u_height=4)
+        # U2 falls inside the U1-U4 range
+        result = _check_rack_position_conflict("R1", 2, "front", ctx, row_number=11, device_name="intruder", u_height=1)
+        self.assertIsNotNone(result)
+        msg, prev_row = result
+        self.assertEqual(prev_row, 10)
+        # The colliding slot should be reported, not the new device's start.
+        self.assertIn("U2 (front)", msg)
+        self.assertIn("'big'", msg)
+
+    def test_partial_range_overlap_reports_first_colliding_slot(self):
+        """A 2U device starting at U3 must collide with a prior 4U device at U1-U4."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        _check_rack_position_conflict("R1", 1, "front", ctx, row_number=5, device_name="big", u_height=4)
+        result = _check_rack_position_conflict("R1", 3, "front", ctx, row_number=6, device_name="small", u_height=2)
+        self.assertIsNotNone(result)
+        msg, prev_row = result
+        self.assertEqual(prev_row, 5)
+        # First overlapping slot is U3 (small starts there, big covers it).
+        self.assertIn("U3 (front)", msg)
+
+    def test_adjacent_non_overlapping_ranges_ok(self):
+        """A 2U device at U1 (covers U1-U2) does not collide with another 2U at U3 (covers U3-U4)."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 1, "front", ctx, row_number=1, device_name="a", u_height=2)
+        )
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 3, "front", ctx, row_number=2, device_name="b", u_height=2)
+        )
+
+    def test_different_face_no_conflict(self):
+        """Same rack and position but different face must not conflict (vertical PDU L vs R)."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 1, "front", ctx, row_number=1, device_name="L", u_height=1)
+        )
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 1, "rear", ctx, row_number=2, device_name="R", u_height=1)
+        )
+
+    def test_different_rack_no_conflict(self):
+        """Same position but different racks must not conflict."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4)
+        )
+        self.assertIsNone(
+            _check_rack_position_conflict("R2", 1, "front", ctx, row_number=2, device_name="b", u_height=4)
+        )
+
+    def test_invalid_u_height_falls_back_to_one(self):
+        """An invalid u_height value is treated as 1U so the check still runs."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 5, "front", ctx, row_number=1, device_name="a", u_height="bogus")
+        )
+        # Adjacent slot must be free (proves no over-claim from bad height).
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", 6, "front", ctx, row_number=2, device_name="b", u_height=1)
+        )
+        # Same slot conflicts.
+        result = _check_rack_position_conflict("R1", 5, "front", ctx, row_number=3, device_name="c", u_height=1)
+        self.assertIsNotNone(result)
+
+    def test_no_position_or_rack_returns_none(self):
+        """Missing rack_name or position short-circuits to None (no claim recorded)."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        self.assertIsNone(_check_rack_position_conflict("", 1, "front", ctx, row_number=1, device_name="a", u_height=2))
+        self.assertIsNone(
+            _check_rack_position_conflict("R1", None, "front", ctx, row_number=1, device_name="a", u_height=2)
+        )
+        self.assertEqual(ctx.claimed_positions, {})
+
+    def test_same_matched_device_pk_not_flagged(self):
+        """Two rows resolving to the same existing Device must not conflict on shared slots."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        # Row 1 claims U1-U4 for device pk=42 (e.g. matched by name).
+        self.assertIsNone(
+            _check_rack_position_conflict(
+                "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4, matched_device_pk=42
+            )
+        )
+        # Row 2 also resolves to pk=42 (e.g. matched by serial) and overlaps U3-U4.
+        # Same matched device → not a rack-position conflict.
+        self.assertIsNone(
+            _check_rack_position_conflict(
+                "R1", 3, "front", ctx, row_number=2, device_name="a-by-serial", u_height=2, matched_device_pk=42
+            )
+        )
+
+    def test_different_matched_device_pk_still_conflicts(self):
+        """Different matched_device_pk → overlap is a real conflict."""
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        _check_rack_position_conflict(
+            "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4, matched_device_pk=42
+        )
+        result = _check_rack_position_conflict(
+            "R1", 3, "front", ctx, row_number=2, device_name="b", u_height=2, matched_device_pk=99
+        )
+        self.assertIsNotNone(result)
+        _, prev_row = result
+        self.assertEqual(prev_row, 1)
+
+    def test_none_pk_does_not_collapse_with_none_pk(self):
+        """Two rows with matched_device_pk=None on the same slot must still conflict.
+
+        A None pk represents an unmatched (create) row, not a shared identity;
+        two creates at the same slot are a real conflict.
+        """
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        _check_rack_position_conflict(
+            "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=1, matched_device_pk=None
+        )
+        result = _check_rack_position_conflict(
+            "R1", 1, "front", ctx, row_number=2, device_name="b", u_height=1, matched_device_pk=None
+        )
+        self.assertIsNotNone(result)
+
+
+class PreviewRackPositionConflictMultiURangeTest(TestCase):
+    """End-to-end: preview surfaces a multi-U range conflict on the second offending row."""
+
+    def setUp(self):
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="MUSite", slug="mu-site")
+        self.profile = _make_profile("MUOverlap")
+
+    def _row(self, **overrides):
+        base = {
+            "_row_number": 1,
+            "source_id": "MU001",
+            "device_name": "mu-dev",
+            "device_class": "Server",
+            "make": "Dell",
+            "model": "PowerEdge R940",
+            "u_height": "1",
+            "rack_name": "MU-RACK",
+            "u_position": "1",
+            "serial": "",
+            "asset_tag": "",
+            "status": "active",
+        }
+        base.update(overrides)
+        return base
+
+    def test_4u_then_overlapping_2u_in_same_rack_yields_error(self):
+        """A 4U device at U1 + a 2U device at U3 in the same rack/face must error on the 2U row."""
+        rows = [
+            self._row(_row_number=1, source_id="MU-BIG", device_name="big-4u", u_height="4", u_position="1"),
+            self._row(_row_number=2, source_id="MU-INTR", device_name="intr-2u", u_height="2", u_position="3"),
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        # First row (big-4u) should be a "create" intent.
+        big = [r for r in device_rows if r.name == "big-4u"]
+        self.assertTrue(big and big[0].action in ("create",))
+        # Second row should be flagged as an error referencing the first row.
+        intr = [r for r in device_rows if r.name == "intr-2u"]
+        self.assertTrue(intr)
+        self.assertEqual(intr[0].action, "error")
+        self.assertIn("conflict", intr[0].detail.lower())
+        self.assertIn("row 1", intr[0].detail)
+
+    def test_update_moves_into_range_then_create_overlap_yields_error(self):
+        """Update path must reserve its target U-range.
+
+        Row 1 matches an existing device (update_existing=True) and moves it into
+        U1..U4 of MU-RACK. Row 2 tries to create a new 2U device at U3..U4 in the
+        same rack/face. Without the update-path reservation the second row would
+        preview clean and then fail on write.
+        """
+        from dcim.models import Device, Manufacturer, DeviceType, DeviceRole
+
+        mfg = Manufacturer.objects.create(name="Dell", slug="dell")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="PowerEdge R940", slug="poweredge-r940", u_height=4)
+        role = DeviceRole.objects.create(name="Server", slug="server")
+        # Pre-existing device matched by name; first row will update it into the new range.
+        Device.objects.create(name="big-4u", site=self.site, device_type=dt, role=role)
+
+        rows = [
+            self._row(_row_number=1, source_id="MU-BIG", device_name="big-4u", u_height="4", u_position="1"),
+            self._row(_row_number=2, source_id="MU-INTR", device_name="intr-2u", u_height="2", u_position="3"),
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        big = [r for r in device_rows if r.name == "big-4u"]
+        self.assertTrue(big and big[0].action == "update")
+        intr = [r for r in device_rows if r.name == "intr-2u"]
+        self.assertTrue(intr)
+        self.assertEqual(intr[0].action, "error")
+        self.assertIn("conflict", intr[0].detail.lower())
+        self.assertIn("row 1", intr[0].detail)
+
+    def test_two_rows_matching_same_device_do_not_falsely_conflict(self):
+        """Two preview rows resolving to the same existing Device on overlapping slots must both update.
+
+        Row 1 matches the existing device by name; row 2 matches the same device
+        by serial. Their target U-ranges overlap, but since execute mode would
+        just update one record twice, the preview must not flag either as an
+        error.
+        """
+        from dcim.models import Device, Manufacturer, DeviceType, DeviceRole
+
+        mfg = Manufacturer.objects.create(name="Dell", slug="dell")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="PowerEdge R940", slug="poweredge-r940", u_height=4)
+        role = DeviceRole.objects.create(name="Server", slug="server")
+        # Pre-existing device — row 1 matches by name, row 2 by serial.
+        Device.objects.create(name="dup-4u", site=self.site, device_type=dt, role=role, serial="SN-DUP")
+
+        rows = [
+            self._row(_row_number=1, source_id="DUP-A", device_name="dup-4u", u_height="4", u_position="1"),
+            self._row(
+                _row_number=2,
+                source_id="DUP-B",
+                device_name="other-name",
+                u_height="2",
+                u_position="3",
+                serial="SN-DUP",
+            ),
+        ]
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [r for r in result.rows if r.object_type == "device"]
+        self.assertEqual(len(device_rows), 2)
+        for r in device_rows:
+            self.assertEqual(r.action, "update", f"Row {r.row_number} unexpectedly errored: {r.detail}")
+        # Both rows reference the same netbox_device_id.
+        device_ids = {r.extra_data.get("netbox_device_id") for r in device_rows}
+        self.assertEqual(len(device_ids), 1)
+        self.assertIsNotNone(next(iter(device_ids)))
 
 
 class MissingRoleSlugErrorTest(TestCase):
