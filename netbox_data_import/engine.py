@@ -895,11 +895,16 @@ def _pass2_process_racks(rows, ctx, class_role_map):
             _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=crm.rack_type)
 
 
-def _find_existing_device(profile, source_id, site, device_name, serial, asset_tag, Device):
+def _find_existing_device(
+    profile, source_id, site, device_name, serial, asset_tag, Device, ambiguous_names: frozenset = frozenset()
+):
     """Look up a pre-existing NetBox device by source-ID link, serial, asset_tag, or name.
 
     Returns (device, match_method) or (None, None).
     Matching priority: source-ID link → serial → asset_tag → name.
+    The name-based fallback is skipped when *device_name* is in *ambiguous_names*
+    (i.e. two or more rows in the current import share the same name), since
+    matching all of them to the same NetBox device would be incorrect.
     When *site* is provided the name lookup is scoped to that site; without a
     site the name is matched globally (any site).
     """
@@ -931,7 +936,7 @@ def _find_existing_device(profile, source_id, site, device_name, serial, asset_t
         except Device.MultipleObjectsReturned:
             logger.warning("Ambiguous asset_tag match for asset_tag=%r; skipping auto-match", asset_tag)
 
-    if matched_device is None and device_name:
+    if matched_device is None and device_name and device_name not in ambiguous_names:
         name_filter = {"name": device_name}
         if site is not None:
             name_filter["site"] = site
@@ -1170,6 +1175,7 @@ def _preview_device_row(
     device_status="active",
     u_position=None,
     is_explicit_mapping: bool = False,
+    ambiguous_names: frozenset = frozenset(),
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     # Parse u_height early so it's available in all return paths
@@ -1236,7 +1242,7 @@ def _preview_device_row(
     # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
     # ensuring explicit operator mappings always take precedence over coincidental name matches.
     matched_device, match_method = _find_existing_device(
-        ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device
+        ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device, ambiguous_names
     )
     conflict_row_number = None
     if matched_device is not None:
@@ -1365,8 +1371,8 @@ def _write_device_row(
     Rack,
     Device,
     ip_fields: dict | None = None,
+    ambiguous_names: frozenset = frozenset(),
 ):
-    """Write or update a device in the DB and return a RowResult."""
     rack_name = _str_val(row.get("rack_name"))
     try:
         device_type = DeviceType.objects.get(manufacturer__slug=mfg_slug, slug=dt_slug)
@@ -1403,7 +1409,7 @@ def _write_device_row(
     # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
     # ensuring explicit operator mappings always take precedence over coincidental name matches.
     device, match_method = _find_existing_device(
-        ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device
+        ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device, ambiguous_names
     )
 
     if device is not None:
@@ -1555,6 +1561,22 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
 
     # Pre-fetch ignored source IDs to avoid per-row queries
     ignored_source_ids = set(IgnoredDevice.objects.filter(profile=ctx.profile).values_list("source_id", flat=True))
+
+    # Identify device names that appear in multiple rows. When the same name occurs
+    # in 2+ rows the name-based device lookup would incorrectly match all of them
+    # to the same NetBox object (e.g. after one of them is synced), so we skip the
+    # name fallback for those ambiguous rows and only match via source-ID link,
+    # serial, or asset tag.
+    _name_counts: dict[str, int] = {}
+    for _row in rows:
+        _dc = _str_val(_row.get("device_class"))
+        _crm = class_role_map.get(_dc)
+        if _crm and _crm.creates_rack:
+            continue
+        _dn = _str_val(_row.get("device_name"))
+        if _dn:
+            _name_counts[_dn] = _name_counts.get(_dn, 0) + 1
+    ambiguous_names: frozenset = frozenset(n for n, c in _name_counts.items() if c > 1)
 
     for row in rows:
         device_class = _str_val(row.get("device_class"))
@@ -1734,6 +1756,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 device_status=device_status,
                 u_position=position,
                 is_explicit_mapping=is_explicit_mapping,
+                ambiguous_names=ambiguous_names,
             )
         else:
             row_result = _write_device_row(
@@ -1757,6 +1780,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 Rack,
                 Device,
                 ip_fields=ip_fields,
+                ambiguous_names=ambiguous_names,
             )
         ctx.result.rows.append(row_result)
 
