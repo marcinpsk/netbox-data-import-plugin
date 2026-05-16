@@ -2060,7 +2060,7 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
 
     def get(self, request):
         """Return a JSON list of matching NetBox objects for the given type and query."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, RackType
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, RackType
         from django.http import JsonResponse
 
         obj_type = request.GET.get("type", "device")
@@ -2108,16 +2108,7 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
                     }
                 )
         elif obj_type == "device":
-            for dev in Device.objects.filter(_device_name_filter(q)).distinct().select_related("site")[:limit]:
-                results.append(
-                    {
-                        "id": dev.pk,
-                        "name": dev.name,
-                        "serial": dev.serial or None,
-                        "site": dev.site.name if dev.site else "",
-                        "url": request.build_absolute_uri(dev.get_absolute_url()),
-                    }
-                )
+            self._search_devices(request, q, limit, results)
         elif obj_type == "role":
             for role in DeviceRole.objects.filter(name__icontains=q)[:limit]:
                 results.append(
@@ -2145,6 +2136,48 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
                 )
 
         return JsonResponse({"results": results})
+
+    def _search_devices(self, request, q, limit, results):
+        """Two-phase device search: full-string matches first, then token matches.
+
+        This prevents a relevant exact-substring match (e.g. "prod-lab03d-rc1")
+        from being pushed off the result list by noisy short tokens like "rc1"
+        or "prod" that match many devices.
+        """
+        from dcim.models import Device
+
+        base_qs = Device.objects.filter(name__icontains=q).distinct().select_related("site").order_by("name")
+        seen_ids = set()
+        for dev in base_qs[:limit]:
+            seen_ids.add(dev.pk)
+            results.append(
+                {
+                    "id": dev.pk,
+                    "name": dev.name,
+                    "serial": dev.serial or None,
+                    "site": dev.site.name if dev.site else "",
+                    "url": request.build_absolute_uri(dev.get_absolute_url()),
+                }
+            )
+        if len(results) >= limit:
+            return
+        token_qs = (
+            Device.objects.filter(_device_name_filter(q))
+            .exclude(pk__in=seen_ids)
+            .distinct()
+            .select_related("site")
+            .order_by("name")
+        )
+        for dev in token_qs[: limit - len(results)]:
+            results.append(
+                {
+                    "id": dev.pk,
+                    "name": dev.name,
+                    "serial": dev.serial or None,
+                    "site": dev.site.name if dev.site else "",
+                    "url": request.build_absolute_uri(dev.get_absolute_url()),
+                }
+            )
 
 
 class QuickCreateDeviceRoleView(PermissionRequiredMixin, View):

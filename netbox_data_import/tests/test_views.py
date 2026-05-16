@@ -1559,6 +1559,33 @@ class SearchNetBoxObjectsExtendedViewTest(BaseViewTestCase):
         self.assertIn("serial", result)
         self.assertEqual(result["serial"], "ABC123XYZ")
 
+    def test_full_string_match_not_pushed_off_by_token_noise(self):
+        """When short tokens like 'rc1' match many devices, the exact-substring
+        match must still appear in the result list (limit=20)."""
+        import json
+        from dcim.models import Device
+
+        # 25 devices that match the noisy "rc1" token but NOT "prod-lab03d-rc1"
+        for i in range(25):
+            Device.objects.create(
+                name=f"other-rc1-{i:02d}",
+                device_type=self.dt,
+                role=self.role,
+                site=self.site,
+            )
+        # The target device — full-string match
+        target = Device.objects.create(
+            name="prod-lab03d-rc1",
+            device_type=self.dt,
+            role=self.role,
+            site=self.site,
+        )
+        resp = self.client.get(self.url + "?type=device&q=prod-lab03d-rc1")
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        names = [r["name"] for r in data["results"]]
+        self.assertIn(target.name, names, f"Target device pushed off result list; got {names}")
+
     def test_device_serial_null_when_not_set(self):
         """Device search results include serial=null when not set."""
         import json
