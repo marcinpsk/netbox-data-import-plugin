@@ -3514,6 +3514,205 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertIn("already exists", data["error"])
 
 
+class SyncRackAndPlacementTests(TestCase):
+    """Tests for rack_name sync, face dependency guard, and SyncPlacementView."""
+
+    def setUp(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, Rack, Site
+
+        self.user = User.objects.create_superuser("testuser_placement", "p@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="testuser_placement", password="testpass")
+
+        self.site = Site.objects.create(name="PSite", slug="psite")
+        self.site2 = Site.objects.create(name="PSite2", slug="psite2")
+        self.location = Location.objects.create(name="PLoc", slug="ploc", site=self.site)
+        mfg = Manufacturer.objects.create(name="PMfg", slug="pmfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="PModel", slug="pmodel", u_height=1)
+        role = DeviceRole.objects.create(name="PRole", slug="prole")
+        # Rack in site only (no location)
+        self.rack_no_loc = Rack.objects.create(name="R1", site=self.site, u_height=42)
+        # Rack in site + location
+        self.rack_with_loc = Rack.objects.create(name="R2", site=self.site, location=self.location, u_height=42)
+        # Same-named rack in a different site (must not match)
+        Rack.objects.create(name="R1", site=self.site2, u_height=42)
+        # Two racks with same name in same site (ambiguous)
+        self.amb_site = Site.objects.create(name="AmbSite", slug="ambsite")
+        Rack.objects.create(name="DUP", site=self.amb_site, u_height=42)
+        Rack.objects.create(name="DUP", site=self.amb_site, u_height=42)
+
+        self.device_no_loc = Device.objects.create(name="dev-noloc", site=self.site, device_type=dt, role=role)
+        self.device_with_loc = Device.objects.create(
+            name="dev-withloc", site=self.site, location=self.location, device_type=dt, role=role
+        )
+        self.device_amb = Device.objects.create(name="dev-amb", site=self.amb_site, device_type=dt, role=role)
+
+        self.field_url = reverse("plugins:netbox_data_import:sync_device_field")
+        self.placement_url = reverse("plugins:netbox_data_import:sync_placement")
+
+    def test_rack_name_sync_site_only(self):
+        """Device with no location matches rack with no location in same site."""
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_no_loc.pk, "field": "rack_name", "value": "R1"},
+        )
+        data = resp.json()
+        self.assertTrue(data["ok"], data)
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+
+    def test_rack_name_sync_with_location(self):
+        """Device with location matches rack in same location."""
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_with_loc.pk, "field": "rack_name", "value": "R2"},
+        )
+        data = resp.json()
+        self.assertTrue(data["ok"], data)
+        self.device_with_loc.refresh_from_db()
+        self.assertEqual(self.device_with_loc.rack_id, self.rack_with_loc.pk)
+
+    def test_rack_name_sync_location_mismatch_not_found(self):
+        """Device with location does NOT match a rack without location (and vice versa)."""
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_with_loc.pk, "field": "rack_name", "value": "R1"},
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("not found", data["error"])
+
+    def test_rack_name_sync_not_found(self):
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_no_loc.pk, "field": "rack_name", "value": "DOESNOTEXIST"},
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("not found", data["error"])
+
+    def test_rack_name_sync_ambiguous(self):
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_amb.pk, "field": "rack_name", "value": "DUP"},
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("Multiple", data["error"])
+
+    def test_rack_name_sync_empty(self):
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_no_loc.pk, "field": "rack_name", "value": "   "},
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("empty", data["error"].lower())
+
+    def test_face_blocked_when_no_rack(self):
+        """Syncing face on a device with no rack returns a clear error and does not save."""
+        self.assertIsNone(self.device_no_loc.rack_id)
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_no_loc.pk, "field": "face", "value": "front"},
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("no rack", data["error"].lower())
+        self.device_no_loc.refresh_from_db()
+        self.assertFalse(self.device_no_loc.face)
+
+    def test_face_works_when_rack_assigned(self):
+        self.device_no_loc.rack = self.rack_no_loc
+        self.device_no_loc.save()
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_no_loc.pk, "field": "face", "value": "front"},
+        )
+        data = resp.json()
+        self.assertTrue(data["ok"], data)
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.face, "front")
+
+    def test_placement_happy_path(self):
+        resp = self.client.post(
+            self.placement_url,
+            {
+                "device_id": self.device_no_loc.pk,
+                "rack_name": "R1",
+                "u_position": "5",
+                "face": "front",
+            },
+        )
+        data = resp.json()
+        self.assertTrue(data["ok"], data)
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+        self.assertEqual(self.device_no_loc.position, 5)
+        self.assertEqual(self.device_no_loc.face, "front")
+
+    def test_placement_rack_only(self):
+        """Placement with no position/face only sets the rack."""
+        resp = self.client.post(
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
+        )
+        data = resp.json()
+        self.assertTrue(data["ok"], data)
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+        self.assertIsNone(self.device_no_loc.position)
+        self.assertFalse(self.device_no_loc.face)
+
+    def test_placement_atomic_on_rack_lookup_failure(self):
+        """If rack lookup fails, no fields are changed."""
+        original_rack = self.device_no_loc.rack_id
+        original_pos = self.device_no_loc.position
+        resp = self.client.post(
+            self.placement_url,
+            {
+                "device_id": self.device_no_loc.pk,
+                "rack_name": "DOESNOTEXIST",
+                "u_position": "5",
+                "face": "front",
+            },
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.rack_id, original_rack)
+        self.assertEqual(self.device_no_loc.position, original_pos)
+        self.assertFalse(self.device_no_loc.face)
+
+    def test_placement_bad_face(self):
+        resp = self.client.post(
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "R1", "face": "sideways"},
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("face", data["error"].lower())
+        self.device_no_loc.refresh_from_db()
+        # All-or-nothing: rack also not set
+        self.assertIsNone(self.device_no_loc.rack_id)
+
+    def test_placement_missing_device(self):
+        resp = self.client.post(self.placement_url, {"device_id": 99999, "rack_name": "R1"})
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("Device not found", data["error"])
+
+    def test_placement_requires_permission(self):
+        User.objects.create_user("no_perm_placement", "n@example.com", "testpass")
+        c = Client()
+        c.login(username="no_perm_placement", password="testpass")
+        resp = c.post(
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
+        )
+        self.assertIn(resp.status_code, (302, 403))
+
+
 class UnlinkDeviceViewTest(TestCase):
     """Test UnlinkDeviceView."""
 

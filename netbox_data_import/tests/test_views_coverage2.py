@@ -393,7 +393,12 @@ class SyncDeviceFieldErrorPathsTest(TestCase):
         self.assertIn("not syncable", data["error"].lower())
 
     def test_face_front_sets_face_and_returns_ok(self):
-        """face='front' is valid → ok=True — lines 1100-1108."""
+        """face='front' is valid when device has a rack → ok=True."""
+        from dcim.models import Rack
+
+        rack = Rack.objects.create(name="SyncErr2Rack", site=self.device.site, u_height=42)
+        self.device.rack = rack
+        self.device.save()
         resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "face", "value": "front"})
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json()["ok"])

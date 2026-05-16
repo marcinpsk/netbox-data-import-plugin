@@ -662,6 +662,20 @@
             <tr id="diff-{{ row.row_number }}" class="ndi-diff-row">
               <td colspan="7" class="p-0 border-top-0">
                 <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
+                  {% if row.rack_name %}
+                  <div class="mb-2">
+                    <button type="button" class="btn btn-xs btn-outline-success ndi-sync-placement-btn"
+                            data-device-id="{{ row.extra_data.netbox_device_id }}"
+                            data-rack-name="{{ row.rack_name }}"
+                            data-u-position="{{ row.extra_data.u_position|default:'' }}"
+                            data-face="{{ row.extra_data.face|default:'' }}"
+                            data-row-id="{{ row.row_number }}"
+                            title="Set rack{% if row.extra_data.u_position %}, position{% endif %}{% if row.extra_data.face %}, face{% endif %} atomically">
+                      <i class="mdi mdi-package-variant"></i> Sync placement
+                    </button>
+                    <span class="text-muted small ms-2">rack=<strong>{{ row.rack_name }}</strong>{% if row.extra_data.u_position %}, U{{ row.extra_data.u_position }}{% endif %}{% if row.extra_data.face %}, {{ row.extra_data.face }}{% endif %}</span>
+                  </div>
+                  {% endif %}
                   <table class="table table-sm table-borderless ndi-diff-table mb-0">
                     <thead>
                       <tr class="text-muted">
@@ -2226,6 +2240,60 @@ document.addEventListener('click', function(e) {
     btn.title = 'Network error — sync failed';
     btn.classList.add('btn-danger');
     btn.classList.remove('btn-outline-primary');
+  });
+});
+
+// Sync placement bundle (rack + position + face atomic)
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.ndi-sync-placement-btn');
+  if (!btn) return;
+
+  const deviceId = btn.dataset.deviceId;
+  const rackName = btn.dataset.rackName;
+  const uPosition = btn.dataset.uPosition || '';
+  const face = btn.dataset.face || '';
+
+  const originalHTML = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Syncing...';
+
+  const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+  const body = new URLSearchParams({
+    device_id: deviceId,
+    rack_name: rackName,
+    u_position: uPosition,
+    face: face,
+  });
+
+  fetch('{% url "plugins:netbox_data_import:sync_placement" %}', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-CSRFToken': csrfToken,
+    },
+    body: body.toString(),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      btn.innerHTML = '<i class="mdi mdi-check"></i> Synced: ' + data.display;
+      btn.classList.remove('btn-outline-success');
+      btn.classList.add('btn-success');
+    } else {
+      btn.disabled = false;
+      btn.innerHTML = originalHTML;
+      btn.title = data.error || 'Placement sync failed';
+      btn.classList.add('btn-danger');
+      btn.classList.remove('btn-outline-success');
+      alert('Placement sync failed: ' + (data.error || 'unknown error'));
+    }
+  })
+  .catch(() => {
+    btn.disabled = false;
+    btn.innerHTML = originalHTML;
+    btn.title = 'Network error — placement sync failed';
+    btn.classList.add('btn-danger');
+    btn.classList.remove('btn-outline-success');
   });
 });
 </script>

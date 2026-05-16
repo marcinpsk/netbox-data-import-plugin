@@ -1073,7 +1073,7 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
 
     permission_required = "dcim.change_device"
 
-    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face"}
+    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face", "rack_name"}
 
     def post(self, request):
         """Apply the given field value to the specified device."""
@@ -1151,6 +1151,10 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
             return device.asset_tag
 
         if field == "face":
+            if device.rack_id is None:
+                raise ValueError(
+                    "Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement."
+                )
             v = str(value).strip().lower()
             _FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
             mapped = _FACE_MAP.get(v)
@@ -1160,7 +1164,109 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
             device.save(update_fields=["face"])
             return device.face
 
+        if field == "rack_name":
+            rack = _lookup_rack_for_device(device, value)
+            device.rack = rack
+            device.save(update_fields=["rack"])
+            return rack.name
+
         raise ValueError(f"Field '{field}' is not syncable")
+
+
+def _lookup_rack_for_device(device, value):
+    """Look up a Rack by name within ``device.site``, honoring ``device.location``.
+
+    If the device has a location set, the rack must be in the same location. If the
+    device has no location, the rack must also have no location (the implicit
+    "default location" semantic). Raises ValueError on miss/ambiguity.
+    """
+    from dcim.models import Rack
+
+    name = (str(value) if value is not None else "").strip()
+    if not name:
+        raise ValueError("Rack name is empty")
+    if device.site_id is None:
+        raise ValueError("Device has no site; cannot resolve rack")
+    qs = Rack.objects.filter(site=device.site, name=name)
+    if device.location_id is not None:
+        qs = qs.filter(location=device.location)
+        loc_str = f" / location '{device.location}'"
+    else:
+        qs = qs.filter(location__isnull=True)
+        loc_str = ""
+    racks = list(qs[:2])
+    if not racks:
+        raise ValueError(f"Rack '{name}' not found in site '{device.site}'{loc_str}")
+    if len(racks) > 1:
+        raise ValueError(f"Multiple racks named '{name}' found; cannot disambiguate")
+    return racks[0]
+
+
+class SyncPlacementView(PermissionRequiredMixin, View):
+    """Atomically sync rack + (optional) u_position + (optional) face for a device.
+
+    All-or-nothing: if the rack lookup fails, nothing is saved.
+    """
+
+    permission_required = "dcim.change_device"
+
+    def post(self, request):
+        """Resolve rack and atomically set rack + optional position + optional face."""
+        from django.http import JsonResponse
+
+        from dcim.models import Device
+
+        device_id = request.POST.get("device_id")
+        rack_name = request.POST.get("rack_name", "")
+        u_position = request.POST.get("u_position", "")
+        face = request.POST.get("face", "")
+
+        try:
+            device = Device.objects.select_related("site", "location", "rack").get(pk=device_id)
+        except (Device.DoesNotExist, ValueError, TypeError):
+            return JsonResponse({"ok": False, "error": "Device not found"})
+
+        try:
+            rack = _lookup_rack_for_device(device, rack_name)
+        except ValueError as exc:
+            return JsonResponse({"ok": False, "error": str(exc)})
+
+        update_fields = ["rack"]
+        device.rack = rack
+
+        if u_position not in ("", None):
+            try:
+                device.position = int(u_position)
+            except (ValueError, TypeError):
+                return JsonResponse({"ok": False, "error": f"Cannot parse '{u_position}' as integer for u_position"})
+            update_fields.append("position")
+
+        if face not in ("", None):
+            v = str(face).strip().lower()
+            _FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
+            mapped = _FACE_MAP.get(v)
+            if mapped is None:
+                return JsonResponse({"ok": False, "error": f"Unknown face value '{face}' — expected 'front' or 'rear'"})
+            device.face = mapped
+            update_fields.append("face")
+
+        try:
+            device.full_clean()
+        except Exception as exc:
+            return JsonResponse({"ok": False, "error": f"Validation failed: {exc}"})
+
+        try:
+            device.save(update_fields=update_fields)
+        except Exception:
+            logger.exception("SyncPlacementView save failed for device_id=%s", device_id)
+            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+
+        parts = [f"rack={rack.name}"]
+        if "position" in update_fields:
+            parts.append(f"U{device.position}")
+        if "face" in update_fields:
+            parts.append(device.face)
+        return JsonResponse({"ok": True, "display": ", ".join(parts)})
 
 
 # ---------------------------------------------------------------------------
