@@ -744,7 +744,7 @@
             <label class="form-label">Delimiter</label>
             <input type="text" class="form-control form-control-sm w-auto d-inline-block"
                    id="res_delimiter" value=" - " style="min-width:80px;"
-                   oninput="reSplit()">
+                   oninput="reSplit(window._currentFileResolvedFields || {})">
           </div>
 
           <div id="res_existing_notice" class="alert alert-info py-2 mb-3 d-none">
@@ -942,15 +942,16 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('res_original_value').value = btn.dataset.originalValue;
     document.getElementById('res_original_display').textContent = btn.dataset.originalValue;
 
-    // Check for existing resolution and pre-populate
+    var fileResolvedFields = SPLIT_FIELD_VALUES[sourceId] || {};
+    window._currentFileResolvedFields = fileResolvedFields;
+
     var existing = (EXISTING_RESOLUTIONS[sourceId] || {})[sourceColumn];
     document.getElementById('res_existing_notice').classList.toggle('d-none', !existing);
     if (existing) {
       document.getElementById('res_existing_display').textContent = JSON.stringify(existing.resolved_fields);
-      // Pre-populate using existing resolved fields instead of auto-split
-      reSplitWithExisting(btn.dataset.originalValue, existing.resolved_fields);
+      reSplitWithExisting(btn.dataset.originalValue, existing.resolved_fields, fileResolvedFields);
     } else {
-      reSplit();
+      reSplit(fileResolvedFields);
     }
   });
 
@@ -1053,38 +1054,33 @@ document.addEventListener('DOMContentLoaded', function() {
 
 });
 
-function reSplit() {
+function reSplit(fileResolvedFields) {
+  fileResolvedFields = fileResolvedFields || {};
   var originalValue = document.getElementById('res_original_value').value;
   var delimiter = document.getElementById('res_delimiter').value || ' - ';
   var parts = originalValue.split(delimiter);
   var container = document.getElementById('res_parts_row');
   container.innerHTML = '';
 
-  // Default field assignments: left → asset_tag, right → device_name
   var defaultFields = ['asset_tag', 'device_name'];
-
   parts.forEach(function(part, idx) {
-    _addResolutionPart(container, idx, part.trim(), defaultFields[idx] || '');
+    _addResolutionPart(container, idx, part.trim(), defaultFields[idx] || '', fileResolvedFields);
   });
 }
 
-function reSplitWithExisting(originalValue, resolvedFields) {
-  // Reverse-map: field → value
+function reSplitWithExisting(originalValue, resolvedFields, fileResolvedFields) {
+  fileResolvedFields = fileResolvedFields || {};
   var delimiter = document.getElementById('res_delimiter').value || ' - ';
   var parts = originalValue.split(delimiter);
   var container = document.getElementById('res_parts_row');
   container.innerHTML = '';
 
-  // Default field assignments mirror reSplit() so unrecorded parts get a
-  // sensible field pre-selected rather than an empty dropdown.
   var defaultFields = ['asset_tag', 'device_name'];
-
-  // Build ordered list of resolved entries
   var entries = Object.entries(resolvedFields);
   parts.forEach(function(part, idx) {
     var field = entries[idx] ? entries[idx][0] : (defaultFields[idx] || '');
     var val = entries[idx] ? entries[idx][1] : part.trim();
-    _addResolutionPart(container, idx, val, field);
+    _addResolutionPart(container, idx, val, field, fileResolvedFields);
   });
 }
 
