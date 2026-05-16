@@ -793,6 +793,19 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             for r in result.rows
             if r.extra_data.get("extra_columns")
         }
+        split_field_values_by_source_id = {
+            r.source_id: {
+                "device_name": r.name or "",
+                "asset_tag": r.extra_data.get("asset_tag", ""),
+                "serial": r.extra_data.get("source_serial", ""),
+                "make": r.extra_data.get("source_make", ""),
+                "model": r.extra_data.get("source_model", ""),
+                "rack_name": r.rack_name or "",
+                "source_id": r.source_id,
+            }
+            for r in result.rows
+            if r.object_type == "device" and r.source_id
+        }
 
         non_card_error_rows = [
             r
@@ -821,6 +834,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_match_info": device_match_info,
                 "conflicts_by_row": conflicts_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
+                "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
             },
         )

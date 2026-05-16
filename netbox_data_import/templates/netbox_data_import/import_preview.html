@@ -744,7 +744,7 @@
             <label class="form-label">Delimiter</label>
             <input type="text" class="form-control form-control-sm w-auto d-inline-block"
                    id="res_delimiter" value=" - " style="min-width:80px;"
-                   oninput="reSplit()">
+                   oninput="reSplit(window._currentFileResolvedFields || {})">
           </div>
 
           <div id="res_existing_notice" class="alert alert-info py-2 mb-3 d-none">
@@ -755,6 +755,11 @@
 
           <div class="row g-3" id="res_parts_row">
             {# Dynamically populated parts #}
+          </div>
+
+          <div id="res_conflict_alert" class="alert alert-warning py-2 mt-3 mb-0 small d-none">
+            <i class="mdi mdi-lock-outline"></i>
+            Cannot save: resolve all field conflicts above (check "Force override") before saving.
           </div>
 
           <div id="res_device_check" class="mt-3 d-none">
@@ -817,6 +822,7 @@
 {{ device_match_info|json_script:"ndi-device-match-info" }}
 {{ conflicts_by_row|json_script:"ndi-conflicts-by-row" }}
 {{ extra_columns_by_row|json_script:"ndi-extra-columns-by-row" }}
+{{ split_field_values_by_source_id|json_script:"ndi-split-field-values" }}
 <script>
 // ── Row filter ──────────────────────────────────────────────────────────────
 (function() {
@@ -888,6 +894,15 @@ var TARGET_FIELDS = [
   ['source_id', 'Source ID'],
 ];
 
+function _escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Existing saved resolutions keyed by source_id → source_column → {original_value, resolved_fields}
 var EXISTING_RESOLUTIONS = JSON.parse(document.getElementById('ndi-existing-resolutions').textContent);
 
@@ -895,6 +910,10 @@ var EXISTING_RESOLUTIONS = JSON.parse(document.getElementById('ndi-existing-reso
 // Issue 1: Add null check for element to prevent uncaught errors
 var scriptElement = document.getElementById('ndi-device-match-info');
 var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : {};
+
+// Resolved field values per source_id for split modal conflict detection
+var splitFieldValuesEl = document.getElementById('ndi-split-field-values');
+var SPLIT_FIELD_VALUES = splitFieldValuesEl ? JSON.parse(splitFieldValuesEl.textContent) : {};
 
 // Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
 document.addEventListener('DOMContentLoaded', function() {
@@ -922,15 +941,16 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('res_original_value').value = btn.dataset.originalValue;
     document.getElementById('res_original_display').textContent = btn.dataset.originalValue;
 
-    // Check for existing resolution and pre-populate
+    var fileResolvedFields = SPLIT_FIELD_VALUES[sourceId] || {};
+    window._currentFileResolvedFields = fileResolvedFields;
+
     var existing = (EXISTING_RESOLUTIONS[sourceId] || {})[sourceColumn];
     document.getElementById('res_existing_notice').classList.toggle('d-none', !existing);
     if (existing) {
       document.getElementById('res_existing_display').textContent = JSON.stringify(existing.resolved_fields);
-      // Pre-populate using existing resolved fields instead of auto-split
-      reSplitWithExisting(btn.dataset.originalValue, existing.resolved_fields);
+      reSplitWithExisting(btn.dataset.originalValue, existing.resolved_fields, fileResolvedFields);
     } else {
-      reSplit();
+      reSplit(fileResolvedFields);
     }
   });
 
@@ -1033,44 +1053,41 @@ document.addEventListener('DOMContentLoaded', function() {
 
 });
 
-function reSplit() {
+function reSplit(fileResolvedFields) {
+  fileResolvedFields = fileResolvedFields || {};
   var originalValue = document.getElementById('res_original_value').value;
   var delimiter = document.getElementById('res_delimiter').value || ' - ';
   var parts = originalValue.split(delimiter);
   var container = document.getElementById('res_parts_row');
   container.innerHTML = '';
 
-  // Default field assignments: left → asset_tag, right → device_name
   var defaultFields = ['asset_tag', 'device_name'];
-
   parts.forEach(function(part, idx) {
-    _addResolutionPart(container, idx, part.trim(), defaultFields[idx] || '');
+    _addResolutionPart(container, idx, part.trim(), defaultFields[idx] || '', fileResolvedFields);
   });
 }
 
-function reSplitWithExisting(originalValue, resolvedFields) {
-  // Reverse-map: field → value
+function reSplitWithExisting(originalValue, resolvedFields, fileResolvedFields) {
+  fileResolvedFields = fileResolvedFields || {};
   var delimiter = document.getElementById('res_delimiter').value || ' - ';
   var parts = originalValue.split(delimiter);
   var container = document.getElementById('res_parts_row');
   container.innerHTML = '';
 
-  // Default field assignments mirror reSplit() so unrecorded parts get a
-  // sensible field pre-selected rather than an empty dropdown.
   var defaultFields = ['asset_tag', 'device_name'];
-
-  // Build ordered list of resolved entries
   var entries = Object.entries(resolvedFields);
   parts.forEach(function(part, idx) {
     var field = entries[idx] ? entries[idx][0] : (defaultFields[idx] || '');
     var val = entries[idx] ? entries[idx][1] : part.trim();
-    _addResolutionPart(container, idx, val, field);
+    _addResolutionPart(container, idx, val, field, fileResolvedFields);
   });
 }
 
-function _addResolutionPart(container, idx, value, defaultField) {
+function _addResolutionPart(container, idx, value, defaultField, fileResolvedFields) {
+  fileResolvedFields = fileResolvedFields || {};
   var col = document.createElement('div');
   col.className = 'col-md-6';
+  col.id = 'res_part_col_' + idx;
 
   var label = document.createElement('label');
   label.className = 'form-label';
@@ -1093,7 +1110,20 @@ function _addResolutionPart(container, idx, value, defaultField) {
     select.appendChild(opt);
   });
 
-  // Check device name existence on change
+  var previewDiv = document.createElement('div');
+  previewDiv.id = 'res_part_preview_' + idx;
+
+  // Conflict + preview re-check on every value or field change
+  input.addEventListener('input', function() {
+    _checkPartConflict(idx, fileResolvedFields);
+    _updateSaveButton();
+  });
+  select.addEventListener('change', function() {
+    _checkPartConflict(idx, fileResolvedFields);
+    _updateSaveButton();
+  });
+
+  // Existing: device name existence check for part 2
   if (idx === 1) {
     input.addEventListener('input', function() { checkDevice(input.value); });
     checkDevice(input.value);
@@ -1102,7 +1132,103 @@ function _addResolutionPart(container, idx, value, defaultField) {
   col.appendChild(label);
   col.appendChild(input);
   col.appendChild(select);
+  col.appendChild(previewDiv);
   container.appendChild(col);
+
+  // Render initial preview state
+  _checkPartConflict(idx, fileResolvedFields);
+  _updateSaveButton();
+}
+
+function _checkPartConflict(idx, fileResolvedFields) {
+  var previewDiv = document.getElementById('res_part_preview_' + idx);
+  if (!previewDiv) return;
+  var fieldSelect = document.getElementById('res_part_field_' + idx);
+  var valueInput = document.getElementById('res_part_val_' + idx);
+  if (!fieldSelect || !valueInput) return;
+
+  var field = fieldSelect.value;
+  var splitValue = valueInput.value.trim();
+  var sourceColumn = document.getElementById('res_source_column').value; // always 'device_name'
+
+  previewDiv.innerHTML = '';
+  previewDiv.className = 'mt-2 p-2 rounded small';
+
+  if (!field) {
+    previewDiv.style.cssText = '';
+    return;
+  }
+
+  // Field is the column being split — no conflict possible
+  if (field === sourceColumn) {
+    previewDiv.style.cssText = 'background:#f8f9fa;border:1px solid #dee2e6;color:#6c757d;';
+    previewDiv.textContent = '(Replacing this column — no conflict possible)';
+    return;
+  }
+
+  var existingValue = ((fileResolvedFields || {})[field] || '').trim();
+
+  if (!existingValue) {
+    previewDiv.style.cssText = 'background:#d1e7dd;border:1px solid #badbcc;color:#0a3622;';
+    previewDiv.innerHTML = '<i class="mdi mdi-check-circle-outline"></i> Empty in file — will use split result.';
+    return;
+  }
+
+  if (existingValue.toLowerCase() === splitValue.toLowerCase()) {
+    previewDiv.style.cssText = 'background:#d1e7dd;border:1px solid #badbcc;color:#0a3622;';
+    previewDiv.innerHTML = '<i class="mdi mdi-check-circle-outline"></i> Matches file value: <code>' + _escHtml(existingValue) + '</code>';
+    return;
+  }
+
+  // Conflict: non-empty existing value differs from split result
+  // Snapshot force-checkbox state before innerHTML replacement
+  var prevCb = document.getElementById('res_force_' + idx);
+  var prevChecked = prevCb ? prevCb.checked : false;
+
+  previewDiv.style.cssText = 'background:#f8d7da;border:1px solid #f5c2c7;color:#842029;';
+  previewDiv.innerHTML =
+    '<strong><i class="mdi mdi-alert-circle-outline"></i> Conflict:</strong> ' +
+    'File has <code>' + _escHtml(existingValue) + '</code>, ' +
+    'split would set <code>' + _escHtml(splitValue) + '</code><br>' +
+    '<div class="form-check mt-1">' +
+      '<input class="form-check-input" type="checkbox" id="res_force_' + idx + '">' +
+      '<label class="form-check-label fw-semibold" for="res_force_' + idx + '">' +
+        'Force override (use split result, discard file value)' +
+      '</label>' +
+    '</div>';
+
+  // Restore state and re-attach listener (old element was destroyed)
+  var cb = document.getElementById('res_force_' + idx);
+  if (cb) {
+    cb.checked = prevChecked;
+    cb.addEventListener('change', _updateSaveButton);
+  }
+  _updateSaveButton();
+}
+
+function _updateSaveButton() {
+  var saveBtn = document.querySelector('#splitNameModal button[type="submit"]');
+  var alertDiv = document.getElementById('res_conflict_alert');
+  var container = document.getElementById('res_parts_row');
+  if (!container) return;
+
+  var hasUnresolved = false;
+  var cols = container.querySelectorAll('[id^="res_part_preview_"]');
+  cols.forEach(function(previewDiv) {
+    var idxMatch = previewDiv.id.match(/res_part_preview_(\d+)/);
+    if (!idxMatch) return;
+    var idx = idxMatch[1];
+    var cb = document.getElementById('res_force_' + idx);
+    if (cb && !cb.checked) { hasUnresolved = true; }
+  });
+
+  if (saveBtn) {
+    saveBtn.disabled = hasUnresolved;
+    saveBtn.classList.toggle('disabled', hasUnresolved);
+  }
+  if (alertDiv) {
+    alertDiv.classList.toggle('d-none', !hasUnresolved);
+  }
 }
 
 function checkDevice(name) {
@@ -1146,6 +1272,18 @@ function checkDevice(name) {
 function buildResolvedFields() {
   var container = document.getElementById('res_parts_row');
   var parts = container.querySelectorAll('.col-md-6');
+
+  // Guard: block save if any conflict is unacknowledged
+  var hasUnresolved = false;
+  parts.forEach(function(col, idx) {
+    var cb = document.getElementById('res_force_' + idx);
+    if (cb && !cb.checked) { hasUnresolved = true; }
+  });
+  if (hasUnresolved) {
+    _updateSaveButton();
+    return false;
+  }
+
   var fields = {};
   parts.forEach(function(col, idx) {
     var val = document.getElementById('res_part_val_' + idx).value.trim();
