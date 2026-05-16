@@ -757,6 +757,11 @@
             {# Dynamically populated parts #}
           </div>
 
+          <div id="res_conflict_alert" class="alert alert-warning py-2 mt-3 mb-0 small d-none">
+            <i class="mdi mdi-lock-outline"></i>
+            Cannot save: resolve all field conflicts above (check "Force override") before saving.
+          </div>
+
           <div id="res_device_check" class="mt-3 d-none">
             <small class="text-muted" id="res_device_check_msg"></small>
           </div>
@@ -817,6 +822,7 @@
 {{ device_match_info|json_script:"ndi-device-match-info" }}
 {{ conflicts_by_row|json_script:"ndi-conflicts-by-row" }}
 {{ extra_columns_by_row|json_script:"ndi-extra-columns-by-row" }}
+{{ split_field_values_by_source_id|json_script:"ndi-split-field-values" }}
 <script>
 // ── Row filter ──────────────────────────────────────────────────────────────
 (function() {
@@ -888,6 +894,15 @@ var TARGET_FIELDS = [
   ['source_id', 'Source ID'],
 ];
 
+function _escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Existing saved resolutions keyed by source_id → source_column → {original_value, resolved_fields}
 var EXISTING_RESOLUTIONS = JSON.parse(document.getElementById('ndi-existing-resolutions').textContent);
 
@@ -895,6 +910,11 @@ var EXISTING_RESOLUTIONS = JSON.parse(document.getElementById('ndi-existing-reso
 // Issue 1: Add null check for element to prevent uncaught errors
 var scriptElement = document.getElementById('ndi-device-match-info');
 var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : {};
+
+// Resolved field values per source_id for split modal conflict detection
+var SPLIT_FIELD_VALUES = JSON.parse(
+  (document.getElementById('ndi-split-field-values') || {textContent: '{}'}).textContent
+);
 
 // Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
 document.addEventListener('DOMContentLoaded', function() {
