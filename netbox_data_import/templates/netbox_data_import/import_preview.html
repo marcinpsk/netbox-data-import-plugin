@@ -572,8 +572,8 @@
                   {% endif %}
                 {% endif %}
 
-                {# Split button: show on device rows where name contains ' - ' #}
-                {% if row.object_type == 'device' and row.source_id and profile_id and ' - ' in row.name %}
+                {# Split button: show on all unlinked device rows regardless of separator format #}
+                {% if row.object_type == 'device' and row.source_id and profile_id and row.action != 'update' and row.action != 'skip' and row.action != 'ignore' %}
                   <button type="button" class="btn btn-sm btn-outline-info ms-1"
                           data-bs-toggle="modal" data-bs-target="#splitNameModal"
                           data-source-id="{{ row.source_id}}"
