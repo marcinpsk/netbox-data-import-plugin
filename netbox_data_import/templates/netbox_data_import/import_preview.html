@@ -912,9 +912,8 @@ var scriptElement = document.getElementById('ndi-device-match-info');
 var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : {};
 
 // Resolved field values per source_id for split modal conflict detection
-var SPLIT_FIELD_VALUES = JSON.parse(
-  (document.getElementById('ndi-split-field-values') || {textContent: '{}'}).textContent
-);
+var splitFieldValuesEl = document.getElementById('ndi-split-field-values');
+var SPLIT_FIELD_VALUES = splitFieldValuesEl ? JSON.parse(splitFieldValuesEl.textContent) : {};
 
 // Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
 document.addEventListener('DOMContentLoaded', function() {
@@ -1182,6 +1181,10 @@ function _checkPartConflict(idx, fileResolvedFields) {
   }
 
   // Conflict: non-empty existing value differs from split result
+  // Snapshot force-checkbox state before innerHTML replacement
+  var prevCb = document.getElementById('res_force_' + idx);
+  var prevChecked = prevCb ? prevCb.checked : false;
+
   previewDiv.style.cssText = 'background:#f8d7da;border:1px solid #f5c2c7;color:#842029;';
   previewDiv.innerHTML =
     '<strong><i class="mdi mdi-alert-circle-outline"></i> Conflict:</strong> ' +
@@ -1193,8 +1196,14 @@ function _checkPartConflict(idx, fileResolvedFields) {
         'Force override (use split result, discard file value)' +
       '</label>' +
     '</div>';
+
+  // Restore state and re-attach listener (old element was destroyed)
   var cb = document.getElementById('res_force_' + idx);
-  if (cb) { cb.addEventListener('change', _updateSaveButton); }
+  if (cb) {
+    cb.checked = prevChecked;
+    cb.addEventListener('change', _updateSaveButton);
+  }
+  _updateSaveButton();
 }
 
 function _updateSaveButton() {

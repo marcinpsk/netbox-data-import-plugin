@@ -801,7 +801,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "make": r.extra_data.get("source_make", ""),
                 "model": r.extra_data.get("source_model", ""),
                 "rack_name": r.rack_name or "",
-                "source_id": r.source_id or "",
+                "source_id": r.source_id,
             }
             for r in result.rows
             if r.object_type == "device" and r.source_id
