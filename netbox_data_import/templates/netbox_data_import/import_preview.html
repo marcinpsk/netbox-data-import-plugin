@@ -1084,9 +1084,11 @@ function reSplitWithExisting(originalValue, resolvedFields, fileResolvedFields) 
   });
 }
 
-function _addResolutionPart(container, idx, value, defaultField) {
+function _addResolutionPart(container, idx, value, defaultField, fileResolvedFields) {
+  fileResolvedFields = fileResolvedFields || {};
   var col = document.createElement('div');
   col.className = 'col-md-6';
+  col.id = 'res_part_col_' + idx;
 
   var label = document.createElement('label');
   label.className = 'form-label';
@@ -1109,7 +1111,20 @@ function _addResolutionPart(container, idx, value, defaultField) {
     select.appendChild(opt);
   });
 
-  // Check device name existence on change
+  var previewDiv = document.createElement('div');
+  previewDiv.id = 'res_part_preview_' + idx;
+
+  // Conflict + preview re-check on every value or field change
+  input.addEventListener('input', function() {
+    _checkPartConflict(idx, fileResolvedFields);
+    _updateSaveButton();
+  });
+  select.addEventListener('change', function() {
+    _checkPartConflict(idx, fileResolvedFields);
+    _updateSaveButton();
+  });
+
+  // Existing: device name existence check for part 2
   if (idx === 1) {
     input.addEventListener('input', function() { checkDevice(input.value); });
     checkDevice(input.value);
@@ -1118,8 +1133,17 @@ function _addResolutionPart(container, idx, value, defaultField) {
   col.appendChild(label);
   col.appendChild(input);
   col.appendChild(select);
+  col.appendChild(previewDiv);
   container.appendChild(col);
+
+  // Render initial preview state
+  _checkPartConflict(idx, fileResolvedFields);
+  _updateSaveButton();
 }
+
+// Stubs — replaced in Task 5
+function _checkPartConflict(idx, fileResolvedFields) {}
+function _updateSaveButton() {}
 
 function checkDevice(name) {
   var div = document.getElementById('res_device_check');
