@@ -1141,9 +1141,86 @@ function _addResolutionPart(container, idx, value, defaultField, fileResolvedFie
   _updateSaveButton();
 }
 
-// Stubs — replaced in Task 5
-function _checkPartConflict(idx, fileResolvedFields) {}
-function _updateSaveButton() {}
+function _checkPartConflict(idx, fileResolvedFields) {
+  var previewDiv = document.getElementById('res_part_preview_' + idx);
+  if (!previewDiv) return;
+  var fieldSelect = document.getElementById('res_part_field_' + idx);
+  var valueInput = document.getElementById('res_part_val_' + idx);
+  if (!fieldSelect || !valueInput) return;
+
+  var field = fieldSelect.value;
+  var splitValue = valueInput.value.trim();
+  var sourceColumn = document.getElementById('res_source_column').value; // always 'device_name'
+
+  previewDiv.innerHTML = '';
+  previewDiv.className = 'mt-2 p-2 rounded small';
+
+  if (!field) {
+    previewDiv.style.cssText = '';
+    return;
+  }
+
+  // Field is the column being split — no conflict possible
+  if (field === sourceColumn) {
+    previewDiv.style.cssText = 'background:#f8f9fa;border:1px solid #dee2e6;color:#6c757d;';
+    previewDiv.textContent = '(Replacing this column — no conflict possible)';
+    return;
+  }
+
+  var existingValue = ((fileResolvedFields || {})[field] || '').trim();
+
+  if (!existingValue) {
+    previewDiv.style.cssText = 'background:#d1e7dd;border:1px solid #badbcc;color:#0a3622;';
+    previewDiv.innerHTML = '<i class="mdi mdi-check-circle-outline"></i> Empty in file — will use split result.';
+    return;
+  }
+
+  if (existingValue.toLowerCase() === splitValue.toLowerCase()) {
+    previewDiv.style.cssText = 'background:#d1e7dd;border:1px solid #badbcc;color:#0a3622;';
+    previewDiv.innerHTML = '<i class="mdi mdi-check-circle-outline"></i> Matches file value: <code>' + _escHtml(existingValue) + '</code>';
+    return;
+  }
+
+  // Conflict: non-empty existing value differs from split result
+  previewDiv.style.cssText = 'background:#f8d7da;border:1px solid #f5c2c7;color:#842029;';
+  previewDiv.innerHTML =
+    '<strong><i class="mdi mdi-alert-circle-outline"></i> Conflict:</strong> ' +
+    'File has <code>' + _escHtml(existingValue) + '</code>, ' +
+    'split would set <code>' + _escHtml(splitValue) + '</code><br>' +
+    '<div class="form-check mt-1">' +
+      '<input class="form-check-input" type="checkbox" id="res_force_' + idx + '">' +
+      '<label class="form-check-label fw-semibold" for="res_force_' + idx + '">' +
+        'Force override (use split result, discard file value)' +
+      '</label>' +
+    '</div>';
+  var cb = document.getElementById('res_force_' + idx);
+  if (cb) { cb.addEventListener('change', _updateSaveButton); }
+}
+
+function _updateSaveButton() {
+  var saveBtn = document.querySelector('#splitNameModal button[type="submit"]');
+  var alertDiv = document.getElementById('res_conflict_alert');
+  var container = document.getElementById('res_parts_row');
+  if (!container) return;
+
+  var hasUnresolved = false;
+  var cols = container.querySelectorAll('[id^="res_part_preview_"]');
+  cols.forEach(function(previewDiv) {
+    var idxMatch = previewDiv.id.match(/res_part_preview_(\d+)/);
+    if (!idxMatch) return;
+    var idx = idxMatch[1];
+    var cb = document.getElementById('res_force_' + idx);
+    if (cb && !cb.checked) { hasUnresolved = true; }
+  });
+
+  if (saveBtn) {
+    saveBtn.disabled = hasUnresolved;
+    saveBtn.classList.toggle('disabled', hasUnresolved);
+  }
+  if (alertDiv) {
+    alertDiv.classList.toggle('d-none', !hasUnresolved);
+  }
+}
 
 function checkDevice(name) {
   var div = document.getElementById('res_device_check');
@@ -1186,6 +1263,18 @@ function checkDevice(name) {
 function buildResolvedFields() {
   var container = document.getElementById('res_parts_row');
   var parts = container.querySelectorAll('.col-md-6');
+
+  // Guard: block save if any conflict is unacknowledged
+  var hasUnresolved = false;
+  parts.forEach(function(col, idx) {
+    var cb = document.getElementById('res_force_' + idx);
+    if (cb && !cb.checked) { hasUnresolved = true; }
+  });
+  if (hasUnresolved) {
+    _updateSaveButton();
+    return false;
+  }
+
   var fields = {};
   parts.forEach(function(col, idx) {
     var val = document.getElementById('res_part_val_' + idx).value.trim();
