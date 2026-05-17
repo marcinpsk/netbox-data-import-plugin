@@ -1165,7 +1165,9 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
             return device.face
 
         if field == "rack_name":
-            rack = _lookup_rack_for_device(device, value)
+            rack, err = _lookup_rack_for_device(device, value)
+            if err:
+                raise ValueError(err)
             device.rack = rack
             device.save(update_fields=["rack"])
             return rack.name
@@ -1178,15 +1180,19 @@ def _lookup_rack_for_device(device, value):
 
     If the device has a location set, the rack must be in the same location. If the
     device has no location, the rack must also have no location (the implicit
-    "default location" semantic). Raises ValueError on miss/ambiguity.
+    "default location" semantic).
+
+    Returns ``(rack, None)`` on success or ``(None, error_message)`` on failure.
+    Error messages are static, controlled strings — no exception text is exposed,
+    so the result is safe to return directly to the client.
     """
     from dcim.models import Rack
 
     name = (str(value) if value is not None else "").strip()
     if not name:
-        raise ValueError("Rack name is empty")
+        return None, "Rack name is empty"
     if device.site_id is None:
-        raise ValueError("Device has no site; cannot resolve rack")
+        return None, "Device has no site; cannot resolve rack"
     qs = Rack.objects.filter(site=device.site, name=name)
     if device.location_id is not None:
         qs = qs.filter(location=device.location)
@@ -1196,10 +1202,10 @@ def _lookup_rack_for_device(device, value):
         loc_str = ""
     racks = list(qs[:2])
     if not racks:
-        raise ValueError(f"Rack '{name}' not found in site '{device.site}'{loc_str}")
+        return None, f"Rack '{name}' not found in site '{device.site}'{loc_str}"
     if len(racks) > 1:
-        raise ValueError(f"Multiple racks named '{name}' found; cannot disambiguate")
-    return racks[0]
+        return None, f"Multiple racks named '{name}' found; cannot disambiguate"
+    return racks[0], None
 
 
 class SyncPlacementView(PermissionRequiredMixin, View):
@@ -1226,10 +1232,9 @@ class SyncPlacementView(PermissionRequiredMixin, View):
         except (Device.DoesNotExist, ValueError, TypeError):
             return JsonResponse({"ok": False, "error": "Device not found"})
 
-        try:
-            rack = _lookup_rack_for_device(device, rack_name)
-        except ValueError as exc:
-            return JsonResponse({"ok": False, "error": str(exc)})
+        rack, err = _lookup_rack_for_device(device, rack_name)
+        if err:
+            return JsonResponse({"ok": False, "error": err})
 
         update_fields = ["rack"]
         device.rack = rack
@@ -1252,8 +1257,15 @@ class SyncPlacementView(PermissionRequiredMixin, View):
 
         try:
             device.full_clean()
-        except Exception as exc:
-            return JsonResponse({"ok": False, "error": f"Validation failed: {exc}"})
+        except ValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                msg = "; ".join(f"{f}: {', '.join(es)}" for f, es in exc.message_dict.items())
+            else:
+                msg = "; ".join(exc.messages)
+            return JsonResponse({"ok": False, "error": f"Validation failed: {msg}"}, status=400)
+        except Exception:
+            logger.exception("SyncPlacementView full_clean failed for device_id=%s", device_id)
+            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         try:
             device.save(update_fields=update_fields)

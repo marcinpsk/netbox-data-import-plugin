@@ -2276,7 +2276,12 @@ document.addEventListener('click', function(e) {
   .then(r => r.json())
   .then(data => {
     if (data.ok) {
-      btn.innerHTML = '<i class="mdi mdi-check"></i> Synced: ' + data.display;
+      // Build DOM nodes (not innerHTML) so data.display cannot inject markup.
+      while (btn.firstChild) btn.removeChild(btn.firstChild);
+      const icon = document.createElement('i');
+      icon.className = 'mdi mdi-check';
+      btn.appendChild(icon);
+      btn.appendChild(document.createTextNode(' Synced: ' + (data.display || '')));
       btn.classList.remove('btn-outline-success');
       btn.classList.add('btn-success');
     } else {
