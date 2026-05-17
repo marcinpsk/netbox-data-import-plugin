@@ -3739,6 +3739,91 @@ class SyncRackAndPlacementTests(TestCase):
         )
         self.assertIn(resp.status_code, (302, 403))
 
+    def test_face_invalid_value_with_rack(self):
+        """Invalid face value with rack assigned hits the face mapping error path."""
+        self.device_no_loc.rack = self.rack_no_loc
+        self.device_no_loc.save()
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_no_loc.pk, "field": "face", "value": "sideways"},
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("face", data["error"].lower())
+        self.device_no_loc.refresh_from_db()
+        self.assertFalse(self.device_no_loc.face)
+
+    def test_lookup_rack_device_with_no_site(self):
+        """_lookup_rack_for_device returns an error when device has no site."""
+        from netbox_data_import.views import _lookup_rack_for_device
+
+        class _Stub:
+            site_id = None
+            location_id = None
+            site = None
+            location = None
+
+        rack, err = _lookup_rack_for_device(_Stub(), "R1")
+        self.assertIsNone(rack)
+        self.assertIn("no site", err.lower())
+
+    def test_placement_bad_u_position(self):
+        """Non-integer u_position returns a clear error and does not save."""
+        resp = self.client.post(
+            self.placement_url,
+            {
+                "device_id": self.device_no_loc.pk,
+                "rack_name": "R1",
+                "u_position": "notanint",
+            },
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("u_position", data["error"])
+        self.device_no_loc.refresh_from_db()
+        self.assertIsNone(self.device_no_loc.rack_id)
+
+    def test_placement_validation_error(self):
+        """A u_position outside the rack u_height range triggers full_clean ValidationError."""
+        resp = self.client.post(
+            self.placement_url,
+            {
+                "device_id": self.device_no_loc.pk,
+                "rack_name": "R1",
+                "u_position": "9999",
+                "face": "front",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("Validation failed", data["error"])
+        self.device_no_loc.refresh_from_db()
+        self.assertIsNone(self.device_no_loc.rack_id)
+
+    def test_placement_save_exception(self):
+        """A save() failure returns a generic 500 JSON error and logs the exception."""
+        from unittest.mock import patch
+
+        from dcim.models import Device
+
+        original_save = Device.save
+
+        def boom(self, *a, **kw):
+            if "rack" in (kw.get("update_fields") or []):
+                raise RuntimeError("simulated db error")
+            return original_save(self, *a, **kw)
+
+        with patch.object(Device, "save", boom):
+            resp = self.client.post(
+                self.placement_url,
+                {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
+            )
+        self.assertEqual(resp.status_code, 500)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("internal error", data["error"].lower())
+
 
 class UnlinkDeviceViewTest(TestCase):
     """Test UnlinkDeviceView."""

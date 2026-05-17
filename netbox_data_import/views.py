@@ -13,6 +13,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
 from utilities.permissions import get_permission_for_model
+from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet
 from .forms import (
@@ -1068,7 +1069,31 @@ class RemoveExtraIpView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class SyncDeviceFieldView(PermissionRequiredMixin, View):
+class _AjaxPermissionView(ConditionalLoginRequiredMixin, View):
+    """Base for AJAX/JSON endpoints — inherits NetBox's ``ConditionalLoginRequiredMixin``.
+
+    Subclasses set ``permission_required`` (a Django permission string) to gate
+    access. Authenticated users without the permission receive a JSON
+    ``{"ok": false, "error": "Permission denied"}`` response (HTTP 403) instead
+    of NetBox's default HTML 403 page; unauthenticated users are redirected to
+    the login page when ``settings.LOGIN_REQUIRED`` is true.
+    """
+
+    permission_required = None
+
+    def dispatch(self, request, *args, **kwargs):
+        if (
+            self.permission_required
+            and request.user.is_authenticated
+            and not request.user.has_perm(self.permission_required)
+        ):
+            from django.http import JsonResponse
+
+            return JsonResponse({"ok": False, "error": "Permission denied"}, status=403)
+        return super().dispatch(request, *args, **kwargs)
+
+
+class SyncDeviceFieldView(_AjaxPermissionView):
     """Apply a single field value from the import file to an existing NetBox device."""
 
     permission_required = "dcim.change_device"
@@ -1208,7 +1233,7 @@ def _lookup_rack_for_device(device, value):
     return racks[0], None
 
 
-class SyncPlacementView(PermissionRequiredMixin, View):
+class SyncPlacementView(_AjaxPermissionView):
     """Atomically sync rack + (optional) u_position + (optional) face for a device.
 
     All-or-nothing: if the rack lookup fails, nothing is saved.
@@ -1286,7 +1311,7 @@ class SyncPlacementView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class SaveResolutionView(PermissionRequiredMixin, View):
+class SaveResolutionView(_AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
     permission_required = "netbox_data_import.add_sourceresolution"
@@ -2044,23 +2069,6 @@ def _device_name_filter(q: str):
     return base
 
 
-class _AjaxPermissionView(PermissionRequiredMixin, View):
-    """Base for AJAX endpoints that require a permission.
-
-    Returns a JSON ``{"ok": false, "error": "Permission denied"}`` response
-    (HTTP 403) for authenticated users who lack the required permission,
-    instead of the default HTML 403 page.  Unauthenticated users are still
-    redirected to the login page.
-    """
-
-    def handle_no_permission(self):
-        from django.http import JsonResponse
-
-        if self.request.user.is_authenticated:
-            return JsonResponse({"ok": False, "error": "Permission denied"}, status=403)
-        return super().handle_no_permission()
-
-
 class SearchNetBoxObjectsView(_AjaxPermissionView):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
@@ -2192,7 +2200,7 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
             )
 
 
-class QuickCreateDeviceRoleView(PermissionRequiredMixin, View):
+class QuickCreateDeviceRoleView(_AjaxPermissionView):
     """AJAX endpoint: create a new DeviceRole and return its details as JSON.
 
     Used by the Configure Class modal so operators can create missing roles
@@ -2439,7 +2447,7 @@ class SyncSingleRowView(_AjaxPermissionView):
         )
 
 
-class UnlinkDeviceView(PermissionRequiredMixin, View):
+class UnlinkDeviceView(_AjaxPermissionView):
     """Remove a DeviceExistingMatch (unlink a manually-linked device)."""
 
     permission_required = "netbox_data_import.delete_deviceexistingmatch"
