@@ -1584,6 +1584,7 @@ class SearchNetBoxObjectsExtendedViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
         names = [r["name"] for r in data["results"]]
+        self.assertEqual(len(names), 20, f"Expected 20-result cap, got {len(names)}: {names}")
         self.assertIn(target.name, names, f"Target device pushed off result list; got {names}")
 
     def test_device_serial_null_when_not_set(self):
@@ -3702,7 +3703,14 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertEqual(self.device_no_loc.face, "front")
 
     def test_placement_rack_only(self):
-        """Placement with no position/face only sets the rack."""
+        """Placement with no position/face only sets the rack, leaving existing position/face intact."""
+        # Pre-seed: device already placed in the rack with a known position and face.
+        # Bypasses full_clean intentionally — we're setting up pre-existing DB state.
+        self.device_no_loc.rack = self.rack_no_loc
+        self.device_no_loc.position = 7
+        self.device_no_loc.face = "rear"
+        self.device_no_loc.save()
+
         resp = self.client.post(
             self.placement_url,
             {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
@@ -3711,8 +3719,9 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertTrue(data["ok"], data)
         self.device_no_loc.refresh_from_db()
         self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
-        self.assertIsNone(self.device_no_loc.position)
-        self.assertFalse(self.device_no_loc.face)
+        # Unspecified fields must be preserved — only the fields in the POST are written.
+        self.assertEqual(self.device_no_loc.position, 7)
+        self.assertEqual(self.device_no_loc.face, "rear")
 
     def test_placement_atomic_on_rack_lookup_failure(self):
         """If rack lookup fails, no fields are changed."""
