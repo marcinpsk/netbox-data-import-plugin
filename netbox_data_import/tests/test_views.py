@@ -3504,12 +3504,25 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertIn("Device not found", data["error"])
 
     def test_sync_requires_permission(self):
-        """User without dcim.change_device is denied."""
+        """Authenticated user without dcim.change_device gets JSON 403."""
         User.objects.create_user("no_perm_sync", "noperm@example.com", "testpass")
         no_perm_client = Client()
         no_perm_client.login(username="no_perm_sync", password="testpass")
         response = no_perm_client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
-        self.assertIn(response.status_code, (302, 403))
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("application/json", response.get("Content-Type", ""))
+        data = response.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("Permission denied", data["error"])
+
+    def test_sync_unauthenticated_gets_json_401(self):
+        """Unauthenticated request receives JSON 401 (not an HTML redirect)."""
+        c = Client()
+        response = c.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("application/json", response.get("Content-Type", ""))
+        data = response.json()
+        self.assertFalse(data["ok"])
 
     def test_sync_asset_tag_clear(self):
         """Clearing asset_tag sets it to None (not empty string) to avoid UNIQUE violation."""
@@ -3578,10 +3591,10 @@ class SyncRackAndPlacementTests(TestCase):
         self.placement_url = reverse("plugins:netbox_data_import:sync_placement")
 
     def test_rack_name_sync_site_only(self):
-        """Device with no location matches rack with no location in same site."""
+        """Device with no location matches rack with no location in same site (via placement)."""
         resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_no_loc.pk, "field": "rack_name", "value": "R1"},
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
         )
         data = resp.json()
         self.assertTrue(data["ok"], data)
@@ -3589,10 +3602,10 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
 
     def test_rack_name_sync_with_location(self):
-        """Device with location matches rack in same location."""
+        """Device with location matches rack in same location (via placement)."""
         resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_with_loc.pk, "field": "rack_name", "value": "R2"},
+            self.placement_url,
+            {"device_id": self.device_with_loc.pk, "rack_name": "R2"},
         )
         data = resp.json()
         self.assertTrue(data["ok"], data)
@@ -3602,8 +3615,8 @@ class SyncRackAndPlacementTests(TestCase):
     def test_rack_name_sync_location_mismatch_not_found(self):
         """Device with location does NOT match a rack without location (and vice versa)."""
         resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_with_loc.pk, "field": "rack_name", "value": "R1"},
+            self.placement_url,
+            {"device_id": self.device_with_loc.pk, "rack_name": "R1"},
         )
         data = resp.json()
         self.assertFalse(data["ok"])
@@ -3611,8 +3624,8 @@ class SyncRackAndPlacementTests(TestCase):
 
     def test_rack_name_sync_not_found(self):
         resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_no_loc.pk, "field": "rack_name", "value": "DOESNOTEXIST"},
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "DOESNOTEXIST"},
         )
         data = resp.json()
         self.assertFalse(data["ok"])
@@ -3620,8 +3633,8 @@ class SyncRackAndPlacementTests(TestCase):
 
     def test_rack_name_sync_ambiguous(self):
         resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_amb.pk, "field": "rack_name", "value": "DUP"},
+            self.placement_url,
+            {"device_id": self.device_amb.pk, "rack_name": "DUP"},
         )
         data = resp.json()
         self.assertFalse(data["ok"])
@@ -3629,12 +3642,22 @@ class SyncRackAndPlacementTests(TestCase):
 
     def test_rack_name_sync_empty(self):
         resp = self.client.post(
-            self.field_url,
-            {"device_id": self.device_no_loc.pk, "field": "rack_name", "value": "   "},
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "   "},
         )
         data = resp.json()
         self.assertFalse(data["ok"])
         self.assertIn("empty", data["error"].lower())
+
+    def test_rack_name_field_no_longer_in_single_field_sync(self):
+        """rack_name is not in _ALLOWED_FIELDS — use Sync Placement instead."""
+        resp = self.client.post(
+            self.field_url,
+            {"device_id": self.device_no_loc.pk, "field": "rack_name", "value": "R1"},
+        )
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("rack_name", data["error"])
 
     def test_face_blocked_when_no_rack(self):
         """Syncing face on a device with no rack returns a clear error and does not save."""
@@ -3730,6 +3753,7 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertIn("Device not found", data["error"])
 
     def test_placement_requires_permission(self):
+        """Authenticated user without dcim.change_device gets JSON 403."""
         User.objects.create_user("no_perm_placement", "n@example.com", "testpass")
         c = Client()
         c.login(username="no_perm_placement", password="testpass")
@@ -3737,7 +3761,23 @@ class SyncRackAndPlacementTests(TestCase):
             self.placement_url,
             {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
         )
-        self.assertIn(resp.status_code, (302, 403))
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("application/json", resp.get("Content-Type", ""))
+        data = resp.json()
+        self.assertFalse(data["ok"])
+        self.assertIn("Permission denied", data["error"])
+
+    def test_placement_unauthenticated_gets_json_401(self):
+        """Unauthenticated request receives JSON 401 (not an HTML redirect)."""
+        c = Client()
+        resp = c.post(
+            self.placement_url,
+            {"device_id": self.device_no_loc.pk, "rack_name": "R1"},
+        )
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn("application/json", resp.get("Content-Type", ""))
+        data = resp.json()
+        self.assertFalse(data["ok"])
 
     def test_face_invalid_value_with_rack(self):
         """Invalid face value with rack assigned hits the face mapping error path."""
@@ -3877,16 +3917,13 @@ class UnlinkDeviceViewTest(TestCase):
         self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
 
     def test_unlink_unauthenticated(self):
-        """Unlink requires authentication."""
-        from django.conf import settings
-        from django.shortcuts import resolve_url
-
+        """Unauthenticated requests get JSON 401 (not a redirect)."""
         from netbox_data_import.models import DeviceExistingMatch
 
         resp = self.client.post(self.url, {"profile_id": self.profile.pk, "source_id": "SRC001"})
-        login_url = resolve_url(getattr(settings, "LOGIN_URL", "/login/"))
-        self.assertEqual(resp.status_code, 302)
-        self.assertTrue(str(resp.url).startswith(login_url))
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp["Content-Type"], "application/json")
+        self.assertIn("error", resp.json())
         self.assertTrue(DeviceExistingMatch.objects.filter(pk=self.match.pk).exists())
 
     def test_unlink_missing_profile(self):

@@ -1073,22 +1073,22 @@ class _AjaxPermissionView(ConditionalLoginRequiredMixin, View):
     """Base for AJAX/JSON endpoints — inherits NetBox's ``ConditionalLoginRequiredMixin``.
 
     Subclasses set ``permission_required`` (a Django permission string) to gate
-    access. Authenticated users without the permission receive a JSON
-    ``{"ok": false, "error": "Permission denied"}`` response (HTTP 403) instead
-    of NetBox's default HTML 403 page; unauthenticated users are redirected to
-    the login page when ``settings.LOGIN_REQUIRED`` is true.
+    access. Unauthenticated requests receive a JSON 401 (never a redirect, since
+    these endpoints are called via ``fetch``). Authenticated users without the
+    required permission receive a JSON 403. ``ConditionalLoginRequiredMixin`` is
+    still inherited so that login redirects work if the request is ever reached
+    via a browser navigation (e.g. direct URL), but the explicit checks above
+    fire first for API callers.
     """
 
     permission_required = None
 
     def dispatch(self, request, *args, **kwargs):
-        if (
-            self.permission_required
-            and request.user.is_authenticated
-            and not request.user.has_perm(self.permission_required)
-        ):
-            from django.http import JsonResponse
+        from django.http import JsonResponse
 
+        if not request.user.is_authenticated:
+            return JsonResponse({"ok": False, "error": "Authentication required"}, status=401)
+        if self.permission_required and not request.user.has_perm(self.permission_required):
             return JsonResponse({"ok": False, "error": "Permission denied"}, status=403)
         return super().dispatch(request, *args, **kwargs)
 
@@ -1098,7 +1098,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     permission_required = "dcim.change_device"
 
-    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face", "rack_name"}
+    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face"}
 
     def post(self, request):
         """Apply the given field value to the specified device."""
@@ -1188,14 +1188,6 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             device.face = mapped
             device.save(update_fields=["face"])
             return device.face
-
-        if field == "rack_name":
-            rack, err = _lookup_rack_for_device(device, value)
-            if err:
-                raise ValueError(err)
-            device.rack = rack
-            device.save(update_fields=["rack"])
-            return rack.name
 
         raise ValueError(f"Field '{field}' is not syncable")
 
