@@ -13,6 +13,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
 from utilities.permissions import get_permission_for_model
+from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet
 from .forms import (
@@ -1068,7 +1069,31 @@ class RemoveExtraIpView(PermissionRequiredMixin, View):
 # ---------------------------------------------------------------------------
 
 
-class SyncDeviceFieldView(PermissionRequiredMixin, View):
+class _AjaxPermissionView(ConditionalLoginRequiredMixin, View):
+    """Base for AJAX/JSON endpoints — inherits NetBox's ``ConditionalLoginRequiredMixin``.
+
+    Subclasses set ``permission_required`` (a Django permission string) to gate
+    access. Unauthenticated requests receive a JSON 401 (never a redirect, since
+    these endpoints are called via ``fetch``). Authenticated users without the
+    required permission receive a JSON 403. ``ConditionalLoginRequiredMixin`` is
+    still inherited so that login redirects work if the request is ever reached
+    via a browser navigation (e.g. direct URL), but the explicit checks above
+    fire first for API callers.
+    """
+
+    permission_required = None
+
+    def dispatch(self, request, *args, **kwargs):
+        from django.http import JsonResponse
+
+        if not request.user.is_authenticated:
+            return JsonResponse({"ok": False, "error": "Authentication required"}, status=401)
+        if self.permission_required and not request.user.has_perm(self.permission_required):
+            return JsonResponse({"ok": False, "error": "Permission denied"}, status=403)
+        return super().dispatch(request, *args, **kwargs)
+
+
+class SyncDeviceFieldView(_AjaxPermissionView):
     """Apply a single field value from the import file to an existing NetBox device."""
 
     permission_required = "dcim.change_device"
@@ -1151,6 +1176,10 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
             return device.asset_tag
 
         if field == "face":
+            if device.rack_id is None:
+                raise ValueError(
+                    "Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement."
+                )
             v = str(value).strip().lower()
             _FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
             mapped = _FACE_MAP.get(v)
@@ -1163,12 +1192,118 @@ class SyncDeviceFieldView(PermissionRequiredMixin, View):
         raise ValueError(f"Field '{field}' is not syncable")
 
 
+def _lookup_rack_for_device(device, value):
+    """Look up a Rack by name within ``device.site``, honoring ``device.location``.
+
+    If the device has a location set, the rack must be in the same location. If the
+    device has no location, the rack must also have no location (the implicit
+    "default location" semantic).
+
+    Returns ``(rack, None)`` on success or ``(None, error_message)`` on failure.
+    Error messages are static, controlled strings — no exception text is exposed,
+    so the result is safe to return directly to the client.
+    """
+    from dcim.models import Rack
+
+    name = (str(value) if value is not None else "").strip()
+    if not name:
+        return None, "Rack name is empty"
+    if device.site_id is None:
+        return None, "Device has no site; cannot resolve rack"
+    qs = Rack.objects.filter(site=device.site, name=name)
+    if device.location_id is not None:
+        qs = qs.filter(location=device.location)
+        loc_str = f" / location '{device.location}'"
+    else:
+        qs = qs.filter(location__isnull=True)
+        loc_str = ""
+    racks = list(qs[:2])
+    if not racks:
+        return None, f"Rack '{name}' not found in site '{device.site}'{loc_str}"
+    if len(racks) > 1:
+        return None, f"Multiple racks named '{name}' found; cannot disambiguate"
+    return racks[0], None
+
+
+class SyncPlacementView(_AjaxPermissionView):
+    """Atomically sync rack + (optional) u_position + (optional) face for a device.
+
+    All-or-nothing: if the rack lookup fails, nothing is saved.
+    """
+
+    permission_required = "dcim.change_device"
+
+    def post(self, request):
+        """Resolve rack and atomically set rack + optional position + optional face."""
+        from django.http import JsonResponse
+
+        from dcim.models import Device
+
+        device_id = request.POST.get("device_id")
+        rack_name = request.POST.get("rack_name", "")
+        u_position = request.POST.get("u_position", "")
+        face = request.POST.get("face", "")
+
+        try:
+            device = Device.objects.select_related("site", "location", "rack").get(pk=device_id)
+        except (Device.DoesNotExist, ValueError, TypeError):
+            return JsonResponse({"ok": False, "error": "Device not found"})
+
+        rack, err = _lookup_rack_for_device(device, rack_name)
+        if err:
+            return JsonResponse({"ok": False, "error": err})
+
+        update_fields = ["rack"]
+        device.rack = rack
+
+        if u_position not in ("", None):
+            try:
+                device.position = int(u_position)
+            except (ValueError, TypeError):
+                return JsonResponse({"ok": False, "error": f"Cannot parse '{u_position}' as integer for u_position"})
+            update_fields.append("position")
+
+        if face not in ("", None):
+            v = str(face).strip().lower()
+            _FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
+            mapped = _FACE_MAP.get(v)
+            if mapped is None:
+                return JsonResponse({"ok": False, "error": f"Unknown face value '{face}' — expected 'front' or 'rear'"})
+            device.face = mapped
+            update_fields.append("face")
+
+        try:
+            device.full_clean()
+        except ValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                msg = "; ".join(f"{f}: {', '.join(es)}" for f, es in exc.message_dict.items())
+            else:
+                msg = "; ".join(exc.messages)
+            return JsonResponse({"ok": False, "error": f"Validation failed: {msg}"}, status=400)
+        except Exception:
+            logger.exception("SyncPlacementView full_clean failed for device_id=%s", device_id)
+            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+
+        try:
+            device.save(update_fields=update_fields)
+        except Exception:
+            logger.exception("SyncPlacementView save failed for device_id=%s", device_id)
+            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+
+        parts = [f"rack={rack.name}"]
+        if "position" in update_fields:
+            parts.append(f"U{device.position}")
+        if "face" in update_fields:
+            parts.append(device.face)
+        return JsonResponse({"ok": True, "display": ", ".join(parts)})
+
+
 # ---------------------------------------------------------------------------
 # Save resolution (rerere)
 # ---------------------------------------------------------------------------
 
 
-class SaveResolutionView(PermissionRequiredMixin, View):
+class SaveResolutionView(_AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
     permission_required = "netbox_data_import.add_sourceresolution"
@@ -1926,23 +2061,6 @@ def _device_name_filter(q: str):
     return base
 
 
-class _AjaxPermissionView(PermissionRequiredMixin, View):
-    """Base for AJAX endpoints that require a permission.
-
-    Returns a JSON ``{"ok": false, "error": "Permission denied"}`` response
-    (HTTP 403) for authenticated users who lack the required permission,
-    instead of the default HTML 403 page.  Unauthenticated users are still
-    redirected to the login page.
-    """
-
-    def handle_no_permission(self):
-        from django.http import JsonResponse
-
-        if self.request.user.is_authenticated:
-            return JsonResponse({"ok": False, "error": "Permission denied"}, status=403)
-        return super().handle_no_permission()
-
-
 class SearchNetBoxObjectsView(_AjaxPermissionView):
     """AJAX search endpoint for NetBox objects used in preview quick-fix modals.
 
@@ -1954,7 +2072,7 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
 
     def get(self, request):
         """Return a JSON list of matching NetBox objects for the given type and query."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, RackType
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, RackType
         from django.http import JsonResponse
 
         obj_type = request.GET.get("type", "device")
@@ -2002,16 +2120,7 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
                     }
                 )
         elif obj_type == "device":
-            for dev in Device.objects.filter(_device_name_filter(q)).distinct().select_related("site")[:limit]:
-                results.append(
-                    {
-                        "id": dev.pk,
-                        "name": dev.name,
-                        "serial": dev.serial or None,
-                        "site": dev.site.name if dev.site else "",
-                        "url": request.build_absolute_uri(dev.get_absolute_url()),
-                    }
-                )
+            self._search_devices(request, q, limit, results)
         elif obj_type == "role":
             for role in DeviceRole.objects.filter(name__icontains=q)[:limit]:
                 results.append(
@@ -2040,8 +2149,50 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
 
         return JsonResponse({"results": results})
 
+    def _search_devices(self, request, q, limit, results):
+        """Two-phase device search: full-string matches first, then token matches.
 
-class QuickCreateDeviceRoleView(PermissionRequiredMixin, View):
+        This prevents a relevant exact-substring match (e.g. "prod-lab03d-rc1")
+        from being pushed off the result list by noisy short tokens like "rc1"
+        or "prod" that match many devices.
+        """
+        from dcim.models import Device
+
+        base_qs = Device.objects.filter(name__icontains=q).distinct().select_related("site").order_by("name")
+        seen_ids = set()
+        for dev in base_qs[:limit]:
+            seen_ids.add(dev.pk)
+            results.append(
+                {
+                    "id": dev.pk,
+                    "name": dev.name,
+                    "serial": dev.serial or None,
+                    "site": dev.site.name if dev.site else "",
+                    "url": request.build_absolute_uri(dev.get_absolute_url()),
+                }
+            )
+        if len(results) >= limit:
+            return
+        token_qs = (
+            Device.objects.filter(_device_name_filter(q))
+            .exclude(pk__in=seen_ids)
+            .distinct()
+            .select_related("site")
+            .order_by("name")
+        )
+        for dev in token_qs[: limit - len(results)]:
+            results.append(
+                {
+                    "id": dev.pk,
+                    "name": dev.name,
+                    "serial": dev.serial or None,
+                    "site": dev.site.name if dev.site else "",
+                    "url": request.build_absolute_uri(dev.get_absolute_url()),
+                }
+            )
+
+
+class QuickCreateDeviceRoleView(_AjaxPermissionView):
     """AJAX endpoint: create a new DeviceRole and return its details as JSON.
 
     Used by the Configure Class modal so operators can create missing roles
@@ -2288,7 +2439,7 @@ class SyncSingleRowView(_AjaxPermissionView):
         )
 
 
-class UnlinkDeviceView(PermissionRequiredMixin, View):
+class UnlinkDeviceView(_AjaxPermissionView):
     """Remove a DeviceExistingMatch (unlink a manually-linked device)."""
 
     permission_required = "netbox_data_import.delete_deviceexistingmatch"
