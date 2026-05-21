@@ -103,12 +103,40 @@ class ColumnMapping(models.Model):
         max_length=200,
         help_text="Exact column header in the source file (case-sensitive)",
     )
-    target_field = models.CharField(max_length=50, choices=TARGET_FIELD_CHOICES)
+    target_field = models.CharField(max_length=100)
 
     class Meta:
         ordering = ["profile", "target_field"]
         verbose_name = "Column Mapping"
         verbose_name_plural = "Column Mappings"
+
+    def clean(self):
+        """Allow standard TARGET_FIELD_CHOICES values and extra_json:<key> custom-field mappings."""
+        from django.core.exceptions import ValidationError
+
+        valid_standard = {choice[0] for choice in TARGET_FIELD_CHOICES}
+        value = self.target_field or ""
+        if value in valid_standard:
+            return
+        if value.startswith("extra_json:") and value[len("extra_json:") :].strip():
+            return
+        raise ValidationError(
+            {
+                "target_field": (
+                    f"Value '{value}' is not a valid choice. "
+                    "Must be one of the standard field names or start with 'extra_json:'."
+                )
+            }
+        )
+
+    def get_target_field_display(self):
+        """Return the human-readable name for the target_field value."""
+        for key, label in TARGET_FIELD_CHOICES:
+            if key == self.target_field:
+                return label
+        if self.target_field and self.target_field.startswith("extra_json:"):
+            return f"Custom field: {self.target_field[len('extra_json:') :]}"
+        return self.target_field
 
     def __str__(self):
         return f"{self.source_column} → {self.get_target_field_display()}"
@@ -317,15 +345,13 @@ class ColumnTransformRule(models.Model):
         help_text=r"Python regex with capture groups (re.fullmatch). E.g. ^(\w+) - (.+)$",
     )
     group_1_target = models.CharField(
-        max_length=50,
+        max_length=100,
         blank=True,
-        choices=TARGET_FIELD_CHOICES,
         help_text="Target field for capture group 1 (leave blank to ignore)",
     )
     group_2_target = models.CharField(
-        max_length=50,
+        max_length=100,
         blank=True,
-        choices=TARGET_FIELD_CHOICES,
         help_text="Target field for capture group 2 (leave blank to ignore)",
     )
 
@@ -338,7 +364,7 @@ class ColumnTransformRule(models.Model):
         verbose_name_plural = "Column Transform Rules"
 
     def clean(self):
-        """Validate the regex pattern and that it has enough capture groups."""
+        """Validate the regex pattern, group counts, and group target field names."""
         import re
 
         from django.core.exceptions import ValidationError
@@ -359,6 +385,24 @@ class ColumnTransformRule(models.Model):
                     "pattern": (
                         f"Regex must contain at least {required_groups} capture group(s) "
                         f"for the configured group target(s), but found {compiled.groups}."
+                    )
+                }
+            )
+
+        valid_standard = {choice[0] for choice in TARGET_FIELD_CHOICES}
+        for attr in ("group_1_target", "group_2_target"):
+            value = getattr(self, attr) or ""
+            if not value:
+                continue
+            if value in valid_standard:
+                continue
+            if value.startswith("extra_json:") and value[len("extra_json:") :].strip():
+                continue
+            raise ValidationError(
+                {
+                    attr: (
+                        f"Value '{value}' is not a valid choice. "
+                        "Must be one of the standard field names or start with 'extra_json:'."
                     )
                 }
             )

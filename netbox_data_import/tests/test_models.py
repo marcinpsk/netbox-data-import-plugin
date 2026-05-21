@@ -129,6 +129,51 @@ class ColumnMappingModelTest(TestCase):
         self.profile.delete()
         self.assertEqual(ColumnMapping.objects.filter(profile_id=pk).count(), 0)
 
+    def test_extra_json_target_field_is_valid(self):
+        """extra_json:<key> target_field values pass model validation."""
+        from django.core.exceptions import ValidationError
+
+        cm = ColumnMapping(profile=self.profile, source_column="Contact", target_field="extra_json:Contact_number")
+        try:
+            cm.full_clean(validate_unique=False)
+        except ValidationError as exc:
+            self.fail(f"extra_json:Contact_number should be valid but got: {exc}")
+
+    def test_extra_json_target_field_can_be_saved(self):
+        """extra_json:<key> column mappings can be persisted to the database."""
+        cm = ColumnMapping.objects.create(
+            profile=self.profile, source_column="Contact", target_field="extra_json:Contact_number"
+        )
+        self.assertEqual(cm.target_field, "extra_json:Contact_number")
+        self.assertIn("Contact_number", cm.get_target_field_display())
+
+    def test_extra_json_display_contains_key_name(self):
+        """get_target_field_display() for extra_json:* includes the custom field key."""
+        cm = ColumnMapping(profile=self.profile, source_column="x", target_field="extra_json:My_Field")
+        display = cm.get_target_field_display()
+        self.assertIn("My_Field", display)
+
+    def test_standard_target_field_display_is_human_readable(self):
+        """get_target_field_display() for standard fields returns the label, not the key."""
+        cm = ColumnMapping(profile=self.profile, source_column="x", target_field="device_name")
+        self.assertEqual(cm.get_target_field_display(), "Device name")
+
+    def test_invalid_target_field_fails_validation(self):
+        """Unknown target_field values fail model clean()."""
+        from django.core.exceptions import ValidationError
+
+        cm = ColumnMapping(profile=self.profile, source_column="x", target_field="not_a_real_field")
+        with self.assertRaises(ValidationError):
+            cm.full_clean(validate_unique=False)
+
+    def test_extra_json_without_key_fails_validation(self):
+        """'extra_json:' with an empty key fails validation."""
+        from django.core.exceptions import ValidationError
+
+        cm = ColumnMapping(profile=self.profile, source_column="x", target_field="extra_json:")
+        with self.assertRaises(ValidationError):
+            cm.full_clean(validate_unique=False)
+
 
 class ClassRoleMappingModelTest(TestCase):
     """Tests for the ClassRoleMapping model."""
