@@ -3053,6 +3053,48 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         # Full rollback: profile itself must not exist.
         self.assertFalse(ImportProfile.objects.filter(name="BadTargetFieldProfile").exists())
 
+    def test_extra_json_column_mapping_imports_successfully(self):
+        """extra_json:<key> target_field values are accepted during profile import."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        data = {
+            "profile": {"name": "ExtraJsonProfile"},
+            "column_mappings": [
+                {"source_column": "Contact_number", "target_field": "extra_json:Contact_number"},
+                {"source_column": "Name", "target_field": "device_name"},
+            ],
+        }
+        profile, stats = _apply_profile_yaml_data(data)
+        self.assertEqual(stats.get("column_mappings"), 2)
+        self.assertTrue(
+            ColumnMapping.objects.filter(profile=profile, target_field="extra_json:Contact_number").exists(),
+            "extra_json column mapping must be persisted",
+        )
+
+    def test_export_then_import_roundtrip_with_extra_json(self):
+        """A profile with extra_json column mappings survives export→import roundtrip."""
+        profile = ImportProfile.objects.create(name="RoundtripProfile")
+        ColumnMapping.objects.create(profile=profile, source_column="Contact", target_field="extra_json:Contact_number")
+        ColumnMapping.objects.create(profile=profile, source_column="Host", target_field="device_name")
+
+        # Simulate what _apply_profile_yaml_data does on import.
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        # Delete and re-import to verify clean creation.
+        profile.delete()
+        data = {
+            "profile": {"name": "RoundtripProfile"},
+            "column_mappings": [
+                {"source_column": "Contact", "target_field": "extra_json:Contact_number"},
+                {"source_column": "Host", "target_field": "device_name"},
+            ],
+        }
+        profile, stats = _apply_profile_yaml_data(data)
+        self.assertEqual(stats.get("column_mappings"), 2)
+        cms = {cm.target_field: cm.source_column for cm in profile.column_mappings.all()}
+        self.assertEqual(cms.get("extra_json:Contact_number"), "Contact")
+        self.assertEqual(cms.get("device_name"), "Host")
+
     def test_partial_reimport_preserves_unmentioned_profile_fields(self):
         """Reimporting YAML that omits optional profile fields does not reset them."""
         from netbox_data_import.views import _apply_profile_yaml_data

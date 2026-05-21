@@ -6,6 +6,7 @@ from tenancy.models import Tenant
 from netbox.forms import NetBoxModelForm, NetBoxModelImportForm
 from utilities.forms.fields import DynamicModelChoiceField
 from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
+from .models import TARGET_FIELD_CHOICES
 
 
 class ImportProfileForm(NetBoxModelForm):
@@ -48,6 +49,8 @@ class ImportProfileImportForm(NetBoxModelImportForm):
 
 class ColumnMappingForm(forms.ModelForm):
     """Form for creating and editing ColumnMapping instances."""
+
+    target_field = forms.ChoiceField(choices=TARGET_FIELD_CHOICES)
 
     class Meta:
         model = ColumnMapping
@@ -94,6 +97,9 @@ class DeviceTypeMappingForm(forms.ModelForm):
 
 class ColumnTransformRuleForm(forms.ModelForm):
     """Form for creating and editing ColumnTransformRule instances."""
+
+    group_1_target = forms.ChoiceField(choices=[("", "---------")] + TARGET_FIELD_CHOICES, required=False)
+    group_2_target = forms.ChoiceField(choices=[("", "---------")] + TARGET_FIELD_CHOICES, required=False)
 
     class Meta:
         model = ColumnTransformRule
