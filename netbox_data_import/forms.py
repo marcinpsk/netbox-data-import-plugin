@@ -138,6 +138,15 @@ class ImportSetupForm(forms.Form):
         required=False,
     )
 
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if user is None:
+            return
+        self.fields["profile"].queryset = ImportProfile.objects.restrict(user, "change")
+        self.fields["site"].queryset = Site.objects.restrict(user, "view")
+        self.fields["location"].queryset = Location.objects.restrict(user, "view")
+        self.fields["tenant"].queryset = Tenant.objects.restrict(user, "view")
+
     def clean_excel_file(self):
         """Reject files that exceed the maximum upload size."""
         f = self.cleaned_data.get("excel_file")

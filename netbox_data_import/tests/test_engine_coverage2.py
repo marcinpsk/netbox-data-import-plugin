@@ -600,6 +600,7 @@ class WriteDeviceRowRackFromDBTest(TestCase):
                 "u_height": "1",
                 "status": "active",
                 "u_position": "3",
+                "face": "front",
                 "serial": "",
                 "asset_tag": "",
             }

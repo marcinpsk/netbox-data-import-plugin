@@ -708,8 +708,8 @@ class SyncSingleRowViewTest(TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["detail"], "Would create device 'test-device'")
         self.assertEqual(data["url"], "/dcim/devices/1/")
-        mock_engine.run_import.assert_called_once()
-        call_kwargs = mock_engine.run_import.call_args
+        self.assertEqual(mock_engine.run_import.call_count, 2)
+        call_kwargs = mock_engine.run_import.call_args_list[1]
         self.assertFalse(call_kwargs.kwargs.get("dry_run", True))
 
     @patch("netbox_data_import.views.engine")
@@ -741,8 +741,8 @@ class SyncSingleRowViewTest(TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["detail"], "Would create rack 'test-rack'")
         self.assertEqual(data["url"], "/dcim/racks/1/")
-        mock_engine.run_import.assert_called_once()
-        call_kwargs = mock_engine.run_import.call_args
+        self.assertEqual(mock_engine.run_import.call_count, 2)
+        call_kwargs = mock_engine.run_import.call_args_list[1]
         self.assertFalse(call_kwargs.kwargs.get("dry_run", True))
 
     @patch("django.db.transaction.set_rollback")
@@ -750,8 +750,19 @@ class SyncSingleRowViewTest(TestCase):
     def test_engine_error_returns_ok_false(self, mock_engine, mock_set_rollback):
         from netbox_data_import.engine import ImportResult, RowResult
 
-        mock_result = ImportResult()
-        mock_result.rows = [
+        preview_result = ImportResult()
+        preview_result.rows = [
+            RowResult(
+                row_number=1,
+                source_id="D001",
+                name="bad-device",
+                action="create",
+                object_type="device",
+                detail="Would create device 'bad-device'",
+            )
+        ]
+        execute_result = ImportResult()
+        execute_result.rows = [
             RowResult(
                 row_number=1,
                 source_id="D001",
@@ -761,8 +772,8 @@ class SyncSingleRowViewTest(TestCase):
                 detail="Missing rack",
             )
         ]
-        mock_result.has_errors = True
-        mock_engine.run_import.return_value = mock_result
+        execute_result.has_errors = True
+        mock_engine.run_import.side_effect = [preview_result, execute_result]
         mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])

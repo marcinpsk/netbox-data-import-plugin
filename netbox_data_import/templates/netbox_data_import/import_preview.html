@@ -496,6 +496,22 @@
 
                 {% elif row.action == 'error' and row.object_type == 'device' and profile_id %}
                   {# Device error — show class mapping button if we have source_class #}
+                  {% if row.extra_data.identity_conflict == 'duplicate_name' or row.extra_data.identity_conflict == 'name_placement_conflict' %}
+                  {% if row.extra_data.suggested_name and row.source_id %}
+                  <form method="post" action="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}" class="d-inline-flex align-items-center gap-1">
+                    {% csrf_token %}
+                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                    <input type="hidden" name="source_id" value="{{ row.source_id }}">
+                    <input type="hidden" name="row_number" value="{{ row.row_number }}">
+                    <input type="text" name="new_name" value="{{ row.extra_data.suggested_name }}"
+                           maxlength="64" required class="form-control form-control-sm"
+                           aria-label="Unique device name" style="width:20rem;">
+                    <button type="submit" class="btn btn-sm btn-outline-success" title="Use this unique name for the source row">
+                      <i class="mdi mdi-form-textbox"></i> Use name
+                    </button>
+                  </form>
+                  {% endif %}
+                  {% endif %}
                   {% if row.extra_data.source_class %}
                   <button type="button" class="btn btn-sm btn-outline-warning"
                           data-bs-toggle="modal" data-bs-target="#classMappingModal"

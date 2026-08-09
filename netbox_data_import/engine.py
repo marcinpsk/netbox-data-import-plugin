@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import logging
 import re
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Literal
 from io import BytesIO
 
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.utils.text import slugify
 import openpyxl
@@ -27,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 class ParseError(Exception):
     """Raised when the source file cannot be parsed."""
+
+
+class _ObjectPermissionDenied(Exception):
+    """Raised to roll back a write outside an object permission constraint."""
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +168,17 @@ class ImportContext:
     # Memoizes ``DeviceType.u_height == 0`` lookups by ``(mfg_slug, dt_slug)``
     # to avoid an N+1 query in preview for large imports.
     zero_u_cache: dict = field(default_factory=dict)
+    # Captures the previewed identity action for each row. Execute mode must
+    # not change a previewed create into an update, or update another object.
+    expected_intents: dict = field(default_factory=dict)
+    duplicate_source_ids: frozenset = frozenset()
+    duplicate_serials: frozenset = frozenset()
+    duplicate_asset_tags: frozenset = frozenset()
+    duplicate_rack_names: frozenset = frozenset()
+    ignored_source_ids: frozenset = frozenset()
+    claimed_device_ids: dict = field(default_factory=dict)
+    slug_conflicts_by_row: dict = field(default_factory=dict)
+    reserved_device_names: set = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +198,35 @@ def _str_val(v) -> str:
         return ""
     s = str(v).strip()
     return "" if s.lower() in _NONE_LIKE else s
+
+
+def _has_below_rack_position(row) -> bool:
+    """Return True when a source row is explicitly below rack unit 1."""
+    try:
+        return int(float(row.get("u_position"))) < 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_writing_device_row(row, crm, ignored_source_ids) -> bool:
+    """Return True when a row is eligible to create or update a device."""
+    source_id = _str_val(row.get("source_id"))
+    return bool(
+        crm
+        and not crm.creates_rack
+        and not crm.ignore
+        and crm.role_slug
+        and source_id not in ignored_source_ids
+        and not _has_below_rack_position(row)
+    )
+
+
+def _effective_device_name(row) -> str:
+    """Return the imported name, including the asset-tag fallback."""
+    device_name = _str_val(row.get("device_name"))
+    if device_name:
+        return device_name
+    return _str_val(row.get("asset_tag"))[:50]
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +539,7 @@ def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
 
     result = []
     for row in rows:
-        source_id = str(row.get("source_id", ""))
+        source_id = _str_val(row.get("source_id"))
         if source_id and source_id in resolutions_by_source_id:
             row = dict(row)  # shallow copy — don't mutate the session dict
             if "_conflicts" in row:
@@ -599,7 +645,7 @@ def _perm_denied_row(perm: str, row: dict, name: str, object_type: str) -> RowRe
     """Return a permission-denied RowResult for a write operation the user may not perform."""
     return RowResult(
         row_number=row["_row_number"],
-        source_id=str(row.get("source_id", "")),
+        source_id=_str_val(row.get("source_id")),
         name=name,
         action="error",
         object_type=object_type,
@@ -607,9 +653,24 @@ def _perm_denied_row(perm: str, row: dict, name: str, object_type: str) -> RowRe
     )
 
 
-def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufacturer):
+def _enforce_saved_object_permission(obj, user, action):
+    """Reject a saved object whose final state is outside the user's permission scope."""
+    if user is not None and not obj.__class__.objects.restrict(user, action).filter(pk=obj.pk).exists():
+        raise _ObjectPermissionDenied
+
+
+def _ensure_manufacturer(
+    mfg_slug,
+    make,
+    seen_manufacturers,
+    ctx,
+    row,
+    Manufacturer,
+    *,
+    explicit_identity=False,
+):
     """Create (or preview-create) a manufacturer if not yet seen."""
-    if mfg_slug in seen_manufacturers:
+    if ctx.dry_run and mfg_slug in seen_manufacturers:
         return
     seen_manufacturers.add(mfg_slug)
     if not ctx.dry_run:
@@ -618,7 +679,12 @@ def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufactu
                 if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
                     ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
                     return
-            Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
+            manufacturer, _ = Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
+            if not explicit_identity and _identity_text(manufacturer.name) != _identity_text(make):
+                ctx.slug_conflicts_by_row[row["_row_number"]] = (
+                    f"Manufacturer '{make}' derives slug '{mfg_slug}', which now belongs to "
+                    f"'{manufacturer.name}' in NetBox. Refresh the preview and add an explicit manufacturer mapping."
+                )
     elif not Manufacturer.objects.filter(slug=mfg_slug).exists() and ctx.profile.create_missing_device_types:
         if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
             ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
@@ -637,11 +703,22 @@ def _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufactu
 
 
 def _ensure_device_type(
-    mfg_slug, dt_slug, make, model, u_height, seen_device_types, ctx, row, Manufacturer, DeviceType
+    mfg_slug,
+    dt_slug,
+    make,
+    model,
+    u_height,
+    seen_device_types,
+    ctx,
+    row,
+    Manufacturer,
+    DeviceType,
+    *,
+    explicit_identity=False,
 ):
     """Create (or preview-create) a device type if not yet seen."""
     dt_key = (mfg_slug, dt_slug)
-    if dt_key in seen_device_types:
+    if ctx.dry_run and dt_key in seen_device_types:
         return
     seen_device_types.add(dt_key)
     if not ctx.dry_run:
@@ -659,9 +736,20 @@ def _ensure_device_type(
                     )
                     return
             mfg, _ = Manufacturer.objects.get_or_create(slug=mfg_slug, defaults={"name": make})
-            DeviceType.objects.get_or_create(
+            if not explicit_identity and _identity_text(mfg.name) != _identity_text(make):
+                ctx.slug_conflicts_by_row[row["_row_number"]] = (
+                    f"Manufacturer '{make}' derives slug '{mfg_slug}', which now belongs to "
+                    f"'{mfg.name}' in NetBox. Refresh the preview and add an explicit manufacturer mapping."
+                )
+                return
+            device_type, _ = DeviceType.objects.get_or_create(
                 manufacturer=mfg, slug=dt_slug, defaults={"model": model, "u_height": u_height}
             )
+            if not explicit_identity and _identity_text(device_type.model) != _identity_text(model):
+                ctx.slug_conflicts_by_row[row["_row_number"]] = (
+                    f"Device type '{make} / {model}' derives slug '{mfg_slug}/{dt_slug}', which now belongs to "
+                    f"'{mfg.name} / {device_type.model}' in NetBox. Refresh the preview and add an explicit mapping."
+                )
         return
     exists = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists()
     if exists:
@@ -733,9 +821,11 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
     seen_roles: set[str] = set()
 
     for row in rows:
+        if row.get("_row_number") in ctx.slug_conflicts_by_row:
+            continue
         device_class = _str_val(row.get("device_class"))
         crm = class_role_map.get(device_class)
-        if crm is None or crm.creates_rack or crm.ignore:
+        if not _is_writing_device_row(row, crm, ctx.ignored_source_ids):
             continue
 
         make = " ".join((_str_val(row.get("make")) or "Unknown").split())
@@ -746,8 +836,18 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
         except (TypeError, ValueError):
             u_height = 1
 
-        mfg_slug, dt_slug, _ = _resolve_device_type_slugs(make, model, ctx.profile)
-        _ensure_manufacturer(mfg_slug, make, seen_manufacturers, ctx, row, Manufacturer)
+        mfg_slug, dt_slug, explicit_identity = _resolve_device_type_slugs(make, model, ctx.profile)
+        _ensure_manufacturer(
+            mfg_slug,
+            make,
+            seen_manufacturers,
+            ctx,
+            row,
+            Manufacturer,
+            explicit_identity=explicit_identity,
+        )
+        if row.get("_row_number") in ctx.slug_conflicts_by_row:
+            continue
         _ensure_device_type(
             mfg_slug,
             dt_slug,
@@ -759,27 +859,207 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
             row,
             Manufacturer,
             DeviceType,
+            explicit_identity=explicit_identity,
         )
         _ensure_device_role(crm, seen_roles, ctx, DeviceRole)
 
 
+def _rack_query(Rack, ctx, rack_name):
+    """Return the rack query for the selected NetBox location."""
+    location_filter = {"location": ctx.location} if ctx.location is not None else {"location__isnull": True}
+    return Rack.objects.filter(site=ctx.site, name__iexact=rack_name, **location_filter)
+
+
+def _get_unique_rack(Rack, ctx, rack_name, *, lock=False, permission_action=None):
+    """Return one rack by active location, plus an ambiguity flag."""
+    queryset = _rack_query(Rack, ctx, rack_name)
+    if lock:
+        queryset = queryset.select_for_update(of=("self",))
+    racks = list(queryset[:2])
+    if len(racks) > 1:
+        return None, True
+    rack = racks[0] if racks else None
+    if (
+        rack is not None
+        and ctx.user is not None
+        and permission_action is not None
+        and not Rack.objects.restrict(ctx.user, permission_action).filter(pk=rack.pk).exists()
+    ):
+        return None, False
+    return rack, False
+
+
+def _tenant_filter(tenant):
+    """Return an ORM filter for one tenant identity, including no tenant."""
+    return {"tenant": tenant} if tenant is not None else {"tenant__isnull": True}
+
+
+def _rack_identity_label(rack_name, location):
+    """Return a rack label that includes location when one is selected."""
+    if not rack_name:
+        return ""
+    return f"{location} / {rack_name}" if location is not None else rack_name
+
+
+def _device_rack_identity_label(device):
+    """Return the location-aware rack identity for a NetBox device."""
+    if not device.rack_id:
+        return ""
+    return _rack_identity_label(device.rack.name, device.rack.location)
+
+
+def _device_placement_differs(device, source_location_id, rack_name, position, face):
+    """Return whether a source placement differs from a NetBox device placement."""
+    device_rack_name = device.rack.name if device.rack_id else ""
+    device_rack_location_id = device.rack.location_id if device.rack_id else None
+    return (
+        device.location_id != source_location_id
+        or (device.rack_id is not None and device_rack_location_id != source_location_id)
+        or _identity_text(device_rack_name) != _identity_text(rack_name)
+        or _normalize_for_compare(device.position) != _normalize_for_compare(position)
+        or (face is not None and (device.face or None) != face)
+    )
+
+
+def _identity_state_error(row, source_id, name, object_type, detail, rack_name=""):
+    """Return an error when current identity differs from the preview."""
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=name,
+        action="error",
+        object_type=object_type,
+        detail=detail,
+        rack_name=rack_name,
+        extra_data={"identity_state_changed": True},
+    )
+
+
+def _ambiguous_rack_row(row, source_id, name, rack_name, ctx, object_type):
+    """Return an error when a rack name does not identify one rack."""
+    label = _rack_identity_label(rack_name, ctx.location)
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=name,
+        action="error",
+        object_type=object_type,
+        detail=f"Multiple racks named '{label}' exist. Select a location or make the rack names unique.",
+        rack_name=rack_name,
+        extra_data={"identity_conflict": "ambiguous_rack"},
+    )
+
+
+def _device_identity_state(device):
+    """Return the device state that an import update can overwrite."""
+    return {
+        "name": device.name,
+        "site_id": device.site_id,
+        "location_id": device.location_id,
+        "tenant_id": device.tenant_id,
+        "rack_id": device.rack_id,
+        "position": _normalize_for_compare(device.position),
+        "face": device.face or "",
+        "device_type_id": device.device_type_id,
+        "role_id": device.role_id,
+        "status": device.status,
+        "serial": device.serial or "",
+        "asset_tag": device.asset_tag or "",
+        "airflow": device.airflow or "",
+    }
+
+
+def _rack_identity_state(rack):
+    """Return the rack state that an import update can overwrite."""
+    return {
+        "name": rack.name,
+        "site_id": rack.site_id,
+        "location_id": rack.location_id,
+        "tenant_id": rack.tenant_id,
+        "u_height": rack.u_height,
+        "serial": rack.serial or "",
+        "rack_type_id": rack.rack_type_id,
+    }
+
+
+def _intent_matches(ctx, row, object_type, action, object_id=None, current_state=None):
+    """Return True when an execute-time identity matches its preview intent."""
+    expected = ctx.expected_intents.get((row.get("_row_number"), object_type))
+    if expected is None:
+        return True
+    if expected.get("action") != action:
+        return False
+    expected_id = expected.get("object_id")
+    if expected_id not in (None, "") and expected_id != object_id:
+        return False
+    expected_state = expected.get("object_state")
+    return expected_state is None or expected_state == current_state
+
+
+def _set_rack_import_fields(rack, u_height, serial, rack_type, ctx):
+    """Apply the fields controlled by a rack import."""
+    rack.u_height = u_height
+    rack.serial = serial or rack.serial
+    rack.rack_type = rack_type
+    if ctx.location:
+        rack.location = ctx.location
+    if ctx.tenant:
+        rack.tenant = ctx.tenant
+
+
+def _rack_validation_error_row(row, source_id, rack_name, exc):
+    """Return one rack model validation error."""
+    if hasattr(exc, "message_dict"):
+        message = "; ".join(f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items())
+    else:
+        message = "; ".join(exc.messages)
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=rack_name,
+        action="error",
+        object_type="rack",
+        detail=f"Cannot update rack '{rack_name}': validation failed: {message}",
+        rack_name=rack_name,
+        extra_data={"identity_conflict": "rack_validation_failed"},
+    )
+
+
 def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=None):
     """Write or update a rack in the database and record the result."""
-    try:
-        rack = Rack.objects.get(site=ctx.site, name=rack_name)
+    rack, ambiguous = _get_unique_rack(Rack, ctx, rack_name, lock=True)
+    if ambiguous:
+        ctx.result.rows.append(_ambiguous_rack_row(row, source_id, rack_name, rack_name, ctx, "rack"))
+        return
+    if rack is not None:
+        action = "update" if ctx.profile.update_existing else "skip"
+        if not _intent_matches(ctx, row, "rack", action, rack.pk, _rack_identity_state(rack)):
+            ctx.result.rows.append(
+                _identity_state_error(
+                    row,
+                    source_id,
+                    rack_name,
+                    "rack",
+                    f"Rack identity changed after preview for '{rack_name}'. Refresh the preview before importing.",
+                )
+            )
+            return
         if ctx.profile.update_existing:
-            if ctx.user is not None and not ctx.user.has_perm("dcim.change_rack"):
+            if ctx.user is not None and not Rack.objects.restrict(ctx.user, "change").filter(pk=rack.pk).exists():
                 ctx.result.rows.append(_perm_denied_row("dcim.change_rack", row, rack_name, "rack"))
-                ctx.rack_map[rack_name] = rack
                 return
-            rack.u_height = u_height
-            rack.serial = serial or rack.serial
-            rack.rack_type = rack_type
-            if ctx.location:
-                rack.location = ctx.location
-            if ctx.tenant:
-                rack.tenant = ctx.tenant
-            rack.save()
+            _set_rack_import_fields(rack, u_height, serial, rack_type, ctx)
+            try:
+                with transaction.atomic():
+                    rack.full_clean()
+                    rack.save()
+                    _enforce_saved_object_permission(rack, ctx.user, "change")
+            except _ObjectPermissionDenied:
+                ctx.result.rows.append(_perm_denied_row("dcim.change_rack", row, rack_name, "rack"))
+                return
+            except ValidationError as exc:
+                ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc))
+                return
             ctx.rack_map[rack_name] = rack
             ctx.result.rows.append(
                 RowResult(
@@ -804,20 +1084,37 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
                     detail=f"Rack '{rack_name}' already exists (update_existing=False)",
                 )
             )
-    except Rack.DoesNotExist:
+    else:
+        if not _intent_matches(ctx, row, "rack", "create"):
+            ctx.result.rows.append(
+                _identity_state_error(
+                    row,
+                    source_id,
+                    rack_name,
+                    "rack",
+                    f"Rack identity changed after preview for '{rack_name}'. Refresh the preview before importing.",
+                )
+            )
+            return
         if ctx.user is not None and not ctx.user.has_perm("dcim.add_rack"):
             ctx.result.rows.append(_perm_denied_row("dcim.add_rack", row, rack_name, "rack"))
             return
-        rack = Rack.objects.create(
-            site=ctx.site,
-            location=ctx.location,
-            name=rack_name,
-            tenant=ctx.tenant,
-            u_height=u_height,
-            serial=serial,
-            rack_type=rack_type,
-        )
-        _store_source_id(rack, ctx.profile, source_id)
+        try:
+            with transaction.atomic():
+                rack = Rack.objects.create(
+                    site=ctx.site,
+                    location=ctx.location,
+                    name=rack_name,
+                    tenant=ctx.tenant,
+                    u_height=u_height,
+                    serial=serial,
+                    rack_type=rack_type,
+                )
+                _store_source_id(rack, ctx.profile, source_id)
+                _enforce_saved_object_permission(rack, ctx.user, "add")
+        except _ObjectPermissionDenied:
+            ctx.result.rows.append(_perm_denied_row("dcim.add_rack", row, rack_name, "rack"))
+            return
         ctx.rack_map[rack_name] = rack
         ctx.result.rows.append(
             RowResult(
@@ -843,7 +1140,7 @@ def _pass2_process_racks(rows, ctx, class_role_map):
             continue
 
         rack_name = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
-        source_id = str(row.get("source_id", ""))
+        source_id = _str_val(row.get("source_id"))
         u_height_raw = row.get("u_height", 42)
         serial = _str_val(row.get("serial"))
 
@@ -865,16 +1162,72 @@ def _pass2_process_racks(rows, ctx, class_role_map):
             )
             continue
 
+        if source_id in ctx.ignored_source_ids:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=rack_name,
+                    action="ignore",
+                    object_type="rack",
+                    detail="Ignored rack",
+                    rack_name=rack_name,
+                    extra_data={"ignore_kind": "individual"},
+                )
+            )
+            continue
+
+        if _identity_text(rack_name) in ctx.duplicate_rack_names:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=rack_name,
+                    action="error",
+                    object_type="rack",
+                    detail=f"Duplicate rack name '{rack_name}' appears more than once in this import.",
+                    rack_name=rack_name,
+                    extra_data={"identity_conflict": "duplicate_rack"},
+                )
+            )
+            continue
+
+        if source_id and source_id in ctx.duplicate_source_ids:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=rack_name,
+                    action="error",
+                    object_type="rack",
+                    detail=f"Duplicate source ID '{source_id}' appears more than once in this import.",
+                    extra_data={"identity_conflict": "duplicate_source_id"},
+                )
+            )
+            continue
+
         if ctx.dry_run:
             rack_type_label = f", type={crm.rack_type}" if crm.rack_type_id else ""
-            try:
-                Rack.objects.get(site=ctx.site, name=rack_name)
+            rack, ambiguous = _get_unique_rack(Rack, ctx, rack_name, permission_action="view")
+            if ambiguous:
+                ctx.result.rows.append(_ambiguous_rack_row(row, source_id, rack_name, rack_name, ctx, "rack"))
+                continue
+            if rack is not None:
                 action = "update" if ctx.profile.update_existing else "skip"
                 detail = f"Rack '{rack_name}' already exists"
-            except Rack.DoesNotExist:
+                if ctx.profile.update_existing:
+                    candidate = copy(rack)
+                    _set_rack_import_fields(candidate, u_height, serial, crm.rack_type, ctx)
+                    try:
+                        candidate.full_clean()
+                    except ValidationError as exc:
+                        ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc))
+                        continue
+            else:
+                rack = None
                 action = "create"
                 detail = f"Would create rack '{rack_name}' ({u_height}U{rack_type_label}) at site '{ctx.site}'"
-            ctx.rack_map[rack_name] = rack_name
+            ctx.rack_map[rack_name] = rack if rack is not None else rack_name
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -888,6 +1241,8 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                         "rack_type_set": bool(crm.rack_type_id),
                         "rack_type_id": crm.rack_type_id or "",
                         "rack_type_name": str(crm.rack_type) if crm.rack_type_id else "",
+                        **({"netbox_rack_id": rack.pk} if rack is not None else {}),
+                        **({"_identity_state": _rack_identity_state(rack)} if rack is not None else {}),
                     },
                 )
             )
@@ -895,8 +1250,20 @@ def _pass2_process_racks(rows, ctx, class_role_map):
             _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=crm.rack_type)
 
 
-def _find_existing_device(
-    profile, source_id, site, device_name, serial, asset_tag, Device, ambiguous_names: frozenset = frozenset()
+def _find_existing_device(  # noqa: C901
+    profile,
+    source_id,
+    site,
+    device_name,
+    serial,
+    asset_tag,
+    Device,
+    ambiguous_names: frozenset = frozenset(),
+    *,
+    tenant=None,
+    device_queryset=None,
+    source_match=None,
+    source_match_locked=False,
 ):
     """Look up a pre-existing NetBox device by source-ID link, serial, asset_tag, or name.
 
@@ -905,50 +1272,206 @@ def _find_existing_device(
     The name-based fallback is skipped when *device_name* is in *ambiguous_names*
     (i.e. two or more rows in the current import share the same name), since
     matching all of them to the same NetBox device would be incorrect.
-    When *site* is provided the name lookup is scoped to that site; without a
-    site the name is matched globally (any site).
+    When *site* is provided the name lookup is scoped to that site and tenant.
+    Strong identifiers remain global so callers can report an unsafe cross-site
+    match instead of silently creating a second identity.
+    The optional device queryset controls visibility only. Hidden devices still
+    participate in global ambiguity checks.
     """
-    existing_match = profile.device_matches.filter(source_id=source_id).first() if source_id else None
+    devices = Device.objects.all()
+    visible_devices = device_queryset
+    existing_match = source_match
+    if source_id and not source_match_locked:
+        existing_match = profile.device_matches.filter(source_id=source_id).first()
     matched_device = None
     match_method = None
     if existing_match:
         try:
-            matched_device = Device.objects.get(pk=existing_match.netbox_device_id)
+            matched_device = devices.get(pk=existing_match.netbox_device_id)
             match_method = "source ID link"
         except Device.DoesNotExist:
             pass
 
+    if matched_device is None and source_id:
+        source_matches = list(
+            devices.filter(
+                custom_field_data__data_import_source__profile_id=profile.pk,
+                custom_field_data__data_import_source__source_id=source_id,
+            )[:2]
+        )
+        if len(source_matches) == 1:
+            matched_device = source_matches[0]
+            match_method = "stored source ID"
+        elif len(source_matches) > 1:
+            logger.warning(
+                "Ambiguous stored source ID match for profile=%s source_id=%r; skipping auto-match",
+                profile.pk,
+                source_id,
+            )
+            return None, "ambiguous stored source ID"
+
     if matched_device is None and serial:
         try:
-            matched_device = Device.objects.get(serial=serial)
+            matched_device = devices.get(serial=serial)
             match_method = "serial"
         except Device.DoesNotExist:
             pass
         except Device.MultipleObjectsReturned:
             logger.warning("Ambiguous serial match for serial=%r; skipping auto-match", serial)
+            return None, "ambiguous serial"
 
     if matched_device is None and asset_tag:
         try:
-            matched_device = Device.objects.get(asset_tag=asset_tag)
+            matched_device = devices.get(asset_tag__iexact=asset_tag)
             match_method = "asset tag"
         except Device.DoesNotExist:
             pass
         except Device.MultipleObjectsReturned:
             logger.warning("Ambiguous asset_tag match for asset_tag=%r; skipping auto-match", asset_tag)
+            return None, "ambiguous asset tag"
 
-    if matched_device is None and device_name and device_name not in ambiguous_names:
-        name_filter = {"name": device_name}
+    if matched_device is None and device_name and _identity_text(device_name) not in ambiguous_names:
+        name_filter = {"name__iexact": device_name}
         if site is not None:
             name_filter["site"] = site
+            name_filter.update(_tenant_filter(tenant))
         try:
-            matched_device = Device.objects.get(**name_filter)
+            matched_device = devices.get(**name_filter)
             match_method = "name"
         except Device.DoesNotExist:
             pass
         except Device.MultipleObjectsReturned:
             logger.warning("Ambiguous name match for device_name=%r; skipping auto-match", device_name)
 
+    if (
+        matched_device is not None
+        and visible_devices is not None
+        and not visible_devices.filter(pk=matched_device.pk).exists()
+    ):
+        return None, "inaccessible device"
+
     return matched_device, match_method
+
+
+def _ambiguous_source_id_row(row, source_id, device_name, rack_name):
+    """Return an error for duplicate stored source identity metadata."""
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=device_name,
+        action="error",
+        object_type="device",
+        detail=(
+            f"Source ID '{source_id}' is stored on multiple NetBox devices. "
+            "Remove the duplicate metadata or link one device explicitly."
+        ),
+        rack_name=rack_name,
+        extra_data={"identity_conflict": "ambiguous_source_id"},
+    )
+
+
+def _ambiguous_asset_tag_row(row, source_id, device_name, rack_name, asset_tag):
+    """Return an error when an asset tag identifies multiple devices."""
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=device_name,
+        action="error",
+        object_type="device",
+        detail=f"Asset tag '{asset_tag}' matches multiple NetBox devices. Make the asset tags unique before import.",
+        rack_name=rack_name,
+        extra_data={"identity_conflict": "ambiguous_asset_tag"},
+    )
+
+
+def _ambiguous_serial_row(row, source_id, device_name, rack_name, serial):
+    """Return an error when a serial identifies multiple devices."""
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=device_name,
+        action="error",
+        object_type="device",
+        detail=f"Serial '{serial}' matches multiple NetBox devices. Make the serials unique before import.",
+        rack_name=rack_name,
+        extra_data={"identity_conflict": "ambiguous_serial"},
+    )
+
+
+def _device_binding_conflict(profile, source_id, device):
+    """Return the source ID already bound to *device*, if it differs."""
+    if device is None:
+        return None
+    match = profile.device_matches.filter(netbox_device_id=device.pk).exclude(source_id=source_id).first()
+    return match.source_id if match else None
+
+
+def _bind_device_source(profile, source_id, device, asset_tag=""):
+    """Persist the confirmed one-to-one source-to-device identity binding."""
+    if not source_id:
+        return
+    conflict_source_id = _device_binding_conflict(profile, source_id, device)
+    if conflict_source_id:
+        raise IntegrityError(f"Device is already bound to source ID '{conflict_source_id}'")
+    existing_match = profile.device_matches.select_for_update().filter(source_id=source_id).first()
+    if existing_match is not None:
+        if existing_match.netbox_device_id != device.pk:
+            raise IntegrityError(f"Source ID is already bound to device #{existing_match.netbox_device_id}")
+        existing_match.device_name = device.name
+        existing_match.source_asset_tag = asset_tag or ""
+        existing_match.save(update_fields=["device_name", "source_asset_tag"])
+        return
+    profile.device_matches.create(
+        source_id=source_id,
+        netbox_device_id=device.pk,
+        device_name=device.name,
+        source_asset_tag=asset_tag or "",
+    )
+
+
+def _device_queryset_for_user(Device, user, action):
+    """Return devices allowed by NetBox object permissions."""
+    if user is None:
+        return Device.objects.all()
+    return Device.objects.restrict(user, action)
+
+
+def _reserve_device_names(rows, ctx, class_role_map, Device):
+    """Reserve case-insensitive source and NetBox names before suggestions."""
+    existing_names = (
+        _device_queryset_for_user(Device, ctx.user, "view")
+        .filter(site=ctx.site, **_tenant_filter(ctx.tenant))
+        .values_list("name", flat=True)
+    )
+    ctx.reserved_device_names.update(_identity_text(name) for name in existing_names)
+    for row in rows:
+        crm = class_role_map.get(_str_val(row.get("device_class")))
+        if not _is_writing_device_row(row, crm, ctx.ignored_source_ids):
+            continue
+        name = _effective_device_name(row)
+        if name:
+            ctx.reserved_device_names.add(_identity_text(name))
+
+
+def _suggest_unique_device_name(row, ctx):
+    """Build and reserve one deterministic, case-insensitive device name."""
+    name = _effective_device_name(row)
+    rack_name = _str_val(row.get("rack_name")) or "NO-RACK"
+    position = _normalize_for_compare(row.get("u_position")) or "NO-U"
+    base = f"{name}-{rack_name}-U{position}" if position != "NO-U" else f"{name}-{rack_name}"
+    candidate = base[:64]
+    if _identity_text(candidate) in ctx.reserved_device_names:
+        source_suffix = _str_val(row.get("source_id")) or str(row.get("_row_number", "ROW"))
+        source_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_suffix).strip("-") or "ROW"
+        candidate = f"{base[: max(1, 63 - len(source_suffix))]}-{source_suffix}"[:64]
+    serial = 2
+    unique_candidate = candidate
+    while _identity_text(unique_candidate) in ctx.reserved_device_names:
+        suffix = f"-{serial}"
+        unique_candidate = f"{candidate[: 64 - len(suffix)]}{suffix}"
+        serial += 1
+    ctx.reserved_device_names.add(_identity_text(unique_candidate))
+    return unique_candidate
 
 
 def _normalize_for_compare(val) -> str:
@@ -969,8 +1492,25 @@ def _normalize_for_compare(val) -> str:
         return str(val).strip()
 
 
-def _compute_field_diff(
-    matched_device, device_name, serial, asset_tag, device_face, device_airflow, device_status, u_height, u_position
+_NOT_PROVIDED = object()
+
+
+def _compute_field_diff(  # noqa: C901
+    matched_device,
+    device_name,
+    serial,
+    asset_tag,
+    device_face,
+    device_airflow,
+    device_status,
+    u_height,
+    u_position,
+    *,
+    rack_name=_NOT_PROVIDED,
+    device_type_key=_NOT_PROVIDED,
+    role_slug=_NOT_PROVIDED,
+    tenant=_NOT_PROVIDED,
+    location=_NOT_PROVIDED,
 ):
     """Return a dict of fields that differ between the XLS row and the existing NetBox device."""
     diff = {}
@@ -1003,6 +1543,36 @@ def _compute_field_diff(
             "netbox": _normalize_for_compare(matched_device.position),
             "file": _normalize_for_compare(u_position),
         }
+    if rack_name is not _NOT_PROVIDED:
+        netbox_rack_name = _device_rack_identity_label(matched_device)
+        if _str_cmp(rack_name) != _str_cmp(netbox_rack_name):
+            diff["rack_name"] = {"netbox": netbox_rack_name, "file": _str_cmp(rack_name)}
+    if device_type_key is not _NOT_PROVIDED:
+        mfg_slug, dt_slug, source_make, source_model = device_type_key
+        netbox_type_key = (
+            matched_device.device_type.manufacturer.slug,
+            matched_device.device_type.slug,
+        )
+        if (mfg_slug, dt_slug) != netbox_type_key:
+            diff["device_type"] = {
+                "netbox": f"{matched_device.device_type.manufacturer.name} / {matched_device.device_type.model}",
+                "file": f"{source_make} / {source_model}",
+            }
+    if role_slug is not _NOT_PROVIDED and _str_cmp(role_slug) != _str_cmp(matched_device.role.slug):
+        diff["role"] = {"netbox": matched_device.role.slug, "file": _str_cmp(role_slug)}
+    if tenant is not _NOT_PROVIDED:
+        netbox_tenant = matched_device.tenant.name if matched_device.tenant_id else ""
+        source_tenant_id = tenant.pk if tenant is not None else None
+        if source_tenant_id != matched_device.tenant_id:
+            diff["tenant"] = {"netbox": netbox_tenant, "file": tenant.name if tenant is not None else ""}
+    if location is not _NOT_PROVIDED:
+        netbox_location = matched_device.location.name if matched_device.location_id else ""
+        source_location_id = location.pk if location is not None else None
+        if source_location_id != matched_device.location_id:
+            diff["location"] = {
+                "netbox": netbox_location,
+                "file": location.name if location is not None else "",
+            }
     return diff
 
 
@@ -1054,10 +1624,8 @@ def _check_rack_position_conflict(
     slot in their ranges collides on the same ``(rack, face)``.
 
     Claims are keyed by ``(rack_name, slot, face)`` and store
-    ``(row_number, device_name, matched_device_pk)``.  When ``matched_device_pk``
-    matches a previous claim's pk, the overlap is treated as legitimate (two
-    rows resolving to the same existing ``Device`` — execute mode would just
-    update one record twice) rather than a conflict.
+    ``(row_number, device_name, matched_device_pk)``. Multiple source rows
+    cannot claim the same existing device.
 
     Returns ``(message, conflicting_row_number)`` on the first real overlap,
     otherwise registers each uncovered slot and returns ``None``.
@@ -1072,25 +1640,28 @@ def _check_rack_position_conflict(
     face_label = f" ({effective_face})" if effective_face else ""
     slots = range(position, position + height)
     for slot in slots:
-        pos_key = (rack_name, slot, effective_face)
-        if pos_key not in ctx.claimed_positions:
-            continue
-        prev_row, prev_name, prev_pk = _unpack_claim(ctx.claimed_positions[pos_key])
-        # Same matched Device → not a conflict; execute mode would update once.
-        if matched_device_pk is not None and prev_pk == matched_device_pk:
-            continue
-        if prev_row is not None:
-            other = f"row {prev_row}"
-            if prev_name:
-                other = f"{other} ('{prev_name}')"
+        if effective_face:
+            claimed_keys = [
+                key
+                for key in ((rack_name, slot, effective_face), (rack_name, slot, ""))
+                if key in ctx.claimed_positions
+            ]
+        else:
+            claimed_keys = [key for key in ctx.claimed_positions if key[0] == rack_name and key[1] == slot]
+        for claimed_key in claimed_keys:
+            prev_row, prev_name, _prev_pk = _unpack_claim(ctx.claimed_positions[claimed_key])
+            if prev_row is not None:
+                other = f"row {prev_row}"
+                if prev_name:
+                    other = f"{other} ('{prev_name}')"
+                return (
+                    f"Rack position conflict: {rack_name} U{slot}{face_label} also claimed by {other}",
+                    prev_row,
+                )
             return (
-                f"Rack position conflict: {rack_name} U{slot}{face_label} also claimed by {other}",
-                prev_row,
+                f"Rack position conflict: {rack_name} U{slot}{face_label} already claimed by another row in this file",
+                None,
             )
-        return (
-            f"Rack position conflict: {rack_name} U{slot}{face_label} already claimed by another row in this file",
-            None,
-        )
     # First claim wins: only register slots that aren't already claimed.
     for slot in slots:
         pos_key = (rack_name, slot, effective_face)
@@ -1133,9 +1704,8 @@ def _claim_rack_slots_for_preview(
     of failing later as an ``IntegrityError`` on write. Skips and ignores make
     no claim.
 
-    ``matched_device_pk`` is threaded through so multiple rows that resolve to
-    the same existing ``Device`` are not falsely flagged as conflicting with
-    each other. Returns ``(action, detail, conflict_row_number)``.
+    ``matched_device_pk`` is stored with the claim for diagnostics. Returns
+    ``(action, detail, conflict_row_number)``.
     """
     if action not in ("create", "update"):
         return action, detail, None
@@ -1155,7 +1725,156 @@ def _claim_rack_slots_for_preview(
     return action, detail, None
 
 
-def _preview_device_row(
+def _resolve_preview_rack(row, ctx, Rack, source_id, device_name, make, model, serial, asset_tag):
+    """Resolve the target rack for preview and return an error row when missing."""
+    rack_name = _str_val(row.get("rack_name"))
+    if not rack_name:
+        return None, "(no rack)", None
+    cached_rack = ctx.rack_map.get(rack_name)
+    if isinstance(cached_rack, Rack):
+        return cached_rack, rack_name, None
+    if cached_rack:
+        return None, rack_name, None
+    target_rack, ambiguous = _get_unique_rack(Rack, ctx, rack_name, permission_action="view")
+    if ambiguous:
+        return None, "", _ambiguous_rack_row(row, source_id, device_name, rack_name, ctx, "device")
+    if target_rack is not None:
+        ctx.rack_map[rack_name] = target_rack
+        return target_rack, rack_name, None
+    error = RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=device_name,
+        action="error",
+        object_type="device",
+        detail=(
+            f"Rack '{_rack_identity_label(rack_name, ctx.location)}' was not found. "
+            "Select the correct import location or fix the rack name."
+        ),
+        rack_name=rack_name,
+        extra_data={
+            "identity_conflict": "rack_not_found",
+            "source_make": make,
+            "source_model": model,
+            "source_serial": serial or "",
+            "asset_tag": asset_tag or "",
+        },
+    )
+    return None, "", error
+
+
+def _name_placement_conflict_row(
+    row,
+    ctx,
+    matched_device,
+    source_id,
+    device_name,
+    rack_name,
+    position,
+    face,
+    serial,
+    asset_tag,
+):
+    """Return an error when a name-only match targets a different placement."""
+    netbox_rack = _device_rack_identity_label(matched_device) or "(none)"
+    source_rack = _rack_identity_label(rack_name, ctx.location) or "(none)"
+    netbox_location = str(matched_device.location) if matched_device.location_id else "(none)"
+    source_location = str(ctx.location) if ctx.location is not None else "(none)"
+    netbox_position = f" U{matched_device.position}" if matched_device.position is not None else ""
+    source_position = f" U{position}" if position is not None else ""
+    netbox_face = f" {matched_device.face}" if matched_device.face else ""
+    source_face = f" {face}" if face else ""
+    placement_differs = _device_placement_differs(
+        matched_device,
+        ctx.location.pk if ctx.location is not None else None,
+        rack_name,
+        position,
+        face,
+    )
+    if not placement_differs:
+        return None
+    return RowResult(
+        row_number=row["_row_number"],
+        source_id=source_id,
+        name=device_name,
+        action="error",
+        object_type="device",
+        detail=(
+            f"Device '{matched_device.name}' already exists in NetBox at location '{netbox_location}', "
+            f"rack '{netbox_rack}'{netbox_position}{netbox_face}. Source placement is location "
+            f"'{source_location}', rack '{source_rack}'{source_position}{source_face}. "
+            "Confirm an explicit link to merge it, or use the suggested unique name."
+        ),
+        netbox_url=matched_device.get_absolute_url(),
+        rack_name=rack_name,
+        extra_data={
+            "identity_conflict": "name_placement_conflict",
+            "suggested_name": _suggest_unique_device_name(row, ctx),
+            "source_rack_name": source_rack,
+            "source_location": source_location,
+            "source_position": _normalize_for_compare(position),
+            "source_face": face or "",
+            "netbox_device_id": matched_device.pk,
+            "netbox_device_name": matched_device.name,
+            "netbox_rack_name": netbox_rack,
+            "netbox_location": netbox_location,
+            "netbox_position": _normalize_for_compare(matched_device.position),
+            "netbox_face": matched_device.face or "",
+            "source_serial": serial or "",
+            "asset_tag": asset_tag or "",
+        },
+    )
+
+
+def _validate_preview_placement(
+    action,
+    detail,
+    rack_name,
+    target_rack,
+    position,
+    face,
+    device_type,
+    proposed_u_height,
+    proposed_full_depth,
+    matched_device,
+    ctx,
+):
+    """Validate required placement fields and existing rack capacity."""
+    effective_face = face
+    if effective_face is None and matched_device is not None and action == "update":
+        effective_face = matched_device.face or None
+    if action not in ("create", "update"):
+        return action, detail, None, effective_face
+    if position is not None and not rack_name:
+        return "error", "A rack is required when a device has a rack position.", "rack_required", effective_face
+    if position is not None and effective_face is None:
+        return (
+            "error",
+            "A rack face is required when a device has a rack position.",
+            "rack_face_required",
+            effective_face,
+        )
+    placement_height = device_type.u_height if device_type is not None else proposed_u_height
+    placement_full_depth = device_type.is_full_depth if device_type is not None else proposed_full_depth
+    if target_rack is None or position is None or placement_height == 0:
+        return action, detail, None, effective_face
+    rack_face = None if placement_full_depth else effective_face
+    excluded_ids = [matched_device.pk] if matched_device is not None else []
+    available_units = target_rack.get_available_units(
+        u_height=placement_height,
+        rack_face=rack_face,
+        exclude=excluded_ids,
+    )
+    if position in available_units:
+        return action, detail, None, effective_face
+    detail = (
+        f"Rack position {_rack_identity_label(rack_name, ctx.location)} U{position} "
+        f"does not have {placement_height}U of available space."
+    )
+    return "error", detail, "rack_position_occupied", effective_face
+
+
+def _preview_device_row(  # noqa: C901
     row,
     ctx,
     make,
@@ -1176,6 +1895,7 @@ def _preview_device_row(
     u_position=None,
     is_explicit_mapping: bool = False,
     ambiguous_names: frozenset = frozenset(),
+    role_slug=_NOT_PROVIDED,
 ):
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     # Parse u_height early so it's available in all return paths
@@ -1185,7 +1905,8 @@ def _preview_device_row(
     except (TypeError, ValueError):
         u_height = 1
 
-    dt_exists = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists()
+    device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
+    dt_exists = device_type is not None
     if not dt_exists and not ctx.profile.create_missing_device_types:
         return RowResult(
             row_number=row["_row_number"],
@@ -1214,16 +1935,19 @@ def _preview_device_row(
         )
 
     rack_name = _str_val(row.get("rack_name"))
-    if rack_name:
-        if rack_name in ctx.rack_map:
-            rack_label = rack_name
-        elif Rack.objects.filter(site=ctx.site, name=rack_name).exists():
-            ctx.rack_map[rack_name] = rack_name  # cache to avoid repeated queries
-            rack_label = rack_name
-        else:
-            rack_label = f"{rack_name} (not found)"
-    else:
-        rack_label = "(no rack)"
+    target_rack, rack_label, rack_error = _resolve_preview_rack(
+        row,
+        ctx,
+        Rack,
+        source_id,
+        device_name,
+        make,
+        model,
+        serial,
+        asset_tag,
+    )
+    if rack_error is not None:
+        return rack_error
     raw_position = row.get("u_position")
     try:
         # Re-derive position for display label; u_position param is the pre-resolved value for field_diff
@@ -1242,13 +1966,91 @@ def _preview_device_row(
     # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
     # ensuring explicit operator mappings always take precedence over coincidental name matches.
     matched_device, match_method = _find_existing_device(
-        ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device, ambiguous_names
+        ctx.profile,
+        source_id,
+        ctx.site,
+        device_name,
+        serial,
+        asset_tag,
+        Device,
+        ambiguous_names,
+        tenant=ctx.tenant,
+        device_queryset=_device_queryset_for_user(Device, ctx.user, "view") if ctx.user is not None else None,
     )
+    if match_method == "inaccessible device":
+        return _perm_denied_row("dcim.view_device", row, device_name, "device")
+    if match_method == "ambiguous serial":
+        return _ambiguous_serial_row(row, source_id, device_name, rack_name, serial)
+    if match_method == "ambiguous asset tag":
+        return _ambiguous_asset_tag_row(row, source_id, device_name, rack_name, asset_tag)
+    if match_method == "ambiguous stored source ID":
+        return _ambiguous_source_id_row(row, source_id, device_name, rack_name)
     conflict_row_number = None
     if matched_device is not None:
+        if matched_device.site_id != ctx.site.pk:
+            return RowResult(
+                row_number=row["_row_number"],
+                source_id=source_id,
+                name=device_name,
+                action="error",
+                object_type="device",
+                detail=(
+                    f"The {match_method} matches device '{matched_device.name}' at site "
+                    f"'{matched_device.site}'. The active import site is '{ctx.site}'. Link a device in the active site."
+                ),
+                rack_name=rack_name,
+                extra_data={
+                    "identity_conflict": "cross_site_match",
+                    "netbox_device_id": matched_device.pk,
+                    "source_serial": serial or "",
+                    "asset_tag": asset_tag or "",
+                },
+            )
+        conflict_source_id = _device_binding_conflict(ctx.profile, source_id, matched_device)
+        previous_claim = ctx.claimed_device_ids.get(matched_device.pk)
+        if conflict_source_id or (previous_claim and previous_claim[0] != row.get("_row_number")):
+            claimed_source = conflict_source_id or previous_claim[1]
+            return RowResult(
+                row_number=row["_row_number"],
+                source_id=source_id,
+                name=device_name,
+                action="error",
+                object_type="device",
+                detail=(
+                    f"Device '{matched_device.name}' is already bound to source ID "
+                    f"'{claimed_source}'. One NetBox device cannot represent two source rows."
+                ),
+                rack_name=rack_name,
+                extra_data={
+                    "identity_conflict": "device_already_bound",
+                    "netbox_device_id": matched_device.pk,
+                },
+            )
+        ctx.claimed_device_ids[matched_device.pk] = (row.get("_row_number"), source_id)
         action = "update" if ctx.profile.update_existing else "skip"
         if match_method == "name":
-            detail = f"Device '{device_name}' already exists"
+            netbox_rack = _device_rack_identity_label(matched_device) or "(none)"
+            source_rack = _rack_identity_label(rack_name, ctx.location) or "(none)"
+            netbox_position = f" U{matched_device.position}" if matched_device.position is not None else ""
+            source_position = f" U{position}" if position is not None else ""
+            placement_error = _name_placement_conflict_row(
+                row,
+                ctx,
+                matched_device,
+                source_id,
+                device_name,
+                rack_name,
+                position,
+                device_face,
+                serial,
+                asset_tag,
+            )
+            if placement_error is not None:
+                return placement_error
+            detail = (
+                f"Device '{device_name}' already exists in NetBox at rack '{netbox_rack}'{netbox_position}. "
+                f"Source placement is rack '{source_rack}'{source_position}."
+            )
         else:
             # Clarify what happens to name: it is NOT updated on matched devices
             name_note = ""
@@ -1270,18 +2072,37 @@ def _preview_device_row(
             _pos_label = f" U{position}" if position is not None else ""
             detail = f"Would create device '{device_name}' in {rack_label}{_pos_label}"
 
-    action, detail, conflict_row_number = _claim_rack_slots_for_preview(
+    pending_full_depth = DeviceType._meta.get_field("is_full_depth").get_default()
+    action, detail, identity_conflict, effective_face = _validate_preview_placement(
         action,
         detail,
         rack_name,
+        target_rack,
         position,
         device_face,
+        device_type,
+        u_height,
+        pending_full_depth,
+        matched_device,
+        ctx,
+    )
+    placement_height = device_type.u_height if device_type is not None else u_height
+    placement_full_depth = device_type.is_full_depth if device_type is not None else pending_full_depth
+    placement_face = None if placement_full_depth else effective_face
+    action, detail, conflict_row_number = _claim_rack_slots_for_preview(
+        action,
+        detail,
+        _rack_identity_label(rack_name, ctx.location),
+        position,
+        placement_face,
         ctx,
         row,
         device_name,
-        u_height,
+        placement_height,
         matched_device_pk=matched_device.pk if matched_device is not None else None,
     )
+    if conflict_row_number is not None or (action == "error" and detail.startswith("Rack position conflict:")):
+        identity_conflict = "rack_position_occupied"
 
     field_diff: dict | None = None
     if action == "update" and matched_device is not None:
@@ -1295,6 +2116,11 @@ def _preview_device_row(
             device_status,
             u_height,
             u_position,
+            rack_name=_rack_identity_label(rack_name, ctx.location),
+            device_type_key=(mfg_slug, dt_slug, make, model),
+            role_slug=role_slug,
+            tenant=ctx.tenant,
+            location=ctx.location,
         )
 
     return RowResult(
@@ -1304,6 +2130,7 @@ def _preview_device_row(
         action=action,
         object_type="device",
         detail=detail,
+        netbox_url=matched_device.get_absolute_url() if matched_device is not None else "",
         rack_name=rack_name,
         extra_data={
             "source_make": make,
@@ -1323,21 +2150,40 @@ def _preview_device_row(
             "conflicts": row.get("_conflicts", {}),
             **({"_ip": ip_fields} if ip_fields else {}),
             **({"field_diff": field_diff} if field_diff is not None else {}),
+            **({"identity_conflict": identity_conflict} if identity_conflict else {}),
             **({"netbox_device_id": matched_device.pk} if action == "update" else {}),
+            **({"_identity_state": _device_identity_state(matched_device)} if matched_device is not None else {}),
+            **(
+                {
+                    "netbox_rack_name": matched_device.rack.name if matched_device.rack_id else "",
+                    "netbox_position": _normalize_for_compare(matched_device.position),
+                    "netbox_face": matched_device.face or "",
+                }
+                if matched_device is not None
+                else {}
+            ),
             **({"conflict_row_number": conflict_row_number} if action == "error" and conflict_row_number else {}),
         },
     )
 
 
 def _rack_position_error_row(row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, action):
-    """Convert an IntegrityError on device create/update to a descriptive error RowResult."""
+    """Convert a database or model validation failure to an error row."""
     _rack_label = rack_name if rack_name else "(no rack)"
     _pos_label = f" U{position}" if position is not None else ""
-    msg = str(exc).split("\n")[0]
-    if "unique_rack_position" in msg or ("rack_id" in msg and "position" in msg):
-        detail = f"Cannot {action} '{device_name}': rack position {_rack_label}{_pos_label} is already occupied"
+    if isinstance(exc, ValidationError):
+        if hasattr(exc, "message_dict"):
+            msg = "; ".join(f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items())
+        else:
+            msg = "; ".join(exc.messages)
     else:
-        detail = f"Cannot {action} '{device_name}': database constraint violation — {msg}"
+        msg = str(exc).split("\n")[0]
+    if "unique_rack_position" in msg or ("rack_id" in msg and "position" in msg) or "occupied" in msg:
+        detail = f"Cannot {action} '{device_name}': rack position {_rack_label}{_pos_label} is already occupied"
+        identity_conflict = "rack_position_occupied"
+    else:
+        detail = f"Cannot {action} '{device_name}': validation failed: {msg}"
+        identity_conflict = "device_validation_failed"
     return RowResult(
         row_number=row["_row_number"],
         source_id=source_id,
@@ -1346,11 +2192,16 @@ def _rack_position_error_row(row, source_id, device_name, make, model, asset_tag
         object_type="device",
         detail=detail,
         rack_name=rack_name,
-        extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
+        extra_data={
+            "source_make": make,
+            "source_model": model,
+            "asset_tag": asset_tag or "",
+            "identity_conflict": identity_conflict,
+        },
     )
 
 
-def _write_device_row(
+def _write_device_row(  # noqa: C901
     row,
     ctx,
     make,
@@ -1404,43 +2255,158 @@ def _write_device_row(
 
     rack = ctx.rack_map.get(rack_name) if rack_name else None
     if rack_name and rack is None:
-        rack = Rack.objects.filter(site=ctx.site, name=rack_name).first()
+        rack, ambiguous = _get_unique_rack(Rack, ctx, rack_name, lock=True, permission_action="view")
+        if ambiguous:
+            return _ambiguous_rack_row(row, source_id, device_name, rack_name, ctx, "device")
+    if rack_name and not isinstance(rack, Rack):
+        return RowResult(
+            row_number=row["_row_number"],
+            source_id=source_id,
+            name=device_name,
+            action="error",
+            object_type="device",
+            detail=(
+                f"Rack '{_rack_identity_label(rack_name, ctx.location)}' was not found. "
+                "Select the correct import location or fix the rack name."
+            ),
+            rack_name=rack_name,
+            extra_data={"identity_conflict": "rack_not_found"},
+        )
 
     # _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,
     # ensuring explicit operator mappings always take precedence over coincidental name matches.
+    locked_source_match = None
+    if source_id:
+        locked_source_match = ctx.profile.device_matches.select_for_update().filter(source_id=source_id).first()
     device, match_method = _find_existing_device(
-        ctx.profile, source_id, ctx.site, device_name, serial, asset_tag, Device, ambiguous_names
+        ctx.profile,
+        source_id,
+        ctx.site,
+        device_name,
+        serial,
+        asset_tag,
+        Device,
+        ambiguous_names,
+        tenant=ctx.tenant,
+        device_queryset=_device_queryset_for_user(Device, ctx.user, "view") if ctx.user is not None else None,
+        source_match=locked_source_match,
+        source_match_locked=bool(source_id),
     )
+    if match_method == "inaccessible device":
+        return _perm_denied_row("dcim.view_device", row, device_name, "device")
+    if match_method == "ambiguous serial":
+        return _ambiguous_serial_row(row, source_id, device_name, rack_name, serial)
+    if match_method == "ambiguous asset tag":
+        return _ambiguous_asset_tag_row(row, source_id, device_name, rack_name, asset_tag)
+    if match_method == "ambiguous stored source ID":
+        return _ambiguous_source_id_row(row, source_id, device_name, rack_name)
 
     if device is not None:
+        try:
+            device = Device.objects.select_for_update(of=("self",)).select_related("rack__location").get(pk=device.pk)
+        except Device.DoesNotExist:
+            return _identity_state_error(
+                row,
+                source_id,
+                device_name,
+                "device",
+                f"Device identity changed after preview for '{device_name}'. Refresh the preview before importing.",
+                rack_name,
+            )
+        if device.site_id != ctx.site.pk:
+            return RowResult(
+                row_number=row["_row_number"],
+                source_id=source_id,
+                name=device_name,
+                action="error",
+                object_type="device",
+                detail=(
+                    f"The {match_method} matches device '{device.name}' at site '{device.site}'. "
+                    f"The active import site is '{ctx.site}'. Link a device in the active site."
+                ),
+                rack_name=rack_name,
+                extra_data={"identity_conflict": "cross_site_match", "netbox_device_id": device.pk},
+            )
+        if match_method == "name":
+            placement_error = _name_placement_conflict_row(
+                row,
+                ctx,
+                device,
+                source_id,
+                device_name,
+                rack_name,
+                position,
+                face,
+                serial,
+                asset_tag,
+            )
+            if placement_error is not None:
+                return placement_error
+        actual_action = "update" if ctx.profile.update_existing else "skip"
+        if not _intent_matches(ctx, row, "device", actual_action, device.pk, _device_identity_state(device)):
+            return _identity_state_error(
+                row,
+                source_id,
+                device_name,
+                "device",
+                f"Device identity changed after preview for '{device_name}'. Refresh the preview before importing.",
+                rack_name,
+            )
+        conflict_source_id = _device_binding_conflict(ctx.profile, source_id, device)
+        if conflict_source_id:
+            return RowResult(
+                row_number=row["_row_number"],
+                source_id=source_id,
+                name=device_name,
+                action="error",
+                object_type="device",
+                detail=(
+                    f"Device '{device.name}' is already bound to source ID '{conflict_source_id}'. "
+                    "One NetBox device cannot represent two source rows."
+                ),
+                rack_name=rack_name,
+                extra_data={"identity_conflict": "device_already_bound", "netbox_device_id": device.pk},
+            )
         if ctx.profile.update_existing:
-            if ctx.user is not None and not ctx.user.has_perm("dcim.change_device"):
+            if (
+                ctx.user is not None
+                and not _device_queryset_for_user(Device, ctx.user, "change").filter(pk=device.pk).exists()
+            ):
                 return _perm_denied_row("dcim.change_device", row, device_name, "device")
             device.device_type = device_type
             device.role = device_role
             device.rack = rack if isinstance(rack, Rack) else None
             device.position = position
-            device.face = face
-            device.airflow = airflow
+            if device_type.u_height == 0:
+                device.face = None
+            elif face is not None:
+                device.face = face
+            if airflow is not None:
+                device.airflow = airflow
             device.status = status
             device.serial = serial or device.serial
             if asset_tag:
                 device.asset_tag = asset_tag
-            if ctx.tenant:
-                device.tenant = ctx.tenant
+            device.location = ctx.location
+            device.tenant = ctx.tenant
+            ip_json = {}
             try:
                 with transaction.atomic():
+                    device.full_clean()
                     device.save()
-            except IntegrityError as exc:
+                    _bind_device_source(ctx.profile, source_id, device, asset_tag)
+                    for ip_field, ip_str in (ip_fields or {}).items():
+                        assigned = _assign_ip_to_device(device, ip_field, ip_str)
+                        if not assigned:
+                            ip_json[ip_field] = ip_str
+                    _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"), ip_json or None)
+                    _enforce_saved_object_permission(device, ctx.user, "change")
+            except _ObjectPermissionDenied:
+                return _perm_denied_row("dcim.change_device", row, device_name, "device")
+            except (IntegrityError, ValidationError) as exc:
                 return _rack_position_error_row(
                     row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "update"
                 )
-            ip_json = {}
-            for ip_field, ip_str in (ip_fields or {}).items():
-                assigned = _assign_ip_to_device(device, ip_field, ip_str)
-                if not assigned:
-                    ip_json[ip_field] = ip_str
-            _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"), ip_json or None)
             return RowResult(
                 row_number=row["_row_number"],
                 source_id=source_id,
@@ -1463,11 +2429,21 @@ def _write_device_row(
             extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
         )
 
+    if not _intent_matches(ctx, row, "device", "create"):
+        return _identity_state_error(
+            row,
+            source_id,
+            device_name,
+            "device",
+            f"Device identity changed after preview for '{device_name}'. Refresh the preview before importing.",
+            rack_name,
+        )
     if ctx.user is not None and not ctx.user.has_perm("dcim.add_device"):
         return _perm_denied_row("dcim.add_device", row, device_name, "device")
+    ip_json = {ip_field: ip_str for ip_field, ip_str in (ip_fields or {}).items()}
     try:
         with transaction.atomic():
-            device = Device.objects.create(
+            device = Device(
                 site=ctx.site,
                 location=ctx.location,
                 name=device_name,
@@ -1482,15 +2458,17 @@ def _write_device_row(
                 asset_tag=asset_tag,
                 tenant=ctx.tenant,
             )
-    except IntegrityError as exc:
+            device.full_clean()
+            device.save()
+            _bind_device_source(ctx.profile, source_id, device, asset_tag)
+            _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"), ip_json or None)
+            _enforce_saved_object_permission(device, ctx.user, "add")
+    except _ObjectPermissionDenied:
+        return _perm_denied_row("dcim.add_device", row, device_name, "device")
+    except (IntegrityError, ValidationError) as exc:
         return _rack_position_error_row(
             row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "create"
         )
-    ip_json = {}
-    for ip_field, ip_str in (ip_fields or {}).items():
-        # New device — no interfaces yet, always store in JSON
-        ip_json[ip_field] = ip_str
-    _store_source_id(device, ctx.profile, source_id, row.get("_extra_columns"), ip_json or None)
     _rack_label = rack_name if rack_name else "(no rack)"
     _pos_label = f" U{position}" if position is not None else ""
     return RowResult(
@@ -1555,12 +2533,8 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
     suppression is preferred over a project-wide bump.
     """
     from dcim.models import Device, DeviceRole, DeviceType, Rack
-    from .models import IgnoredDevice
 
     side_map, airflow_map, status_map = _get_translation_maps()
-
-    # Pre-fetch ignored source IDs to avoid per-row queries
-    ignored_source_ids = set(IgnoredDevice.objects.filter(profile=ctx.profile).values_list("source_id", flat=True))
 
     # Identify device names that appear in multiple rows. When the same name occurs
     # in 2+ rows the name-based device lookup would incorrectly match all of them
@@ -1571,12 +2545,14 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
     for _row in rows:
         _dc = _str_val(_row.get("device_class"))
         _crm = class_role_map.get(_dc)
-        if _crm and _crm.creates_rack:
+        if not _is_writing_device_row(_row, _crm, ctx.ignored_source_ids):
             continue
-        _dn = _str_val(_row.get("device_name"))
+        _dn = _effective_device_name(_row)
         if _dn:
-            _name_counts[_dn] = _name_counts.get(_dn, 0) + 1
+            name_key = _identity_text(_dn)
+            _name_counts[name_key] = _name_counts.get(name_key, 0) + 1
     ambiguous_names: frozenset = frozenset(n for n, c in _name_counts.items() if c > 1)
+    _reserve_device_names(rows, ctx, class_role_map, Device)
 
     for row in rows:
         device_class = _str_val(row.get("device_class"))
@@ -1584,14 +2560,76 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
         if crm and crm.creates_rack:
             continue
 
-        source_id = str(row.get("source_id", ""))
-        device_name = _str_val(row.get("device_name"))
+        source_id = _str_val(row.get("source_id"))
+        device_name = _effective_device_name(row)
         rack_name = _str_val(row.get("rack_name"))
         make = " ".join((_str_val(row.get("make")) or "Unknown").split())
         model = " ".join((_str_val(row.get("model")) or "Unknown").split())
         serial = _str_val(row.get("serial"))
         asset_tag_raw = _str_val(row.get("asset_tag")) or None
         asset_tag = asset_tag_raw[:50] if asset_tag_raw else None
+
+        slug_conflict = ctx.slug_conflicts_by_row.get(row.get("_row_number"))
+        if slug_conflict:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="error",
+                    object_type="device",
+                    detail=slug_conflict,
+                    rack_name=rack_name,
+                    extra_data={"identity_conflict": "derived_slug_collision"},
+                )
+            )
+            continue
+
+        if source_id and source_id in ctx.duplicate_source_ids:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="error",
+                    object_type="device",
+                    detail=f"Duplicate source ID '{source_id}' appears more than once in this import.",
+                    rack_name=rack_name,
+                    extra_data={"identity_conflict": "duplicate_source_id"},
+                )
+            )
+            continue
+
+        if serial and serial in ctx.duplicate_serials:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="error",
+                    object_type="device",
+                    detail=f"Duplicate serial '{serial}' appears more than once in this import.",
+                    rack_name=rack_name,
+                    extra_data={"identity_conflict": "duplicate_serial"},
+                )
+            )
+            continue
+
+        asset_tag_key = _identity_text(asset_tag) if asset_tag else ""
+        if asset_tag_key and asset_tag_key in ctx.duplicate_asset_tags:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="error",
+                    object_type="device",
+                    detail=f"Duplicate asset tag '{asset_tag}' appears more than once in this import.",
+                    rack_name=rack_name,
+                    extra_data={"identity_conflict": "duplicate_asset_tag"},
+                )
+            )
+            continue
 
         ip_fields = {}
         for ip_field in ("primary_ip4", "primary_ip6", "oob_ip"):
@@ -1603,7 +2641,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 else:
                     logger.warning("Row %s: unparseable IP value for %s: %r", row.get("_row_number"), ip_field, raw)
 
-        if source_id and source_id in ignored_source_ids:
+        if source_id and source_id in ctx.ignored_source_ids:
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -1617,6 +2655,100 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 )
             )
             continue
+
+        if _identity_text(device_name) in ambiguous_names:
+            strong_device, strong_method = _find_existing_device(
+                ctx.profile,
+                source_id,
+                ctx.site,
+                device_name,
+                serial,
+                asset_tag,
+                Device,
+                ambiguous_names,
+                tenant=ctx.tenant,
+                device_queryset=(_device_queryset_for_user(Device, ctx.user, "view") if ctx.user is not None else None),
+            )
+            if strong_method == "inaccessible device":
+                ctx.result.rows.append(_perm_denied_row("dcim.view_device", row, device_name, "device"))
+                continue
+            if strong_method == "ambiguous serial":
+                ctx.result.rows.append(_ambiguous_serial_row(row, source_id, device_name, rack_name, serial))
+                continue
+            if strong_method == "ambiguous asset tag":
+                ctx.result.rows.append(_ambiguous_asset_tag_row(row, source_id, device_name, rack_name, asset_tag))
+                continue
+            if strong_method == "ambiguous stored source ID":
+                ctx.result.rows.append(_ambiguous_source_id_row(row, source_id, device_name, rack_name))
+                continue
+            if strong_device is None:
+                existing = (
+                    _device_queryset_for_user(Device, ctx.user, "view")
+                    .filter(
+                        site=ctx.site,
+                        name__iexact=device_name,
+                        **_tenant_filter(ctx.tenant),
+                    )
+                    .select_related("rack__location")
+                    .first()
+                )
+                placement = f"source rack '{rack_name or '(none)'}'"
+                if row.get("u_position") not in (None, ""):
+                    placement += f", U{row.get('u_position')}"
+                detail = f"Duplicate device name '{device_name}' in this import ({placement})."
+                extra_data = {
+                    "identity_conflict": "duplicate_name",
+                    "suggested_name": _suggest_unique_device_name(row, ctx),
+                    "source_rack_name": rack_name,
+                    "source_position": row.get("u_position") or "",
+                }
+                if existing is not None:
+                    netbox_rack = _device_rack_identity_label(existing) or "(none)"
+                    detail += (
+                        f" NetBox already has '{existing.name}' in rack '{netbox_rack}'"
+                        f"{f', U{existing.position}' if existing.position is not None else ''}."
+                    )
+                    extra_data.update(
+                        {
+                            "netbox_device_id": existing.pk,
+                            "netbox_device_name": existing.name,
+                            "netbox_rack_name": netbox_rack,
+                            "netbox_position": _normalize_for_compare(existing.position),
+                            "netbox_face": existing.face or "",
+                            "netbox_url": existing.get_absolute_url(),
+                        }
+                    )
+                ctx.result.rows.append(
+                    RowResult(
+                        row_number=row["_row_number"],
+                        source_id=source_id,
+                        name=device_name,
+                        action="error",
+                        object_type="device",
+                        detail=detail,
+                        rack_name=rack_name,
+                        extra_data=extra_data,
+                    )
+                )
+                continue
+            if _device_binding_conflict(ctx.profile, source_id, strong_device):
+                conflict_source_id = _device_binding_conflict(ctx.profile, source_id, strong_device)
+                ctx.result.rows.append(
+                    RowResult(
+                        row_number=row["_row_number"],
+                        source_id=source_id,
+                        name=device_name,
+                        action="error",
+                        object_type="device",
+                        detail=(
+                            f"Device '{strong_device.name}' matched by {strong_method} is already bound "
+                            f"to source ID '{conflict_source_id}'."
+                        ),
+                        rack_name=rack_name,
+                        extra_data={"identity_conflict": "device_already_bound"},
+                    )
+                )
+                continue
 
         u_position_raw = row.get("u_position")
         try:
@@ -1636,14 +2768,6 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 continue
         except (TypeError, ValueError):
             position = None
-
-        if not device_name and asset_tag:
-            # Fallback: if a saved split-resolution cleared device_name (e.g.
-            # user split "TAG - free-text comment" → asset_tag and ignored
-            # the comment), reuse the asset_tag as the device name rather
-            # than failing the row.  One-way only (asset_tag never falls back
-            # to device_name) to avoid circular resolution.
-            device_name = asset_tag
 
         if not device_name:
             ctx.result.rows.append(
@@ -1757,6 +2881,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 u_position=position,
                 is_explicit_mapping=is_explicit_mapping,
                 ambiguous_names=ambiguous_names,
+                role_slug=crm.role_slug,
             )
         else:
             row_result = _write_device_row(
@@ -1790,8 +2915,115 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
 # ---------------------------------------------------------------------------
 
 
+def _identity_text(value):
+    """Normalize a label for source identity comparisons."""
+    return " ".join(str(value).split()).casefold()
+
+
+def _add_within_file_slug_conflicts(manufacturer_groups, device_type_groups, conflicts):
+    """Add collisions between different identities in the same source file."""
+    for slug, records in manufacturer_groups.items():
+        source_makes = {_identity_text(record["make"]) for record in records}
+        if len(source_makes) <= 1 or all(record["explicit_manufacturer"] for record in records):
+            continue
+        source_labels = {record["make"] for record in records}
+        detail = (
+            f"Different manufacturer names derive the same slug '{slug}': "
+            f"{', '.join(sorted(source_labels))}. Add explicit manufacturer mappings."
+        )
+        for record in records:
+            conflicts[record["row_number"]] = detail
+
+    for (mfg_slug, dt_slug), records in device_type_groups.items():
+        source_types = {(_identity_text(record["make"]), _identity_text(record["model"])) for record in records}
+        if len(source_types) <= 1 or all(record["explicit_device_type"] for record in records):
+            continue
+        source_labels = {(record["make"], record["model"]) for record in records}
+        labels = ", ".join(sorted(f"{make} / {model}" for make, model in source_labels))
+        detail = (
+            f"Different device types derive the same slug '{mfg_slug}/{dt_slug}': {labels}. "
+            "Add explicit device type mappings."
+        )
+        for record in records:
+            conflicts[record["row_number"]] = detail
+
+
+def _add_existing_slug_conflicts(manufacturer_groups, device_type_groups, conflicts):
+    """Add collisions with differently named objects that already exist in NetBox."""
+    from dcim.models import DeviceType, Manufacturer
+
+    existing_manufacturers = {
+        manufacturer.slug: manufacturer
+        for manufacturer in Manufacturer.objects.filter(slug__in=manufacturer_groups).only("name", "slug")
+    }
+    for slug, records in manufacturer_groups.items():
+        existing = existing_manufacturers.get(slug)
+        if existing is None:
+            continue
+        for record in records:
+            if record["explicit_manufacturer"] or _identity_text(existing.name) == _identity_text(record["make"]):
+                continue
+            conflicts[record["row_number"]] = (
+                f"Manufacturer '{record['make']}' derives slug '{slug}', which already belongs to "
+                f"'{existing.name}' in NetBox. Add an explicit manufacturer mapping."
+            )
+
+    existing_device_types = {
+        (device_type.manufacturer.slug, device_type.slug): device_type
+        for device_type in DeviceType.objects.filter(
+            manufacturer__slug__in=manufacturer_groups,
+            slug__in={key[1] for key in device_type_groups},
+        ).select_related("manufacturer")
+    }
+    for key, records in device_type_groups.items():
+        existing = existing_device_types.get(key)
+        if existing is None:
+            continue
+        for record in records:
+            if record["explicit_device_type"] or _identity_text(existing.model) == _identity_text(record["model"]):
+                continue
+            conflicts[record["row_number"]] = (
+                f"Device type '{record['make']} / {record['model']}' derives slug '{key[0]}/{key[1]}', "
+                f"which already belongs to '{existing.manufacturer.name} / {existing.model}' in NetBox. "
+                "Add an explicit device type mapping."
+            )
+
+
+def _derived_slug_conflicts(rows, profile, class_role_map, ignored_source_ids=frozenset()):
+    """Return per-row errors for different source identities that derive one slug."""
+    manufacturer_groups = {}
+    device_type_groups = {}
+    for row in rows:
+        crm = class_role_map.get(_str_val(row.get("device_class")))
+        if not _is_writing_device_row(row, crm, ignored_source_ids):
+            continue
+        make = " ".join((_str_val(row.get("make")) or "Unknown").split())
+        model = " ".join((_str_val(row.get("model")) or "Unknown").split())
+        mfg_slug, dt_slug, explicit_device_type = _resolve_device_type_slugs(make, model, profile)
+        explicit_manufacturer = explicit_device_type or profile.manufacturer_mappings.filter(source_make=make).exists()
+        record = {
+            "row_number": row.get("_row_number"),
+            "make": make,
+            "model": model,
+            "explicit_device_type": explicit_device_type,
+            "explicit_manufacturer": explicit_manufacturer,
+        }
+        manufacturer_groups.setdefault(mfg_slug, []).append(record)
+        device_type_groups.setdefault((mfg_slug, dt_slug), []).append(record)
+
+    conflicts = {}
+    _add_within_file_slug_conflicts(manufacturer_groups, device_type_groups, conflicts)
+    _add_existing_slug_conflicts(manufacturer_groups, device_type_groups, conflicts)
+    return conflicts
+
+
 def run_import(
-    rows: list[dict], profile: ImportProfile, context: dict, dry_run: bool = True, user: object | None = None
+    rows: list[dict],
+    profile: ImportProfile,
+    context: dict,
+    dry_run: bool = True,
+    user: object | None = None,
+    expected_intents: dict | None = None,
 ) -> ImportResult:
     """Run (or preview) the import.
 
@@ -1799,6 +3031,44 @@ def run_import(
     dry_run=True  → no DB writes, returns what *would* happen
     dry_run=False → writes to DB; pass user to enforce DCIM object permissions
     """
+    from .models import IgnoredDevice
+
+    class_role_map: dict[str, object] = {
+        crm.source_class: crm for crm in profile.class_role_mappings.select_related("rack_type").all()
+    }
+    ignored_source_ids = frozenset(
+        _str_val(source_id)
+        for source_id in IgnoredDevice.objects.filter(profile=profile).values_list("source_id", flat=True)
+    )
+    source_id_counts = {}
+    serial_counts = {}
+    asset_tag_counts = {}
+    rack_name_counts = {}
+    for row in rows:
+        source_id = _str_val(row.get("source_id"))
+        crm = class_role_map.get(_str_val(row.get("device_class")))
+        if not crm or crm.ignore or source_id in ignored_source_ids:
+            continue
+        if crm.creates_rack:
+            if source_id:
+                source_id_counts[source_id] = source_id_counts.get(source_id, 0) + 1
+            rack_name = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
+            if rack_name:
+                rack_key = _identity_text(rack_name)
+                rack_name_counts[rack_key] = rack_name_counts.get(rack_key, 0) + 1
+            continue
+        if not _is_writing_device_row(row, crm, ignored_source_ids):
+            continue
+        if source_id:
+            source_id_counts[source_id] = source_id_counts.get(source_id, 0) + 1
+        serial = _str_val(row.get("serial"))
+        if serial:
+            serial_counts[serial] = serial_counts.get(serial, 0) + 1
+        asset_tag = _str_val(row.get("asset_tag"))[:50]
+        if asset_tag:
+            asset_tag_key = _identity_text(asset_tag)
+            asset_tag_counts[asset_tag_key] = asset_tag_counts.get(asset_tag_key, 0) + 1
+
     ctx = ImportContext(
         profile=profile,
         site=context["site"],
@@ -1807,15 +3077,24 @@ def run_import(
         dry_run=dry_run,
         result=ImportResult(),
         user=user,
+        expected_intents=expected_intents or {},
+        duplicate_source_ids=frozenset(source_id for source_id, count in source_id_counts.items() if count > 1),
+        duplicate_serials=frozenset(serial for serial, count in serial_counts.items() if count > 1),
+        duplicate_asset_tags=frozenset(tag for tag, count in asset_tag_counts.items() if count > 1),
+        duplicate_rack_names=frozenset(name for name, count in rack_name_counts.items() if count > 1),
+        ignored_source_ids=ignored_source_ids,
     )
+    ctx.slug_conflicts_by_row = _derived_slug_conflicts(rows, profile, class_role_map, ignored_source_ids)
 
-    class_role_map: dict[str, object] = {
-        crm.source_class: crm for crm in profile.class_role_mappings.select_related("rack_type").all()
-    }
-
-    _pass1_ensure_types(rows, ctx, class_role_map)
-    _pass2_process_racks(rows, ctx, class_role_map)
-    _pass3_process_devices(rows, ctx, class_role_map)
+    if dry_run:
+        _pass1_ensure_types(rows, ctx, class_role_map)
+        _pass2_process_racks(rows, ctx, class_role_map)
+        _pass3_process_devices(rows, ctx, class_role_map)
+    else:
+        with transaction.atomic():
+            _pass1_ensure_types(rows, ctx, class_role_map)
+            _pass2_process_racks(rows, ctx, class_role_map)
+            _pass3_process_devices(rows, ctx, class_role_map)
 
     ctx.result._recompute_counts()
     if ctx.pending_device_roles:

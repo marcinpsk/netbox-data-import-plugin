@@ -6,7 +6,7 @@ import logging
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, IntegrityError
+from django.db import DatabaseError, IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -56,6 +56,40 @@ def _safe_next_url(request, fallback: str) -> str:
     ):
         return url
     return reverse(fallback)
+
+
+def _save_source_resolution_for_user(user, profile, source_id, source_column, values):
+    """Create or update one source resolution within the user's object permission scope."""
+    with transaction.atomic():
+        resolution = (
+            SourceResolution.objects.select_for_update()
+            .filter(
+                profile=profile,
+                source_id=source_id,
+                source_column=source_column,
+            )
+            .first()
+        )
+        if resolution is None:
+            if not user.has_perm("netbox_data_import.add_sourceresolution"):
+                return False
+            resolution = SourceResolution.objects.create(
+                profile=profile,
+                source_id=source_id,
+                source_column=source_column,
+                **values,
+            )
+            allowed = user.has_perm("netbox_data_import.add_sourceresolution", resolution)
+        else:
+            allowed = user.has_perm("netbox_data_import.change_sourceresolution", resolution)
+            if allowed:
+                for field_name, value in values.items():
+                    setattr(resolution, field_name, value)
+                resolution.save(update_fields=values)
+                allowed = user.has_perm("netbox_data_import.change_sourceresolution", resolution)
+        if not allowed:
+            transaction.set_rollback(True)
+        return allowed
 
 
 # ---------------------------------------------------------------------------
@@ -658,12 +692,12 @@ class ImportSetupView(PermissionRequiredMixin, View):
         initial = {}
         if profile_pk := request.GET.get("profile"):
             initial["profile"] = profile_pk
-        form = ImportSetupForm(initial=initial)
+        form = ImportSetupForm(initial=initial, user=request.user)
         return render(request, "netbox_data_import/import_setup.html", {"form": form})
 
     def post(self, request):
         """Parse the uploaded file and redirect to the preview step."""
-        form = ImportSetupForm(request.POST, request.FILES)
+        form = ImportSetupForm(request.POST, request.FILES, user=request.user)
         if not form.is_valid():
             return render(request, "netbox_data_import/import_setup.html", {"form": form})
 
@@ -720,7 +754,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         from dcim.models import Location, Site
         from tenancy.models import Tenant
 
-        profile = ImportProfile.objects.filter(pk=ctx.get("profile_id")).first()
+        profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=ctx.get("profile_id")).first()
         if not profile:
             messages.warning(request, "Import profile not found.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
@@ -759,7 +793,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         from dcim.models import Device
 
         netbox_device_ids = [m.netbox_device_id for m in device_matches]
-        devices_by_id = {d.id: d for d in Device.objects.filter(id__in=netbox_device_ids)}
+        devices_by_id = {
+            d.id: d for d in Device.objects.restrict(request.user, "view").filter(id__in=netbox_device_ids)
+        }
 
         for match in device_matches:
             device = devices_by_id.get(match.netbox_device_id)
@@ -841,6 +877,38 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         )
 
 
+def _import_intents(result):
+    """Return execute guards derived from a full-batch preview."""
+    intents = {}
+    for row in result.rows:
+        if row.object_type not in ("device", "rack"):
+            continue
+        object_id = row.extra_data.get("netbox_device_id") or row.extra_data.get("netbox_rack_id")
+        intents[(row.row_number, row.object_type)] = {
+            "action": row.action,
+            "object_id": object_id,
+            "object_state": row.extra_data.get("_identity_state"),
+        }
+    return intents
+
+
+def _previewed_writes_changed(stored_result, current_result):
+    """Return True when any device or rack preview row changed."""
+
+    def _tracked_rows(result):
+        rows = result.rows if hasattr(result, "rows") else result.get("rows", [])
+        tracked = {}
+        for row in rows:
+            data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            object_type = data.get("object_type")
+            if object_type not in ("device", "rack"):
+                continue
+            tracked[(data.get("row_number"), object_type)] = data
+        return tracked
+
+    return _tracked_rows(stored_result) != _tracked_rows(current_result)
+
+
 class ImportRunView(PermissionRequiredMixin, View):
     """Step 3: run the real import (dry_run=False)."""
 
@@ -858,7 +926,10 @@ class ImportRunView(PermissionRequiredMixin, View):
         from django.db import transaction
         from tenancy.models import Tenant
 
-        profile = get_object_or_404(ImportProfile, pk=ctx_data["profile_id"])
+        profile = get_object_or_404(
+            ImportProfile.objects.restrict(request.user, "change"),
+            pk=ctx_data["profile_id"],
+        )
         site = get_object_or_404(Site, pk=ctx_data["site_id"])
         location = get_object_or_404(Location, pk=ctx_data["location_id"]) if ctx_data.get("location_id") else None
         tenant = get_object_or_404(Tenant, pk=ctx_data["tenant_id"]) if ctx_data.get("tenant_id") else None
@@ -866,7 +937,32 @@ class ImportRunView(PermissionRequiredMixin, View):
         context = {"site": site, "location": location, "tenant": tenant}
 
         with transaction.atomic():
-            result = engine.run_import(rows, profile, context, dry_run=False, user=request.user)
+            current_preview = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
+            stored_preview = request.session.get("import_result") or {"rows": []}
+            if _previewed_writes_changed(stored_preview, current_preview):
+                request.session["import_result"] = current_preview.to_session_dict()
+                messages.error(
+                    request,
+                    "NetBox identity changed after preview. Review the refreshed preview before importing.",
+                )
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+            result = engine.run_import(
+                rows,
+                profile,
+                context,
+                dry_run=False,
+                user=request.user,
+                expected_intents=_import_intents(current_preview),
+            )
+            if any(row.extra_data.get("identity_state_changed") for row in result.rows):
+                transaction.set_rollback(True)
+                request.session["import_result"] = current_preview.to_session_dict()
+                messages.error(
+                    request,
+                    "NetBox identity changed during import. No changes were saved. Refresh the preview and try again.",
+                )
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         # Persist job record
         from .models import ImportJob
@@ -1303,16 +1399,94 @@ class SyncPlacementView(_AjaxPermissionView):
 # ---------------------------------------------------------------------------
 
 
+class ResolveDuplicateNameView(PermissionRequiredMixin, View):
+    """Save a unique device name for one duplicate source row."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Validate and persist the replacement device name."""
+        from dcim.models import Device
+
+        ctx_data = request.session.get("import_context") or {}
+        rows = request.session.get("import_rows") or []
+        profile_id = request.POST.get("profile_id")
+        if str(ctx_data.get("profile_id")) != str(profile_id):
+            messages.error(request, "The selected profile is not the active import profile.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        profile = get_object_or_404(
+            ImportProfile.objects.restrict(request.user, "change"),
+            pk=profile_id,
+        )
+        try:
+            row_number = int(request.POST.get("row_number", ""))
+        except (TypeError, ValueError):
+            messages.error(request, "A valid source row is required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        source_id = engine._str_val(request.POST.get("source_id"))
+        source_rows = [
+            row
+            for row in rows
+            if row.get("_row_number") == row_number and engine._str_val(row.get("source_id")) == source_id
+        ]
+        if not source_id or len(source_rows) != 1:
+            messages.error(request, "The source ID and row must identify one active import row.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        new_name = request.POST.get("new_name", "").strip()
+        if not new_name or len(new_name) > 64:
+            messages.error(request, "The device name must contain 1 to 64 characters.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        effective_rows = engine.reapply_saved_resolutions(rows, profile)
+        other_names = {
+            engine._identity_text(row.get("device_name", ""))
+            for row in effective_rows
+            if row.get("_row_number") != row_number and engine._str_val(row.get("device_name"))
+        }
+        if engine._identity_text(new_name) in other_names:
+            messages.error(request, f"Device name '{new_name}' is already used by another source row.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        tenant_filter = (
+            {"tenant_id": ctx_data.get("tenant_id")} if ctx_data.get("tenant_id") else {"tenant__isnull": True}
+        )
+        if Device.objects.filter(site_id=ctx_data.get("site_id"), name__iexact=new_name, **tenant_filter).exists():
+            messages.error(request, f"Device name '{new_name}' already exists at the active import site.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        resolution_values = {
+            "original_value": str(source_rows[0].get("device_name", "")),
+            "resolved_fields": {"device_name": new_name},
+        }
+        try:
+            allowed = _save_source_resolution_for_user(
+                request.user,
+                profile,
+                source_id,
+                "device_name",
+                resolution_values,
+            )
+        except IntegrityError:
+            messages.error(request, "The saved name changed while this request was being processed. Try again.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        if not allowed:
+            messages.error(request, "Permission denied: cannot create or change this saved name.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
+        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+
 class SaveResolutionView(_AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
-    permission_required = "netbox_data_import.add_sourceresolution"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
         import json
-
-        from .models import SourceResolution
 
         profile_id = request.POST.get("profile_id")
         source_id = request.POST.get("source_id")
@@ -1327,17 +1501,28 @@ class SaveResolutionView(_AjaxPermissionView):
             resolved_fields = {}
 
         if profile_id and source_id and source_column:
-            profile = get_object_or_404(ImportProfile, pk=profile_id)
-            SourceResolution.objects.update_or_create(
-                profile=profile,
-                source_id=source_id,
-                source_column=source_column,
-                defaults={
-                    "original_value": original_value or "",
-                    "resolved_fields": resolved_fields,
-                },
+            profile = get_object_or_404(
+                ImportProfile.objects.restrict(request.user, "change"),
+                pk=profile_id,
             )
-            messages.success(request, "Resolution saved. Re-run the import to apply it.")
+            try:
+                allowed = _save_source_resolution_for_user(
+                    request.user,
+                    profile,
+                    source_id,
+                    source_column,
+                    {
+                        "original_value": original_value or "",
+                        "resolved_fields": resolved_fields,
+                    },
+                )
+            except IntegrityError:
+                messages.error(request, "The resolution changed while this request was being processed. Try again.")
+                return redirect(next_url)
+            if allowed:
+                messages.success(request, "Resolution saved. Re-run the import to apply it.")
+            else:
+                messages.error(request, "Permission denied: cannot create or change this resolution.")
         return redirect(next_url)
 
 
@@ -2006,36 +2191,99 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
     Saves a DeviceExistingMatch; on next preview re-run the row shows action='update'.
     """
 
-    permission_required = "netbox_data_import.add_deviceexistingmatch"
+    permission_required = (
+        "netbox_data_import.change_importprofile",
+        "dcim.view_device",
+    )
 
     def post(self, request):
         """Save the device match and redirect back to preview."""
         from dcim.models import Device
 
         profile_id = request.POST.get("profile_id")
-        profile = get_object_or_404(ImportProfile, pk=profile_id)
-        source_id = request.POST.get("source_id", "").strip()
+        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+        source_id = engine._str_val(request.POST.get("source_id"))
         netbox_device_id = request.POST.get("netbox_device_id", "").strip()
 
         if not source_id or not netbox_device_id:
             messages.error(request, "source_id and netbox_device_id are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
+        ctx_data = request.session.get("import_context") or {}
+        rows = request.session.get("import_rows") or []
+        if str(ctx_data.get("profile_id")) != str(profile.pk):
+            messages.error(request, "The selected profile is not the active import profile.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        source_rows = [row for row in rows if engine._str_val(row.get("source_id")) == source_id]
+        if len(source_rows) != 1:
+            messages.error(request, "The source ID must identify exactly one row in the active import.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
         try:
-            device = Device.objects.get(pk=int(netbox_device_id))
+            device = Device.objects.restrict(request.user, "view").get(pk=int(netbox_device_id))
         except (Device.DoesNotExist, ValueError):
             messages.error(request, f"Device #{netbox_device_id} not found.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        DeviceExistingMatch.objects.update_or_create(
-            profile=profile,
-            source_id=source_id,
-            defaults={
-                "netbox_device_id": device.pk,
-                "device_name": device.name,
-                "source_asset_tag": request.POST.get("source_asset_tag", "").strip(),
-            },
+        if device.site_id != ctx_data.get("site_id"):
+            messages.error(request, "The selected device is outside the active import site.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        conflicting_match = (
+            profile.device_matches.filter(netbox_device_id=device.pk).exclude(source_id=source_id).first()
         )
+        if conflicting_match:
+            messages.error(
+                request,
+                f"Device '{device.name}' is already linked to source '{conflicting_match.source_id}'.",
+            )
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        binding_values = {
+            "netbox_device_id": device.pk,
+            "device_name": device.name,
+            "source_asset_tag": str(source_rows[0].get("asset_tag", "")).strip(),
+        }
+        allowed = True
+        try:
+            with transaction.atomic():
+                binding = (
+                    DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
+                )
+                if binding is None:
+                    if not request.user.has_perm("netbox_data_import.add_deviceexistingmatch"):
+                        allowed = False
+                    else:
+                        binding = DeviceExistingMatch.objects.create(
+                            profile=profile,
+                            source_id=source_id,
+                            **binding_values,
+                        )
+                        allowed = request.user.has_perm(
+                            "netbox_data_import.add_deviceexistingmatch",
+                            binding,
+                        )
+                else:
+                    allowed = request.user.has_perm(
+                        "netbox_data_import.change_deviceexistingmatch",
+                        binding,
+                    )
+                    if allowed:
+                        for field_name, value in binding_values.items():
+                            setattr(binding, field_name, value)
+                        binding.save(update_fields=binding_values)
+                        allowed = request.user.has_perm(
+                            "netbox_data_import.change_deviceexistingmatch",
+                            binding,
+                        )
+                if not allowed:
+                    transaction.set_rollback(True)
+        except IntegrityError:
+            messages.error(request, "The device link changed while this request was being processed. Try again.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        if not allowed:
+            messages.error(request, "Permission denied: cannot create or change this device link.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         messages.success(request, f"Source '{source_id}' linked to existing device '{device.name}'.")
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
@@ -2158,7 +2406,8 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
         """
         from dcim.models import Device
 
-        base_qs = Device.objects.filter(name__icontains=q).distinct().select_related("site").order_by("name")
+        visible_devices = Device.objects.restrict(request.user, "view")
+        base_qs = visible_devices.filter(name__icontains=q).distinct().select_related("site").order_by("name")
         seen_ids = set()
         for dev in base_qs[:limit]:
             seen_ids.add(dev.pk)
@@ -2174,7 +2423,7 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
         if len(results) >= limit:
             return
         token_qs = (
-            Device.objects.filter(_device_name_filter(q))
+            visible_devices.filter(_device_name_filter(q))
             .exclude(pk__in=seen_ids)
             .distinct()
             .select_related("site")
@@ -2245,35 +2494,61 @@ class QuickCreateDeviceRoleView(_AjaxPermissionView):
         )
 
 
-def _auto_match_single_device(device_model, device_name, serial, asset_tag):
+def _auto_match_single_device(
+    device_model,
+    device_name,
+    serial,
+    asset_tag,
+    site=None,
+    tenant_id=None,
+    device_queryset=None,
+):
     """Try to match a single device row to an existing NetBox device.
 
-    Returns (device_or_None, is_ambiguous).  Matching priority: serial →
-    asset_tag → exact name.  Multiple matches on any field → ambiguous.
+    Returns (device_or_None, is_ambiguous, method). Matching priority is
+    serial, asset tag, then exact name. Multiple matches are ambiguous.
     """
     device = None
+    method = None
+    devices = device_model.objects
     if serial:
-        results = list(device_model.objects.filter(serial=serial)[:2])
+        results = list(devices.filter(serial=serial)[:2])
         if len(results) == 1:
             device = results[0]
+            method = "serial"
         elif len(results) > 1:
-            return None, True
+            return None, True, None
 
     if device is None and asset_tag:
-        results = list(device_model.objects.filter(asset_tag=asset_tag)[:2])
+        results = list(devices.filter(asset_tag__iexact=asset_tag)[:2])
         if len(results) == 1:
             device = results[0]
+            method = "asset tag"
         elif len(results) > 1:
-            return None, True
+            return None, True, None
 
     if device is None and device_name:
-        results = list(device_model.objects.filter(name=device_name)[:2])
+        name_filter = {"name__iexact": device_name}
+        if site is not None:
+            name_filter["site"] = site
+            if tenant_id is None:
+                name_filter["tenant__isnull"] = True
+            else:
+                name_filter["tenant_id"] = tenant_id
+        results = list(devices.filter(**name_filter)[:2])
         if len(results) == 1:
             device = results[0]
+            method = "name"
         elif len(results) > 1:
-            return None, True
+            return None, True, None
 
-    return device, False
+    if device is not None:
+        if site is not None and device.site_id != site.pk:
+            return None, True, None
+        if device_queryset is not None and not device_queryset.filter(pk=device.pk).exists():
+            return None, True, None
+
+    return device, False, method
 
 
 class AutoMatchDevicesView(PermissionRequiredMixin, View):
@@ -2283,50 +2558,157 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
     Name substring matches are recorded as probable_matches only (not auto-linked).
     """
 
-    permission_required = "netbox_data_import.change_importprofile"
+    permission_required = (
+        "netbox_data_import.change_importprofile",
+        "netbox_data_import.add_deviceexistingmatch",
+        "dcim.view_device",
+    )
 
-    def post(self, request):
+    def post(self, request):  # noqa: C901
         """Run auto-matching and redirect back to preview with a summary message."""
         from dcim.models import Device
 
         profile_id = request.POST.get("profile_id")
-        profile = get_object_or_404(ImportProfile, pk=profile_id)
+        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
         rows = request.session.get("import_rows", [])
+        ctx_data = request.session.get("import_context") or {}
+        if str(ctx_data.get("profile_id")) != str(profile.pk):
+            messages.error(request, "The selected profile is not the active import profile.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
+        from dcim.models import Site
+
+        site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
+        if site is None:
+            messages.error(request, "The active import site was not found.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        visible_devices = Device.objects.restrict(request.user, "view")
+
+        ignored_source_ids = set(profile.ignored_devices.values_list("source_id", flat=True))
+        class_mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
+        eligible_rows = []
+        for row in rows:
+            source_id = engine._str_val(row.get("source_id"))
+            mapping = class_mappings.get(engine._str_val(row.get("device_class")))
+            if (
+                (mapping is not None and (mapping.creates_rack or mapping.ignore))
+                or source_id in ignored_source_ids
+                or engine._has_below_rack_position(row)
+            ):
+                continue
+            eligible_rows.append(row)
+
+        source_counts = {}
+        name_counts = {}
+        serial_counts = {}
+        asset_tag_counts = {}
+        for row in eligible_rows:
+            source_id = engine._str_val(row.get("source_id"))
+            device_name = engine._effective_device_name(row)
+            serial = engine._str_val(row.get("serial"))
+            asset_tag = engine._str_val(row.get("asset_tag"))[:50]
+            for value, counts in (
+                (source_id, source_counts),
+                (engine._identity_text(device_name), name_counts),
+                (serial, serial_counts),
+                (engine._identity_text(asset_tag), asset_tag_counts),
+            ):
+                if value:
+                    counts[value] = counts.get(value, 0) + 1
 
         matched = 0
         ambiguous = 0
         already = 0
         probable = 0
 
-        for row in rows:
-            source_id = str(row.get("source_id", "")).strip()
-            device_name = str(row.get("device_name", "")).strip()
-            serial = str(row.get("serial", "")).strip()
-            asset_tag = str(row.get("asset_tag", "")).strip()
+        for row in eligible_rows:
+            source_id = engine._str_val(row.get("source_id"))
+            device_name = engine._effective_device_name(row)
+            serial = engine._str_val(row.get("serial"))
+            asset_tag = engine._str_val(row.get("asset_tag"))[:50]
             if not source_id:
+                continue
+            if source_counts.get(source_id, 0) > 1:
+                ambiguous += 1
                 continue
             if profile.device_matches.filter(source_id=source_id).exists():
                 already += 1
                 continue
 
-            device, is_ambiguous = _auto_match_single_device(Device, device_name, serial, asset_tag)
+            safe_name = device_name if name_counts.get(engine._identity_text(device_name), 0) == 1 else ""
+            safe_serial = serial if serial_counts.get(serial, 0) == 1 else ""
+            safe_asset_tag = asset_tag if asset_tag_counts.get(engine._identity_text(asset_tag), 0) == 1 else ""
+            device, is_ambiguous, match_method = _auto_match_single_device(
+                Device,
+                safe_name,
+                safe_serial,
+                safe_asset_tag,
+                site=site,
+                tenant_id=ctx_data.get("tenant_id"),
+                device_queryset=visible_devices,
+            )
             if is_ambiguous:
                 ambiguous += 1
                 continue
 
+            if device is not None and match_method == "name":
+                raw_position = row.get("u_position")
+                try:
+                    position = (
+                        int(float(raw_position))
+                        if raw_position is not None and str(raw_position).strip() != ""
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    position = None
+                side_map, _, _ = engine._get_translation_maps()
+                face = side_map.get(engine._str_val(row.get("face")).lower())
+                if engine._device_placement_differs(
+                    device,
+                    ctx_data.get("location_id"),
+                    engine._str_val(row.get("rack_name")),
+                    position,
+                    face,
+                ):
+                    ambiguous += 1
+                    continue
+
             if device is not None:
-                DeviceExistingMatch.objects.create(
-                    profile=profile,
-                    source_id=source_id,
-                    netbox_device_id=device.pk,
-                    device_name=device.name,
-                    source_asset_tag=asset_tag,
-                )
+                if profile.device_matches.filter(netbox_device_id=device.pk).exclude(source_id=source_id).exists():
+                    ambiguous += 1
+                    continue
+                allowed = True
+                try:
+                    with transaction.atomic():
+                        binding = DeviceExistingMatch.objects.create(
+                            profile=profile,
+                            source_id=source_id,
+                            netbox_device_id=device.pk,
+                            device_name=device.name,
+                            source_asset_tag=asset_tag,
+                        )
+                        allowed = request.user.has_perm(
+                            "netbox_data_import.add_deviceexistingmatch",
+                            binding,
+                        )
+                        if not allowed:
+                            transaction.set_rollback(True)
+                except IntegrityError:
+                    ambiguous += 1
+                    continue
+                if not allowed:
+                    ambiguous += 1
+                    continue
                 matched += 1
             elif device_name:
                 # Substring name match → probable only (no auto-link)
                 short_name = device_name.split(" - ")[-1].strip() if " - " in device_name else device_name
-                if Device.objects.filter(name__icontains=short_name).exists():
+                probable_filter = {"site": site}
+                if ctx_data.get("tenant_id"):
+                    probable_filter["tenant_id"] = ctx_data["tenant_id"]
+                else:
+                    probable_filter["tenant__isnull"] = True
+                if visible_devices.filter(name__icontains=short_name, **probable_filter).exists():
                     probable += 1
 
         msg_parts = []
@@ -2371,7 +2753,7 @@ class SyncSingleRowView(_AjaxPermissionView):
         except (TypeError, ValueError):
             return JsonResponse({"ok": False, "error": "Invalid row number"}, status=400)
 
-        profile = ImportProfile.objects.filter(pk=ctx_data.get("profile_id")).first()
+        profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=ctx_data.get("profile_id")).first()
         if not profile:
             return JsonResponse({"ok": False, "error": "Import profile not found"}, status=400)
 
@@ -2414,15 +2796,44 @@ class SyncSingleRowView(_AjaxPermissionView):
 
         try:
             with transaction.atomic():
-                result = engine.run_import([target], profile, context, dry_run=False, user=request.user)
+                current_preview = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
+                current_row = next(
+                    (
+                        row
+                        for row in current_preview.rows
+                        if row.row_number == row_number and row.object_type == preview_row.get("object_type")
+                    ),
+                    None,
+                )
+                if current_row is None or current_row.action != "create":
+                    detail = current_row.detail if current_row is not None else "The row is no longer available."
+                    return JsonResponse(
+                        {
+                            "ok": False,
+                            "error": "NetBox identity changed after preview. Review the refreshed preview.",
+                            "detail": detail,
+                            "extra_data": current_row.extra_data if current_row is not None else {},
+                        },
+                        status=409,
+                    )
+
+                result = engine.run_import(
+                    [target],
+                    profile,
+                    context,
+                    dry_run=False,
+                    user=request.user,
+                    expected_intents=_import_intents(current_preview),
+                )
                 error_rows = [r for r in result.rows if r.action == "error"]
                 if error_rows:
                     transaction.set_rollback(True)
-                    return JsonResponse({"ok": False, "errors": [r.detail for r in error_rows]})
+                    status = 409 if any(r.extra_data.get("identity_state_changed") for r in error_rows) else 200
+                    return JsonResponse({"ok": False, "errors": [r.detail for r in error_rows]}, status=status)
         except Exception:
             logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
             return JsonResponse(
-                {"ok": False, "error": "An unexpected error occurred — see server logs."},
+                {"ok": False, "error": "An unexpected error occurred. See server logs."},
                 status=500,
             )
 
@@ -2451,12 +2862,22 @@ class UnlinkDeviceView(_AjaxPermissionView):
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
         if profile_id and source_id:
-            profile = get_object_or_404(ImportProfile, pk=profile_id)
-            DeviceExistingMatch.objects.filter(
-                profile=profile,
-                source_id=source_id,
-            ).delete()
-            messages.success(request, f"Unlinked source '{source_id}'.")
+            profile = get_object_or_404(
+                ImportProfile.objects.restrict(request.user, "change"),
+                pk=profile_id,
+            )
+            with transaction.atomic():
+                binding = (
+                    DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
+                )
+                if binding is not None and request.user.has_perm(
+                    "netbox_data_import.delete_deviceexistingmatch",
+                    binding,
+                ):
+                    binding.delete()
+                    messages.success(request, f"Unlinked source '{source_id}'.")
+                elif binding is not None:
+                    messages.error(request, "Permission denied: cannot delete this device link.")
 
         return redirect(next_url)
 

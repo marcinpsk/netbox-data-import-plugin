@@ -70,6 +70,7 @@ urlpatterns = [
     path("sync-placement/", views.SyncPlacementView.as_view(), name="sync_placement"),
     # Save resolution (rerere)
     path("save-resolution/", views.SaveResolutionView.as_view(), name="save_resolution"),
+    path("resolve-duplicate-name/", views.ResolveDuplicateNameView.as_view(), name="resolve_duplicate_name"),
     # Source resolutions list (per profile)
     path(
         "profiles/<int:profile_pk>/resolutions/",

@@ -42,6 +42,8 @@ def _make_profile(name="ViewTest") -> ImportProfile:
         "Model": "model",
         "UHeight": "u_height",
         "UPosition": "u_position",
+        "Side": "face",
+        "Airflow": "airflow",
         "Serial Number": "serial",
         "Asset Tag": "asset_tag",
         "Status": "status",
@@ -96,8 +98,8 @@ class ImportProfileListViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:importprofile_list")
         resp = self.client.get(url, {"q": "Alph"})
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "Alpha")
-        self.assertNotContains(resp, "Beta")
+        self.assertContains(resp, ">Alpha</a>")
+        self.assertNotContains(resp, ">Beta</a>")
 
 
 class ImportProfileDetailViewTest(BaseViewTestCase):
@@ -1704,6 +1706,10 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         """POST links a source_id to an existing device."""
         from netbox_data_import.models import DeviceExistingMatch
 
+        session = self.client.session
+        session["import_rows"] = [{"_row_number": 1, "source_id": "SRC-MATCH-01", "asset_tag": "PLACEHOLDER-TAG"}]
+        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
+        session.save()
         url = reverse("plugins:netbox_data_import:match_existing_device")
         resp = self.client.post(
             url,
@@ -1762,6 +1768,9 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             name="automatch-device-01", serial="SERIAL-AM-01", device_type=dt, role=role, site=self.site
         )
         self.profile = _make_profile("AutoMatchProfile")
+        session = self.client.session
+        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
+        session.save()
 
     def test_post_automatch_by_serial(self):
         """POST with a row matching by serial creates a DeviceExistingMatch."""
@@ -1787,6 +1796,44 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 profile=self.profile, source_id="AM-001", netbox_device_id=self.device.pk
             ).exists()
         )
+
+    def test_post_requires_permission_to_add_matches(self):
+        """A profile editor with device access cannot create match records."""
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+
+        user = get_user_model().objects.create_user(username="limited-auto-match-user", password="testpass")
+        user.user_permissions.add(
+            Permission.objects.get(content_type__app_label="netbox_data_import", codename="change_importprofile"),
+            Permission.objects.get(content_type__app_label="dcim", codename="view_device"),
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": self.profile.pk},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_post_requires_permission_to_view_devices(self):
+        """A match editor cannot scan devices without device access."""
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+
+        user = get_user_model().objects.create_user(username="blind-auto-match-user", password="testpass")
+        user.user_permissions.add(
+            Permission.objects.get(content_type__app_label="netbox_data_import", codename="change_importprofile"),
+            Permission.objects.get(content_type__app_label="netbox_data_import", codename="add_deviceexistingmatch"),
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": self.profile.pk},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_post_automatch_empty_rows(self):
         """POST with no rows in session still succeeds."""
@@ -2701,9 +2748,10 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         qs_mock.__getitem__ = MagicMock(return_value=[MagicMock(), MagicMock()])
         mock_dev_model.objects.filter.return_value = qs_mock
 
-        device, is_ambiguous = _auto_match_single_device(mock_dev_model, "any-name", "", "SHARED-TAG")
+        device, is_ambiguous, method = _auto_match_single_device(mock_dev_model, "any-name", "", "SHARED-TAG")
         self.assertIsNone(device)
         self.assertTrue(is_ambiguous)
+        self.assertIsNone(method)
 
 
 class ImportProfileBulkImportViewTest(BaseViewTestCase):
