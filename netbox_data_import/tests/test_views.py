@@ -1731,7 +1731,7 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         from netbox_data_import.models import DeviceExistingMatch
 
         session = self.client.session
-        session["import_rows"] = [{"_row_number": 1, "source_id": "SRC-LONG-TAG", "asset_tag": "T" * 120}]
+        session["import_rows"] = [{"_row_number": 1, "source_id": "SRC-LONG-TAG", "asset_tag": f"  {'T' * 120}  "}]
         session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
         session.save()
 

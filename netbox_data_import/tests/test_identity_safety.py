@@ -216,6 +216,26 @@ class IdentitySafetyTest(TestCase):
         self.assertEqual(existing.rack, self.rack_a)
         self.assertEqual(existing.position, 1)
 
+    def test_single_row_sync_rejects_changed_create_plan_after_preview(self):
+        from dcim.models import Device
+
+        rows = [self._device_row(2, "SYNC-STALE-PLAN", "previewed-device-name", self.rack_a, 1)]
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        session = self.client.session
+        changed_rows = session["import_rows"]
+        changed_rows[0]["device_name"] = "changed-device-name"
+        session["import_rows"] = changed_rows
+        session.save()
+
+        response = self.client.post(reverse("plugins:netbox_data_import:sync_single_row"), {"row_number": 2})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("Review the refreshed preview", response.json()["error"])
+        self.assertFalse(Device.objects.filter(name__in=["previewed-device-name", "changed-device-name"]).exists())
+
     def test_bulk_run_rejects_stale_create_that_now_matches_existing_device(self):
         from dcim.models import Device
 

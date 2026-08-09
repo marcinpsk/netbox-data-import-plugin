@@ -2801,7 +2801,11 @@ class SyncSingleRowView(_AjaxPermissionView):
                     ),
                     None,
                 )
-                if current_row is None or current_row.action != "create":
+                if (
+                    current_row is None
+                    or current_row.action != "create"
+                    or _previewed_writes_changed(import_result_data, current_preview)
+                ):
                     detail = current_row.detail if current_row is not None else "The row is no longer available."
                     return JsonResponse(
                         {

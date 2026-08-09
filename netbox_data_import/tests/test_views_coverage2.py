@@ -701,7 +701,7 @@ class SyncSingleRowViewTest(TestCase):
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
-        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "device"}]}
+        session["import_result"] = mock_result.to_session_dict()
         session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
@@ -734,7 +734,7 @@ class SyncSingleRowViewTest(TestCase):
 
         self._set_session([{"_row_number": 1, "source_id": "R001"}])
         session = self.client.session
-        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "rack"}]}
+        session["import_result"] = mock_result.to_session_dict()
         session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
@@ -778,7 +778,7 @@ class SyncSingleRowViewTest(TestCase):
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
-        session["import_result"] = {"rows": [{"row_number": 1, "action": "create", "object_type": "device"}]}
+        session["import_result"] = preview_result.to_session_dict()
         session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
         data = resp.json()
