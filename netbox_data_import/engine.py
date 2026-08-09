@@ -1014,7 +1014,7 @@ def _set_rack_import_fields(rack, u_height, serial, rack_type, ctx):
         rack.tenant = ctx.tenant
 
 
-def _rack_validation_error_row(row, source_id, rack_name, exc):
+def _rack_validation_error_row(row, source_id, rack_name, exc, operation):
     """Return one rack model validation error."""
     if isinstance(exc, ValidationError) and hasattr(exc, "message_dict"):
         message = "; ".join(f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items())
@@ -1028,7 +1028,7 @@ def _rack_validation_error_row(row, source_id, rack_name, exc):
         name=rack_name,
         action="error",
         object_type="rack",
-        detail=f"Cannot update rack '{rack_name}': validation failed: {message}",
+        detail=f"Cannot {operation} rack '{rack_name}': validation failed: {message}",
         rack_name=rack_name,
         extra_data={"identity_conflict": "rack_validation_failed"},
     )
@@ -1067,7 +1067,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
                 ctx.result.rows.append(_perm_denied_row("dcim.change_rack", row, rack_name, "rack"))
                 return
             except (DatabaseError, ValidationError) as exc:
-                ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc))
+                ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "update"))
                 return
             ctx.rack_map[rack_name] = rack
             ctx.result.rows.append(
@@ -1125,7 +1125,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
             ctx.result.rows.append(_perm_denied_row("dcim.add_rack", row, rack_name, "rack"))
             return
         except (DatabaseError, ValidationError) as exc:
-            ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc))
+            ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "create"))
             return
         ctx.rack_map[rack_name] = rack
         ctx.result.rows.append(
@@ -1233,7 +1233,7 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                     try:
                         candidate.full_clean()
                     except ValidationError as exc:
-                        ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc))
+                        ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "update"))
                         continue
             else:
                 rack = None
@@ -1637,7 +1637,6 @@ def _check_rack_position_conflict(
     row_number=None,
     device_name=None,
     u_height=1,
-    matched_device_pk=None,
 ):
     """Detect within-file rack position conflicts (incl. multi-U range overlaps).
 
@@ -1646,8 +1645,8 @@ def _check_rack_position_conflict(
     slot in their ranges collides on the same ``(rack, face)``.
 
     Claims are keyed by ``(normalized rack identity, slot, face)`` and store
-    ``(row_number, device_name, matched_device_pk)``. Multiple source rows
-    cannot claim the same existing device.
+    ``(row_number, device_name)``. Device identity claims are checked before
+    rack placement claims.
 
     Returns ``(message, conflicting_row_number)`` on the first real overlap,
     otherwise registers each uncovered slot and returns ``None``.
@@ -1672,7 +1671,7 @@ def _check_rack_position_conflict(
                 (rack_key, slot, claimed_face) for claimed_face in ctx.claimed_position_faces.get((rack_key, slot), ())
             ]
         for claimed_key in claimed_keys:
-            prev_row, prev_name, _prev_pk = _unpack_claim(ctx.claimed_positions[claimed_key])
+            prev_row, prev_name = ctx.claimed_positions[claimed_key]
             if prev_row is not None:
                 other = f"row {prev_row}"
                 if prev_name:
@@ -1689,23 +1688,9 @@ def _check_rack_position_conflict(
     for slot in slots:
         pos_key = (rack_key, slot, effective_face)
         if pos_key not in ctx.claimed_positions:
-            ctx.claimed_positions[pos_key] = (row_number, device_name, matched_device_pk)
+            ctx.claimed_positions[pos_key] = (row_number, device_name)
             ctx.claimed_position_faces.setdefault((rack_key, slot), set()).add(effective_face)
     return None
-
-
-def _unpack_claim(prev):
-    """Unpack a ``ctx.claimed_positions`` value into ``(row, name, pk)``.
-
-    Tolerates legacy 2-tuple claims (no ``matched_device_pk``) so the function
-    remains safe if older code paths stored shorter tuples.
-    """
-    if not isinstance(prev, tuple):
-        return None, None, None
-    prev_row = prev[0] if len(prev) > 0 else None
-    prev_name = prev[1] if len(prev) > 1 else None
-    prev_pk = prev[2] if len(prev) > 2 else None
-    return prev_row, prev_name, prev_pk
 
 
 def _claim_rack_slots_for_preview(
@@ -1718,7 +1703,6 @@ def _claim_rack_slots_for_preview(
     row,
     device_name,
     u_height,
-    matched_device_pk=None,
 ):
     """Reserve the row's target U-range for create/update intents during preview.
 
@@ -1728,8 +1712,7 @@ def _claim_rack_slots_for_preview(
     of failing later as an ``IntegrityError`` on write. Skips and ignores make
     no claim.
 
-    ``matched_device_pk`` is stored with the claim for diagnostics. Returns
-    ``(action, detail, conflict_row_number, identity_conflict)``.
+    Returns ``(action, detail, conflict_row_number, identity_conflict)``.
     """
     if action not in ("create", "update"):
         return action, detail, None, None
@@ -1741,7 +1724,6 @@ def _claim_rack_slots_for_preview(
         row_number=row.get("_row_number"),
         device_name=device_name,
         u_height=u_height,
-        matched_device_pk=matched_device_pk,
     )
     if conflict:
         new_detail, conflict_row_number = conflict
@@ -2123,7 +2105,6 @@ def _preview_device_row(  # noqa: C901
         row,
         device_name,
         placement_height,
-        matched_device_pk=matched_device.pk if matched_device is not None else None,
     )
     if claim_conflict is not None:
         identity_conflict = claim_conflict

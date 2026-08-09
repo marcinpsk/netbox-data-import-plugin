@@ -1726,6 +1726,28 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
             ).exists()
         )
 
+    def test_post_normalizes_and_bounds_source_asset_tag(self):
+        """Manual links store the same bounded source asset tag as auto-match."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        session = self.client.session
+        session["import_rows"] = [{"_row_number": 1, "source_id": "SRC-LONG-TAG", "asset_tag": "T" * 120}]
+        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:match_existing_device"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SRC-LONG-TAG",
+                "netbox_device_id": self.device.pk,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        binding = DeviceExistingMatch.objects.get(profile=self.profile, source_id="SRC-LONG-TAG")
+        self.assertEqual(binding.source_asset_tag, "T" * 50)
+
     def test_post_missing_source_id_redirects(self):
         """POST without source_id redirects to preview."""
         url = reverse("plugins:netbox_data_import:match_existing_device")

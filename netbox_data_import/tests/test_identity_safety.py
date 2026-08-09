@@ -2214,9 +2214,12 @@ class IdentitySafetyTest(TestCase):
         response = self.client.post(
             reverse("plugins:netbox_data_import:auto_match_devices"),
             {"profile_id": self.profile.pk},
+            follow=True,
         )
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "1 skipped (permission denied or concurrent change)")
+        self.assertNotContains(response, "1 ambiguous (multiple devices)")
         self.assertFalse(
             DeviceExistingMatch.objects.filter(profile=self.profile, source_id="CONSTRAINED-BINDING").exists()
         )
@@ -2244,7 +2247,7 @@ class IdentitySafetyTest(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AUTO-CROSS-SITE").exists())
 
-    def test_same_device_conflict_identifies_an_earlier_row_without_source_id(self):
+    def test_non_overlapping_rows_cannot_claim_the_same_matched_device(self):
         from dcim.models import Device
 
         existing = Device.objects.create(
@@ -2329,6 +2332,29 @@ class IdentitySafetyTest(TestCase):
                 source_column="device_name",
             ).exists()
         )
+
+    def test_duplicate_name_resolution_normalizes_null_original_value(self):
+        row = self._device_row(2, "RESOLVE-NULL", None, self.rack_a, 1)
+        row["asset_tag"] = "RESOLVE-NULL-ASSET"
+        self._set_import_session([row])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": row["source_id"],
+                "row_number": row["_row_number"],
+                "new_name": "resolve-null-name",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        resolution = SourceResolution.objects.get(
+            profile=self.profile,
+            source_id=row["source_id"],
+            source_column="device_name",
+        )
+        self.assertEqual(resolution.original_value, "")
 
     def test_auto_match_skips_rows_without_a_class_mapping(self):
         from dcim.models import Device

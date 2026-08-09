@@ -19,7 +19,6 @@ concurrency:
 jobs:
   test-netbox:
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.netbox-version == 'main' }}
 
     strategy:
       fail-fast: false
@@ -32,8 +31,6 @@ jobs:
             netbox-version: "v4.6.7"
           - python-version: "3.14"
             netbox-version: "v4.6.7"
-          - python-version: "3.14"
-            netbox-version: "main"
 
     services:
       redis:

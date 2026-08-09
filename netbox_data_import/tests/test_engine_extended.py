@@ -847,6 +847,26 @@ class WriteRackToDbTest(TestCase):
         self.assertEqual(result.rows[0].action, "create")
         self.assertTrue(Rack.objects.filter(site=self.site, name="NewRack").exists())
 
+    def test_create_rack_validation_error_mentions_create(self):
+        """A failed rack create reports the operation that failed."""
+        from dcim.models import Rack
+
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=result,
+        )
+
+        _write_rack_to_db("InvalidRack", 42, "S" * 101, "SRC-INVALID", {"_row_number": 2}, ctx, Rack)
+
+        self.assertFalse(Rack.objects.filter(site=self.site, name="InvalidRack").exists())
+        self.assertEqual(result.rows[0].action, "error")
+        self.assertIn("Cannot create rack 'InvalidRack'", result.rows[0].detail)
+
     def test_same_name_rack_in_another_location_is_not_updated(self):
         """A rack in another location keeps its identity and a new rack is created."""
         from dcim.models import Location, Rack
@@ -2508,54 +2528,16 @@ class CheckRackPositionConflictRangeTest(TestCase):
         )
         self.assertEqual(ctx.claimed_positions, {})
 
-    def test_same_matched_device_pk_is_flagged(self):
-        """Two source rows cannot claim one existing device."""
+    def test_overlap_conflicts_regardless_of_device_identity(self):
+        """Rack overlap remains a placement conflict for distinct devices."""
         from netbox_data_import.engine import _check_rack_position_conflict
 
         ctx = self._ctx()
-        # Row 1 claims U1-U4 for device pk=42 (e.g. matched by name).
-        self.assertIsNone(
-            _check_rack_position_conflict(
-                "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4, matched_device_pk=42
-            )
-        )
-        result = _check_rack_position_conflict(
-            "R1", 3, "front", ctx, row_number=2, device_name="a-by-serial", u_height=2, matched_device_pk=42
-        )
-        self.assertIsNotNone(result)
-        self.assertIn("row 1", result[0])
-
-    def test_different_matched_device_pk_still_conflicts(self):
-        """Different matched_device_pk → overlap is a real conflict."""
-        from netbox_data_import.engine import _check_rack_position_conflict
-
-        ctx = self._ctx()
-        _check_rack_position_conflict(
-            "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4, matched_device_pk=42
-        )
-        result = _check_rack_position_conflict(
-            "R1", 3, "front", ctx, row_number=2, device_name="b", u_height=2, matched_device_pk=99
-        )
+        _check_rack_position_conflict("R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4)
+        result = _check_rack_position_conflict("R1", 3, "front", ctx, row_number=2, device_name="b", u_height=2)
         self.assertIsNotNone(result)
         _, prev_row = result
         self.assertEqual(prev_row, 1)
-
-    def test_none_pk_does_not_collapse_with_none_pk(self):
-        """Two rows with matched_device_pk=None on the same slot must still conflict.
-
-        A None pk represents an unmatched (create) row, not a shared identity;
-        two creates at the same slot are a real conflict.
-        """
-        from netbox_data_import.engine import _check_rack_position_conflict
-
-        ctx = self._ctx()
-        _check_rack_position_conflict(
-            "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=1, matched_device_pk=None
-        )
-        result = _check_rack_position_conflict(
-            "R1", 1, "front", ctx, row_number=2, device_name="b", u_height=1, matched_device_pk=None
-        )
-        self.assertIsNotNone(result)
 
     def test_position_face_index_tracks_claims_for_full_depth_lookup(self):
         from netbox_data_import.engine import _check_rack_position_conflict

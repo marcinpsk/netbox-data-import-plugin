@@ -1464,7 +1464,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             return redirect(next_url)
 
         resolution_values = {
-            "original_value": str(source_rows[0].get("device_name", "")),
+            "original_value": engine._str_val(source_rows[0].get("device_name")),
             "resolved_fields": {"device_name": new_name},
         }
         try:
@@ -2246,7 +2246,7 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
         binding_values = {
             "netbox_device_id": device.pk,
             "device_name": device.name,
-            "source_asset_tag": str(source_rows[0].get("asset_tag", "")).strip(),
+            "source_asset_tag": engine._str_val(source_rows[0].get("asset_tag"))[:50],
         }
         try:
             allowed = _save_permission_scoped_object(
@@ -2600,6 +2600,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
         ambiguous = 0
         already = 0
         probable = 0
+        skipped = 0
 
         for row in eligible_rows:
             source_id = engine._str_val(row.get("source_id"))
@@ -2670,10 +2671,10 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                         allow_update=False,
                     )
                 except IntegrityError:
-                    ambiguous += 1
+                    skipped += 1
                     continue
                 if not allowed:
-                    ambiguous += 1
+                    skipped += 1
                     continue
                 matched += 1
             elif device_name:
@@ -2696,6 +2697,8 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
             msg_parts.append(f"{ambiguous} ambiguous (multiple devices)")
         if already:
             msg_parts.append(f"{already} already matched")
+        if skipped:
+            msg_parts.append(f"{skipped} skipped (permission denied or concurrent change)")
         messages.success(request, f"Auto-match: {', '.join(msg_parts) or 'nothing found'}.")
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
