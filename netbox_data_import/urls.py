@@ -2,15 +2,23 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 from django.urls import path
 from . import views
+from .models import ImportProfile
 
 urlpatterns = [
     # Import Profiles
     path("profiles/", views.ImportProfileListView.as_view(), name="importprofile_list"),
     path("profiles/add/", views.ImportProfileEditView.as_view(), name="importprofile_add"),
     path("profiles/import/", views.ImportProfileBulkImportView.as_view(), name="importprofile_bulk_import"),
+    path("profiles/edit/", views.ImportProfileBulkEditView.as_view(), name="importprofile_bulk_edit"),
     path("profiles/<int:pk>/", views.ImportProfileView.as_view(), name="importprofile"),
     path("profiles/<int:pk>/edit/", views.ImportProfileEditView.as_view(), name="importprofile_edit"),
     path("profiles/<int:pk>/delete/", views.ImportProfileDeleteView.as_view(), name="importprofile_delete"),
+    path(
+        "profiles/<int:pk>/changelog/",
+        views.ImportProfileChangeLogView.as_view(),
+        name="importprofile_changelog",
+        kwargs={"model": ImportProfile},
+    ),
     path("profiles/delete/", views.ImportProfileBulkDeleteView.as_view(), name="importprofile_bulk_delete"),
     # Column Mappings
     path("profiles/<int:profile_pk>/columns/add/", views.ColumnMappingAddView.as_view(), name="columnmapping_add"),

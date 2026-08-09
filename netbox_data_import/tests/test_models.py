@@ -84,6 +84,35 @@ class ColumnTransformRuleModelTest(TestCase):
         self.assertIn("pattern", cm.exception.message_dict)
         self.assertIn("2", cm.exception.message_dict["pattern"][0])
 
+    def test_clean_accepts_a_nonempty_extra_json_target(self):
+        """A transform can write a captured group to a named extra-data key."""
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Inventory Label",
+            pattern=r"^(.+)$",
+            group_1_target="extra_json:inventory_label",
+        )
+
+        rule.clean()
+
+        self.assertEqual(rule.group_1_target, "extra_json:inventory_label")
+
+    def test_clean_rejects_an_empty_extra_json_target(self):
+        """An extra-data target must contain a key after its prefix."""
+        from django.core.exceptions import ValidationError
+
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Inventory Label",
+            pattern=r"^(.+)$",
+            group_1_target="extra_json:",
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            rule.clean()
+
+        self.assertIn("group_1_target", error.exception.message_dict)
+
 
 class ColumnMappingModelTest(TestCase):
     """Tests for the ColumnMapping model."""

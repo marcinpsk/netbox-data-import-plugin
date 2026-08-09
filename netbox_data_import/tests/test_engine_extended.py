@@ -2392,7 +2392,7 @@ class CheckRackPositionConflictRangeTest(TestCase):
         # requires a profile, site, ImportResult, etc.).
         from types import SimpleNamespace
 
-        return SimpleNamespace(claimed_positions={})
+        return SimpleNamespace(claimed_positions={}, claimed_position_faces={})
 
     def test_single_u_no_conflict_when_distinct_positions(self):
         from netbox_data_import.engine import _check_rack_position_conflict
@@ -2556,6 +2556,17 @@ class CheckRackPositionConflictRangeTest(TestCase):
             "R1", 1, "front", ctx, row_number=2, device_name="b", u_height=1, matched_device_pk=None
         )
         self.assertIsNotNone(result)
+
+    def test_position_face_index_tracks_claims_for_full_depth_lookup(self):
+        from netbox_data_import.engine import _check_rack_position_conflict
+
+        ctx = self._ctx()
+        _check_rack_position_conflict("R1", 5, "front", ctx, row_number=1, device_name="front", u_height=1)
+        _check_rack_position_conflict("R1", 5, "rear", ctx, row_number=2, device_name="rear", u_height=1)
+
+        self.assertEqual(ctx.claimed_position_faces[("r1", 5)], {"front", "rear"})
+        conflict = _check_rack_position_conflict("R1", 5, None, ctx, row_number=3, device_name="full-depth", u_height=1)
+        self.assertIsNotNone(conflict)
 
 
 class PreviewRackPositionConflictMultiURangeTest(TestCase):

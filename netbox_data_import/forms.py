@@ -3,10 +3,11 @@
 from django import forms
 from dcim.models import Site, Location
 from tenancy.models import Tenant
-from netbox.forms import NetBoxModelForm, NetBoxModelImportForm
+from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
 from utilities.forms.fields import DynamicModelChoiceField
+from utilities.forms.widgets import BulkEditNullBooleanSelect
 from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
-from .models import TARGET_FIELD_CHOICES
+from .models import PREVIEW_VIEW_CHOICES, TARGET_FIELD_CHOICES
 
 
 class ImportProfileForm(NetBoxModelForm):
@@ -45,6 +46,26 @@ class ImportProfileImportForm(NetBoxModelImportForm):
             "capture_extra_data",
             "tags",
         ]
+
+
+class ImportProfileBulkEditForm(NetBoxModelBulkEditForm):
+    """Bulk-edit fields that apply safely across import profiles."""
+
+    model = ImportProfile
+
+    description = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}))
+    sheet_name = forms.CharField(max_length=100, required=False)
+    source_id_column = forms.CharField(max_length=100, required=False)
+    custom_field_name = forms.CharField(max_length=100, required=False)
+    update_existing = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    create_missing_device_types = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    preview_view_mode = forms.ChoiceField(
+        choices=[("", "---------"), *PREVIEW_VIEW_CHOICES],
+        required=False,
+    )
+    capture_extra_data = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+
+    nullable_fields = ("description", "source_id_column", "custom_field_name")
 
 
 class ColumnMappingForm(forms.ModelForm):

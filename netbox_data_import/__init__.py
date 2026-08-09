@@ -46,6 +46,7 @@ class NetBoxDataImportConfig(PluginConfig):
     author = "Marcin Zieba"
     author_email = "marcinpsk@gmail.com"
     min_version = "4.2.0"
+    graphql_schema = "graphql.schema.schema"
 
     def ready(self):
         """Register post_migrate signal to auto-create the data_import_source custom field."""

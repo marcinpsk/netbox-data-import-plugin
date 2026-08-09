@@ -503,6 +503,7 @@
                     <input type="hidden" name="profile_id" value="{{ profile_id }}">
                     <input type="hidden" name="source_id" value="{{ row.source_id }}">
                     <input type="hidden" name="row_number" value="{{ row.row_number }}">
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
                     <input type="text" name="new_name" value="{{ row.extra_data.suggested_name }}"
                            maxlength="64" required class="form-control form-control-sm"
                            aria-label="Unique device name" style="width:20rem;">

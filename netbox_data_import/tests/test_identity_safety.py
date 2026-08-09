@@ -10,15 +10,23 @@ from django.urls import reverse
 from netbox_data_import.engine import (
     ImportContext,
     ImportResult,
+    _DeviceBindingConflict,
+    _assign_ip_to_device,
     _bind_device_source,
+    _derived_slug_conflicts,
     _ensure_device_type,
     _ensure_manufacturer,
+    _find_existing_device,
+    _name_placement_conflict_row,
+    _pass1_ensure_types,
+    _rack_position_error_row,
+    _suggest_unique_device_name,
     reapply_saved_resolutions,
     run_import,
 )
 from netbox_data_import.forms import ImportSetupForm
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile, SourceResolution
-from netbox_data_import.views import _import_intents, _serialize_rows
+from netbox_data_import.views import _import_intents, _save_permission_scoped_object, _serialize_rows
 
 
 class IdentitySafetyTest(TestCase):
@@ -755,6 +763,39 @@ class IdentitySafetyTest(TestCase):
         self.assertEqual(device_row.action, "error")
         self.assertEqual(device_row.extra_data.get("identity_conflict"), "cross_site_match")
         self.assertIn(other_site.name, device_row.detail)
+
+    def test_stored_source_metadata_outside_active_site_is_an_error(self):
+        from dcim.models import Device, Site
+        from extras.models import CustomField
+
+        content_type = ContentType.objects.get_for_model(Device)
+        custom_field, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
+        if created:
+            custom_field.object_types.set([content_type])
+        elif not custom_field.object_types.filter(pk=content_type.pk).exists():
+            custom_field.object_types.add(content_type)
+        other_site = Site.objects.create(name="Metadata Identity Site", slug="metadata-identity-site")
+        existing = Device.objects.create(
+            name="metadata-cross-site-device",
+            site=other_site,
+            device_type=self.device_type,
+            role=self.role,
+            custom_field_data={
+                "data_import_source": {
+                    "profile_id": self.profile.pk,
+                    "profile_name": self.profile.name,
+                    "source_id": "METADATA-CROSS-SITE",
+                }
+            },
+        )
+        row = self._device_row(2, "METADATA-CROSS-SITE", "metadata-source-name", self.rack_a, 1)
+
+        result = run_import([row], self.profile, {"site": self.site}, dry_run=True)
+        device_row = next(item for item in result.rows if item.object_type == "device")
+
+        self.assertEqual(device_row.action, "error")
+        self.assertEqual(device_row.extra_data.get("identity_conflict"), "cross_site_match")
+        self.assertEqual(device_row.extra_data.get("netbox_device_id"), existing.pk)
 
     def test_rack_location_is_visible_in_placement_diff(self):
         from dcim.models import Device, Location, Rack
@@ -2202,3 +2243,1018 @@ class IdentitySafetyTest(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AUTO-CROSS-SITE").exists())
+
+    def test_same_device_conflict_identifies_an_earlier_row_without_source_id(self):
+        from dcim.models import Device
+
+        existing = Device.objects.create(
+            name="blank-claim-target",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            rack=self.rack_a,
+            position=1,
+            face="front",
+            serial="BLANK-CLAIM-SERIAL",
+        )
+        first = self._device_row(2, "", existing.name, self.rack_a, 1)
+        second = self._device_row(3, "SECOND-CLAIM", "other-source-name", self.rack_a, 2)
+        second["serial"] = existing.serial
+
+        result = run_import([first, second], self.profile, {"site": self.site}, dry_run=True)
+        second_result = next(row for row in result.rows if row.row_number == 3 and row.object_type == "device")
+
+        self.assertEqual(second_result.action, "error")
+        self.assertEqual(second_result.extra_data.get("identity_conflict"), "device_already_bound")
+        self.assertIn("row 2", second_result.detail)
+        self.assertNotIn("source ID ''", second_result.detail)
+
+    def test_case_insensitive_rack_names_share_preview_position_claims(self):
+        first = self._device_row(2, "CASE-RACK-A", "case-rack-device-a", self.rack_a, 1)
+        second = self._device_row(3, "CASE-RACK-B", "case-rack-device-b", self.rack_a, 1)
+        second["rack_name"] = self.rack_a.name.lower()
+
+        result = run_import([first, second], self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [row for row in result.rows if row.object_type == "device"]
+
+        self.assertEqual(device_rows[0].action, "create")
+        self.assertEqual(device_rows[1].action, "error")
+        self.assertEqual(device_rows[1].extra_data.get("identity_conflict"), "rack_position_occupied")
+
+    def test_duplicate_name_resolution_preserves_the_preview_view(self):
+        rows = [
+            self._device_row(2, "NEXT-A", "next-shared", self.rack_a, 1),
+            self._device_row(3, "NEXT-B", "next-shared", self.rack_b, 2),
+        ]
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        suggestion = next(row for row in preview.rows if row.row_number == 3 and row.object_type == "device")
+        self._set_import_session(rows, preview)
+        next_url = f"{reverse('plugins:netbox_data_import:import_preview')}?view=racks"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "NEXT-B",
+                "row_number": 3,
+                "new_name": suggestion.extra_data["suggested_name"],
+                "next": next_url,
+            },
+        )
+
+        self.assertRedirects(response, next_url, fetch_redirect_response=False)
+
+    def test_duplicate_name_resolution_checks_asset_tag_fallback_names(self):
+        target = self._device_row(2, "RESOLVE-TARGET", "resolve-target", self.rack_a, 1)
+        fallback = self._device_row(3, "RESOLVE-FALLBACK", "", self.rack_b, 2)
+        fallback["asset_tag"] = "RESERVED-FALLBACK-NAME"
+        self._set_import_session([target, fallback])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "RESOLVE-TARGET",
+                "row_number": 2,
+                "new_name": fallback["asset_tag"],
+            },
+            follow=True,
+        )
+
+        self.assertContains(response, "already used by another source row")
+        self.assertFalse(
+            SourceResolution.objects.filter(
+                profile=self.profile,
+                source_id="RESOLVE-TARGET",
+                source_column="device_name",
+            ).exists()
+        )
+
+    def test_auto_match_skips_rows_without_a_class_mapping(self):
+        from dcim.models import Device
+
+        existing = Device.objects.create(
+            name="unmapped-auto-target",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="UNMAPPED-AUTO-SERIAL",
+        )
+        row = self._device_row(2, "UNMAPPED-AUTO", "unmapped-source", self.rack_a, 1)
+        row.update({"device_class": "No Mapping", "serial": existing.serial})
+        self._set_import_session([row])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": self.profile.pk},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="UNMAPPED-AUTO").exists())
+
+    def test_device_lookup_preloads_fields_used_by_preview_diff(self):
+        from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Query Tenant", slug="query-tenant")
+        existing = Device.objects.create(
+            name="query-device",
+            site=self.site,
+            tenant=tenant,
+            device_type=self.device_type,
+            role=self.role,
+            rack=self.rack_a,
+            serial="QUERY-SERIAL",
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            matched, method = _find_existing_device(
+                self.profile,
+                "",
+                self.site,
+                "source-query-name",
+                existing.serial,
+                "",
+                Device,
+                tenant=tenant,
+            )
+            self.assertEqual(method, "serial")
+            self.assertEqual(matched.device_type.manufacturer.pk, self.manufacturer.pk)
+            self.assertEqual(matched.role.pk, self.role.pk)
+            self.assertEqual(matched.tenant.pk, tenant.pk)
+            self.assertEqual(matched.rack.pk, self.rack_a.pk)
+            self.assertIsNone(matched.location)
+
+        self.assertEqual(len(queries), 1)
+
+    def test_unchanged_name_placement_returns_before_formatting_labels(self):
+        from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        Device.objects.create(
+            name="unchanged-placement",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            rack=self.rack_a,
+            position=1,
+            face="front",
+        )
+        matched = Device.objects.get(name="unchanged-placement")
+        row = self._device_row(2, "UNCHANGED-PLACEMENT", matched.name, self.rack_a, 1)
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=True,
+            result=ImportResult(),
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            conflict = _name_placement_conflict_row(
+                row,
+                ctx,
+                matched,
+                row["source_id"],
+                row["device_name"],
+                row["rack_name"],
+                1,
+                "front",
+                "",
+                "",
+            )
+
+        self.assertIsNone(conflict)
+        self.assertEqual(len(queries), 1)
+
+    def test_blank_import_context_clears_existing_location_and_tenant(self):
+        from dcim.models import Device, Location
+        from tenancy.models import Tenant
+
+        location = Location.objects.create(name="Previous Location", slug="previous-location", site=self.site)
+        tenant = Tenant.objects.create(name="Previous Tenant", slug="previous-tenant")
+        existing = Device.objects.create(
+            name="clear-import-scope",
+            site=self.site,
+            location=location,
+            tenant=tenant,
+            device_type=self.device_type,
+            role=self.role,
+            serial="CLEAR-SCOPE-SERIAL",
+        )
+        row = self._device_row(2, "CLEAR-SCOPE", existing.name, self.rack_a, 1)
+        row["serial"] = existing.serial
+
+        preview = run_import([row], self.profile, {"site": self.site, "location": None, "tenant": None}, dry_run=True)
+        device_preview = next(item for item in preview.rows if item.object_type == "device")
+        self.assertEqual(device_preview.extra_data["field_diff"]["location"]["file"], "")
+        self.assertEqual(device_preview.extra_data["field_diff"]["tenant"]["file"], "")
+
+        run_import([row], self.profile, {"site": self.site, "location": None, "tenant": None}, dry_run=False)
+
+        existing.refresh_from_db()
+        self.assertIsNone(existing.location)
+        self.assertIsNone(existing.tenant)
+
+    def test_slug_preflight_does_not_issue_per_row_manufacturer_exists_queries(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        rows = [
+            self._device_row(2, "SLUG-QUERY-A", "slug-query-a", self.rack_a, 1),
+            self._device_row(3, "SLUG-QUERY-B", "slug-query-b", self.rack_a, 2),
+        ]
+        class_role_map = {"Server": ClassRoleMapping.objects.get(profile=self.profile, source_class="Server")}
+
+        with CaptureQueriesContext(connection) as queries:
+            self.assertEqual(_derived_slug_conflicts(rows, self.profile, class_role_map), {})
+
+        repeated_exists_queries = [
+            query["sql"]
+            for query in queries
+            if "netbox_data_import_manufacturermapping" in query["sql"] and 'SELECT 1 AS "a"' in query["sql"]
+        ]
+        self.assertEqual(repeated_exists_queries, [])
+
+    def test_binding_database_conflict_keeps_its_identity_classification(self):
+        row = self._device_row(2, "BINDING-RACE", "binding-race-device", self.rack_a, 1)
+
+        result = _rack_position_error_row(
+            row,
+            row["source_id"],
+            row["device_name"],
+            row["make"],
+            row["model"],
+            row["asset_tag"],
+            row["rack_name"],
+            1,
+            _DeviceBindingConflict("The source binding changed during import"),
+            "update",
+        )
+
+        self.assertEqual(result.action, "error")
+        self.assertEqual(result.extra_data.get("identity_conflict"), "device_already_bound")
+        self.assertIn("source binding changed", result.detail)
+
+    def test_execute_rejects_each_ambiguous_strong_identity(self):
+        from dcim.models import Device, Site
+        from extras.models import CustomField
+
+        for suffix in ("a", "b"):
+            Device.objects.create(
+                name=f"execute-serial-{suffix}",
+                site=self.site,
+                device_type=self.device_type,
+                role=self.role,
+                serial="EXECUTE-AMBIGUOUS-SERIAL",
+            )
+            Device.objects.create(
+                name=f"execute-asset-{suffix}",
+                site=self.site,
+                device_type=self.device_type,
+                role=self.role,
+                asset_tag="Execute-Ambiguous-Tag" if suffix == "a" else "execute-ambiguous-tag",
+            )
+
+        content_type = ContentType.objects.get_for_model(Device)
+        custom_field, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
+        if created:
+            custom_field.object_types.set([content_type])
+        elif not custom_field.object_types.filter(pk=content_type.pk).exists():
+            custom_field.object_types.add(content_type)
+        metadata = {
+            "data_import_source": {
+                "profile_id": self.profile.pk,
+                "profile_name": self.profile.name,
+                "source_id": "EXECUTE-AMBIGUOUS-METADATA",
+            }
+        }
+        for suffix in ("a", "b"):
+            Device.objects.create(
+                name=f"execute-metadata-{suffix}",
+                site=self.site,
+                device_type=self.device_type,
+                role=self.role,
+                custom_field_data=metadata,
+            )
+
+        other_site = Site.objects.create(name="Execute Other Site", slug="execute-other-site")
+        Device.objects.create(
+            name="execute-cross-site-target",
+            site=other_site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="EXECUTE-CROSS-SITE",
+        )
+        rows = [
+            self._device_row(2, "EXECUTE-SERIAL", "execute-serial-source", self.rack_a, 1),
+            self._device_row(3, "EXECUTE-ASSET", "execute-asset-source", self.rack_a, 2),
+            self._device_row(4, "EXECUTE-AMBIGUOUS-METADATA", "execute-metadata-source", self.rack_a, 3),
+            self._device_row(5, "EXECUTE-CROSS", "execute-cross-source", self.rack_a, 4),
+        ]
+        rows[0]["serial"] = "EXECUTE-AMBIGUOUS-SERIAL"
+        rows[1]["asset_tag"] = "EXECUTE-AMBIGUOUS-TAG"
+        rows[3]["serial"] = "EXECUTE-CROSS-SITE"
+
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=False)
+        conflicts = {
+            row.source_id: row.extra_data.get("identity_conflict") for row in result.rows if row.object_type == "device"
+        }
+
+        self.assertEqual(conflicts["EXECUTE-SERIAL"], "ambiguous_serial")
+        self.assertEqual(conflicts["EXECUTE-ASSET"], "ambiguous_asset_tag")
+        self.assertEqual(conflicts["EXECUTE-AMBIGUOUS-METADATA"], "ambiguous_source_id")
+        self.assertEqual(conflicts["EXECUTE-CROSS"], "cross_site_match")
+
+    def test_duplicate_names_fail_closed_on_strong_identity_conflicts(self):
+        from dcim.models import Device
+        from extras.models import CustomField
+
+        for suffix in ("a", "b"):
+            Device.objects.create(
+                name=f"duplicate-serial-target-{suffix}",
+                site=self.site,
+                device_type=self.device_type,
+                role=self.role,
+                serial="DUPLICATE-NAME-SERIAL",
+            )
+            Device.objects.create(
+                name=f"duplicate-asset-target-{suffix}",
+                site=self.site,
+                device_type=self.device_type,
+                role=self.role,
+                asset_tag="Duplicate-Name-Tag" if suffix == "a" else "duplicate-name-tag",
+            )
+
+        content_type = ContentType.objects.get_for_model(Device)
+        custom_field, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
+        if created:
+            custom_field.object_types.set([content_type])
+        elif not custom_field.object_types.filter(pk=content_type.pk).exists():
+            custom_field.object_types.add(content_type)
+        metadata = {
+            "data_import_source": {
+                "profile_id": self.profile.pk,
+                "profile_name": self.profile.name,
+                "source_id": "DUPLICATE-NAME-METADATA",
+            }
+        }
+        for suffix in ("a", "b"):
+            Device.objects.create(
+                name=f"duplicate-metadata-target-{suffix}",
+                site=self.site,
+                device_type=self.device_type,
+                role=self.role,
+                custom_field_data=metadata,
+            )
+        bound_device = Device.objects.create(
+            name="duplicate-bound-target",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="DUPLICATE-NAME-BOUND",
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="BOUND-ELSEWHERE",
+            netbox_device_id=bound_device.pk,
+            device_name=bound_device.name,
+        )
+
+        rows = []
+        cases = (
+            ("DUP-SERIAL", "duplicate-serial-name", "serial", "DUPLICATE-NAME-SERIAL"),
+            ("DUP-ASSET", "duplicate-asset-name", "asset_tag", "DUPLICATE-NAME-TAG"),
+            ("DUPLICATE-NAME-METADATA", "duplicate-metadata-name", None, None),
+            ("DUP-BOUND", "duplicate-bound-name", "serial", "DUPLICATE-NAME-BOUND"),
+        )
+        for index, (source_id, name, field, value) in enumerate(cases, start=0):
+            strong_row = self._device_row(2 + index * 2, source_id, name, self.rack_a, 1 + index * 2)
+            if field:
+                strong_row[field] = value
+            rows.extend(
+                [
+                    strong_row,
+                    self._device_row(3 + index * 2, f"{source_id}-OTHER", name, self.rack_a, 2 + index * 2),
+                ]
+            )
+
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        conflicts = {
+            row.source_id: row.extra_data.get("identity_conflict") for row in result.rows if row.object_type == "device"
+        }
+
+        self.assertEqual(conflicts["DUP-SERIAL"], "ambiguous_serial")
+        self.assertEqual(conflicts["DUP-ASSET"], "ambiguous_asset_tag")
+        self.assertEqual(conflicts["DUPLICATE-NAME-METADATA"], "ambiguous_source_id")
+        self.assertEqual(conflicts["DUP-BOUND"], "device_already_bound")
+
+    def test_binding_helper_rejects_a_device_bound_to_another_source(self):
+        from dcim.models import Device
+
+        device = Device.objects.create(
+            name="helper-bound-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="HELPER-BOUND-A",
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+
+        with self.assertRaisesMessage(_DeviceBindingConflict, "HELPER-BOUND-A"):
+            _bind_device_source(self.profile, "HELPER-BOUND-B", device)
+
+    def test_unique_name_suggestion_uses_a_sanitized_source_and_counter(self):
+        row = self._device_row(2, "Source / Two", "reserved-name", self.rack_a, 1)
+        base = f"reserved-name-{self.rack_a.name}-U1"
+        candidate = f"{base}-Source-Two"
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=True,
+            result=ImportResult(),
+            reserved_device_names={base.lower(), candidate.lower(), f"{candidate.lower()}-2"},
+        )
+
+        suggestion = _suggest_unique_device_name(row, ctx)
+
+        self.assertEqual(suggestion, f"{candidate}-3")
+        self.assertIn(suggestion.lower(), ctx.reserved_device_names)
+
+    def test_execute_create_refuses_a_stale_preview_intent(self):
+        row = self._device_row(2, "STALE-CREATE", "stale-create-device", self.rack_a, 1)
+        expected_intents = {(2, "device"): {"action": "update", "object_id": 999999}}
+
+        result = run_import(
+            [row],
+            self.profile,
+            {"site": self.site},
+            dry_run=False,
+            expected_intents=expected_intents,
+        )
+        device_row = next(item for item in result.rows if item.object_type == "device")
+
+        self.assertEqual(device_row.action, "error")
+        self.assertTrue(device_row.extra_data.get("identity_state_changed"))
+
+    def test_execute_update_rejects_a_device_bound_to_another_source(self):
+        from dcim.models import Device
+
+        existing = Device.objects.create(
+            name="execute-bound-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="EXECUTE-BOUND-SERIAL",
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="EXECUTE-BOUND-A",
+            netbox_device_id=existing.pk,
+            device_name=existing.name,
+        )
+        row = self._device_row(2, "EXECUTE-BOUND-B", "execute-bound-source", self.rack_a, 1)
+        row["serial"] = existing.serial
+
+        result = run_import([row], self.profile, {"site": self.site}, dry_run=False)
+        device_row = next(item for item in result.rows if item.object_type == "device")
+
+        self.assertEqual(device_row.action, "error")
+        self.assertEqual(device_row.extra_data.get("identity_conflict"), "device_already_bound")
+
+    def test_zero_u_preview_and_update_clear_position_and_face(self):
+        from dcim.models import Device, DeviceType
+
+        zero_u_type = DeviceType.objects.create(
+            manufacturer=self.manufacturer,
+            model="Identity Zero U",
+            slug="identity-vendor-identity-zero-u",
+            u_height=0,
+        )
+        existing = Device.objects.create(
+            name="zero-u-existing",
+            site=self.site,
+            device_type=zero_u_type,
+            role=self.role,
+            serial="ZERO-U-UPDATE",
+            rack=self.rack_a,
+        )
+        create_row = self._device_row(2, "ZERO-U-CREATE", "zero-u-create", self.rack_a, 5)
+        create_row["model"] = zero_u_type.model
+        update_row = self._device_row(3, "ZERO-U-UPDATE", existing.name, self.rack_a, 6)
+        update_row.update({"model": zero_u_type.model, "serial": existing.serial})
+
+        preview = run_import([create_row], self.profile, {"site": self.site}, dry_run=True)
+        preview_row = next(item for item in preview.rows if item.object_type == "device")
+        self.assertIn("zero-U", preview_row.detail)
+        self.assertIsNone(preview_row.extra_data["u_position"])
+        self.assertEqual(preview_row.extra_data["face"], "")
+
+        result = run_import([update_row], self.profile, {"site": self.site}, dry_run=False)
+        update_result = next(item for item in result.rows if item.object_type == "device")
+        self.assertEqual(update_result.action, "update")
+        existing.refresh_from_db()
+        self.assertIsNone(existing.position)
+        self.assertIsNone(existing.face)
+
+    def test_rack_rows_with_one_source_id_are_rejected_before_writes(self):
+        profile = self._rack_profile("Duplicate Rack Source Profile")
+        rows = [
+            self._rack_row(2, "DUPLICATE-RACK-SOURCE", "SOURCE-RACK-A"),
+            self._rack_row(3, "DUPLICATE-RACK-SOURCE", "SOURCE-RACK-B"),
+        ]
+
+        result = run_import(rows, profile, {"site": self.site}, dry_run=True)
+        rack_rows = [item for item in result.rows if item.object_type == "rack"]
+
+        self.assertEqual(len(rack_rows), 2)
+        self.assertTrue(all(item.extra_data.get("identity_conflict") == "duplicate_source_id" for item in rack_rows))
+
+    def test_rack_create_refuses_a_stale_preview_intent(self):
+        profile = self._rack_profile("Stale Rack Create Profile")
+        row = self._rack_row(2, "STALE-RACK", "STALE-RACK")
+
+        result = run_import(
+            [row],
+            profile,
+            {"site": self.site},
+            dry_run=False,
+            expected_intents={(2, "rack"): {"action": "update", "object_id": 999999}},
+        )
+        rack_row = next(item for item in result.rows if item.object_type == "rack")
+
+        self.assertEqual(rack_row.action, "error")
+        self.assertTrue(rack_row.extra_data.get("identity_state_changed"))
+
+    def test_rack_update_retains_the_selected_location_scope(self):
+        from dcim.models import Location, Rack
+
+        profile = self._rack_profile("Rack Location Update Profile")
+        location = Location.objects.create(name="Rack Target Location", slug="rack-target-location", site=self.site)
+        rack = Rack.objects.create(site=self.site, location=location, name="RACK-LOCATION-UPDATE", u_height=42)
+        row = self._rack_row(2, "RACK-LOCATION-UPDATE", rack.name)
+
+        result = run_import([row], profile, {"site": self.site, "location": location}, dry_run=False)
+        rack_result = next(item for item in result.rows if item.object_type == "rack")
+
+        self.assertEqual(rack_result.action, "update")
+        rack.refresh_from_db()
+        self.assertEqual(rack.location, location)
+
+    def test_generic_device_write_error_is_not_reported_as_a_position_conflict(self):
+        from django.core.exceptions import ValidationError
+
+        row = self._device_row(2, "GENERIC-VALIDATION", "generic-validation", self.rack_a, 1)
+        validation_result = _rack_position_error_row(
+            row,
+            row["source_id"],
+            row["device_name"],
+            row["make"],
+            row["model"],
+            row["asset_tag"],
+            row["rack_name"],
+            1,
+            ValidationError(["A device field is invalid"]),
+            "create",
+        )
+
+        self.assertEqual(validation_result.extra_data.get("identity_conflict"), "device_validation_failed")
+        self.assertIn("A device field is invalid", validation_result.detail)
+
+    def test_existing_ip_owned_by_another_device_is_not_reassigned(self):
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        target = Device.objects.create(
+            name="ip-target-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        target_interface = Interface.objects.create(device=target, name="eth0", type="1000base-t")
+        IPAddress.objects.create(address="198.18.0.1/24", assigned_object=target_interface)
+        owner = Device.objects.create(
+            name="ip-owner-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        owner_interface = Interface.objects.create(device=owner, name="eth0", type="1000base-t")
+        IPAddress.objects.create(address="198.18.0.2/24", assigned_object=owner_interface)
+
+        assigned = _assign_ip_to_device(target, "primary_ip4", "198.18.0.2/24")
+
+        self.assertFalse(assigned)
+        target.refresh_from_db()
+        self.assertIsNone(target.primary_ip4)
+
+    def test_duplicate_name_resolution_rejects_invalid_request_boundaries(self):
+        from dcim.models import Device
+
+        row = self._device_row(2, "RESOLUTION-BOUNDARY", "resolution-boundary", self.rack_a, 1)
+        self._set_import_session([row])
+        url = reverse("plugins:netbox_data_import:resolve_duplicate_name")
+        base_data = {
+            "profile_id": self.profile.pk,
+            "source_id": row["source_id"],
+            "row_number": row["_row_number"],
+            "new_name": "resolved-boundary-name",
+        }
+
+        invalid_requests = (
+            {**base_data, "profile_id": 999999},
+            {**base_data, "row_number": "not-a-row"},
+            {**base_data, "source_id": ""},
+            {**base_data, "new_name": ""},
+        )
+        for data in invalid_requests:
+            with self.subTest(data=data):
+                response = self.client.post(url, data)
+                self.assertEqual(response.status_code, 302)
+
+        existing = Device.objects.create(
+            name="existing-resolution-name",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        response = self.client.post(url, {**base_data, "new_name": existing.name})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(
+                profile=self.profile,
+                source_id=row["source_id"],
+                source_column="device_name",
+            ).exists()
+        )
+
+    def test_duplicate_name_resolution_requires_resolution_add_permission(self):
+        limited_user = get_user_model().objects.create_user(
+            username="resolution-boundary-user",
+            email="resolution-boundary@example.invalid",
+            password="testpass",
+        )
+        self._grant_object_permission(
+            limited_user,
+            "Change profile without adding resolutions",
+            ImportProfile,
+            ["change"],
+            {"pk": self.profile.pk},
+        )
+        self.client.force_login(limited_user)
+        row = self._device_row(2, "RESOLUTION-PERMISSION", "resolution-permission", self.rack_a, 1)
+        self._set_import_session([row])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": row["source_id"],
+                "row_number": row["_row_number"],
+                "new_name": "resolution-permission-unique",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile, source_id=row["source_id"]).exists())
+
+    def test_permission_scoped_create_only_helper_does_not_replace_an_existing_binding(self):
+        from dcim.models import Device
+
+        first_device = Device.objects.create(
+            name="create-only-first",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        second_device = Device.objects.create(
+            name="create-only-second",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        binding = DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="CREATE-ONLY",
+            netbox_device_id=first_device.pk,
+            device_name=first_device.name,
+        )
+
+        allowed = _save_permission_scoped_object(
+            self.user,
+            DeviceExistingMatch,
+            {"profile": self.profile, "source_id": binding.source_id},
+            {"netbox_device_id": second_device.pk, "device_name": second_device.name},
+            allow_update=False,
+        )
+
+        self.assertFalse(allowed)
+        binding.refresh_from_db()
+        self.assertEqual(binding.netbox_device_id, first_device.pk)
+
+    def test_auto_match_reports_invalid_and_conflicting_eligible_rows(self):
+        from dcim.models import Device, Site
+        from tenancy.models import Tenant
+
+        url = reverse("plugins:netbox_data_import:auto_match_devices")
+
+        session = self.client.session
+        session["import_rows"] = []
+        session["import_context"] = {"profile_id": self.profile.pk, "site_id": 999999}
+        session.save()
+        self.assertEqual(self.client.post(url, {"profile_id": self.profile.pk}).status_code, 302)
+
+        duplicate_rows = [
+            self._device_row(2, "AUTO-DUPLICATE", "auto-duplicate-a", self.rack_a, 1),
+            self._device_row(3, "AUTO-DUPLICATE", "auto-duplicate-b", self.rack_a, 2),
+        ]
+        self._set_import_session(duplicate_rows)
+        self.assertEqual(self.client.post(url, {"profile_id": self.profile.pk}).status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AUTO-DUPLICATE").exists())
+
+        bound = Device.objects.create(
+            name="auto-bound-target",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="AUTO-BOUND-TARGET",
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="AUTO-BOUND-A",
+            netbox_device_id=bound.pk,
+            device_name=bound.name,
+        )
+        bound_row = self._device_row(2, "AUTO-BOUND-B", "auto-bound-source", self.rack_a, 1)
+        bound_row["serial"] = bound.serial
+        self._set_import_session([bound_row])
+        self.assertEqual(self.client.post(url, {"profile_id": self.profile.pk}).status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AUTO-BOUND-B").exists())
+
+        invalid_position = Device.objects.create(
+            name="auto-invalid-position",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        invalid_position_row = self._device_row(2, "AUTO-INVALID-POSITION", invalid_position.name, self.rack_a, 1)
+        invalid_position_row.update({"rack_name": "", "u_position": "not-a-position", "face": ""})
+        self._set_import_session([invalid_position_row])
+        self.assertEqual(self.client.post(url, {"profile_id": self.profile.pk}).status_code, 302)
+        self.assertTrue(
+            DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AUTO-INVALID-POSITION").exists()
+        )
+
+        tenant = Tenant.objects.create(name="Auto Probable Tenant", slug="auto-probable-tenant")
+        Device.objects.create(
+            name="auto-probable-device",
+            site=self.site,
+            tenant=tenant,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        probable_row = self._device_row(2, "AUTO-PROBABLE", "prefix - probable-device", self.rack_a, 1)
+        self._set_import_session([probable_row], tenant=tenant)
+        self.assertEqual(self.client.post(url, {"profile_id": self.profile.pk}).status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AUTO-PROBABLE").exists())
+
+        self.assertFalse(Site.objects.filter(pk=999999).exists())
+
+    def test_quick_mapping_views_validate_inputs_and_refresh_session_rows(self):
+        class_url = reverse("plugins:netbox_data_import:quick_add_class_mapping")
+        invalid_action = self.client.post(
+            class_url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Boundary Class",
+                "mapping_action": "invalid",
+            },
+        )
+        missing_role = self.client.post(
+            class_url,
+            {
+                "profile_id": self.profile.pk,
+                "source_class": "Boundary Class",
+                "mapping_action": "role",
+                "role_slug": "",
+            },
+        )
+        self.assertEqual(invalid_action.status_code, 302)
+        self.assertEqual(missing_role.status_code, 302)
+        self.assertFalse(ClassRoleMapping.objects.filter(profile=self.profile, source_class="Boundary Class").exists())
+
+        session = self.client.session
+        session["import_rows"] = [{"_row_number": 2, "Serial Alias": "SERIAL-FROM-ALIAS"}]
+        session.save()
+        mapping_response = self.client.post(
+            reverse("plugins:netbox_data_import:quick_add_column_mapping"),
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "Serial Alias",
+                "target_field": "serial",
+            },
+        )
+
+        self.assertEqual(mapping_response.status_code, 302)
+        self.assertEqual(self.client.session["import_rows"][0]["serial"], "SERIAL-FROM-ALIAS")
+
+    def test_manual_match_rejects_ambiguous_source_and_cross_site_target(self):
+        from dcim.models import Device, Site
+
+        url = reverse("plugins:netbox_data_import:match_existing_device")
+        target = Device.objects.create(
+            name="manual-boundary-target",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        duplicate_rows = [
+            self._device_row(2, "MANUAL-DUPLICATE", "manual-duplicate-a", self.rack_a, 1),
+            self._device_row(3, "MANUAL-DUPLICATE", "manual-duplicate-b", self.rack_a, 2),
+        ]
+        self._set_import_session(duplicate_rows)
+        duplicate_response = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "MANUAL-DUPLICATE",
+                "netbox_device_id": target.pk,
+            },
+        )
+
+        other_site = Site.objects.create(name="Manual Other Site", slug="manual-other-site")
+        other_target = Device.objects.create(
+            name="manual-cross-site-target",
+            site=other_site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        row = self._device_row(2, "MANUAL-CROSS-SITE", "manual-cross-site", self.rack_a, 1)
+        self._set_import_session([row])
+        cross_site_response = self.client.post(
+            url,
+            {
+                "profile_id": self.profile.pk,
+                "source_id": row["source_id"],
+                "netbox_device_id": other_target.pk,
+            },
+        )
+
+        self.assertEqual(duplicate_response.status_code, 302)
+        self.assertEqual(cross_site_response.status_code, 302)
+        self.assertFalse(
+            DeviceExistingMatch.objects.filter(
+                profile=self.profile,
+                source_id__in=["MANUAL-DUPLICATE", "MANUAL-CROSS-SITE"],
+            ).exists()
+        )
+
+    def test_quick_role_creation_requires_the_dcim_add_permission(self):
+        limited_user = get_user_model().objects.create_user(
+            username="quick-role-boundary-user",
+            email="quick-role-boundary@example.invalid",
+            password="testpass",
+        )
+        self._grant_object_permission(
+            limited_user,
+            "View profiles without adding roles",
+            ImportProfile,
+            ["view"],
+        )
+        self.client.force_login(limited_user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:quick_create_role"),
+            {"name": "Boundary Role", "slug": "boundary-role"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("dcim.add_devicerole", response.json()["error"])
+
+    def test_single_row_sync_validates_row_number_and_active_site(self):
+        row = self._device_row(2, "SYNC-BOUNDARY", "sync-boundary-device", self.rack_a, 1)
+        preview = run_import([row], self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session([row], preview)
+        url = reverse("plugins:netbox_data_import:sync_single_row")
+
+        invalid_number = self.client.post(url, {"row_number": "not-a-number"})
+
+        session = self.client.session
+        context = session["import_context"]
+        context["site_id"] = 999999
+        session["import_context"] = context
+        session.save()
+        missing_site = self.client.post(url, {"row_number": 2})
+
+        self.assertEqual(invalid_number.status_code, 400)
+        self.assertEqual(missing_site.status_code, 400)
+        self.assertEqual(invalid_number.json()["error"], "Invalid row number")
+        self.assertEqual(missing_site.json()["error"], "Site not found")
+
+    def test_hidden_strong_identity_is_rejected_in_preview_write_and_duplicate_name_preflight(self):
+        from dcim.models import Device
+
+        hidden = Device.objects.create(
+            name="hidden-strong-identity",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="HIDDEN-STRONG-IDENTITY",
+        )
+        user = get_user_model().objects.create_user(username="hidden-strong-user", password="testpass")
+        row = self._device_row(2, "HIDDEN-STRONG", "hidden-strong-source", self.rack_a, 1)
+        row.update({"rack_name": "", "u_position": "", "face": "", "serial": hidden.serial})
+
+        preview = run_import([row], self.profile, {"site": self.site}, dry_run=True, user=user)
+        preview_row = next(item for item in preview.rows if item.object_type == "device")
+        write = run_import([row], self.profile, {"site": self.site}, dry_run=False, user=user)
+        write_row = next(item for item in write.rows if item.object_type == "device")
+
+        other_row = self._device_row(3, "HIDDEN-STRONG-OTHER", row["device_name"], self.rack_a, 2)
+        other_row.update({"rack_name": "", "u_position": "", "face": ""})
+        duplicate_rows = [row, other_row]
+        duplicate_preview = run_import(
+            duplicate_rows,
+            self.profile,
+            {"site": self.site},
+            dry_run=True,
+            user=user,
+        )
+        duplicate_row = next(
+            item
+            for item in duplicate_preview.rows
+            if item.object_type == "device" and item.source_id == row["source_id"]
+        )
+
+        self.assertEqual(preview_row.detail, "Permission denied: dcim.view_device")
+        self.assertEqual(write_row.detail, "Permission denied: dcim.view_device")
+        self.assertEqual(duplicate_row.detail, "Permission denied: dcim.view_device")
+
+    def test_write_time_manufacturer_identity_change_stops_type_creation(self):
+        from dcim.models import DeviceType, Manufacturer
+
+        self.profile.create_missing_device_types = True
+        self.profile.save(update_fields=["create_missing_device_types"])
+        Manufacturer.objects.create(name="Different Race Vendor", slug="race-vendor")
+        row = self._device_row(2, "RACE-VENDOR", "race-vendor-device", self.rack_a, 1)
+        row.update({"make": "Race Vendor", "model": "Race Model"})
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=ImportResult(),
+        )
+
+        _ensure_device_type(
+            "race-vendor",
+            "race-model",
+            row["make"],
+            row["model"],
+            1,
+            set(),
+            ctx,
+            row,
+            Manufacturer,
+            DeviceType,
+        )
+
+        self.assertIn(row["_row_number"], ctx.slug_conflicts_by_row)
+        self.assertFalse(DeviceType.objects.filter(manufacturer__slug="race-vendor", slug="race-model").exists())
+
+        Manufacturer.objects.create(name="Different Pass Vendor", slug="pass-race-vendor")
+        pass_row = self._device_row(3, "PASS-RACE", "pass-race-device", self.rack_a, 2)
+        pass_row.update({"make": "Pass Race Vendor", "model": "Pass Race Model"})
+        pass_ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=ImportResult(),
+        )
+        class_role_map = {
+            "Server": ClassRoleMapping.objects.get(profile=self.profile, source_class="Server"),
+        }
+
+        _pass1_ensure_types([pass_row], pass_ctx, class_role_map)
+
+        self.assertIn(pass_row["_row_number"], pass_ctx.slug_conflicts_by_row)
+        self.assertFalse(
+            DeviceType.objects.filter(
+                manufacturer__slug="pass-race-vendor",
+                slug="pass-race-vendor-pass-race-model",
+            ).exists()
+        )

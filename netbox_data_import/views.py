@@ -21,6 +21,7 @@ from .forms import (
     ColumnMappingForm,
     ColumnTransformRuleForm,
     DeviceTypeMappingForm,
+    ImportProfileBulkEditForm,
     ImportProfileForm,
     ImportProfileImportForm,
     ImportSetupForm,
@@ -58,35 +59,25 @@ def _safe_next_url(request, fallback: str) -> str:
     return reverse(fallback)
 
 
-def _save_source_resolution_for_user(user, profile, source_id, source_column, values):
-    """Create or update one source resolution within the user's object permission scope."""
+def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=True):
+    """Create or update one object within the user's NetBox permission scope."""
     with transaction.atomic():
-        resolution = (
-            SourceResolution.objects.select_for_update()
-            .filter(
-                profile=profile,
-                source_id=source_id,
-                source_column=source_column,
-            )
-            .first()
-        )
-        if resolution is None:
-            if not user.has_perm("netbox_data_import.add_sourceresolution"):
+        instance = model.objects.select_for_update().filter(**lookup).first()
+        if instance is None:
+            permission = get_permission_for_model(model, "add")
+            if not user.has_perm(permission):
                 return False
-            resolution = SourceResolution.objects.create(
-                profile=profile,
-                source_id=source_id,
-                source_column=source_column,
-                **values,
-            )
-            allowed = user.has_perm("netbox_data_import.add_sourceresolution", resolution)
+            instance = model.objects.create(**lookup, **values)
         else:
-            allowed = user.has_perm("netbox_data_import.change_sourceresolution", resolution)
-            if allowed:
-                for field_name, value in values.items():
-                    setattr(resolution, field_name, value)
-                resolution.save(update_fields=values)
-                allowed = user.has_perm("netbox_data_import.change_sourceresolution", resolution)
+            if not allow_update:
+                return False
+            permission = get_permission_for_model(model, "change")
+            if not user.has_perm(permission, instance):
+                return False
+            for field_name, value in values.items():
+                setattr(instance, field_name, value)
+            instance.save(update_fields=list(values))
+        allowed = user.has_perm(permission, instance)
         if not allowed:
             transaction.set_rollback(True)
         return allowed
@@ -221,11 +212,26 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
     queryset = ImportProfile.objects.all()
 
 
+class ImportProfileBulkEditView(generic.BulkEditView):
+    """Bulk-edit selected ImportProfiles."""
+
+    queryset = ImportProfile.objects.all()
+    filterset = ImportProfileFilterSet
+    table = ImportProfileTable
+    form = ImportProfileBulkEditForm
+
+
 class ImportProfileBulkDeleteView(generic.BulkDeleteView):
     """Bulk-delete selected ImportProfiles."""
 
     queryset = ImportProfile.objects.all()
     table = ImportProfileTable
+
+
+class ImportProfileChangeLogView(generic.ObjectChangeLogView):
+    """Display the change log for one ImportProfile."""
+
+    queryset = ImportProfile.objects.all()
 
 
 # Scalar profile fields handled by _apply_profile_yaml_data.
@@ -1410,10 +1416,11 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
 
         ctx_data = request.session.get("import_context") or {}
         rows = request.session.get("import_rows") or []
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
         profile_id = request.POST.get("profile_id")
         if str(ctx_data.get("profile_id")) != str(profile_id):
             messages.error(request, "The selected profile is not the active import profile.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return redirect(next_url)
 
         profile = get_object_or_404(
             ImportProfile.objects.restrict(request.user, "change"),
@@ -1423,7 +1430,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             row_number = int(request.POST.get("row_number", ""))
         except (TypeError, ValueError):
             messages.error(request, "A valid source row is required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return redirect(next_url)
 
         source_id = engine._str_val(request.POST.get("source_id"))
         source_rows = [
@@ -1433,50 +1440,49 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
         ]
         if not source_id or len(source_rows) != 1:
             messages.error(request, "The source ID and row must identify one active import row.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return redirect(next_url)
 
         new_name = request.POST.get("new_name", "").strip()
         if not new_name or len(new_name) > 64:
             messages.error(request, "The device name must contain 1 to 64 characters.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return redirect(next_url)
 
         effective_rows = engine.reapply_saved_resolutions(rows, profile)
         other_names = {
-            engine._identity_text(row.get("device_name", ""))
+            engine._identity_text(device_name)
             for row in effective_rows
-            if row.get("_row_number") != row_number and engine._str_val(row.get("device_name"))
+            if row.get("_row_number") != row_number and (device_name := engine._effective_device_name(row))
         }
         if engine._identity_text(new_name) in other_names:
             messages.error(request, f"Device name '{new_name}' is already used by another source row.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return redirect(next_url)
         tenant_filter = (
             {"tenant_id": ctx_data.get("tenant_id")} if ctx_data.get("tenant_id") else {"tenant__isnull": True}
         )
         if Device.objects.filter(site_id=ctx_data.get("site_id"), name__iexact=new_name, **tenant_filter).exists():
             messages.error(request, f"Device name '{new_name}' already exists at the active import site.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return redirect(next_url)
 
         resolution_values = {
             "original_value": str(source_rows[0].get("device_name", "")),
             "resolved_fields": {"device_name": new_name},
         }
         try:
-            allowed = _save_source_resolution_for_user(
+            allowed = _save_permission_scoped_object(
                 request.user,
-                profile,
-                source_id,
-                "device_name",
+                SourceResolution,
+                {"profile": profile, "source_id": source_id, "source_column": "device_name"},
                 resolution_values,
             )
         except IntegrityError:
             messages.error(request, "The saved name changed while this request was being processed. Try again.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return redirect(next_url)
 
         if not allowed:
             messages.error(request, "Permission denied: cannot create or change this saved name.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return redirect(next_url)
         messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        return redirect(next_url)
 
 
 class SaveResolutionView(_AjaxPermissionView):
@@ -1506,11 +1512,10 @@ class SaveResolutionView(_AjaxPermissionView):
                 pk=profile_id,
             )
             try:
-                allowed = _save_source_resolution_for_user(
+                allowed = _save_permission_scoped_object(
                     request.user,
-                    profile,
-                    source_id,
-                    source_column,
+                    SourceResolution,
+                    {"profile": profile, "source_id": source_id, "source_column": source_column},
                     {
                         "original_value": original_value or "",
                         "resolved_fields": resolved_fields,
@@ -2243,40 +2248,13 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
             "device_name": device.name,
             "source_asset_tag": str(source_rows[0].get("asset_tag", "")).strip(),
         }
-        allowed = True
         try:
-            with transaction.atomic():
-                binding = (
-                    DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
-                )
-                if binding is None:
-                    if not request.user.has_perm("netbox_data_import.add_deviceexistingmatch"):
-                        allowed = False
-                    else:
-                        binding = DeviceExistingMatch.objects.create(
-                            profile=profile,
-                            source_id=source_id,
-                            **binding_values,
-                        )
-                        allowed = request.user.has_perm(
-                            "netbox_data_import.add_deviceexistingmatch",
-                            binding,
-                        )
-                else:
-                    allowed = request.user.has_perm(
-                        "netbox_data_import.change_deviceexistingmatch",
-                        binding,
-                    )
-                    if allowed:
-                        for field_name, value in binding_values.items():
-                            setattr(binding, field_name, value)
-                        binding.save(update_fields=binding_values)
-                        allowed = request.user.has_perm(
-                            "netbox_data_import.change_deviceexistingmatch",
-                            binding,
-                        )
-                if not allowed:
-                    transaction.set_rollback(True)
+            allowed = _save_permission_scoped_object(
+                request.user,
+                DeviceExistingMatch,
+                {"profile": profile, "source_id": source_id},
+                binding_values,
+            )
         except IntegrityError:
             messages.error(request, "The device link changed while this request was being processed. Try again.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
@@ -2591,7 +2569,9 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
             source_id = engine._str_val(row.get("source_id"))
             mapping = class_mappings.get(engine._str_val(row.get("device_class")))
             if (
-                (mapping is not None and (mapping.creates_rack or mapping.ignore))
+                mapping is None
+                or mapping.creates_rack
+                or mapping.ignore
                 or source_id in ignored_source_ids
                 or engine._has_below_rack_position(row)
             ):
@@ -2677,22 +2657,18 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                 if profile.device_matches.filter(netbox_device_id=device.pk).exclude(source_id=source_id).exists():
                     ambiguous += 1
                     continue
-                allowed = True
                 try:
-                    with transaction.atomic():
-                        binding = DeviceExistingMatch.objects.create(
-                            profile=profile,
-                            source_id=source_id,
-                            netbox_device_id=device.pk,
-                            device_name=device.name,
-                            source_asset_tag=asset_tag,
-                        )
-                        allowed = request.user.has_perm(
-                            "netbox_data_import.add_deviceexistingmatch",
-                            binding,
-                        )
-                        if not allowed:
-                            transaction.set_rollback(True)
+                    allowed = _save_permission_scoped_object(
+                        request.user,
+                        DeviceExistingMatch,
+                        {"profile": profile, "source_id": source_id},
+                        {
+                            "netbox_device_id": device.pk,
+                            "device_name": device.name,
+                            "source_asset_tag": asset_tag,
+                        },
+                        allow_update=False,
+                    )
                 except IntegrityError:
                     ambiguous += 1
                     continue

@@ -1782,6 +1782,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "AM-001",
                 "device_name": "automatch-device-01",
+                "device_class": "Server",
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
@@ -1859,6 +1860,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "TAG-001",
                 "device_name": "tag-device-01",
+                "device_class": "Server",
                 "serial": "",
                 "asset_tag": "ASSET-TAG-01",
             }
@@ -1886,7 +1888,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
 
         session = self.client.session
         session["import_rows"] = [
-            {"_row_number": 1, "source_id": "NAME-001", "device_name": "name-device-01", "serial": "", "asset_tag": ""}
+            {
+                "_row_number": 1,
+                "source_id": "NAME-001",
+                "device_name": "name-device-01",
+                "device_class": "Server",
+                "serial": "",
+                "asset_tag": "",
+            }
         ]
         session.save()
 
@@ -1917,6 +1926,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "AMB-001",
                 "device_name": "amb-device-01",
+                "device_class": "Server",
                 "serial": "AMBSERIAL-01",
                 "asset_tag": "",
             }
@@ -1945,6 +1955,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "ALREADY-001",
                 "device_name": "automatch-device-01",
+                "device_class": "Server",
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
@@ -1967,6 +1978,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "",
                 "device_name": "automatch-device-01",
+                "device_class": "Server",
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
@@ -1994,6 +2006,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "PROB-001",
                 "device_name": "prefix - probable-device",
+                "device_class": "Server",
                 "serial": "",
                 "asset_tag": "",
             }
@@ -2457,6 +2470,72 @@ class BulkYamlImportExtendedTest(BaseViewTestCase):
         resp = self.client.post(url, {"mapping_type": "class_role", "yaml_file": f})
         self.assertIn(resp.status_code, [200, 302])
         self.assertTrue(ClassRoleMapping.objects.filter(profile=self.profile, source_class="StorageArrayX").exists())
+
+    def test_class_role_yaml_reports_a_missing_rack_type(self):
+        """A rack mapping must reference a real NetBox RackType."""
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        yaml_file = BytesIO(b"- source_class: MissingRackType\n  creates_rack: true\n  rack_type: missing-rack-type\n")
+        yaml_file.name = "missing-rack-type.yaml"
+
+        response = self.client.post(url, {"mapping_type": "class_role", "yaml_file": yaml_file}, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "RackType with slug")
+        self.assertFalse(ClassRoleMapping.objects.filter(profile=self.profile, source_class="MissingRackType").exists())
+
+    def test_class_role_yaml_can_clear_an_existing_rack_type(self):
+        """An explicit null rack_type updates an existing class mapping."""
+        from dcim.models import Manufacturer, RackType
+
+        manufacturer = Manufacturer.objects.create(name="YAML Rack Vendor", slug="yaml-rack-vendor")
+        rack_type = RackType.objects.create(
+            manufacturer=manufacturer,
+            model="YAML Rack Type",
+            slug="yaml-rack-type",
+            u_height=42,
+        )
+        mapping = ClassRoleMapping.objects.get(profile=self.profile, source_class="Server")
+        mapping.rack_type = rack_type
+        mapping.save(update_fields=["rack_type"])
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        yaml_file = BytesIO(b"- source_class: Server\n  rack_type: null\n")
+        yaml_file.name = "clear-rack-type.yaml"
+
+        response = self.client.post(url, {"mapping_type": "class_role", "yaml_file": yaml_file})
+
+        self.assertEqual(response.status_code, 302)
+        mapping.refresh_from_db()
+        self.assertIsNone(mapping.rack_type)
+
+    def test_device_type_yaml_counts_an_existing_mapping_as_skipped(self):
+        """Reimporting one mapping does not create a duplicate."""
+        DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="Existing Vendor",
+            source_model="Existing Model",
+            netbox_manufacturer_slug="existing-vendor",
+            netbox_device_type_slug="existing-model",
+        )
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        yaml_file = BytesIO(
+            b"- source_make: Existing Vendor\n"
+            b"  source_model: Existing Model\n"
+            b"  netbox_manufacturer_slug: existing-vendor\n"
+            b"  netbox_device_type_slug: existing-model\n"
+        )
+        yaml_file.name = "existing-device-type.yaml"
+
+        response = self.client.post(url, {"mapping_type": "device_type", "yaml_file": yaml_file})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            DeviceTypeMapping.objects.filter(
+                profile=self.profile,
+                source_make="Existing Vendor",
+                source_model="Existing Model",
+            ).count(),
+            1,
+        )
 
 
 class SourceResolutionDeleteViewTest(BaseViewTestCase):

@@ -2,6 +2,9 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Migration tests for identity constraints."""
 
+from contextlib import contextmanager
+
+from django.apps import apps
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
@@ -10,54 +13,69 @@ from django.test import TransactionTestCase
 class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     """Verify that legacy duplicate bindings do not block an upgrade."""
 
+    available_apps = ["netbox_data_import"]
     migrate_from = ("netbox_data_import", "0014_alter_columnmapping_target_field_and_more")
     migrate_to = ("netbox_data_import", "0016_deviceexistingmatch_ndi_devicematch_profile_device")
 
+    @contextmanager
+    def _migration_apps(self):
+        """Expose dependency migrations while keeping teardown scoped to this plugin."""
+        apps.unset_available_apps()
+        try:
+            yield
+        finally:
+            apps.set_available_apps(self.available_apps)
+
     def setUp(self):
         super().setUp()
-        executor = MigrationExecutor(connection)
-        executor.migrate([self.migrate_from])
-        old_apps = executor.loader.project_state([self.migrate_from]).apps
-        profile = old_apps.get_model("netbox_data_import", "ImportProfile").objects.create(
-            name="Legacy Duplicate Binding Profile"
-        )
-        match_model = old_apps.get_model("netbox_data_import", "DeviceExistingMatch")
-        match_model.objects.create(
-            profile=profile,
-            source_id="LEGACY-SOURCE-A",
-            netbox_device_id=987654,
-            device_name="legacy-device",
-        ).pk
-        match_model.objects.create(
-            profile=profile,
-            source_id="LEGACY-SOURCE-B",
-            netbox_device_id=987654,
-            device_name="legacy-device",
-        )
-        self.profile_pk = profile.pk
+        with self._migration_apps():
+            executor = MigrationExecutor(connection)
+            executor.migrate([self.migrate_from])
+            old_apps = executor.loader.project_state([self.migrate_from]).apps
+            profile = old_apps.get_model("netbox_data_import", "ImportProfile").objects.create(
+                name="Legacy Duplicate Binding Profile"
+            )
+            match_model = old_apps.get_model("netbox_data_import", "DeviceExistingMatch")
+            match_model.objects.create(
+                profile=profile,
+                source_id="LEGACY-SOURCE-A",
+                netbox_device_id=987654,
+                device_name="legacy-device",
+            )
+            match_model.objects.create(
+                profile=profile,
+                source_id="LEGACY-SOURCE-B",
+                netbox_device_id=987654,
+                device_name="legacy-device",
+            )
+            self.profile_pk = profile.pk
 
     def tearDown(self):
-        executor = MigrationExecutor(connection)
-        executor.migrate(executor.loader.graph.leaf_nodes())
+        with self._migration_apps():
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
         from netbox_data_import.models import ImportProfile
 
         ImportProfile.objects.filter(pk=self.profile_pk).delete()
         super().tearDown()
 
-    def _fixture_teardown(self):
-        """Skip NetBox's global flush after explicit test-data cleanup."""
-
     def test_migration_removes_all_ambiguous_bindings(self):
-        executor = MigrationExecutor(connection)
+        with self._migration_apps():
+            executor = MigrationExecutor(connection)
 
-        executor.migrate([self.migrate_to])
+            with self.assertLogs(
+                "netbox_data_import.migrations.0015_cleanup_duplicate_device_matches", level="WARNING"
+            ) as logs:
+                executor.migrate([self.migrate_to])
 
-        apps = executor.loader.project_state([self.migrate_to]).apps
-        match_model = apps.get_model("netbox_data_import", "DeviceExistingMatch")
-        matches = list(
-            match_model.objects.filter(
-                profile_id=self.profile_pk,
-                netbox_device_id=987654,
+            migration_apps = executor.loader.project_state([self.migrate_to]).apps
+            match_model = migration_apps.get_model("netbox_data_import", "DeviceExistingMatch")
+            matches = list(
+                match_model.objects.filter(
+                    profile_id=self.profile_pk,
+                    netbox_device_id=987654,
+                )
             )
-        )
         self.assertEqual(matches, [])
+        self.assertIn("LEGACY-SOURCE-A", logs.output[0])
+        self.assertIn("LEGACY-SOURCE-B", logs.output[0])

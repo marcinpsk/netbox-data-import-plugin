@@ -23,10 +23,17 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: 4
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
-        netbox-version: ["v4.4.10", "v4.5.7", "main"]
+        include:
+          - python-version: "3.12"
+            netbox-version: "v4.4.10"
+          - python-version: "3.12"
+            netbox-version: "v4.6.7"
+          - python-version: "3.14"
+            netbox-version: "v4.6.7"
+          - python-version: "3.14"
+            netbox-version: "main"
 
     services:
       redis:
@@ -111,7 +118,7 @@ jobs:
           coverage report
 
       - name: Generate coverage report
-        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.5.7'
+        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.6.7'
         working-directory: netbox/netbox
         env:
           COVERAGE_RCFILE: ../../netbox-data-import-plugin/pyproject.toml
@@ -120,7 +127,7 @@ jobs:
           coverage html -d ../../coverage-report/htmlcov
 
       - name: Upload coverage report
-        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.5.7'
+        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.6.7'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage-report

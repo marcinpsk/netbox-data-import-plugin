@@ -89,6 +89,15 @@ class DeviceImportDataExtensionTest(TestCase):
 class ImportSetupFormValidationTest(TestCase):
     """Tests for ImportSetupForm.clean_excel_file() file-size validation."""
 
+    def test_form_without_user_keeps_its_default_querysets(self):
+        """Background callers can construct the setup form without permission scoping."""
+        from netbox_data_import.forms import ImportSetupForm
+
+        form = ImportSetupForm()
+
+        self.assertIsNotNone(form.fields["profile"].queryset)
+        self.assertIsNotNone(form.fields["site"].queryset)
+
     def test_file_too_large_raises_validation_error(self):
         """Files exceeding MAX_UPLOAD_SIZE fail clean_excel_file validation."""
         from django.core.exceptions import ValidationError

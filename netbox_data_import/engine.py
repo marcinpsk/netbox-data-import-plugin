@@ -18,7 +18,7 @@ from typing import Literal
 from io import BytesIO
 
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.utils.text import slugify
 import openpyxl
 
@@ -33,6 +33,10 @@ class ParseError(Exception):
 
 class _ObjectPermissionDenied(Exception):
     """Raised to roll back a write outside an object permission constraint."""
+
+
+class _DeviceBindingConflict(IntegrityError):
+    """Raised when one source binding would replace another device identity."""
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +169,9 @@ class ImportContext:
     # rack-position duplicates are flagged before they would cause an
     # IntegrityError on save.
     claimed_positions: dict = field(default_factory=dict)
+    # Maps ``(normalized rack identity, position)`` to claimed faces. This
+    # avoids scanning every position claim for full-depth devices.
+    claimed_position_faces: dict = field(default_factory=dict)
     # Memoizes ``DeviceType.u_height == 0`` lookups by ``(mfg_slug, dt_slug)``
     # to avoid an N+1 query in preview for large imports.
     zero_u_cache: dict = field(default_factory=dict)
@@ -1009,10 +1016,12 @@ def _set_rack_import_fields(rack, u_height, serial, rack_type, ctx):
 
 def _rack_validation_error_row(row, source_id, rack_name, exc):
     """Return one rack model validation error."""
-    if hasattr(exc, "message_dict"):
+    if isinstance(exc, ValidationError) and hasattr(exc, "message_dict"):
         message = "; ".join(f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items())
-    else:
+    elif isinstance(exc, ValidationError):
         message = "; ".join(exc.messages)
+    else:
+        message = str(exc).split("\n")[0]
     return RowResult(
         row_number=row["_row_number"],
         source_id=source_id,
@@ -1057,7 +1066,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
             except _ObjectPermissionDenied:
                 ctx.result.rows.append(_perm_denied_row("dcim.change_rack", row, rack_name, "rack"))
                 return
-            except ValidationError as exc:
+            except (DatabaseError, ValidationError) as exc:
                 ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc))
                 return
             ctx.rack_map[rack_name] = rack
@@ -1114,6 +1123,9 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
                 _enforce_saved_object_permission(rack, ctx.user, "add")
         except _ObjectPermissionDenied:
             ctx.result.rows.append(_perm_denied_row("dcim.add_rack", row, rack_name, "rack"))
+            return
+        except (DatabaseError, ValidationError) as exc:
+            ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc))
             return
         ctx.rack_map[rack_name] = rack
         ctx.result.rows.append(
@@ -1278,7 +1290,14 @@ def _find_existing_device(  # noqa: C901
     The optional device queryset controls visibility only. Hidden devices still
     participate in global ambiguity checks.
     """
-    devices = Device.objects.all()
+    devices = Device.objects.select_related(
+        "device_type__manufacturer",
+        "role",
+        "tenant",
+        "location",
+        "rack__location",
+        "site",
+    )
     visible_devices = device_queryset
     existing_match = source_match
     if source_id and not source_match_locked:
@@ -1412,21 +1431,24 @@ def _bind_device_source(profile, source_id, device, asset_tag=""):
         return
     conflict_source_id = _device_binding_conflict(profile, source_id, device)
     if conflict_source_id:
-        raise IntegrityError(f"Device is already bound to source ID '{conflict_source_id}'")
+        raise _DeviceBindingConflict(f"Device is already bound to source ID '{conflict_source_id}'")
     existing_match = profile.device_matches.select_for_update().filter(source_id=source_id).first()
     if existing_match is not None:
         if existing_match.netbox_device_id != device.pk:
-            raise IntegrityError(f"Source ID is already bound to device #{existing_match.netbox_device_id}")
+            raise _DeviceBindingConflict(f"Source ID is already bound to device #{existing_match.netbox_device_id}")
         existing_match.device_name = device.name
         existing_match.source_asset_tag = asset_tag or ""
         existing_match.save(update_fields=["device_name", "source_asset_tag"])
         return
-    profile.device_matches.create(
-        source_id=source_id,
-        netbox_device_id=device.pk,
-        device_name=device.name,
-        source_asset_tag=asset_tag or "",
-    )
+    try:
+        profile.device_matches.create(
+            source_id=source_id,
+            netbox_device_id=device.pk,
+            device_name=device.name,
+            source_asset_tag=asset_tag or "",
+        )
+    except IntegrityError as exc:
+        raise _DeviceBindingConflict("The source-to-device binding changed during import") from exc
 
 
 def _device_queryset_for_user(Device, user, action):
@@ -1464,12 +1486,12 @@ def _suggest_unique_device_name(row, ctx):
         source_suffix = _str_val(row.get("source_id")) or str(row.get("_row_number", "ROW"))
         source_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_suffix).strip("-") or "ROW"
         candidate = f"{base[: max(1, 63 - len(source_suffix))]}-{source_suffix}"[:64]
-    serial = 2
+    counter = 2
     unique_candidate = candidate
     while _identity_text(unique_candidate) in ctx.reserved_device_names:
-        suffix = f"-{serial}"
+        suffix = f"-{counter}"
         unique_candidate = f"{candidate[: 64 - len(suffix)]}{suffix}"
-        serial += 1
+        counter += 1
     ctx.reserved_device_names.add(_identity_text(unique_candidate))
     return unique_candidate
 
@@ -1623,7 +1645,7 @@ def _check_rack_position_conflict(
     range ``position .. position + u_height - 1``.  Two rows overlap if any
     slot in their ranges collides on the same ``(rack, face)``.
 
-    Claims are keyed by ``(rack_name, slot, face)`` and store
+    Claims are keyed by ``(normalized rack identity, slot, face)`` and store
     ``(row_number, device_name, matched_device_pk)``. Multiple source rows
     cannot claim the same existing device.
 
@@ -1638,16 +1660,17 @@ def _check_rack_position_conflict(
         height = 1
     effective_face = device_face or ""
     face_label = f" ({effective_face})" if effective_face else ""
+    rack_key = _identity_text(rack_name)
     slots = range(position, position + height)
     for slot in slots:
         if effective_face:
             claimed_keys = [
-                key
-                for key in ((rack_name, slot, effective_face), (rack_name, slot, ""))
-                if key in ctx.claimed_positions
+                key for key in ((rack_key, slot, effective_face), (rack_key, slot, "")) if key in ctx.claimed_positions
             ]
         else:
-            claimed_keys = [key for key in ctx.claimed_positions if key[0] == rack_name and key[1] == slot]
+            claimed_keys = [
+                (rack_key, slot, claimed_face) for claimed_face in ctx.claimed_position_faces.get((rack_key, slot), ())
+            ]
         for claimed_key in claimed_keys:
             prev_row, prev_name, _prev_pk = _unpack_claim(ctx.claimed_positions[claimed_key])
             if prev_row is not None:
@@ -1664,9 +1687,10 @@ def _check_rack_position_conflict(
             )
     # First claim wins: only register slots that aren't already claimed.
     for slot in slots:
-        pos_key = (rack_name, slot, effective_face)
+        pos_key = (rack_key, slot, effective_face)
         if pos_key not in ctx.claimed_positions:
             ctx.claimed_positions[pos_key] = (row_number, device_name, matched_device_pk)
+            ctx.claimed_position_faces.setdefault((rack_key, slot), set()).add(effective_face)
     return None
 
 
@@ -1705,10 +1729,10 @@ def _claim_rack_slots_for_preview(
     no claim.
 
     ``matched_device_pk`` is stored with the claim for diagnostics. Returns
-    ``(action, detail, conflict_row_number)``.
+    ``(action, detail, conflict_row_number, identity_conflict)``.
     """
     if action not in ("create", "update"):
-        return action, detail, None
+        return action, detail, None, None
     conflict = _check_rack_position_conflict(
         rack_name,
         position,
@@ -1721,8 +1745,8 @@ def _claim_rack_slots_for_preview(
     )
     if conflict:
         new_detail, conflict_row_number = conflict
-        return "error", new_detail, conflict_row_number
-    return action, detail, None
+        return "error", new_detail, conflict_row_number, "rack_position_occupied"
+    return action, detail, None, None
 
 
 def _resolve_preview_rack(row, ctx, Rack, source_id, device_name, make, model, serial, asset_tag):
@@ -2009,7 +2033,7 @@ def _preview_device_row(  # noqa: C901
         conflict_source_id = _device_binding_conflict(ctx.profile, source_id, matched_device)
         previous_claim = ctx.claimed_device_ids.get(matched_device.pk)
         if conflict_source_id or (previous_claim and previous_claim[0] != row.get("_row_number")):
-            claimed_source = conflict_source_id or previous_claim[1]
+            claimed_source = conflict_source_id or previous_claim[1] or f"row {previous_claim[0]}"
             return RowResult(
                 row_number=row["_row_number"],
                 source_id=source_id,
@@ -2089,7 +2113,7 @@ def _preview_device_row(  # noqa: C901
     placement_height = device_type.u_height if device_type is not None else u_height
     placement_full_depth = device_type.is_full_depth if device_type is not None else pending_full_depth
     placement_face = None if placement_full_depth else effective_face
-    action, detail, conflict_row_number = _claim_rack_slots_for_preview(
+    action, detail, conflict_row_number, claim_conflict = _claim_rack_slots_for_preview(
         action,
         detail,
         _rack_identity_label(rack_name, ctx.location),
@@ -2101,8 +2125,8 @@ def _preview_device_row(  # noqa: C901
         placement_height,
         matched_device_pk=matched_device.pk if matched_device is not None else None,
     )
-    if conflict_row_number is not None or (action == "error" and detail.startswith("Rack position conflict:")):
-        identity_conflict = "rack_position_occupied"
+    if claim_conflict is not None:
+        identity_conflict = claim_conflict
 
     field_diff: dict | None = None
     if action == "update" and matched_device is not None:
@@ -2171,14 +2195,19 @@ def _rack_position_error_row(row, source_id, device_name, make, model, asset_tag
     """Convert a database or model validation failure to an error row."""
     _rack_label = rack_name if rack_name else "(no rack)"
     _pos_label = f" U{position}" if position is not None else ""
-    if isinstance(exc, ValidationError):
+    if isinstance(exc, _DeviceBindingConflict):
+        msg = str(exc)
+    elif isinstance(exc, ValidationError):
         if hasattr(exc, "message_dict"):
             msg = "; ".join(f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items())
         else:
             msg = "; ".join(exc.messages)
     else:
         msg = str(exc).split("\n")[0]
-    if "unique_rack_position" in msg or ("rack_id" in msg and "position" in msg) or "occupied" in msg:
+    if isinstance(exc, _DeviceBindingConflict):
+        detail = f"Cannot {action} '{device_name}': {msg}"
+        identity_conflict = "device_already_bound"
+    elif "unique_rack_position" in msg or ("rack_id" in msg and "position" in msg) or "occupied" in msg:
         detail = f"Cannot {action} '{device_name}': rack position {_rack_label}{_pos_label} is already occupied"
         identity_conflict = "rack_position_occupied"
     else:
@@ -2403,7 +2432,7 @@ def _write_device_row(  # noqa: C901
                     _enforce_saved_object_permission(device, ctx.user, "change")
             except _ObjectPermissionDenied:
                 return _perm_denied_row("dcim.change_device", row, device_name, "device")
-            except (IntegrityError, ValidationError) as exc:
+            except (DatabaseError, ValidationError) as exc:
                 return _rack_position_error_row(
                     row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "update"
                 )
@@ -2465,7 +2494,7 @@ def _write_device_row(  # noqa: C901
             _enforce_saved_object_permission(device, ctx.user, "add")
     except _ObjectPermissionDenied:
         return _perm_denied_row("dcim.add_device", row, device_name, "device")
-    except (IntegrityError, ValidationError) as exc:
+    except (DatabaseError, ValidationError) as exc:
         return _rack_position_error_row(
             row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "create"
         )
@@ -2731,8 +2760,8 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                     )
                 )
                 continue
-            if _device_binding_conflict(ctx.profile, source_id, strong_device):
-                conflict_source_id = _device_binding_conflict(ctx.profile, source_id, strong_device)
+            conflict_source_id = _device_binding_conflict(ctx.profile, source_id, strong_device)
+            if conflict_source_id:
                 ctx.result.rows.append(
                     RowResult(
                         row_number=row["_row_number"],
@@ -2993,6 +3022,7 @@ def _derived_slug_conflicts(rows, profile, class_role_map, ignored_source_ids=fr
     """Return per-row errors for different source identities that derive one slug."""
     manufacturer_groups = {}
     device_type_groups = {}
+    mapped_source_makes = frozenset(profile.manufacturer_mappings.values_list("source_make", flat=True))
     for row in rows:
         crm = class_role_map.get(_str_val(row.get("device_class")))
         if not _is_writing_device_row(row, crm, ignored_source_ids):
@@ -3000,7 +3030,7 @@ def _derived_slug_conflicts(rows, profile, class_role_map, ignored_source_ids=fr
         make = " ".join((_str_val(row.get("make")) or "Unknown").split())
         model = " ".join((_str_val(row.get("model")) or "Unknown").split())
         mfg_slug, dt_slug, explicit_device_type = _resolve_device_type_slugs(make, model, profile)
-        explicit_manufacturer = explicit_device_type or profile.manufacturer_mappings.filter(source_make=make).exists()
+        explicit_manufacturer = explicit_device_type or make in mapped_source_makes
         record = {
             "row_number": row.get("_row_number"),
             "make": make,
@@ -3138,7 +3168,4 @@ def _store_source_id(
         logger.warning("Failed to set data_import_source on %s", obj)
 
     if changed:
-        try:
-            obj.save(update_fields=["custom_field_data"])
-        except Exception:  # pragma: no cover
-            logger.exception("Failed to save custom_field_data on %s (source_id=%s)", obj, source_id)
+        obj.save(update_fields=["custom_field_data"])

@@ -3,7 +3,6 @@
 """Tests for parse_file return_stats / capture_extra_data and _store_source_id extra_columns."""
 
 import os
-from unittest.mock import MagicMock
 
 from django.test import TestCase
 
@@ -123,10 +122,17 @@ class ParseFileExtraColumnsTest(TestCase):
 class StoreSourceIdExtraTest(TestCase):
     """_store_source_id writes extra_columns to data_import_source['extra']."""
 
-    def _make_mock_obj(self):
-        obj = MagicMock()
-        obj.custom_field_data = {}
-        return obj
+    def _make_saved_obj(self):
+        class SavedObject:
+            custom_field_data = None
+
+            def __init__(self):
+                self.custom_field_data = {}
+
+            def save(self, **kwargs):
+                self.saved_fields = kwargs.get("update_fields")
+
+        return SavedObject()
 
     def _make_profile_obj(self):
         return ImportProfile(
@@ -136,7 +142,7 @@ class StoreSourceIdExtraTest(TestCase):
         )
 
     def test_extra_columns_written_to_data_import_source(self):
-        obj = self._make_mock_obj()
+        obj = self._make_saved_obj()
         profile = self._make_profile_obj()
         extra = {"JiraID": "JIRA-123", "Location": "DC1"}
         _store_source_id(obj, profile, "SRC-1", extra_columns=extra)
@@ -145,18 +151,30 @@ class StoreSourceIdExtraTest(TestCase):
         self.assertEqual(stored.get("source_id"), "SRC-1")
 
     def test_no_extra_key_when_extra_is_none(self):
-        obj = self._make_mock_obj()
+        obj = self._make_saved_obj()
         profile = self._make_profile_obj()
         _store_source_id(obj, profile, "SRC-2", extra_columns=None)
         stored = obj.custom_field_data.get("data_import_source", {})
         self.assertNotIn("extra", stored)
 
     def test_no_extra_key_when_extra_is_empty_dict(self):
-        obj = self._make_mock_obj()
+        obj = self._make_saved_obj()
         profile = self._make_profile_obj()
         _store_source_id(obj, profile, "SRC-3", extra_columns={})
         stored = obj.custom_field_data.get("data_import_source", {})
         self.assertNotIn("extra", stored)
+
+    def test_database_error_while_storing_source_metadata_propagates(self):
+        from django.db import IntegrityError
+
+        class FailingDevice:
+            custom_field_data = {}
+
+            def save(self, **kwargs):
+                raise IntegrityError("metadata write failed")
+
+        with self.assertRaisesMessage(IntegrityError, "metadata write failed"):
+            _store_source_id(FailingDevice(), self._make_profile_obj(), "SRC-DB-ERROR")
 
 
 class PromoteExtraJsonFieldsTest(TestCase):
