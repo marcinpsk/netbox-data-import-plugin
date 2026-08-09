@@ -59,6 +59,14 @@ def _safe_next_url(request, fallback: str) -> str:
     return reverse(fallback)
 
 
+def _parse_posted_profile_id(request):
+    """Return the posted integer profile ID, or None when it is invalid."""
+    try:
+        return int(request.POST.get("profile_id", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=True):
     """Create or update one object within the user's NetBox permission scope."""
     with transaction.atomic():
@@ -2205,7 +2213,10 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
         """Save the device match and redirect back to preview."""
         from dcim.models import Device
 
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
         source_id = engine._str_val(request.POST.get("source_id"))
         netbox_device_id = request.POST.get("netbox_device_id", "").strip()
@@ -2546,7 +2557,10 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
         """Run auto-matching and redirect back to preview with a summary message."""
         from dcim.models import Device
 
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
         rows = request.session.get("import_rows", [])
         ctx_data = request.session.get("import_context") or {}
@@ -2598,6 +2612,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
 
         matched = 0
         ambiguous = 0
+        placement_conflicts = 0
         already = 0
         probable = 0
         skipped = 0
@@ -2651,7 +2666,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                     position,
                     face,
                 ):
-                    ambiguous += 1
+                    placement_conflicts += 1
                     continue
 
             if device is not None:
@@ -2695,6 +2710,8 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
             msg_parts.append(f"{probable} probable name match(es) — use Link button to confirm")
         if ambiguous:
             msg_parts.append(f"{ambiguous} ambiguous (multiple devices)")
+        if placement_conflicts:
+            msg_parts.append(f"{placement_conflicts} placement conflict(s)")
         if already:
             msg_parts.append(f"{already} already matched")
         if skipped:

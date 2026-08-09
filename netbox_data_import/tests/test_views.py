@@ -1773,6 +1773,20 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         )
         self.assertEqual(resp.status_code, 302)
 
+    def test_post_invalid_profile_id_redirects_with_error(self):
+        """A malformed profile ID returns the normal validation response."""
+        from django.contrib.messages import get_messages
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:match_existing_device"),
+            {"profile_id": "not-a-number"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            [str(message) for message in get_messages(response.wsgi_request)], ["A valid import profile is required."]
+        )
+
 
 class AutoMatchDevicesViewTest(BaseViewTestCase):
     """Tests for AutoMatchDevicesView."""
@@ -1863,6 +1877,20 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
         self.assertEqual(resp.status_code, 302)
+
+    def test_post_invalid_profile_id_redirects_with_error(self):
+        """A malformed profile ID returns the normal validation response."""
+        from django.contrib.messages import get_messages
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": "not-a-number"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            [str(message) for message in get_messages(response.wsgi_request)], ["A valid import profile is required."]
+        )
 
     def test_post_automatch_by_asset_tag(self):
         """POST with a row matching only by asset_tag creates a DeviceExistingMatch."""

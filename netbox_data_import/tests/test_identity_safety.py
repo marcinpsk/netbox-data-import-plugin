@@ -714,9 +714,12 @@ class IdentitySafetyTest(TestCase):
         response = self.client.post(
             reverse("plugins:netbox_data_import:auto_match_devices"),
             {"profile_id": self.profile.pk},
+            follow=True,
         )
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "1 placement conflict(s)")
+        self.assertNotContains(response, "1 ambiguous (multiple devices)")
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AUTO-PLACEMENT").exists())
 
     def test_name_match_is_scoped_to_tenant(self):

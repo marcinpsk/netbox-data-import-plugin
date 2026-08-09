@@ -94,6 +94,5 @@ jobs:
         working-directory: netbox/netbox
         env:
           NETBOX_CONFIGURATION: netbox.configuration
-          UPDATE_QUERY_COUNTS: "1"
         run: |
           python manage.py test netbox_data_import --verbosity=2
