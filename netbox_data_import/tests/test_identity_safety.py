@@ -280,6 +280,105 @@ class IdentitySafetyTest(TestCase):
         self.assertNotIn("identity changed", error)
         self.assertFalse(Device.objects.filter(name="bulk-placement-device").exists())
 
+    def test_single_row_sync_stores_the_refreshed_preview_on_conflict(self):
+        from dcim.models import Device
+
+        rows = [self._device_row(2, "SYNC-REFRESH", "refresh-device", self.rack_a, 1)]
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        session = self.client.session
+        changed_rows = session["import_rows"]
+        changed_rows[0]["rack_name"] = self.rack_b.name
+        session["import_rows"] = changed_rows
+        session.save()
+
+        url = reverse("plugins:netbox_data_import:sync_single_row")
+        self.assertEqual(self.client.post(url, {"row_number": 2}).status_code, 409)
+
+        stored = self.client.session["import_result"]
+        stored_row = next(row for row in stored["rows"] if row["row_number"] == 2 and row["object_type"] == "device")
+        self.assertEqual(stored_row["rack_name"], self.rack_b.name)
+
+        retry = self.client.post(url, {"row_number": 2})
+
+        self.assertEqual(retry.status_code, 200)
+        self.assertTrue(retry.json()["ok"])
+        self.assertEqual(Device.objects.get(name="refresh-device").rack, self.rack_b)
+
+    def test_preview_omits_bindings_to_devices_the_user_cannot_view(self):
+        from dcim.models import Device
+
+        visible = Device.objects.create(
+            name="visible-target",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        hidden = Device.objects.create(
+            name="hidden-target",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        for source_id, device in (("SRC-VISIBLE", visible), ("SRC-HIDDEN", hidden)):
+            DeviceExistingMatch.objects.create(
+                profile=self.profile,
+                source_id=source_id,
+                netbox_device_id=device.pk,
+                device_name=device.name,
+            )
+        user = get_user_model().objects.create_user(username="hidden-binding-user", password="testpass")
+        self._grant_object_permission(
+            user, "Change binding preview profile", ImportProfile, ["change"], {"pk": self.profile.pk}
+        )
+        self._grant_object_permission(user, "View one bound device", Device, ["view"], {"pk": visible.pk})
+        self.client.force_login(user)
+        self._set_import_session(
+            [
+                self._device_row(2, "SRC-VISIBLE", "visible-source", self.rack_a, 1),
+                self._device_row(3, "SRC-HIDDEN", "hidden-source", self.rack_b, 2),
+            ]
+        )
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        match_info = response.context["device_match_info"]
+        self.assertIn("SRC-VISIBLE", match_info)
+        self.assertNotIn("SRC-HIDDEN", match_info)
+        self.assertNotContains(response, "hidden-target")
+
+    def test_auto_match_refuses_a_row_whose_serial_and_asset_tag_disagree(self):
+        from dcim.models import Device
+
+        Device.objects.create(
+            name="serial-owner",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="CONFLICT-SERIAL",
+        )
+        Device.objects.create(
+            name="asset-owner",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            asset_tag="CONFLICT-TAG",
+        )
+        row = self._device_row(2, "SRC-CONFLICT", "conflict-source", self.rack_a, 1)
+        row["serial"] = "CONFLICT-SERIAL"
+        row["asset_tag"] = "CONFLICT-TAG"
+        self._set_import_session([row])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": self.profile.pk},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
+
     def test_bulk_run_rejects_stale_create_that_now_matches_existing_device(self):
         from dcim.models import Device
 

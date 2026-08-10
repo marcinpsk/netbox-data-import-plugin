@@ -813,10 +813,13 @@ class ImportPreviewView(PermissionRequiredMixin, View):
 
         for match in device_matches:
             device = devices_by_id.get(match.netbox_device_id)
+            # Bindings to devices outside the user's view scope carry no target metadata.
+            if device is None:
+                continue
             device_match_info[match.source_id] = {
                 "device_id": match.netbox_device_id,
                 "device_name": match.device_name,
-                "device_serial": device.serial if device else "",
+                "device_serial": device.serial,
             }
 
         view_mode = request.GET.get("view", profile.preview_view_mode)
@@ -2483,6 +2486,36 @@ class QuickCreateDeviceRoleView(_AjaxPermissionView):
         )
 
 
+def _resolve_strong_identity(devices, serial, asset_tag):
+    """Resolve the serial and the asset tag to one device.
+
+    Returns (device_or_None, method_or_None, is_ambiguous). The identity is
+    ambiguous when either identifier matches more than one device, or when the
+    two identifiers point at different devices.
+    """
+    serial_device = None
+    asset_tag_device = None
+    if serial:
+        results = list(devices.filter(serial=serial)[:2])
+        if len(results) > 1:
+            return None, None, True
+        serial_device = results[0] if results else None
+
+    if asset_tag:
+        results = list(devices.filter(asset_tag__iexact=asset_tag)[:2])
+        if len(results) > 1:
+            return None, None, True
+        asset_tag_device = results[0] if results else None
+
+    if serial_device is not None and asset_tag_device is not None and serial_device.pk != asset_tag_device.pk:
+        return None, None, True
+    if serial_device is not None:
+        return serial_device, "serial", False
+    if asset_tag_device is not None:
+        return asset_tag_device, "asset tag", False
+    return None, None, False
+
+
 def _auto_match_single_device(
     device_model,
     device_name,
@@ -2495,26 +2528,13 @@ def _auto_match_single_device(
     """Try to match a single device row to an existing NetBox device.
 
     Returns (device_or_None, is_ambiguous, method). Matching priority is
-    serial, asset tag, then exact name. Multiple matches are ambiguous.
+    serial, asset tag, then exact name. Multiple matches are ambiguous, and
+    so are a serial and an asset tag that identify different devices.
     """
-    device = None
-    method = None
     devices = device_model.objects
-    if serial:
-        results = list(devices.filter(serial=serial)[:2])
-        if len(results) == 1:
-            device = results[0]
-            method = "serial"
-        elif len(results) > 1:
-            return None, True, None
-
-    if device is None and asset_tag:
-        results = list(devices.filter(asset_tag__iexact=asset_tag)[:2])
-        if len(results) == 1:
-            device = results[0]
-            method = "asset tag"
-        elif len(results) > 1:
-            return None, True, None
+    device, method, ambiguous = _resolve_strong_identity(devices, serial, asset_tag)
+    if ambiguous:
+        return None, True, None
 
     if device is None and device_name:
         name_filter = {"name__iexact": device_name}
@@ -2806,6 +2826,7 @@ class SyncSingleRowView(_AjaxPermissionView):
                     or current_row.action != "create"
                     or _previewed_writes_changed(import_result_data, current_preview)
                 ):
+                    request.session["import_result"] = current_preview.to_session_dict()
                     detail = current_row.detail if current_row is not None else "The row is no longer available."
                     return JsonResponse(
                         {

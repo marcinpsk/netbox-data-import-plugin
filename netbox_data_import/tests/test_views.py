@@ -1909,7 +1909,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             {
                 "_row_number": 1,
                 "source_id": "TAG-001",
-                "device_name": "tag-device-01",
+                "device_name": "",
                 "device_class": "Server",
                 "serial": "",
                 "asset_tag": "ASSET-TAG-01",
@@ -2856,7 +2856,7 @@ class SaveResolutionJsonErrorTest(BaseViewTestCase):
 
 
 class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
-    """Cover _auto_match_single_device ambiguous asset_tag path (lines 1379-1380)."""
+    """Cover the ambiguous asset_tag path in _auto_match_single_device."""
 
     def setUp(self):
         """Set up profile."""
@@ -2864,20 +2864,22 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         self.profile = _make_profile("AmbATProfile")
 
     def test_ambiguous_asset_tag_returns_none_is_ambiguous(self):
-        """_auto_match_single_device returns (None, True) when asset_tag matches multiple devices."""
-        from unittest.mock import MagicMock
+        """_auto_match_single_device is ambiguous when asset_tag matches two devices."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
         from netbox_data_import.views import _auto_match_single_device
 
-        mock_dev_model = MagicMock()
-        # Return 2 results for asset_tag filter (ambiguous)
-        mock_dev_model.objects.filter.return_value.__getitem__ = lambda self, s: [MagicMock(), MagicMock()]
+        site = Site.objects.create(name="AmbATSite", slug="amb-at-site")
+        mfg = Manufacturer.objects.create(name="AmbATMfg", slug="amb-at-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="AmbATModel", slug="amb-at-model")
+        role = DeviceRole.objects.create(name="AmbATRole", slug="amb-at-role")
+        # Device.asset_tag is unique, but the lookup is case-insensitive, so these two both match.
+        for name, asset_tag in (("amb-at-1", "SHARED-TAG"), ("amb-at-2", "shared-tag")):
+            Device.objects.create(name=name, asset_tag=asset_tag, device_type=dt, role=role, site=site)
 
-        # Use a sliceable mock: filter(...)[:2] returns list of 2
-        qs_mock = MagicMock()
-        qs_mock.__getitem__ = MagicMock(return_value=[MagicMock(), MagicMock()])
-        mock_dev_model.objects.filter.return_value = qs_mock
+        # The name matches a real device, so a fall-through to name matching would return that device.
+        device, is_ambiguous, method = _auto_match_single_device(Device, "amb-at-1", "", "SHARED-TAG")
 
-        device, is_ambiguous, method = _auto_match_single_device(mock_dev_model, "any-name", "", "SHARED-TAG")
         self.assertIsNone(device)
         self.assertTrue(is_ambiguous)
         self.assertIsNone(method)
