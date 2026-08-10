@@ -236,6 +236,50 @@ class IdentitySafetyTest(TestCase):
         self.assertIn("Review the refreshed preview", response.json()["error"])
         self.assertFalse(Device.objects.filter(name__in=["previewed-device-name", "changed-device-name"]).exists())
 
+    def test_single_row_sync_reports_a_generic_reason_for_a_placement_change(self):
+        from dcim.models import Device
+
+        rows = [self._device_row(2, "SYNC-STALE-RACK", "placement-device", self.rack_a, 1)]
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        session = self.client.session
+        changed_rows = session["import_rows"]
+        changed_rows[0]["rack_name"] = self.rack_b.name
+        session["import_rows"] = changed_rows
+        session.save()
+
+        response = self.client.post(reverse("plugins:netbox_data_import:sync_single_row"), {"row_number": 2})
+
+        self.assertEqual(response.status_code, 409)
+        error = response.json()["error"]
+        self.assertIn("The import preview changed", error)
+        self.assertNotIn("identity changed", error)
+        self.assertFalse(Device.objects.filter(name="placement-device").exists())
+
+    def test_bulk_run_reports_a_generic_reason_for_a_placement_change(self):
+        from django.contrib.messages import get_messages
+
+        from dcim.models import Device
+
+        rows = [self._device_row(2, "RUN-STALE-RACK", "bulk-placement-device", self.rack_a, 1)]
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        session = self.client.session
+        changed_rows = session["import_rows"]
+        changed_rows[0]["rack_name"] = self.rack_b.name
+        session["import_rows"] = changed_rows
+        session.save()
+
+        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+
+        self.assertEqual(response.status_code, 302)
+        error = " ".join(str(message) for message in get_messages(response.wsgi_request))
+        self.assertIn("The import preview changed", error)
+        self.assertNotIn("identity changed", error)
+        self.assertFalse(Device.objects.filter(name="bulk-placement-device").exists())
+
     def test_bulk_run_rejects_stale_create_that_now_matches_existing_device(self):
         from dcim.models import Device
 

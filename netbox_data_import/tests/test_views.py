@@ -1817,7 +1817,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             {
                 "_row_number": 1,
                 "source_id": "AM-001",
-                "device_name": "automatch-device-01",
+                "device_name": "",
                 "device_class": "Server",
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",

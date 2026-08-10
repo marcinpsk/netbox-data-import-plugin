@@ -957,7 +957,7 @@ class ImportRunView(PermissionRequiredMixin, View):
                 request.session["import_result"] = current_preview.to_session_dict()
                 messages.error(
                     request,
-                    "NetBox identity changed after preview. Review the refreshed preview before importing.",
+                    "The import preview changed after it was generated. Review the refreshed preview before importing.",
                 )
                 return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
@@ -2810,7 +2810,7 @@ class SyncSingleRowView(_AjaxPermissionView):
                     return JsonResponse(
                         {
                             "ok": False,
-                            "error": "NetBox identity changed after preview. Review the refreshed preview.",
+                            "error": "The import preview changed after it was generated. Review the refreshed preview.",
                             "detail": detail,
                             "extra_data": current_row.extra_data if current_row is not None else {},
                         },
