@@ -15,6 +15,7 @@ from netbox_data_import.engine import (
     _ensure_device_type,
     _ensure_manufacturer,
     _find_existing_device,
+    _identity_text,
     _perm_denied_row,
     _resolve_device_type_slugs,
     _write_device_row,
@@ -915,7 +916,7 @@ class WriteRackToDbTest(TestCase):
         row = {"_row_number": 3}
         _write_rack_to_db("SkipRack", 42, "", "SRC3", row, ctx, Rack)
         self.assertEqual(result.rows[0].action, "skip")
-        self.assertIn("SkipRack", ctx.rack_map)
+        self.assertIn(_identity_text("SkipRack"), ctx.rack_map)
 
     def test_create_rack_with_rack_type(self):
         """_write_rack_to_db creates a new Rack with rack_type assigned."""

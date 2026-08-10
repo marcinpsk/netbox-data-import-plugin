@@ -1428,7 +1428,10 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
         ctx_data = request.session.get("import_context") or {}
         rows = request.session.get("import_rows") or []
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required.")
+            return redirect(next_url)
         if str(ctx_data.get("profile_id")) != str(profile_id):
             messages.error(request, "The selected profile is not the active import profile.")
             return redirect(next_url)
@@ -1505,12 +1508,15 @@ class SaveResolutionView(_AjaxPermissionView):
         """Persist a manual field resolution for rerere replay."""
         import json
 
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
         source_id = request.POST.get("source_id")
         source_column = request.POST.get("source_column")
         original_value = request.POST.get("original_value")
         resolved_fields_json = request.POST.get("resolved_fields", "{}")
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required.")
+            return redirect(next_url)
 
         try:
             resolved_fields = json.loads(resolved_fields_json)
@@ -2612,6 +2618,10 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                 continue
             eligible_rows.append(row)
 
+        # One read of the existing bindings; the loop keeps these in step with what it saves.
+        bound_device_by_source = dict(profile.device_matches.values_list("source_id", "netbox_device_id"))
+        bound_source_by_device = {device_id: src for src, device_id in bound_device_by_source.items()}
+
         source_counts = {}
         name_counts = {}
         serial_counts = {}
@@ -2647,7 +2657,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
             if source_counts.get(source_id, 0) > 1:
                 ambiguous += 1
                 continue
-            if profile.device_matches.filter(source_id=source_id).exists():
+            if source_id in bound_device_by_source:
                 already += 1
                 continue
 
@@ -2668,15 +2678,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                 continue
 
             if device is not None and match_method == "name":
-                raw_position = row.get("u_position")
-                try:
-                    position = (
-                        int(float(raw_position))
-                        if raw_position is not None and str(raw_position).strip() != ""
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    position = None
+                position = engine._coerce_int(row.get("u_position"))
                 side_map, _, _ = engine._get_translation_maps()
                 face = side_map.get(engine._str_val(row.get("face")).lower())
                 if engine._device_placement_differs(
@@ -2690,7 +2692,8 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                     continue
 
             if device is not None:
-                if profile.device_matches.filter(netbox_device_id=device.pk).exclude(source_id=source_id).exists():
+                bound_source = bound_source_by_device.get(device.pk)
+                if bound_source is not None and bound_source != source_id:
                     ambiguous += 1
                     continue
                 try:
@@ -2711,6 +2714,8 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                 if not allowed:
                     skipped += 1
                     continue
+                bound_device_by_source[source_id] = device.pk
+                bound_source_by_device[device.pk] = source_id
                 matched += 1
             elif device_name:
                 # Substring name match → probable only (no auto-link)

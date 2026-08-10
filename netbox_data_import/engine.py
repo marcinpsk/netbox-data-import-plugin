@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from copy import copy
+from functools import partial
 from dataclasses import dataclass, field
 from typing import Literal
 from io import BytesIO
@@ -207,12 +208,18 @@ def _str_val(v) -> str:
     return "" if s.lower() in _NONE_LIKE else s
 
 
+def _coerce_int(value, default=None):
+    """Return a source value as an int, or the default when it is not a finite number."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _has_below_rack_position(row) -> bool:
     """Return True when a source row is explicitly below rack unit 1."""
-    try:
-        return int(float(row.get("u_position"))) < 1
-    except (TypeError, ValueError):
-        return False
+    position = _coerce_int(row.get("u_position"))
+    return position is not None and position < 1
 
 
 def _is_writing_device_row(row, crm, ignored_source_ids) -> bool:
@@ -838,10 +845,7 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
         make = " ".join((_str_val(row.get("make")) or "Unknown").split())
         model = " ".join((_str_val(row.get("model")) or "Unknown").split())
         u_height_raw = row.get("u_height", 1)
-        try:
-            u_height = max(1, int(float(u_height_raw)))
-        except (TypeError, ValueError):
-            u_height = 1
+        u_height = max(1, _coerce_int(u_height_raw, 1))
 
         mfg_slug, dt_slug, explicit_identity = _resolve_device_type_slugs(make, model, ctx.profile)
         _ensure_manufacturer(
@@ -1014,6 +1018,19 @@ def _set_rack_import_fields(rack, u_height, serial, rack_type, ctx):
         rack.tenant = ctx.tenant
 
 
+def _build_rack_candidate(Rack, ctx, rack_name, u_height, serial, rack_type):
+    """Return an unsaved rack carrying the fields an import controls."""
+    return Rack(
+        site=ctx.site,
+        location=ctx.location,
+        name=rack_name,
+        tenant=ctx.tenant,
+        u_height=u_height,
+        serial=serial,
+        rack_type=rack_type,
+    )
+
+
 def _rack_validation_error_row(row, source_id, rack_name, exc, operation):
     """Return one rack model validation error."""
     if isinstance(exc, ValidationError) and hasattr(exc, "message_dict"):
@@ -1069,7 +1086,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
             except (DatabaseError, ValidationError) as exc:
                 ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "update"))
                 return
-            ctx.rack_map[rack_name] = rack
+            ctx.rack_map[_identity_text(rack_name)] = rack
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -1082,7 +1099,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
                 )
             )
         else:
-            ctx.rack_map[rack_name] = rack
+            ctx.rack_map[_identity_text(rack_name)] = rack
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -1110,15 +1127,9 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
             return
         try:
             with transaction.atomic():
-                rack = Rack.objects.create(
-                    site=ctx.site,
-                    location=ctx.location,
-                    name=rack_name,
-                    tenant=ctx.tenant,
-                    u_height=u_height,
-                    serial=serial,
-                    rack_type=rack_type,
-                )
+                rack = _build_rack_candidate(Rack, ctx, rack_name, u_height, serial, rack_type)
+                rack.full_clean()
+                rack.save()
                 _store_source_id(rack, ctx.profile, source_id)
                 _enforce_saved_object_permission(rack, ctx.user, "add")
         except _ObjectPermissionDenied:
@@ -1127,7 +1138,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
         except (DatabaseError, ValidationError) as exc:
             ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "create"))
             return
-        ctx.rack_map[rack_name] = rack
+        ctx.rack_map[_identity_text(rack_name)] = rack
         ctx.result.rows.append(
             RowResult(
                 row_number=row["_row_number"],
@@ -1156,10 +1167,7 @@ def _pass2_process_racks(rows, ctx, class_role_map):
         u_height_raw = row.get("u_height", 42)
         serial = _str_val(row.get("serial"))
 
-        try:
-            u_height = max(1, int(float(u_height_raw)))
-        except (TypeError, ValueError):
-            u_height = 42
+        u_height = max(1, _coerce_int(u_height_raw, 42))
 
         if not rack_name:
             ctx.result.rows.append(
@@ -1236,10 +1244,16 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                         ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "update"))
                         continue
             else:
+                candidate = _build_rack_candidate(Rack, ctx, rack_name, u_height, serial, crm.rack_type)
+                try:
+                    candidate.full_clean()
+                except ValidationError as exc:
+                    ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "create"))
+                    continue
                 rack = None
                 action = "create"
                 detail = f"Would create rack '{rack_name}' ({u_height}U{rack_type_label}) at site '{ctx.site}'"
-            ctx.rack_map[rack_name] = rack if rack is not None else rack_name
+            ctx.rack_map[_identity_text(rack_name)] = rack if rack is not None else rack_name
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -1736,7 +1750,7 @@ def _resolve_preview_rack(row, ctx, Rack, source_id, device_name, make, model, s
     rack_name = _str_val(row.get("rack_name"))
     if not rack_name:
         return None, "(no rack)", None
-    cached_rack = ctx.rack_map.get(rack_name)
+    cached_rack = ctx.rack_map.get(_identity_text(rack_name))
     if isinstance(cached_rack, Rack):
         return cached_rack, rack_name, None
     if cached_rack:
@@ -1745,7 +1759,7 @@ def _resolve_preview_rack(row, ctx, Rack, source_id, device_name, make, model, s
     if ambiguous:
         return None, "", _ambiguous_rack_row(row, source_id, device_name, rack_name, ctx, "device")
     if target_rack is not None:
-        ctx.rack_map[rack_name] = target_rack
+        ctx.rack_map[_identity_text(rack_name)] = target_rack
         return target_rack, rack_name, None
     error = RowResult(
         row_number=row["_row_number"],
@@ -1906,10 +1920,7 @@ def _preview_device_row(  # noqa: C901
     """Return a RowResult for *dry_run* mode (no DB writes)."""
     # Parse u_height early so it's available in all return paths
     u_height_raw = row.get("u_height", 1)
-    try:
-        u_height = max(1, int(float(u_height_raw)))
-    except (TypeError, ValueError):
-        u_height = 1
+    u_height = max(1, _coerce_int(u_height_raw, 1))
 
     device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
     dt_exists = device_type is not None
@@ -1954,12 +1965,8 @@ def _preview_device_row(  # noqa: C901
     )
     if rack_error is not None:
         return rack_error
-    raw_position = row.get("u_position")
-    try:
-        # Re-derive position for display label; u_position param is the pre-resolved value for field_diff
-        position = int(float(raw_position)) if raw_position is not None and str(raw_position).strip() != "" else None
-    except (TypeError, ValueError):
-        position = None
+    # Re-derive position for display label; u_position param is the pre-resolved value for field_diff
+    position = _coerce_int(row.get("u_position"))
 
     # Zero-U devices (e.g. vertical PDUs) live in the rack but don't claim a U-position.
     # If the resolved DeviceType has u_height == 0, drop position/face so multiple zero-U
@@ -2263,7 +2270,7 @@ def _write_device_row(  # noqa: C901
             detail=f"Device role not found: {crm.role_slug}",
         )
 
-    rack = ctx.rack_map.get(rack_name) if rack_name else None
+    rack = ctx.rack_map.get(_identity_text(rack_name)) if rack_name else None
     if rack_name and rack is None:
         rack, ambiguous = _get_unique_rack(Rack, ctx, rack_name, lock=True, permission_action="view")
         if ambiguous:
@@ -2288,7 +2295,8 @@ def _write_device_row(  # noqa: C901
     locked_source_match = None
     if source_id:
         locked_source_match = ctx.profile.device_matches.select_for_update().filter(source_id=source_id).first()
-    device, match_method = _find_existing_device(
+    resolve_identity = partial(
+        _find_existing_device,
         ctx.profile,
         source_id,
         ctx.site,
@@ -2302,6 +2310,7 @@ def _write_device_row(  # noqa: C901
         source_match=locked_source_match,
         source_match_locked=bool(source_id),
     )
+    device, match_method = resolve_identity()
     if match_method == "inaccessible device":
         return _perm_denied_row("dcim.view_device", row, device_name, "device")
     if match_method == "ambiguous serial":
@@ -2315,6 +2324,18 @@ def _write_device_row(  # noqa: C901
         try:
             device = Device.objects.select_for_update(of=("self",)).select_related("rack__location").get(pk=device.pk)
         except Device.DoesNotExist:
+            return _identity_state_error(
+                row,
+                source_id,
+                device_name,
+                "device",
+                f"Device identity changed after preview for '{device_name}'. Refresh the preview before importing.",
+                rack_name,
+            )
+        # The lock covers one row, so re-run the predicate: a device written between
+        # resolution and lock can make serial or asset tag ambiguous.
+        recheck_device, recheck_method = resolve_identity()
+        if recheck_device is None or recheck_device.pk != device.pk or recheck_method != match_method:
             return _identity_state_error(
                 row,
                 source_id,
@@ -2760,24 +2781,20 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 )
                 continue
 
-        u_position_raw = row.get("u_position")
-        try:
-            position = int(float(u_position_raw))
-            if position < 1:
-                ctx.result.rows.append(
-                    RowResult(
-                        row_number=row["_row_number"],
-                        source_id=source_id,
-                        name=device_name,
-                        action="skip",
-                        object_type="device",
-                        detail=f"Skipped: position {position} < 1 (under-rack/blanking panel)",
-                        rack_name=rack_name,
-                    )
+        position = _coerce_int(row.get("u_position"))
+        if position is not None and position < 1:
+            ctx.result.rows.append(
+                RowResult(
+                    row_number=row["_row_number"],
+                    source_id=source_id,
+                    name=device_name,
+                    action="skip",
+                    object_type="device",
+                    detail=f"Skipped: position {position} < 1 (under-rack/blanking panel)",
+                    rack_name=rack_name,
                 )
-                continue
-        except (TypeError, ValueError):
-            position = None
+            )
+            continue
 
         if not device_name:
             ctx.result.rows.append(
@@ -2794,10 +2811,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
 
         mfg_slug, dt_slug, is_explicit_mapping = _resolve_device_type_slugs(make, model, ctx.profile)
         u_height_raw = row.get("u_height", 1)
-        try:
-            u_height = max(1, int(float(u_height_raw)))
-        except (TypeError, ValueError):
-            u_height = 1
+        u_height = max(1, _coerce_int(u_height_raw, 1))
 
         if not crm:
             ctx.result.rows.append(

@@ -589,13 +589,59 @@ class SyncSingleRowViewTest(TestCase):
     """Tests for SyncSingleRowView."""
 
     def setUp(self):
-        from dcim.models import Site
+        from dcim.models import DeviceRole, Site
 
         self.user = _make_superuser("sync_row_user")
         self.client = Client()
         self.client.login(username="sync_row_user", password="testpass")
         self.profile = _make_profile("SyncRowProfile")
         self.site = Site.objects.create(name="SyncRow-Site", slug="syncrow-site")
+        ClassRoleMapping.objects.create(
+            profile=self.profile, source_class="Server", creates_rack=False, role_slug="sync-role"
+        )
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="Cabinet", creates_rack=True)
+        DeviceRole.objects.create(name="SyncRole", slug="sync-role")
+
+    def _real_device_row(self):
+        return {
+            "_row_number": 1,
+            "source_id": "D001",
+            "device_name": "sync-real-device",
+            "device_class": "Server",
+            "make": "SyncVendor",
+            "model": "SyncModel",
+            "u_height": "1",
+            "rack_name": "",
+            "u_position": "",
+            "face": "",
+            "serial": "",
+            "asset_tag": "",
+            "status": "active",
+        }
+
+    def _real_rack_row(self):
+        return {
+            "_row_number": 1,
+            "source_id": "R001",
+            "device_name": "sync-real-rack",
+            "rack_name": "sync-real-rack",
+            "device_class": "Cabinet",
+            "u_height": "42",
+            "serial": "",
+        }
+
+    def _seed_preview(self, rows, object_type):
+        """Store a real dry-run preview in the session and return the previewed detail."""
+        from netbox_data_import import engine
+
+        self._set_session(rows)
+        preview = engine.run_import(
+            rows, self.profile, {"site": self.site, "location": None, "tenant": None}, dry_run=True
+        )
+        session = self.client.session
+        session["import_result"] = preview.to_session_dict()
+        session.save()
+        return next(row for row in preview.rows if row.object_type == object_type).detail
 
     def _set_session(self, rows):
         session = self.client.session
@@ -679,71 +725,33 @@ class SyncSingleRowViewTest(TestCase):
         self.assertEqual(data["error"], "Row not found in current preview data")
         mock_engine.run_import.assert_not_called()
 
-    @patch("netbox_data_import.views.engine")
-    def test_success_returns_ok_true(self, mock_engine):
-        from netbox_data_import.engine import ImportResult, RowResult
+    def test_success_returns_the_execution_result_not_the_preview(self):
+        from dcim.models import Device
 
-        mock_result = ImportResult()
-        mock_result.rows = [
-            RowResult(
-                row_number=1,
-                source_id="D001",
-                name="test-device",
-                action="create",
-                object_type="device",
-                detail="Would create device 'test-device'",
-                netbox_url="/dcim/devices/1/",
-            )
-        ]
-        mock_result.has_errors = False
-        mock_engine.run_import.return_value = mock_result
-        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "D001"}]
+        rows = [self._real_device_row()]
+        preview_detail = self._seed_preview(rows, "device")
 
-        self._set_session([{"_row_number": 1, "source_id": "D001"}])
-        session = self.client.session
-        session["import_result"] = mock_result.to_session_dict()
-        session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
+
         data = resp.json()
         self.assertTrue(data["ok"])
-        self.assertEqual(data["detail"], "Would create device 'test-device'")
-        self.assertEqual(data["url"], "/dcim/devices/1/")
-        self.assertEqual(mock_engine.run_import.call_count, 2)
-        call_kwargs = mock_engine.run_import.call_args_list[1]
-        self.assertFalse(call_kwargs.kwargs.get("dry_run", True))
+        device = Device.objects.get(name="sync-real-device")
+        self.assertEqual(data["url"], device.get_absolute_url())
+        self.assertNotEqual(data["detail"], preview_detail)
 
-    @patch("netbox_data_import.views.engine")
-    def test_success_rack_row_returns_ok_true(self, mock_engine):
-        from netbox_data_import.engine import ImportResult, RowResult
+    def test_success_rack_row_returns_the_execution_result_not_the_preview(self):
+        from dcim.models import Rack
 
-        mock_result = ImportResult()
-        mock_result.rows = [
-            RowResult(
-                row_number=1,
-                source_id="R001",
-                name="test-rack",
-                action="create",
-                object_type="rack",
-                detail="Would create rack 'test-rack'",
-                netbox_url="/dcim/racks/1/",
-            )
-        ]
-        mock_result.has_errors = False
-        mock_engine.run_import.return_value = mock_result
-        mock_engine.reapply_saved_resolutions.return_value = [{"_row_number": 1, "source_id": "R001"}]
+        rows = [self._real_rack_row()]
+        preview_detail = self._seed_preview(rows, "rack")
 
-        self._set_session([{"_row_number": 1, "source_id": "R001"}])
-        session = self.client.session
-        session["import_result"] = mock_result.to_session_dict()
-        session.save()
         resp = self.client.post(self._url(), {"row_number": "1"})
+
         data = resp.json()
         self.assertTrue(data["ok"])
-        self.assertEqual(data["detail"], "Would create rack 'test-rack'")
-        self.assertEqual(data["url"], "/dcim/racks/1/")
-        self.assertEqual(mock_engine.run_import.call_count, 2)
-        call_kwargs = mock_engine.run_import.call_args_list[1]
-        self.assertFalse(call_kwargs.kwargs.get("dry_run", True))
+        rack = Rack.objects.get(name="sync-real-rack")
+        self.assertEqual(data["url"], rack.get_absolute_url())
+        self.assertNotEqual(data["detail"], preview_detail)
 
     @patch("django.db.transaction.set_rollback")
     @patch("netbox_data_import.views.engine")
@@ -788,6 +796,8 @@ class SyncSingleRowViewTest(TestCase):
             f"Expected 'Missing rack' in {data['errors']!r}",
         )
         mock_set_rollback.assert_called_with(True)
+        self.assertTrue(mock_engine.run_import.call_args_list[0].kwargs.get("dry_run"))
+        self.assertFalse(mock_engine.run_import.call_args_list[1].kwargs.get("dry_run", True))
 
     @patch("netbox_data_import.views.engine")
     def test_manufacturer_create_but_device_update_rejected(self, mock_engine):

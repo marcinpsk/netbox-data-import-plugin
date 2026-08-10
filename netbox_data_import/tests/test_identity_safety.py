@@ -138,6 +138,136 @@ class IdentitySafetyTest(TestCase):
         permission.users.add(user)
         return permission
 
+    def test_execution_rechecks_the_identity_after_locking_the_device(self):
+        from django.db import connection
+
+        from dcim.models import Device
+
+        existing = Device.objects.create(
+            name="race-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="RACE-SERIAL",
+        )
+        row = self._device_row(2, "RACE-SRC", "race-device", self.rack_a, 1)
+        row["serial"] = "RACE-SERIAL"
+        injected = []
+
+        def insert_twin_when_the_lock_runs(execute, sql, params, many, context):
+            # Stand in for a device that another writer commits between identity
+            # resolution and the row lock.
+            if not injected and "FOR UPDATE" in sql and "dcim_device" in sql:
+                injected.append(True)
+                Device.objects.create(
+                    name="race-device-twin",
+                    site=self.site,
+                    device_type=self.device_type,
+                    role=self.role,
+                    serial="RACE-SERIAL",
+                )
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(insert_twin_when_the_lock_runs):
+            result = run_import([row], self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.assertTrue(injected, "the locking statement never ran")
+        device_row = next(item for item in result.rows if item.object_type == "device")
+        self.assertEqual(device_row.action, "error")
+        existing.refresh_from_db()
+        self.assertIsNone(existing.rack)
+
+    def test_rack_preview_reports_a_u_height_outside_the_model_limits(self):
+        profile = self._rack_profile("Rack Preview Validation Profile")
+        row = self._rack_row(2, "BAD-PREVIEW", "BAD-PREVIEW-RACK", u_height="200")
+
+        result = run_import([row], profile, {"site": self.site}, dry_run=True)
+
+        rack_row = next(item for item in result.rows if item.object_type == "rack")
+        self.assertEqual(rack_row.action, "error")
+
+    def test_rack_create_rejects_a_u_height_outside_the_model_limits(self):
+        from dcim.models import Rack
+
+        profile = self._rack_profile("Rack Write Validation Profile")
+        row = self._rack_row(2, "BAD-WRITE", "BAD-WRITE-RACK", u_height="200")
+
+        result = run_import([row], profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        rack_row = next(item for item in result.rows if item.object_type == "rack")
+        self.assertEqual(rack_row.action, "error")
+        self.assertFalse(Rack.objects.filter(name="BAD-WRITE-RACK").exists())
+
+    def test_pending_rack_is_reused_when_the_device_row_spells_it_differently(self):
+        profile = self._rack_profile("Rack Case Profile")
+        ClassRoleMapping.objects.create(
+            profile=profile, source_class="Server", creates_rack=False, role_slug=self.role.slug
+        )
+        rack_row = self._rack_row(2, "CASE-RACK", "CASE-RACK-01")
+        device_row = self._device_row(3, "CASE-DEV", "case-rack-device", self.rack_a, 1)
+        device_row["rack_name"] = "case-rack-01"
+
+        result = run_import([rack_row, device_row], profile, {"site": self.site}, dry_run=True)
+
+        device_result = next(item for item in result.rows if item.object_type == "device")
+        self.assertNotEqual(device_result.extra_data.get("identity_conflict"), "rack_not_found")
+
+    def test_auto_match_reads_existing_bindings_once_per_run(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        table = DeviceExistingMatch._meta.db_table
+
+        def binding_selects(row_count, prefix):
+            rows = [
+                self._device_row(index + 2, f"{prefix}-{index}", f"{prefix}-device-{index}", self.rack_a, index + 1)
+                for index in range(row_count)
+            ]
+            self._set_import_session(rows)
+            with CaptureQueriesContext(connection) as queries:
+                self.client.post(
+                    reverse("plugins:netbox_data_import:auto_match_devices"),
+                    {"profile_id": self.profile.pk},
+                )
+            return len(
+                [q for q in queries.captured_queries if table in q["sql"] and q["sql"].lstrip().startswith("SELECT")]
+            )
+
+        self.assertEqual(binding_selects(6, "COUNT-B"), binding_selects(2, "COUNT-A"))
+
+    def test_save_resolution_rejects_a_malformed_profile_id(self):
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {"profile_id": "not-a-number", "source_id": "SRC-A", "source_column": "device_name"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(SourceResolution.objects.exists())
+
+    def test_resolve_duplicate_name_rejects_a_malformed_profile_id(self):
+        # With no import in progress the stored profile ID is None, so a posted
+        # "None" used to pass the text comparison and reach the primary-key lookup.
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {"profile_id": "None", "source_id": "SRC-A", "row_number": "2", "new_name": "renamed-device"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(SourceResolution.objects.exists())
+
+    def test_non_finite_rack_position_is_handled_like_any_unparseable_value(self):
+        text_row = self._device_row(2, "POS-TEXT", "pos-text-device", self.rack_a, 1)
+        text_row["u_position"] = "not-a-number"
+        overflow_row = self._device_row(3, "POS-OVERFLOW", "pos-overflow-device", self.rack_a, 1)
+        overflow_row["u_position"] = "1e309"
+
+        text_result = run_import([text_row], self.profile, {"site": self.site}, dry_run=True)
+        overflow_result = run_import([overflow_row], self.profile, {"site": self.site}, dry_run=True)
+
+        text_device = next(item for item in text_result.rows if item.object_type == "device")
+        overflow_device = next(item for item in overflow_result.rows if item.object_type == "device")
+        self.assertEqual(overflow_device.action, text_device.action)
+
     def test_duplicate_names_are_identity_conflicts_with_unique_suggestions(self):
         rows = [
             self._device_row(2, "SRC-A", "shared-label", self.rack_a, 1),

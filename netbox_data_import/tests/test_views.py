@@ -2586,6 +2586,10 @@ class BulkYamlImportExtendedTest(BaseViewTestCase):
             ).count(),
             1,
         )
+        from django.contrib.messages import get_messages
+
+        summary = " ".join(str(message) for message in get_messages(response.wsgi_request))
+        self.assertIn("0 created, 1 already existed", summary)
 
 
 class SourceResolutionDeleteViewTest(BaseViewTestCase):
