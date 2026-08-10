@@ -177,6 +177,36 @@ class IdentitySafetyTest(TestCase):
         existing.refresh_from_db()
         self.assertIsNone(existing.rack)
 
+    def test_preview_checks_capacity_against_a_rack_created_in_the_same_import(self):
+        profile = self._rack_profile("Pending Rack Capacity Profile")
+        ClassRoleMapping.objects.create(
+            profile=profile, source_class="Server", creates_rack=False, role_slug=self.role.slug
+        )
+        rack_row = self._rack_row(2, "PENDING-RACK", "PENDING-RACK-01", u_height="42")
+        # U43 is above the top of the pending 42U rack.
+        device_row = self._device_row(3, "PENDING-DEV", "pending-rack-device", self.rack_a, 43)
+        device_row["rack_name"] = "PENDING-RACK-01"
+
+        result = run_import([rack_row, device_row], profile, {"site": self.site}, dry_run=True)
+
+        device_result = next(item for item in result.rows if item.object_type == "device")
+        self.assertEqual(device_result.action, "error")
+        self.assertEqual(device_result.extra_data.get("identity_conflict"), "rack_position_occupied")
+
+    def test_preview_accepts_a_device_that_fits_a_rack_created_in_the_same_import(self):
+        profile = self._rack_profile("Pending Rack Fit Profile")
+        ClassRoleMapping.objects.create(
+            profile=profile, source_class="Server", creates_rack=False, role_slug=self.role.slug
+        )
+        rack_row = self._rack_row(2, "FIT-RACK", "FIT-RACK-01", u_height="42")
+        device_row = self._device_row(3, "FIT-DEV", "fit-rack-device", self.rack_a, 10)
+        device_row["rack_name"] = "FIT-RACK-01"
+
+        result = run_import([rack_row, device_row], profile, {"site": self.site}, dry_run=True)
+
+        device_result = next(item for item in result.rows if item.object_type == "device")
+        self.assertEqual(device_result.action, "create")
+
     def test_rack_preview_reports_a_u_height_outside_the_model_limits(self):
         profile = self._rack_profile("Rack Preview Validation Profile")
         row = self._rack_row(2, "BAD-PREVIEW", "BAD-PREVIEW-RACK", u_height="200")

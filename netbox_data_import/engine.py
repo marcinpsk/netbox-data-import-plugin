@@ -1253,7 +1253,10 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                 rack = None
                 action = "create"
                 detail = f"Would create rack '{rack_name}' ({u_height}U{rack_type_label}) at site '{ctx.site}'"
-            ctx.rack_map[_identity_text(rack_name)] = rack if rack is not None else rack_name
+            # Keep the unsaved candidate so device rows can be placement-checked against
+            # a rack this import has not created yet. `rack` stays None, so the row never
+            # reports a NetBox rack ID that does not exist.
+            ctx.rack_map[_identity_text(rack_name)] = rack if rack is not None else candidate
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -1880,12 +1883,23 @@ def _validate_preview_placement(
         return action, detail, None, effective_face
     rack_face = None if placement_full_depth else effective_face
     excluded_ids = [matched_device.pk] if matched_device is not None else []
-    available_units = target_rack.get_available_units(
-        u_height=placement_height,
-        rack_face=rack_face,
-        exclude=excluded_ids,
-    )
-    if position in available_units:
+    if target_rack.pk is None:
+        # A rack this import has not created yet holds no devices, so only its own unit
+        # skeleton limits placement. get_available_units() cannot run on an unsaved rack.
+        from decimal import Decimal
+
+        from utilities.data import drange
+
+        start = Decimal(str(position))
+        occupied = set(drange(start, start + Decimal(str(placement_height)), Decimal("0.5")))
+        fits = occupied <= set(target_rack.units)
+    else:
+        fits = position in target_rack.get_available_units(
+            u_height=placement_height,
+            rack_face=rack_face,
+            exclude=excluded_ids,
+        )
+    if fits:
         return action, detail, None, effective_face
     detail = (
         f"Rack position {_rack_identity_label(rack_name, ctx.location)} U{position} "
