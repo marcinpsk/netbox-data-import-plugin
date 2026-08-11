@@ -42,6 +42,8 @@ def _make_profile(name="ViewTest") -> ImportProfile:
         "Model": "model",
         "UHeight": "u_height",
         "UPosition": "u_position",
+        "Side": "face",
+        "Airflow": "airflow",
         "Serial Number": "serial",
         "Asset Tag": "asset_tag",
         "Status": "status",
@@ -96,8 +98,8 @@ class ImportProfileListViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:importprofile_list")
         resp = self.client.get(url, {"q": "Alph"})
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "Alpha")
-        self.assertNotContains(resp, "Beta")
+        self.assertContains(resp, ">Alpha</a>")
+        self.assertNotContains(resp, ">Beta</a>")
 
 
 class ImportProfileDetailViewTest(BaseViewTestCase):
@@ -1704,6 +1706,10 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         """POST links a source_id to an existing device."""
         from netbox_data_import.models import DeviceExistingMatch
 
+        session = self.client.session
+        session["import_rows"] = [{"_row_number": 1, "source_id": "SRC-MATCH-01", "asset_tag": "PLACEHOLDER-TAG"}]
+        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
+        session.save()
         url = reverse("plugins:netbox_data_import:match_existing_device")
         resp = self.client.post(
             url,
@@ -1719,6 +1725,28 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
                 profile=self.profile, source_id="SRC-MATCH-01", netbox_device_id=self.device.pk
             ).exists()
         )
+
+    def test_post_normalizes_and_bounds_source_asset_tag(self):
+        """Manual links store the same bounded source asset tag as auto-match."""
+        from netbox_data_import.models import DeviceExistingMatch
+
+        session = self.client.session
+        session["import_rows"] = [{"_row_number": 1, "source_id": "SRC-LONG-TAG", "asset_tag": f"  {'T' * 120}  "}]
+        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:match_existing_device"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SRC-LONG-TAG",
+                "netbox_device_id": self.device.pk,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        binding = DeviceExistingMatch.objects.get(profile=self.profile, source_id="SRC-LONG-TAG")
+        self.assertEqual(binding.source_asset_tag, "T" * 50)
 
     def test_post_missing_source_id_redirects(self):
         """POST without source_id redirects to preview."""
@@ -1745,6 +1773,20 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         )
         self.assertEqual(resp.status_code, 302)
 
+    def test_post_invalid_profile_id_redirects_with_error(self):
+        """A malformed profile ID returns the normal validation response."""
+        from django.contrib.messages import get_messages
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:match_existing_device"),
+            {"profile_id": "not-a-number"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            [str(message) for message in get_messages(response.wsgi_request)], ["A valid import profile is required."]
+        )
+
 
 class AutoMatchDevicesViewTest(BaseViewTestCase):
     """Tests for AutoMatchDevicesView."""
@@ -1762,6 +1804,9 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             name="automatch-device-01", serial="SERIAL-AM-01", device_type=dt, role=role, site=self.site
         )
         self.profile = _make_profile("AutoMatchProfile")
+        session = self.client.session
+        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
+        session.save()
 
     def test_post_automatch_by_serial(self):
         """POST with a row matching by serial creates a DeviceExistingMatch."""
@@ -1772,7 +1817,8 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             {
                 "_row_number": 1,
                 "source_id": "AM-001",
-                "device_name": "automatch-device-01",
+                "device_name": "",
+                "device_class": "Server",
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
@@ -1788,11 +1834,63 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             ).exists()
         )
 
+    def test_post_requires_permission_to_add_matches(self):
+        """A profile editor with device access cannot create match records."""
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+
+        user = get_user_model().objects.create_user(username="limited-auto-match-user", password="testpass")
+        user.user_permissions.add(
+            Permission.objects.get(content_type__app_label="netbox_data_import", codename="change_importprofile"),
+            Permission.objects.get(content_type__app_label="dcim", codename="view_device"),
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": self.profile.pk},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_post_requires_permission_to_view_devices(self):
+        """A match editor cannot scan devices without device access."""
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+
+        user = get_user_model().objects.create_user(username="blind-auto-match-user", password="testpass")
+        user.user_permissions.add(
+            Permission.objects.get(content_type__app_label="netbox_data_import", codename="change_importprofile"),
+            Permission.objects.get(content_type__app_label="netbox_data_import", codename="add_deviceexistingmatch"),
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": self.profile.pk},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
     def test_post_automatch_empty_rows(self):
         """POST with no rows in session still succeeds."""
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
         self.assertEqual(resp.status_code, 302)
+
+    def test_post_invalid_profile_id_redirects_with_error(self):
+        """A malformed profile ID returns the normal validation response."""
+        from django.contrib.messages import get_messages
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": "not-a-number"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            [str(message) for message in get_messages(response.wsgi_request)], ["A valid import profile is required."]
+        )
 
     def test_post_automatch_by_asset_tag(self):
         """POST with a row matching only by asset_tag creates a DeviceExistingMatch."""
@@ -1811,7 +1909,8 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             {
                 "_row_number": 1,
                 "source_id": "TAG-001",
-                "device_name": "tag-device-01",
+                "device_name": "",
+                "device_class": "Server",
                 "serial": "",
                 "asset_tag": "ASSET-TAG-01",
             }
@@ -1839,7 +1938,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
 
         session = self.client.session
         session["import_rows"] = [
-            {"_row_number": 1, "source_id": "NAME-001", "device_name": "name-device-01", "serial": "", "asset_tag": ""}
+            {
+                "_row_number": 1,
+                "source_id": "NAME-001",
+                "device_name": "name-device-01",
+                "device_class": "Server",
+                "serial": "",
+                "asset_tag": "",
+            }
         ]
         session.save()
 
@@ -1870,6 +1976,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "AMB-001",
                 "device_name": "amb-device-01",
+                "device_class": "Server",
                 "serial": "AMBSERIAL-01",
                 "asset_tag": "",
             }
@@ -1898,6 +2005,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "ALREADY-001",
                 "device_name": "automatch-device-01",
+                "device_class": "Server",
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
@@ -1920,6 +2028,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "",
                 "device_name": "automatch-device-01",
+                "device_class": "Server",
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
@@ -1947,6 +2056,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "_row_number": 1,
                 "source_id": "PROB-001",
                 "device_name": "prefix - probable-device",
+                "device_class": "Server",
                 "serial": "",
                 "asset_tag": "",
             }
@@ -2411,6 +2521,76 @@ class BulkYamlImportExtendedTest(BaseViewTestCase):
         self.assertIn(resp.status_code, [200, 302])
         self.assertTrue(ClassRoleMapping.objects.filter(profile=self.profile, source_class="StorageArrayX").exists())
 
+    def test_class_role_yaml_reports_a_missing_rack_type(self):
+        """A rack mapping must reference a real NetBox RackType."""
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        yaml_file = BytesIO(b"- source_class: MissingRackType\n  creates_rack: true\n  rack_type: missing-rack-type\n")
+        yaml_file.name = "missing-rack-type.yaml"
+
+        response = self.client.post(url, {"mapping_type": "class_role", "yaml_file": yaml_file}, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "RackType with slug")
+        self.assertFalse(ClassRoleMapping.objects.filter(profile=self.profile, source_class="MissingRackType").exists())
+
+    def test_class_role_yaml_can_clear_an_existing_rack_type(self):
+        """An explicit null rack_type updates an existing class mapping."""
+        from dcim.models import Manufacturer, RackType
+
+        manufacturer = Manufacturer.objects.create(name="YAML Rack Vendor", slug="yaml-rack-vendor")
+        rack_type = RackType.objects.create(
+            manufacturer=manufacturer,
+            model="YAML Rack Type",
+            slug="yaml-rack-type",
+            u_height=42,
+        )
+        mapping = ClassRoleMapping.objects.get(profile=self.profile, source_class="Server")
+        mapping.rack_type = rack_type
+        mapping.save(update_fields=["rack_type"])
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        yaml_file = BytesIO(b"- source_class: Server\n  rack_type: null\n")
+        yaml_file.name = "clear-rack-type.yaml"
+
+        response = self.client.post(url, {"mapping_type": "class_role", "yaml_file": yaml_file})
+
+        self.assertEqual(response.status_code, 302)
+        mapping.refresh_from_db()
+        self.assertIsNone(mapping.rack_type)
+
+    def test_device_type_yaml_counts_an_existing_mapping_as_skipped(self):
+        """Reimporting one mapping does not create a duplicate."""
+        DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="Existing Vendor",
+            source_model="Existing Model",
+            netbox_manufacturer_slug="existing-vendor",
+            netbox_device_type_slug="existing-model",
+        )
+        url = reverse("plugins:netbox_data_import:bulk_yaml_import", kwargs={"profile_pk": self.profile.pk})
+        yaml_file = BytesIO(
+            b"- source_make: Existing Vendor\n"
+            b"  source_model: Existing Model\n"
+            b"  netbox_manufacturer_slug: existing-vendor\n"
+            b"  netbox_device_type_slug: existing-model\n"
+        )
+        yaml_file.name = "existing-device-type.yaml"
+
+        response = self.client.post(url, {"mapping_type": "device_type", "yaml_file": yaml_file})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            DeviceTypeMapping.objects.filter(
+                profile=self.profile,
+                source_make="Existing Vendor",
+                source_model="Existing Model",
+            ).count(),
+            1,
+        )
+        from django.contrib.messages import get_messages
+
+        summary = " ".join(str(message) for message in get_messages(response.wsgi_request))
+        self.assertIn("0 created, 1 already existed", summary)
+
 
 class SourceResolutionDeleteViewTest(BaseViewTestCase):
     """Tests for SourceResolutionDeleteView GET."""
@@ -2680,7 +2860,7 @@ class SaveResolutionJsonErrorTest(BaseViewTestCase):
 
 
 class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
-    """Cover _auto_match_single_device ambiguous asset_tag path (lines 1379-1380)."""
+    """Cover the ambiguous asset_tag path in _auto_match_single_device."""
 
     def setUp(self):
         """Set up profile."""
@@ -2688,22 +2868,25 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         self.profile = _make_profile("AmbATProfile")
 
     def test_ambiguous_asset_tag_returns_none_is_ambiguous(self):
-        """_auto_match_single_device returns (None, True) when asset_tag matches multiple devices."""
-        from unittest.mock import MagicMock
+        """_auto_match_single_device is ambiguous when asset_tag matches two devices."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
         from netbox_data_import.views import _auto_match_single_device
 
-        mock_dev_model = MagicMock()
-        # Return 2 results for asset_tag filter (ambiguous)
-        mock_dev_model.objects.filter.return_value.__getitem__ = lambda self, s: [MagicMock(), MagicMock()]
+        site = Site.objects.create(name="AmbATSite", slug="amb-at-site")
+        mfg = Manufacturer.objects.create(name="AmbATMfg", slug="amb-at-mfg")
+        dt = DeviceType.objects.create(manufacturer=mfg, model="AmbATModel", slug="amb-at-model")
+        role = DeviceRole.objects.create(name="AmbATRole", slug="amb-at-role")
+        # Device.asset_tag is unique, but the lookup is case-insensitive, so these two both match.
+        for name, asset_tag in (("amb-at-1", "SHARED-TAG"), ("amb-at-2", "shared-tag")):
+            Device.objects.create(name=name, asset_tag=asset_tag, device_type=dt, role=role, site=site)
 
-        # Use a sliceable mock: filter(...)[:2] returns list of 2
-        qs_mock = MagicMock()
-        qs_mock.__getitem__ = MagicMock(return_value=[MagicMock(), MagicMock()])
-        mock_dev_model.objects.filter.return_value = qs_mock
+        # The name matches a real device, so a fall-through to name matching would return that device.
+        device, is_ambiguous, method = _auto_match_single_device(Device, "amb-at-1", "", "SHARED-TAG")
 
-        device, is_ambiguous = _auto_match_single_device(mock_dev_model, "any-name", "", "SHARED-TAG")
         self.assertIsNone(device)
         self.assertTrue(is_ambiguous)
+        self.assertIsNone(method)
 
 
 class ImportProfileBulkImportViewTest(BaseViewTestCase):

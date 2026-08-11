@@ -494,6 +494,10 @@ class DeviceExistingMatch(models.Model):
         ordering = ["profile", "source_id"]
         constraints = [
             models.UniqueConstraint(fields=["profile", "source_id"], name="ndi_devicematch_profile_srcid"),
+            models.UniqueConstraint(
+                fields=["profile", "netbox_device_id"],
+                name="ndi_devicematch_profile_device",
+            ),
         ]
         verbose_name = "Device Existing Match"
         verbose_name_plural = "Device Existing Matches"

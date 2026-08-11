@@ -26,6 +26,7 @@ class ImportProfileSerializer(NetBoxModelSerializer):
 
     class Meta:
         model = ImportProfile
+        brief_fields = ["id", "url", "display", "name", "description"]
         fields = [
             "id",
             "url",

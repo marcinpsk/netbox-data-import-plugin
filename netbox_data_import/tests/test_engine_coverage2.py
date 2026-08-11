@@ -14,6 +14,7 @@ from netbox_data_import.engine import (
     _ensure_device_role,
     _ensure_device_type,
     _ensure_manufacturer,
+    _identity_text,
     _preview_device_row,
     _store_source_id,
     reapply_saved_resolutions,
@@ -560,7 +561,7 @@ class PreviewDeviceRowRackLookupTest(TestCase):
             Device=Device,
             Rack=Rack,
         )
-        self.assertIn("RackDB-02", ctx.rack_map)
+        self.assertIn(_identity_text("RackDB-02"), ctx.rack_map)
         self.assertIn("RackDB-02", result_row.detail)
         self.assertNotIn("not found", result_row.detail)
 
@@ -600,6 +601,7 @@ class WriteDeviceRowRackFromDBTest(TestCase):
                 "u_height": "1",
                 "status": "active",
                 "u_position": "3",
+                "face": "front",
                 "serial": "",
                 "asset_tag": "",
             }

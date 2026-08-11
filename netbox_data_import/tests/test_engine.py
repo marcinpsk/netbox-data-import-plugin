@@ -435,8 +435,8 @@ class PreviewDeviceRowTest(TestCase):
         self.site = Site.objects.create(name="Preview Site", slug="preview-site")
         self.profile = _make_profile("Preview")
 
-    def test_rack_label_empty_rack_name(self):
-        """An empty rack_name produces '(no rack)' — no leading space in detail."""
+    def test_position_without_rack_is_an_error(self):
+        """A rack position without a rack is rejected."""
         from dcim.models import Device, DeviceType, Rack
 
         row = {
@@ -462,12 +462,11 @@ class PreviewDeviceRowTest(TestCase):
             Device=Device,
             Rack=Rack,
         )
-        # Should use '(no rack)' placeholder, not '  (not found)' with leading space
-        self.assertNotIn("  ", result_row.detail, "Detail should not contain double space")
-        self.assertIn("(no rack)", result_row.detail)
+        self.assertEqual(result_row.action, "error")
+        self.assertEqual(result_row.extra_data["identity_conflict"], "rack_required")
 
-    def test_rack_label_unknown_rack(self):
-        """A non-empty rack_name not in rack_map produces 'rack-X (not found)'."""
+    def test_unknown_rack_is_an_error(self):
+        """A non-empty rack name must resolve in the active location."""
         from dcim.models import Device, DeviceType, Rack
 
         row = {
@@ -493,7 +492,9 @@ class PreviewDeviceRowTest(TestCase):
             Device=Device,
             Rack=Rack,
         )
-        self.assertIn("RACK-99 (not found)", result_row.detail)
+        self.assertEqual(result_row.action, "error")
+        self.assertEqual(result_row.extra_data["identity_conflict"], "rack_not_found")
+        self.assertIn("RACK-99", result_row.detail)
 
     def test_extra_data_includes_slugs(self):
         """extra_data includes mfg_slug and dt_slug for device rows."""

@@ -15,6 +15,7 @@ from netbox_data_import.engine import (
     _ensure_device_type,
     _ensure_manufacturer,
     _find_existing_device,
+    _identity_text,
     _perm_denied_row,
     _resolve_device_type_slugs,
     _write_device_row,
@@ -37,15 +38,44 @@ FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.
 class _MockUserNoPerm:
     """Mock user that denies all permissions — used for engine permission-denied tests."""
 
+    is_active = True
+    is_superuser = False
+    is_authenticated = True
+
     def has_perm(self, perm, obj=None):
         return False
+
+    def get_all_permissions(self):
+        return set()
 
 
 class _MockUserMfgOnly:
     """Mock user that has only dcim.add_manufacturer permission."""
 
+    is_active = True
+    is_superuser = False
+    is_authenticated = True
+
     def has_perm(self, perm, obj=None):
         return perm == "dcim.add_manufacturer"
+
+    def get_all_permissions(self):
+        return {"dcim.add_manufacturer"}
+
+
+class _MockUserViewOnly:
+    """User-shaped fake that can view devices but cannot change them."""
+
+    is_active = True
+    is_superuser = False
+    is_authenticated = True
+    _object_perm_cache = {"dcim.view_device": [{}]}
+
+    def has_perm(self, perm, obj=None):
+        return perm == "dcim.view_device"
+
+    def get_all_permissions(self):
+        return set(self._object_perm_cache)
 
 
 def _make_profile(name="EngineTest2") -> ImportProfile:
@@ -66,6 +96,8 @@ def _make_profile(name="EngineTest2") -> ImportProfile:
         "Model": "model",
         "UHeight": "u_height",
         "UPosition": "u_position",
+        "Side": "face",
+        "Airflow": "airflow",
         "Serial Number": "serial",
         "Asset Tag": "asset_tag",
         "Status": "status",
@@ -214,8 +246,8 @@ class RunImportDeviceTypeMappingTest(TestCase):
                 "make": "Dell",
                 "model": "PowerEdge R640",
                 "u_height": "1",
-                "rack_name": "Rack-01",
-                "u_position": "1",
+                "rack_name": "",
+                "u_position": "",
                 "serial": "",
                 "asset_tag": "",
                 "status": "active",
@@ -685,16 +717,20 @@ class FindExistingDeviceTest(TestCase):
         self.assertEqual(method, "serial")
 
     def test_serial_multiple_objects_returns_none(self):
-        """_find_existing_device returns (None, None) when serial matches multiple devices."""
+        """_find_existing_device reports ambiguity when a serial matches multiple devices."""
         from dcim.models import Device
-        from unittest.mock import patch
 
-        with patch.object(Device.objects, "get", side_effect=Device.MultipleObjectsReturned):
-            matched, method = _find_existing_device(
-                self.profile, None, self.site, "any-name", "AMBIG-SERIAL", None, Device
+        for suffix in ("a", "b"):
+            Device.objects.create(
+                name=f"fed-serial-ambiguous-{suffix}",
+                site=self.site,
+                device_type=self.dt,
+                role=self.role,
+                serial="AMBIG-SERIAL",
             )
+        matched, method = _find_existing_device(self.profile, None, self.site, "any-name", "AMBIG-SERIAL", None, Device)
         self.assertIsNone(matched)
-        self.assertIsNone(method)
+        self.assertEqual(method, "ambiguous serial")
 
     def test_asset_tag_match(self):
         """_find_existing_device returns (device, 'asset tag') when a device with that asset_tag exists."""
@@ -714,14 +750,20 @@ class FindExistingDeviceTest(TestCase):
         self.assertEqual(method, "asset tag")
 
     def test_asset_tag_multiple_objects_returns_none(self):
-        """_find_existing_device returns (None, None) when asset_tag matches multiple devices."""
+        """_find_existing_device reports ambiguity when asset_tag matches multiple devices."""
         from dcim.models import Device
-        from unittest.mock import patch
 
-        with patch.object(Device.objects, "get", side_effect=Device.MultipleObjectsReturned):
-            matched, method = _find_existing_device(self.profile, None, self.site, "any-name", None, "AMBIG-AT", Device)
+        for suffix, asset_tag in (("a", "AMBIG-AT"), ("b", "ambig-at")):
+            Device.objects.create(
+                name=f"fed-asset-ambiguous-{suffix}",
+                site=self.site,
+                device_type=self.dt,
+                role=self.role,
+                asset_tag=asset_tag,
+            )
+        matched, method = _find_existing_device(self.profile, None, self.site, "any-name", None, "Ambig-At", Device)
         self.assertIsNone(matched)
-        self.assertIsNone(method)
+        self.assertEqual(method, "ambiguous asset tag")
 
     def test_no_match_returns_none(self):
         """_find_existing_device returns (None, None) when no match is found."""
@@ -806,8 +848,28 @@ class WriteRackToDbTest(TestCase):
         self.assertEqual(result.rows[0].action, "create")
         self.assertTrue(Rack.objects.filter(site=self.site, name="NewRack").exists())
 
-    def test_update_existing_rack_with_location_and_tenant(self):
-        """_write_rack_to_db updates an existing rack and sets location and tenant."""
+    def test_create_rack_validation_error_mentions_create(self):
+        """A failed rack create reports the operation that failed."""
+        from dcim.models import Rack
+
+        result = ImportResult()
+        ctx = ImportContext(
+            profile=self.profile,
+            site=self.site,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=result,
+        )
+
+        _write_rack_to_db("InvalidRack", 42, "S" * 101, "SRC-INVALID", {"_row_number": 2}, ctx, Rack)
+
+        self.assertFalse(Rack.objects.filter(site=self.site, name="InvalidRack").exists())
+        self.assertEqual(result.rows[0].action, "error")
+        self.assertIn("Cannot create rack 'InvalidRack'", result.rows[0].detail)
+
+    def test_same_name_rack_in_another_location_is_not_updated(self):
+        """A rack in another location keeps its identity and a new rack is created."""
         from dcim.models import Location, Rack
         from tenancy.models import Tenant
 
@@ -826,11 +888,14 @@ class WriteRackToDbTest(TestCase):
         )
         row = {"_row_number": 2}
         _write_rack_to_db("ExistRack", 24, "SN002", "SRC2", row, ctx, Rack)
-        self.assertEqual(result.rows[0].action, "update")
+        self.assertEqual(result.rows[0].action, "create")
         rack.refresh_from_db()
-        self.assertEqual(rack.location, loc)
-        self.assertEqual(rack.tenant, tenant)
-        self.assertEqual(rack.u_height, 24)
+        self.assertIsNone(rack.location)
+        self.assertIsNone(rack.tenant)
+        self.assertEqual(rack.u_height, 42)
+        created = Rack.objects.get(site=self.site, location=loc, name="ExistRack")
+        self.assertEqual(created.tenant, tenant)
+        self.assertEqual(created.u_height, 24)
 
     def test_skip_existing_rack_when_update_existing_false(self):
         """_write_rack_to_db records action='skip' when update_existing=False and rack exists."""
@@ -851,7 +916,7 @@ class WriteRackToDbTest(TestCase):
         row = {"_row_number": 3}
         _write_rack_to_db("SkipRack", 42, "", "SRC3", row, ctx, Rack)
         self.assertEqual(result.rows[0].action, "skip")
-        self.assertIn("SkipRack", ctx.rack_map)
+        self.assertIn(_identity_text("SkipRack"), ctx.rack_map)
 
     def test_create_rack_with_rack_type(self):
         """_write_rack_to_db creates a new Rack with rack_type assigned."""
@@ -929,7 +994,7 @@ class WriteDeviceRowTest(TestCase):
             "model": "WD Model",
             "u_height": "1",
             "rack_name": "",
-            "u_position": "1",
+            "u_position": "",
             "serial": "",
             "asset_tag": "",
             "status": "active",
@@ -956,7 +1021,7 @@ class WriteDeviceRowTest(TestCase):
             "wd-dev-01",
             "",
             None,
-            1,
+            None,
             None,
             None,
             "active",
@@ -992,7 +1057,7 @@ class WriteDeviceRowTest(TestCase):
             "wd-dev-02",
             "",
             None,
-            1,
+            None,
             None,
             None,
             "active",
@@ -1025,7 +1090,7 @@ class WriteDeviceRowTest(TestCase):
             "wd-dev-03",
             "",
             None,
-            1,
+            None,
             None,
             None,
             "active",
@@ -1060,7 +1125,7 @@ class WriteDeviceRowTest(TestCase):
             "wd-dev-04",
             "",
             "AT001",
-            1,
+            None,
             None,
             None,
             "active",
@@ -1097,7 +1162,7 @@ class WriteDeviceRowTest(TestCase):
             "wd-dev-05",
             "",
             None,
-            1,
+            None,
             None,
             None,
             "active",
@@ -1198,7 +1263,7 @@ class Pass3EdgeCasesTest(TestCase):
         Device.objects.create(name="p3-existing", site=self.site, device_type=dt, role=role)
         self.profile.update_existing = True
         self.profile.save()
-        rows = [self._device_row(device_name="p3-existing", source_id="P3005")]
+        rows = [self._device_row(device_name="p3-existing", source_id="P3005", u_position="")]
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
         update_rows = [r for r in result.rows if r.action == "update" and r.object_type == "device"]
         self.assertGreater(len(update_rows), 0)
@@ -1213,7 +1278,7 @@ class Pass3EdgeCasesTest(TestCase):
         Device.objects.create(name="p3b-existing", site=self.site, device_type=dt, role=role)
         self.profile.update_existing = False
         self.profile.save()
-        rows = [self._device_row(device_name="p3b-existing", source_id="P3006")]
+        rows = [self._device_row(device_name="p3b-existing", source_id="P3006", u_position="")]
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
         skip_rows = [r for r in result.rows if r.action == "skip" and r.object_type == "device"]
         self.assertGreater(len(skip_rows), 0)
@@ -1248,7 +1313,7 @@ class Pass1UnmappedClassTest(TestCase):
                 "model": "UniqueModelP1",
                 "u_height": "1",
                 "rack_name": "",
-                "u_position": "1",
+                "u_position": "",
                 "serial": "",
                 "asset_tag": "",
                 "status": "active",
@@ -1581,7 +1646,7 @@ class Pass1UHeightParseErrorTest(TestCase):
                 "model": "UHModel",
                 "u_height": "not-a-number",
                 "rack_name": "",
-                "u_position": "1",
+                "u_position": "",
                 "serial": "",
                 "asset_tag": "",
                 "status": "active",
@@ -1808,7 +1873,7 @@ class PreviewMatchedBySerialTest(TestCase):
                 "model": "PMBSModel",
                 "u_height": "1",
                 "rack_name": "",
-                "u_position": "1",
+                "u_position": "",
                 "serial": "PMBS-SN-UNIQUE",
                 "asset_tag": "",
                 "status": "active",
@@ -2026,7 +2091,7 @@ class PermissionDeniedEngineTest(TestCase):
             "model": "PermDT",
             "u_height": "1",
             "rack_name": "",
-            "u_position": "1",
+            "u_position": "",
             "serial": "",
             "asset_tag": "",
             "status": "active",
@@ -2061,7 +2126,7 @@ class PermissionDeniedEngineTest(TestCase):
         from dcim.models import Device, DeviceRole, DeviceType, Rack
 
         Device.objects.create(name="perm-exist-dev", site=self.site, device_type=self.dt, role=self.role)
-        ctx = self._ctx(user=_MockUserNoPerm())
+        ctx = self._ctx(user=_MockUserViewOnly())
         row = {
             **self._row(7),
             "device_name": "perm-exist-dev",
@@ -2070,7 +2135,7 @@ class PermissionDeniedEngineTest(TestCase):
             "model": "PermDT",
             "u_height": "1",
             "rack_name": "",
-            "u_position": "1",
+            "u_position": "",
             "serial": "",
             "asset_tag": "",
             "status": "active",
@@ -2087,7 +2152,7 @@ class PermissionDeniedEngineTest(TestCase):
             "perm-exist-dev",
             "",
             None,
-            1,
+            None,
             None,
             None,
             "active",
@@ -2348,7 +2413,7 @@ class CheckRackPositionConflictRangeTest(TestCase):
         # requires a profile, site, ImportResult, etc.).
         from types import SimpleNamespace
 
-        return SimpleNamespace(claimed_positions={})
+        return SimpleNamespace(claimed_positions={}, claimed_position_faces={})
 
     def test_single_u_no_conflict_when_distinct_positions(self):
         from netbox_data_import.engine import _check_rack_position_conflict
@@ -2464,65 +2529,37 @@ class CheckRackPositionConflictRangeTest(TestCase):
         )
         self.assertEqual(ctx.claimed_positions, {})
 
-    def test_same_matched_device_pk_not_flagged(self):
-        """Two rows resolving to the same existing Device must not conflict on shared slots."""
+    def test_overlap_conflicts_regardless_of_device_identity(self):
+        """Rack overlap remains a placement conflict for distinct devices."""
         from netbox_data_import.engine import _check_rack_position_conflict
 
         ctx = self._ctx()
-        # Row 1 claims U1-U4 for device pk=42 (e.g. matched by name).
-        self.assertIsNone(
-            _check_rack_position_conflict(
-                "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4, matched_device_pk=42
-            )
-        )
-        # Row 2 also resolves to pk=42 (e.g. matched by serial) and overlaps U3-U4.
-        # Same matched device → not a rack-position conflict.
-        self.assertIsNone(
-            _check_rack_position_conflict(
-                "R1", 3, "front", ctx, row_number=2, device_name="a-by-serial", u_height=2, matched_device_pk=42
-            )
-        )
-
-    def test_different_matched_device_pk_still_conflicts(self):
-        """Different matched_device_pk → overlap is a real conflict."""
-        from netbox_data_import.engine import _check_rack_position_conflict
-
-        ctx = self._ctx()
-        _check_rack_position_conflict(
-            "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4, matched_device_pk=42
-        )
-        result = _check_rack_position_conflict(
-            "R1", 3, "front", ctx, row_number=2, device_name="b", u_height=2, matched_device_pk=99
-        )
+        _check_rack_position_conflict("R1", 1, "front", ctx, row_number=1, device_name="a", u_height=4)
+        result = _check_rack_position_conflict("R1", 3, "front", ctx, row_number=2, device_name="b", u_height=2)
         self.assertIsNotNone(result)
         _, prev_row = result
         self.assertEqual(prev_row, 1)
 
-    def test_none_pk_does_not_collapse_with_none_pk(self):
-        """Two rows with matched_device_pk=None on the same slot must still conflict.
-
-        A None pk represents an unmatched (create) row, not a shared identity;
-        two creates at the same slot are a real conflict.
-        """
+    def test_position_face_index_tracks_claims_for_full_depth_lookup(self):
         from netbox_data_import.engine import _check_rack_position_conflict
 
         ctx = self._ctx()
-        _check_rack_position_conflict(
-            "R1", 1, "front", ctx, row_number=1, device_name="a", u_height=1, matched_device_pk=None
-        )
-        result = _check_rack_position_conflict(
-            "R1", 1, "front", ctx, row_number=2, device_name="b", u_height=1, matched_device_pk=None
-        )
-        self.assertIsNotNone(result)
+        _check_rack_position_conflict("R1", 5, "front", ctx, row_number=1, device_name="front", u_height=1)
+        _check_rack_position_conflict("R1", 5, "rear", ctx, row_number=2, device_name="rear", u_height=1)
+
+        self.assertEqual(ctx.claimed_position_faces[("r1", 5)], {"front", "rear"})
+        conflict = _check_rack_position_conflict("R1", 5, None, ctx, row_number=3, device_name="full-depth", u_height=1)
+        self.assertIsNotNone(conflict)
 
 
 class PreviewRackPositionConflictMultiURangeTest(TestCase):
     """End-to-end: preview surfaces a multi-U range conflict on the second offending row."""
 
     def setUp(self):
-        from dcim.models import Site
+        from dcim.models import Rack, Site
 
         self.site = Site.objects.create(name="MUSite", slug="mu-site")
+        Rack.objects.create(site=self.site, name="MU-RACK", u_height=42)
         self.profile = _make_profile("MUOverlap")
 
     def _row(self, **overrides):
@@ -2536,6 +2573,7 @@ class PreviewRackPositionConflictMultiURangeTest(TestCase):
             "u_height": "1",
             "rack_name": "MU-RACK",
             "u_position": "1",
+            "face": "front",
             "serial": "",
             "asset_tag": "",
             "status": "active",
@@ -2575,10 +2613,23 @@ class PreviewRackPositionConflictMultiURangeTest(TestCase):
         dt = DeviceType.objects.create(manufacturer=mfg, model="PowerEdge R940", slug="poweredge-r940", u_height=4)
         role = DeviceRole.objects.create(name="Server", slug="server")
         # Pre-existing device matched by name; first row will update it into the new range.
-        Device.objects.create(name="big-4u", site=self.site, device_type=dt, role=role)
+        Device.objects.create(
+            name="big-4u",
+            site=self.site,
+            device_type=dt,
+            role=role,
+            serial="MU-BIG-SERIAL",
+        )
 
         rows = [
-            self._row(_row_number=1, source_id="MU-BIG", device_name="big-4u", u_height="4", u_position="1"),
+            self._row(
+                _row_number=1,
+                source_id="MU-BIG",
+                device_name="big-4u",
+                u_height="4",
+                u_position="1",
+                serial="MU-BIG-SERIAL",
+            ),
             self._row(_row_number=2, source_id="MU-INTR", device_name="intr-2u", u_height="2", u_position="3"),
         ]
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
@@ -2591,21 +2642,23 @@ class PreviewRackPositionConflictMultiURangeTest(TestCase):
         self.assertIn("conflict", intr[0].detail.lower())
         self.assertIn("row 1", intr[0].detail)
 
-    def test_two_rows_matching_same_device_do_not_falsely_conflict(self):
-        """Two preview rows resolving to the same existing Device on overlapping slots must both update.
-
-        Row 1 matches the existing device by name; row 2 matches the same device
-        by serial. Their target U-ranges overlap, but since execute mode would
-        just update one record twice, the preview must not flag either as an
-        error.
-        """
+    def test_two_rows_matching_same_device_report_identity_conflict(self):
+        """Two source rows that resolve to one device cannot both update it."""
         from dcim.models import Device, Manufacturer, DeviceType, DeviceRole
+
+        from netbox_data_import.models import DeviceExistingMatch
 
         mfg = Manufacturer.objects.create(name="Dell", slug="dell")
         dt = DeviceType.objects.create(manufacturer=mfg, model="PowerEdge R940", slug="poweredge-r940", u_height=4)
         role = DeviceRole.objects.create(name="Server", slug="server")
         # Pre-existing device — row 1 matches by name, row 2 by serial.
-        Device.objects.create(name="dup-4u", site=self.site, device_type=dt, role=role, serial="SN-DUP")
+        existing = Device.objects.create(name="dup-4u", site=self.site, device_type=dt, role=role, serial="SN-DUP")
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="DUP-A",
+            netbox_device_id=existing.pk,
+            device_name=existing.name,
+        )
 
         rows = [
             self._row(_row_number=1, source_id="DUP-A", device_name="dup-4u", u_height="4", u_position="1"),
@@ -2621,12 +2674,9 @@ class PreviewRackPositionConflictMultiURangeTest(TestCase):
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
         device_rows = [r for r in result.rows if r.object_type == "device"]
         self.assertEqual(len(device_rows), 2)
-        for r in device_rows:
-            self.assertEqual(r.action, "update", f"Row {r.row_number} unexpectedly errored: {r.detail}")
-        # Both rows reference the same netbox_device_id.
-        device_ids = {r.extra_data.get("netbox_device_id") for r in device_rows}
-        self.assertEqual(len(device_ids), 1)
-        self.assertIsNotNone(next(iter(device_ids)))
+        self.assertEqual(device_rows[0].action, "update")
+        self.assertEqual(device_rows[1].action, "error")
+        self.assertEqual(device_rows[1].extra_data.get("identity_conflict"), "device_already_bound")
 
 
 class MissingRoleSlugErrorTest(TestCase):
