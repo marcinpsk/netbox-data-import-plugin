@@ -1,0 +1,39 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
+<div id="import-progress"
+     aria-live="polite"
+     {% if is_active %}
+     hx-get="{% url 'plugins:netbox_data_import:import_progress_status' pk=job.pk %}"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  {% if is_completed %}
+  <div class="alert alert-success">
+    <i class="mdi mdi-check-circle"></i> Import complete.
+  </div>
+  {% elif is_failed %}
+  <div class="alert alert-danger">
+    <i class="mdi mdi-alert-circle"></i> {{ message|default:"The import failed." }}
+  </div>
+  {% endif %}
+
+  <div class="progress mb-2" role="progressbar" aria-label="Import progress"
+       aria-valuenow="{{ percentage }}" aria-valuemin="0" aria-valuemax="100">
+    <div class="progress-bar" style="width: {{ percentage }}%">{{ percentage }}%</div>
+  </div>
+  <p class="mb-3 fw-semibold">Processed {{ processed }} of {{ total }} rows</p>
+
+  <div class="d-flex gap-2">
+    {% if is_completed %}
+    <a href="{% url 'plugins:netbox_data_import:import_results' %}" class="btn btn-success">View results</a>
+    {% elif is_failed and preview_available and preview_blocked %}
+    <span class="text-muted">Finish the current preview before reviewing this failed import.</span>
+    {% elif is_failed and preview_available %}
+    <a href="{% url 'plugins:netbox_data_import:import_preview' %}" class="btn btn-primary">Review preview</a>
+    {% elif is_failed %}
+    <a href="{% url 'plugins:netbox_data_import:import_setup' %}" class="btn btn-primary">Start a new import</a>
+    {% else %}
+    <span class="text-muted"><i class="mdi mdi-loading mdi-spin"></i> This page updates automatically.</span>
+    {% endif %}
+  </div>
+</div>

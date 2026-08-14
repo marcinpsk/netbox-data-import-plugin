@@ -2,6 +2,9 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """DRF serializers for the data-import plugin models."""
 
+import json
+
+from django.core.exceptions import ValidationError
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
@@ -14,6 +17,7 @@ from ..models import (
     ColumnTransformRule,
     SourceResolution,
     ImportJob,
+    validate_contact_candidate_resolution,
 )
 
 
@@ -40,6 +44,8 @@ class ImportProfileSerializer(NetBoxModelSerializer):
             "create_missing_device_types",
             "preview_view_mode",
             "capture_extra_data",
+            "primary_contact_role",
+            "primary_contact_lookup_field",
             "tags",
             "custom_fields",
             "created",
@@ -114,6 +120,34 @@ class ColumnTransformRuleSerializer(serializers.ModelSerializer):
 
 class SourceResolutionSerializer(serializers.ModelSerializer):
     """Serializer for SourceResolution (rerere, plain model)."""
+
+    def validate(self, attrs):
+        """Reject Contact candidate resolutions that the importer cannot apply."""
+        instance = self.instance
+        source_column = attrs.get("source_column", getattr(instance, "source_column", None))
+        if source_column == "candidate:contact":
+            profile = attrs.get("profile", getattr(instance, "profile", None))
+            original_value = attrs.get("original_value", getattr(instance, "original_value", None))
+            resolved_fields = attrs.get("resolved_fields", getattr(instance, "resolved_fields", None))
+            try:
+                candidate_values = json.loads(original_value)
+                if not isinstance(candidate_values, dict):
+                    raise ValueError
+                configured_sources = profile.column_mappings.filter(target_field="candidate:contact").values_list(
+                    "source_column", flat=True
+                )
+                validate_contact_candidate_resolution(
+                    resolved_fields,
+                    profile.primary_contact_lookup_field,
+                    set(candidate_values) & set(configured_sources),
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raise serializers.ValidationError(
+                    {"original_value": "Enter the Contact candidate values as a JSON object."}
+                ) from None
+            except ValidationError as exc:
+                raise serializers.ValidationError({"resolved_fields": exc.messages}) from exc
+        return attrs
 
     class Meta:
         model = SourceResolution

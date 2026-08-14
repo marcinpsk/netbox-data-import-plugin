@@ -73,10 +73,10 @@ Single shared modal at the bottom of the page. Structure:
 │  Field          Value                                    │
 │  ──────────     ──────────────────────────────           │
 │  Name           <name>                                   │
-│  Asset tag      65JP27  [from resolution]  ← green       │
-│  Device type    Cisco / Catalyst 9300                    │
-│  Site           ITC-Lab                                  │
-│  Rack           Rack A                                   │
+│  Asset tag      TEST-ASSET-002  [from resolution]  ← green│
+│  Device type    Example Vendor / Example Switch          │
+│  Site           Example Site                             │
+│  Rack           Example Rack                             │
 │  Position       U12                                      │
 │  Detail         <row.detail full text>                   │
 │                                                          │

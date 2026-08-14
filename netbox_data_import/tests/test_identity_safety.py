@@ -26,10 +26,11 @@ from netbox_data_import.engine import (
 )
 from netbox_data_import.forms import ImportSetupForm
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile, SourceResolution
+from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.views import _import_intents, _save_permission_scoped_object, _serialize_rows
 
 
-class IdentitySafetyTest(TestCase):
+class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
     """Exercise identity decisions through the real engine, views, and database."""
 
     @classmethod
@@ -138,6 +139,22 @@ class IdentitySafetyTest(TestCase):
         permission.users.add(user)
         return permission
 
+    def _run_background_import(self):
+        """Submit the session import and run its native NetBox worker."""
+        from core.models import Job
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        self.assertEqual(response.status_code, 302)
+        job = Job.objects.get(pk=self.client.session["import_background_job_id"])
+        self.run_rq_jobs()
+        job.refresh_from_db()
+        status_response = self.client.get(
+            reverse("plugins:netbox_data_import:import_progress_status", kwargs={"pk": job.pk}),
+            HTTP_HX_REQUEST="true",
+        )
+        return job, status_response
+
     def test_execution_rechecks_the_identity_after_locking_the_device(self):
         from django.db import connection
 
@@ -175,6 +192,52 @@ class IdentitySafetyTest(TestCase):
         device_row = next(item for item in result.rows if item.object_type == "device")
         self.assertEqual(device_row.action, "error")
         existing.refresh_from_db()
+        self.assertIsNone(existing.rack)
+
+    def test_background_import_rolls_back_an_identity_change_after_preview(self):
+        """The worker rolls back the batch when identity changes after its preview."""
+        from django.db import connection
+
+        from core.models import Job
+        from dcim.models import Device
+
+        existing = Device.objects.create(
+            name="background-race-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="BACKGROUND-RACE-SERIAL",
+        )
+        row = self._device_row(2, "BACKGROUND-RACE-SRC", existing.name, self.rack_a, 1)
+        row["serial"] = existing.serial
+        preview = run_import([row], self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session([row], preview)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        job = Job.objects.get(pk=self.client.session["import_background_job_id"])
+        injected = []
+
+        def insert_twin_when_the_lock_runs(execute, sql, params, many, context):
+            if not injected and "FOR UPDATE" in sql and "dcim_device" in sql:
+                injected.append(True)
+                Device.objects.create(
+                    name="background-race-device-twin",
+                    site=self.site,
+                    device_type=self.device_type,
+                    role=self.role,
+                    serial=existing.serial,
+                )
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(insert_twin_when_the_lock_runs):
+            self.run_rq_jobs()
+
+        job.refresh_from_db()
+        existing.refresh_from_db()
+        self.assertTrue(injected, "the locking statement never ran")
+        self.assertEqual(job.status, "failed", job.error)
+        self.assertIn("identity changed", job.data["message"].lower())
+        self.assertFalse(Device.objects.filter(name="background-race-device-twin").exists())
         self.assertIsNone(existing.rack)
 
     def test_preview_checks_capacity_against_a_rack_created_in_the_same_import(self):
@@ -418,8 +481,6 @@ class IdentitySafetyTest(TestCase):
         self.assertFalse(Device.objects.filter(name="placement-device").exists())
 
     def test_bulk_run_reports_a_generic_reason_for_a_placement_change(self):
-        from django.contrib.messages import get_messages
-
         from dcim.models import Device
 
         rows = [self._device_row(2, "RUN-STALE-RACK", "bulk-placement-device", self.rack_a, 1)]
@@ -432,12 +493,11 @@ class IdentitySafetyTest(TestCase):
         session["import_rows"] = changed_rows
         session.save()
 
-        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        job, status_response = self._run_background_import()
 
-        self.assertEqual(response.status_code, 302)
-        error = " ".join(str(message) for message in get_messages(response.wsgi_request))
-        self.assertIn("The import preview changed", error)
-        self.assertNotIn("identity changed", error)
+        self.assertEqual(job.status, "failed", job.error)
+        self.assertContains(status_response, "The import preview changed")
+        self.assertNotContains(status_response, "identity changed")
         self.assertFalse(Device.objects.filter(name="bulk-placement-device").exists())
 
     def test_single_row_sync_stores_the_refreshed_preview_on_conflict(self):
@@ -555,9 +615,9 @@ class IdentitySafetyTest(TestCase):
             face="front",
         )
 
-        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        job, _ = self._run_background_import()
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(job.status, "failed", job.error)
         existing.refresh_from_db()
         self.assertEqual(existing.rack, self.rack_a)
         self.assertEqual(existing.position, 1)
@@ -955,6 +1015,66 @@ class IdentitySafetyTest(TestCase):
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         self.assertContains(response, "Use name")
         self.assertContains(response, device_row.extra_data["suggested_name"])
+        resolve_url = reverse("plugins:netbox_data_import:resolve_duplicate_name")
+        self.assertContains(response, f'hx-post="{resolve_url}"')
+        self.assertContains(response, 'hx-target="#page-content"')
+        self.assertContains(response, 'hx-select="#page-content"')
+        self.assertContains(response, 'hx-swap="outerHTML show:top"')
+        self.assertContains(response, 'hx-indicator="find .ndi-use-name-indicator"')
+        self.assertContains(response, 'hx-disabled-elt="find button"')
+        self.assertContains(response, "Updating preview")
+
+        preview_url = reverse("plugins:netbox_data_import:import_preview")
+        resolve_response = self.client.post(
+            resolve_url,
+            {
+                "profile_id": self.profile.pk,
+                "source_id": row["source_id"],
+                "row_number": row["_row_number"],
+                "new_name": device_row.extra_data["suggested_name"],
+                "next": preview_url,
+            },
+        )
+
+        self.assertRedirects(resolve_response, preview_url)
+
+        htmx_response = self.client.post(
+            resolve_url,
+            {
+                "profile_id": self.profile.pk,
+                "source_id": row["source_id"],
+                "row_number": row["_row_number"],
+                "new_name": device_row.extra_data["suggested_name"],
+                "next": preview_url,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(htmx_response.status_code, 200)
+        self.assertNotIn("HX-Redirect", htmx_response.headers)
+        self.assertNotIn("HX-Location", htmx_response.headers)
+        self.assertContains(htmx_response, 'id="page-content"')
+        self.assertContains(htmx_response, "will use device name")
+        self.assertNotContains(htmx_response, "Use name")
+
+    def test_name_resolution_htmx_redirects_after_preview_session_expires(self):
+        resolve_response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "EXPIRED-PREVIEW",
+                "row_number": 2,
+                "new_name": "expired-preview-name",
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(resolve_response.status_code, 204)
+        self.assertEqual(
+            resolve_response.headers["HX-Redirect"],
+            reverse("plugins:netbox_data_import:import_setup"),
+        )
 
     def test_unracked_name_match_in_another_location_requires_unique_name(self):
         from dcim.models import Device, Location
@@ -1242,9 +1362,9 @@ class IdentitySafetyTest(TestCase):
         self.profile.update_existing = True
         self.profile.save(update_fields=["update_existing"])
 
-        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        job, _ = self._run_background_import()
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(job.status, "failed", job.error)
         existing.refresh_from_db()
         self.assertEqual(existing.serial, "OLD-SERIAL")
         refreshed = self.client.session["import_result"]
@@ -1275,9 +1395,9 @@ class IdentitySafetyTest(TestCase):
         existing.position = 3
         existing.save(update_fields=["rack", "position"])
 
-        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        job, _ = self._run_background_import()
 
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(job.status, "failed", job.error)
         existing.refresh_from_db()
         self.assertEqual(existing.rack, self.rack_b)
         self.assertEqual(existing.position, 3)

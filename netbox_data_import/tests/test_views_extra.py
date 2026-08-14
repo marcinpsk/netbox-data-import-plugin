@@ -72,7 +72,8 @@ class QuickAddColumnMappingViewTest(TestCase):
             ColumnMapping.objects.filter(profile=self.profile, source_column="JiraID", target_field="serial").exists()
         )
 
-    def test_updates_existing_column_mapping(self):
+    def test_keeps_existing_direct_mapping_for_another_target(self):
+        """One source column can provide more than one direct target."""
         ColumnMapping.objects.create(profile=self.profile, source_column="JiraID", target_field="asset_tag")
         self.client.post(
             self.url,
@@ -82,8 +83,14 @@ class QuickAddColumnMappingViewTest(TestCase):
                 "target_field": "serial",
             },
         )
-        mapping = ColumnMapping.objects.get(profile=self.profile, source_column="JiraID")
-        self.assertEqual(mapping.target_field, "serial")
+        self.assertEqual(
+            set(
+                ColumnMapping.objects.filter(profile=self.profile, source_column="JiraID").values_list(
+                    "target_field", flat=True
+                )
+            ),
+            {"asset_tag", "serial"},
+        )
 
     def test_invalid_target_field_rejected(self):
         resp = self.client.post(
@@ -168,4 +175,77 @@ class QuickAddColumnMappingViewTest(TestCase):
             ColumnMapping.objects.filter(
                 profile=self.profile, source_column="NewSerial", target_field="serial"
             ).exists()
+        )
+
+    def test_candidate_target_keeps_multiple_source_columns(self):
+        """Candidate mappings add eligible columns instead of displacing them."""
+        ColumnMapping.objects.create(
+            profile=self.profile,
+            source_column="Primary Contact",
+            target_field="candidate:contact",
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "Owner",
+                "target_field": "candidate:contact",
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertEqual(
+            set(
+                ColumnMapping.objects.filter(
+                    profile=self.profile,
+                    target_field="candidate:contact",
+                ).values_list("source_column", flat=True)
+            ),
+            {"Primary Contact", "Owner"},
+        )
+
+    def test_direct_target_keeps_other_mappings_for_the_source_column(self):
+        """A direct mapping can coexist with candidate and other direct targets."""
+        ColumnMapping.objects.bulk_create(
+            [
+                ColumnMapping(
+                    profile=self.profile,
+                    source_column="Primary Contact",
+                    target_field="candidate:contact",
+                ),
+                ColumnMapping(
+                    profile=self.profile,
+                    source_column="Primary Contact",
+                    target_field="asset_tag",
+                ),
+            ]
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "Primary Contact",
+                "target_field": "serial",
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertEqual(
+            set(
+                ColumnMapping.objects.filter(
+                    profile=self.profile,
+                    source_column="Primary Contact",
+                ).values_list("target_field", flat=True)
+            ),
+            {"candidate:contact", "asset_tag", "serial"},
         )

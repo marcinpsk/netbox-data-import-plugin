@@ -43,7 +43,9 @@ dev = [
     "ruff",
     "pre-commit",
     "pytest",
+    "pytest-cov>=7.1.0",
     "pytest-django",
+    "pytest-xdist>=3.8",
     "python-semantic-release",
 ]
 docs = [
@@ -53,6 +55,8 @@ docs = [
 
 [tool.pytest.ini_options]
 pythonpath = ["/opt/netbox/netbox"]
+DJANGO_SETTINGS_MODULE = "netbox_data_import.tests.isolated_settings"
+addopts = "--cov=netbox_data_import --cov-report=term-missing --reuse-db"
 
 [tool.ruff]
 line-length = 120

@@ -38,13 +38,14 @@ class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
             "create_missing_device_types": True,
             "preview_view_mode": "rows",
             "capture_extra_data": False,
+            "primary_contact_lookup_field": "email",
         }
         cls.csv_data = (
             "name,description,sheet_name,source_id_column,update_existing,create_missing_device_types,"
-            "preview_view_mode,capture_extra_data",
-            "Standard Imported Profile 1,Imported 1,Inventory,Source ID,true,true,rows,false",
-            "Standard Imported Profile 2,Imported 2,Inventory,Source ID,true,false,racks,true",
-            "Standard Imported Profile 3,Imported 3,Inventory,Source ID,false,true,rows,false",
+            "preview_view_mode,capture_extra_data,primary_contact_lookup_field",
+            "Standard Imported Profile 1,Imported 1,Inventory,Source ID,true,true,rows,false,email",
+            "Standard Imported Profile 2,Imported 2,Inventory,Source ID,true,false,racks,true,name",
+            "Standard Imported Profile 3,Imported 3,Inventory,Source ID,false,true,rows,false,email",
         )
         cls.csv_update_data = (
             "id,name,description",

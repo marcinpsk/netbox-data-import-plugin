@@ -10,7 +10,7 @@ Usage:
     python .devcontainer/scripts/test-e2e.py --base-url http://127.0.0.1:8000
 
 Tests:
-    1. librenms-sync page loads for device 22 (prod-lab03c-ri5.arcos / S9610-36D)
+    1. librenms-sync page loads for the configured device
     2. Module bays page shows Transceiver 0–35 with install links
     3. Install QSFP-100G-SR4 into Transceiver 0 via UI (TomSelect widget)
     4. Interface 'swp0' auto-created by InterfaceNameRule [rule: .* → swp{bay_position_num}]
@@ -23,6 +23,7 @@ Tests:
 
 import argparse
 import os
+import re
 import sys
 import time
 
@@ -32,18 +33,16 @@ except ImportError:
     print("ERROR: playwright not installed. Run: pip install playwright && playwright install chromium")
     sys.exit(1)
 
-# ── Constants (match devcontainer sample data) ────────────────────────────────
-DEVICE_ID = 22  # prod-lab03c-ri5.arcos (S9610-36D)
-MANUFACTURER_ID = 2  # Generic
-MODULE_TYPE_MODEL = "QSFP-100G-SR4"
+# ── Runtime settings ──────────────────────────────────────────────────────────
 API_TIMEOUT = 10  # seconds for API calls during cleanup
 
-# Transceiver bay IDs (populated by load-sample-data.py)
-# bay_position_num is the numeric suffix of the bay name: "Transceiver 5" → 5
-BAYS = [
-    (486, "Transceiver 0", "swp0"),  # bay_position_num=0
-    (491, "Transceiver 5", "swp5"),  # bay_position_num=5
-]
+
+def required_setting(name: str) -> str:
+    """Return one required setting without storing environment data in source."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Set {name} before running this environment-specific E2E test")
+    return value
 
 
 def tomselect_pick(page, field_id: str, search_text: str) -> None:
@@ -65,6 +64,14 @@ def tomselect_pick(page, field_id: str, search_text: str) -> None:
 
 
 def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
+    device_id = int(required_setting("NETBOX_E2E_DEVICE_ID"))
+    expected_device_name = required_setting("NETBOX_E2E_DEVICE_NAME")
+    manufacturer_id = int(required_setting("NETBOX_E2E_MANUFACTURER_ID"))
+    module_type_model = required_setting("NETBOX_E2E_MODULE_TYPE_MODEL")
+    bays = [
+        (int(required_setting("NETBOX_E2E_BAY_ZERO_ID")), "Transceiver 0", "swp0"),
+        (int(required_setting("NETBOX_E2E_BAY_FIVE_ID")), "Transceiver 5", "swp5"),
+    ]
     passed: list[str] = []
     failed: list[tuple[str, str]] = []
 
@@ -93,22 +100,24 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
 
         # ── Test 1: librenms-sync page ────────────────────────────────────────
         try:
-            page.goto(f"{base_url}/dcim/devices/{DEVICE_ID}/librenms-sync/")
+            page.goto(f"{base_url}/dcim/devices/{device_id}/librenms-sync/")
             page.wait_for_load_state("networkidle", timeout=10000)
-            assert page.url == f"{base_url}/dcim/devices/{DEVICE_ID}/librenms-sync/", f"redirected to {page.url}"
+            assert page.url == f"{base_url}/dcim/devices/{device_id}/librenms-sync/", f"redirected to {page.url}"
             title = page.locator("h1.page-title").inner_text(timeout=5000)
-            assert "prod-lab03c-ri5.arcos" in title, f"title={title!r}"
-            ok("librenms-sync page loads (device 22: prod-lab03c-ri5.arcos)")
+            assert title == expected_device_name, f"title={title!r}"
+            ok(f"librenms-sync page loads for device {device_id}")
         except Exception as e:
             fail("librenms-sync page loads", e)
+            browser.close()
+            return passed, failed
 
         # ── Test 2: Module bays ───────────────────────────────────────────────
         try:
-            page.goto(f"{base_url}/dcim/devices/{DEVICE_ID}/module-bays/")
+            page.goto(f"{base_url}/dcim/devices/{device_id}/module-bays/")
             page.wait_for_load_state("networkidle", timeout=10000)
             assert page.locator("text=Transceiver 0").count() > 0, "Transceiver 0 missing"
             assert page.locator("text=Transceiver 35").count() > 0, "Transceiver 35 missing"
-            for bay_id, bay_name, _ in BAYS:
+            for bay_id, bay_name, _ in bays:
                 assert page.locator(f'a[href*="module_bay={bay_id}"]').count() > 0, (
                     f"no install link for bay {bay_id} ({bay_name})"
                 )
@@ -117,23 +126,26 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
             fail("module bays page", e)
 
         # ── Tests 3+4 / 5+6: Install + verify interface naming ───────────────
-        for bay_id, bay_name, expected_iface in BAYS:
+        created_module_ids = []
+        for bay_id, bay_name, expected_iface in bays:
             # Install via UI
             try:
                 page.goto(
                     f"{base_url}/dcim/modules/add/"
-                    f"?device={DEVICE_ID}&module_bay={bay_id}"
-                    f"&manufacturer={MANUFACTURER_ID}"
-                    f"&return_url=/dcim/devices/{DEVICE_ID}/module-bays/"
+                    f"?device={device_id}&module_bay={bay_id}"
+                    f"&manufacturer={manufacturer_id}"
                 )
                 page.wait_for_load_state("networkidle", timeout=10000)
-                tomselect_pick(page, "id_module_type", MODULE_TYPE_MODEL)
+                tomselect_pick(page, "id_module_type", module_type_model)
                 page.locator('button[name="_create"]').click()
                 page.wait_for_load_state("networkidle", timeout=15000)
-                assert page.locator(f"text={MODULE_TYPE_MODEL}").count() > 0, (
+                created_module_match = re.fullmatch(rf"{re.escape(base_url)}/dcim/modules/(\d+)/", page.url)
+                assert created_module_match, f"unexpected redirect after module install: {page.url}"
+                created_module_ids.append(int(created_module_match.group(1)))
+                assert page.locator(f"text={module_type_model}").count() > 0, (
                     f"module not shown after install (url={page.url})"
                 )
-                ok(f"installed {MODULE_TYPE_MODEL} into {bay_name} via UI")
+                ok(f"installed {module_type_model} into {bay_name} via UI")
             except Exception as e:
                 fail(f"install into {bay_name}", e)
                 continue
@@ -143,7 +155,7 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
                 deadline = time.monotonic() + 5
                 found = False
                 while time.monotonic() < deadline:
-                    page.goto(f"{base_url}/dcim/devices/{DEVICE_ID}/interfaces/")
+                    page.goto(f"{base_url}/dcim/devices/{device_id}/interfaces/")
                     try:
                         page.wait_for_load_state("networkidle", timeout=3000)
                     except Exception:
@@ -153,13 +165,13 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
                         break
                     time.sleep(0.5)
                 assert found, f"'{expected_iface}' not found — InterfaceNameRule did not fire"
-                ok(f"interface '{expected_iface}' auto-created (rule: S9610-36D .* → swp{{bay_position_num}})")
+                ok(f"interface '{expected_iface}' auto-created")
             except Exception as e:
                 fail(f"interface '{expected_iface}' auto-created", e)
 
         # ── Test: librenms-sync still works after installs ────────────────────
         try:
-            page.goto(f"{base_url}/dcim/devices/{DEVICE_ID}/librenms-sync/")
+            page.goto(f"{base_url}/dcim/devices/{device_id}/librenms-sync/")
             page.wait_for_load_state("networkidle", timeout=10000)
             assert page.locator("text=Server Error").count() == 0, "500 error on sync page"
             ok("librenms-sync page works after module installation")
@@ -170,8 +182,6 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
         print("\n  [cleanup] removing test modules via API...")
         try:
             import urllib.request
-            import urllib.parse
-            import json as _json
 
             # Reuse the browser session cookie for API calls
             cookies = ctx.cookies()
@@ -183,18 +193,8 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
                 "Content-Type": "application/json",
             }
 
-            # List modules on device (follow pagination)
-            module_ids = []
-            next_url = f"{base_url}/api/dcim/modules/?device_id={DEVICE_ID}"
-            while next_url:
-                req = urllib.request.Request(next_url, headers=headers)
-                with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
-                    data = _json.loads(resp.read())
-                module_ids.extend(m["id"] for m in data.get("results", []))
-                next_url = data.get("next")
-
             removed = 0
-            for mid in module_ids:
+            for mid in created_module_ids:
                 del_req = urllib.request.Request(
                     f"{base_url}/api/dcim/modules/{mid}/",
                     headers=headers,

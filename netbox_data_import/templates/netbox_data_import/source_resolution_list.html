@@ -2,7 +2,7 @@
 {# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
 {% extends 'base/layout.html' %}
 
-{% block title %}Name Resolutions — {{ profile.name }}{% endblock %}
+{% block title %}Row Resolutions — {{ profile.name }}{% endblock %}
 
 {% block content %}
 <div class="row">
@@ -10,7 +10,7 @@
     <div class="card">
       <div class="card-header d-flex justify-content-between align-items-center">
         <h5 class="mb-0">
-          <i class="mdi mdi-content-cut"></i> Saved Name Resolutions — {{ profile.name }}
+          <i class="mdi mdi-tune-variant"></i> Saved Row Resolutions — {{ profile.name }}
         </h5>
         <a href="{{ profile.get_absolute_url }}" class="btn btn-sm btn-secondary">
           <i class="mdi mdi-arrow-left"></i> Back to Profile
@@ -18,8 +18,8 @@
       </div>
       <div class="card-body pb-0">
         <p class="text-muted">
-          These resolutions are applied automatically during <em>parse_file</em> on re-import
-          (like <code>git rerere</code>). Delete a record to stop replaying that split.
+          The import applies these row decisions automatically on re-import.
+          Delete a record to stop replaying that decision.
         </p>
       </div>
       <div class="table-responsive">
@@ -54,7 +54,7 @@
             {% empty %}
             <tr>
               <td colspan="5" class="text-center text-muted py-3">
-                No saved resolutions. Use the ✂ Split button on the preview page to create some.
+                No saved row resolutions. Resolve a row in the preview to create one.
               </td>
             </tr>
             {% endfor %}

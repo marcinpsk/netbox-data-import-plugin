@@ -2,12 +2,17 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 from django import forms
 from dcim.models import Site, Location
-from tenancy.models import Tenant
+from tenancy.models import ContactRole, Tenant
 from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
 from utilities.forms.fields import DynamicModelChoiceField
 from utilities.forms.widgets import BulkEditNullBooleanSelect
 from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
-from .models import PREVIEW_VIEW_CHOICES, TARGET_FIELD_CHOICES
+from .models import (
+    COLUMN_TRANSFORM_TARGET_FIELD_CHOICES,
+    CONTACT_LOOKUP_FIELD_CHOICES,
+    PREVIEW_VIEW_CHOICES,
+    TARGET_FIELD_CHOICES,
+)
 
 
 class ImportProfileForm(NetBoxModelForm):
@@ -25,12 +30,23 @@ class ImportProfileForm(NetBoxModelForm):
             "create_missing_device_types",
             "preview_view_mode",
             "capture_extra_data",
+            "primary_contact_role",
+            "primary_contact_lookup_field",
             "tags",
         ]
 
 
 class ImportProfileImportForm(NetBoxModelImportForm):
     """CSV/YAML bulk-import form for ImportProfile objects (profile metadata only)."""
+
+    primary_contact_lookup_field = forms.ChoiceField(
+        choices=CONTACT_LOOKUP_FIELD_CHOICES,
+        required=False,
+    )
+
+    def clean_primary_contact_lookup_field(self):
+        """Use email matching when an older CSV omits the new column."""
+        return self.cleaned_data["primary_contact_lookup_field"] or "email"
 
     class Meta:
         model = ImportProfile
@@ -44,6 +60,8 @@ class ImportProfileImportForm(NetBoxModelImportForm):
             "create_missing_device_types",
             "preview_view_mode",
             "capture_extra_data",
+            "primary_contact_role",
+            "primary_contact_lookup_field",
             "tags",
         ]
 
@@ -64,8 +82,13 @@ class ImportProfileBulkEditForm(NetBoxModelBulkEditForm):
         required=False,
     )
     capture_extra_data = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    primary_contact_role = DynamicModelChoiceField(queryset=ContactRole.objects.all(), required=False)
+    primary_contact_lookup_field = forms.ChoiceField(
+        choices=[("", "---------"), *CONTACT_LOOKUP_FIELD_CHOICES],
+        required=False,
+    )
 
-    nullable_fields = ("description", "source_id_column", "custom_field_name")
+    nullable_fields = ("description", "source_id_column", "custom_field_name", "primary_contact_role")
 
 
 class ColumnMappingForm(forms.ModelForm):
@@ -119,8 +142,14 @@ class DeviceTypeMappingForm(forms.ModelForm):
 class ColumnTransformRuleForm(forms.ModelForm):
     """Form for creating and editing ColumnTransformRule instances."""
 
-    group_1_target = forms.ChoiceField(choices=[("", "---------")] + TARGET_FIELD_CHOICES, required=False)
-    group_2_target = forms.ChoiceField(choices=[("", "---------")] + TARGET_FIELD_CHOICES, required=False)
+    group_1_target = forms.ChoiceField(
+        choices=[("", "---------")] + COLUMN_TRANSFORM_TARGET_FIELD_CHOICES,
+        required=False,
+    )
+    group_2_target = forms.ChoiceField(
+        choices=[("", "---------")] + COLUMN_TRANSFORM_TARGET_FIELD_CHOICES,
+        required=False,
+    )
 
     class Meta:
         model = ColumnTransformRule

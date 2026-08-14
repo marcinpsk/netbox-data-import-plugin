@@ -59,6 +59,32 @@ class ImportProfileAPITest(BaseAPITestCase):
         if resp.status_code == 201:
             self.assertTrue(ImportProfile.objects.filter(name="APICreatedProfile").exists())
 
+    def test_create_profile_with_primary_contact_configuration(self):
+        """The API saves the native Contact Role and contact lookup field."""
+        import json
+
+        from tenancy.models import ContactRole
+
+        role = ContactRole.objects.create(name="API Primary Contact", slug="api-primary-contact")
+
+        response = self.client.post(
+            "/api/plugins/data-import/profiles/",
+            data=json.dumps(
+                {
+                    "name": "API Contact Profile",
+                    "primary_contact_role": role.pk,
+                    "primary_contact_lookup_field": "name",
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        profile = ImportProfile.objects.get(name="API Contact Profile")
+        self.assertEqual(profile.primary_contact_role, role)
+        self.assertEqual(profile.primary_contact_lookup_field, "name")
+
 
 class ColumnMappingAPITest(BaseAPITestCase):
     """Tests for the ColumnMapping REST API with profile_id filter."""
@@ -340,6 +366,98 @@ class SourceResolutionAPITest(BaseAPITestCase):
         data = json.loads(resp.content)
         self.assertEqual(data["count"], 1)
         self.assertEqual(data["results"][0]["profile"], self.p1.pk)
+
+    def test_rejects_contact_candidate_resolution_without_name(self):
+        """Do not persist a Contact candidate resolution that the importer cannot apply."""
+        import json
+
+        from netbox_data_import.models import SourceResolution
+
+        response = self.client.post(
+            "/api/plugins/data-import/source-resolutions/",
+            data=json.dumps(
+                {
+                    "profile": self.p1.pk,
+                    "source_id": "SR-CONTACT-001",
+                    "source_column": "candidate:contact",
+                    "original_value": json.dumps({"Contact": "contact@example.invalid"}),
+                    "resolved_fields": {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {"email": "Contact"},
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-001").exists())
+
+    def test_rejects_contact_candidate_resolution_with_missing_source_column(self):
+        """Do not persist a Contact mapping to a source column that is absent from the row."""
+        import json
+
+        from netbox_data_import.models import SourceResolution
+
+        response = self.client.post(
+            "/api/plugins/data-import/source-resolutions/",
+            data=json.dumps(
+                {
+                    "profile": self.p1.pk,
+                    "source_id": "SR-CONTACT-002",
+                    "source_column": "candidate:contact",
+                    "original_value": json.dumps({"Owner": "Example Owner"}),
+                    "resolved_fields": {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {
+                            "name": "Missing Column",
+                            "email": "Missing Column",
+                        },
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-002").exists())
+
+    def test_rejects_contact_candidate_resolution_with_unconfigured_source_column(self):
+        """Do not trust candidate source columns supplied only by the API client."""
+        import json
+
+        from netbox_data_import.models import SourceResolution
+
+        ColumnMapping.objects.create(
+            profile=self.p1,
+            source_column="Owner",
+            target_field="candidate:contact",
+        )
+        response = self.client.post(
+            "/api/plugins/data-import/source-resolutions/",
+            data=json.dumps(
+                {
+                    "profile": self.p1.pk,
+                    "source_id": "SR-CONTACT-003",
+                    "source_column": "candidate:contact",
+                    "original_value": json.dumps({"Missing Column": "Example Owner"}),
+                    "resolved_fields": {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {
+                            "name": "Missing Column",
+                            "email": "Missing Column",
+                        },
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-003").exists())
 
 
 class ImportJobAPITest(BaseAPITestCase):

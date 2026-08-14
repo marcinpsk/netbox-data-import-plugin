@@ -68,6 +68,12 @@ urlpatterns = [
     path("import/", views.ImportSetupView.as_view(), name="import_setup"),
     path("import/preview/", views.ImportPreviewView.as_view(), name="import_preview"),
     path("import/run/", views.ImportRunView.as_view(), name="import_run"),
+    path("import/progress/<int:pk>/", views.ImportProgressView.as_view(), name="import_progress"),
+    path(
+        "import/progress/<int:pk>/status/",
+        views.ImportProgressStatusView.as_view(),
+        name="import_progress_status",
+    ),
     path("import/results/", views.ImportResultsView.as_view(), name="import_results"),
     # Ignore / Unignore device
     path("ignore-device/", views.IgnoreDeviceView.as_view(), name="ignore_device"),

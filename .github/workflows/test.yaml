@@ -26,8 +26,6 @@ jobs:
       matrix:
         include:
           - python-version: "3.12"
-            netbox-version: "v4.4.10"
-          - python-version: "3.12"
             netbox-version: "v4.6.7"
           - python-version: "3.14"
             netbox-version: "v4.6.7"
@@ -79,13 +77,15 @@ jobs:
         working-directory: netbox-data-import-plugin
         run: |
           uv pip install --system -r ../netbox/requirements.txt
-          uv pip install --system pytest pytest-django tblib coverage
+          uv pip install --system pytest pytest-cov pytest-django pytest-xdist tblib
           uv pip install --system -e .
 
       - name: Set up NetBox configuration
         working-directory: netbox
         run: |
           cat > netbox/netbox/configuration.py << 'EOF'
+          import os
+
           ALLOWED_HOSTS = ['*']
           DATABASE = {
               'NAME': 'netbox',
@@ -97,8 +97,16 @@ jobs:
               'ENGINE': 'django.db.backends.postgresql'
           }
           REDIS = {
-              'tasks': {'HOST': 'localhost', 'PORT': 6379, 'DATABASE': 0},
-              'caching': {'HOST': 'localhost', 'PORT': 6379, 'DATABASE': 1}
+              'tasks': {
+                  'HOST': os.environ.get('REDIS_HOST', 'localhost'),
+                  'PORT': 6379,
+                  'DATABASE': int(os.environ.get('REDIS_DATABASE', '0')),
+              },
+              'caching': {
+                  'HOST': os.environ.get('REDIS_CACHE_HOST', 'localhost'),
+                  'PORT': 6379,
+                  'DATABASE': int(os.environ.get('REDIS_CACHE_DATABASE', '1')),
+              },
           }
           SECRET_KEY = 'test-secret-key-not-for-production-1234567890123456'
           API_TOKEN_PEPPERS = {0: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
@@ -106,22 +114,22 @@ jobs:
           EOF
 
       - name: Run tests with coverage
-        working-directory: netbox/netbox
+        working-directory: netbox-data-import-plugin
         env:
           NETBOX_CONFIGURATION: netbox.configuration
-          COVERAGE_RCFILE: ../../netbox-data-import-plugin/pyproject.toml
-        run: |
-          coverage run manage.py test netbox_data_import --verbosity=2
-          coverage report
+          PYTHONPATH: ${{ github.workspace }}/netbox/netbox
+          TEST_DB_NAME: test_netbox_data_import_ci
+          TEST_REDIS_HOST: localhost
+        # Four workers match the standard public runner's CPU allocation. The
+        # plugin test configuration isolates PostgreSQL and Redis per worker.
+        run: pytest -n 4 --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
 
       - name: Generate coverage report
         if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.6.7'
-        working-directory: netbox/netbox
-        env:
-          COVERAGE_RCFILE: ../../netbox-data-import-plugin/pyproject.toml
+        working-directory: netbox-data-import-plugin
         run: |
-          coverage json -o ../../coverage-report/coverage.json
-          coverage html -d ../../coverage-report/htmlcov
+          coverage json -o ../coverage-report/coverage.json
+          coverage html -d ../coverage-report/htmlcov
 
       - name: Upload coverage report
         if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.6.7'
