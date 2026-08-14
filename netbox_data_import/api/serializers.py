@@ -2,6 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """DRF serializers for the data-import plugin models."""
 
+from django.core.exceptions import ValidationError
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
@@ -14,6 +15,7 @@ from ..models import (
     ColumnTransformRule,
     SourceResolution,
     ImportJob,
+    validate_contact_candidate_resolution,
 )
 
 
@@ -116,6 +118,19 @@ class ColumnTransformRuleSerializer(serializers.ModelSerializer):
 
 class SourceResolutionSerializer(serializers.ModelSerializer):
     """Serializer for SourceResolution (rerere, plain model)."""
+
+    def validate(self, attrs):
+        """Reject Contact candidate resolutions that the importer cannot apply."""
+        instance = self.instance
+        source_column = attrs.get("source_column", getattr(instance, "source_column", None))
+        if source_column == "candidate:contact":
+            profile = attrs.get("profile", getattr(instance, "profile", None))
+            resolved_fields = attrs.get("resolved_fields", getattr(instance, "resolved_fields", None))
+            try:
+                validate_contact_candidate_resolution(resolved_fields, profile.primary_contact_lookup_field)
+            except ValidationError as exc:
+                raise serializers.ValidationError({"resolved_fields": exc.messages}) from exc
+        return attrs
 
     class Meta:
         model = SourceResolution

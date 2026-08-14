@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
@@ -18,6 +19,27 @@ CANDIDATE_TARGET_PREFIX = "candidate:"
 CANDIDATE_TARGET_CHOICES = [
     ("candidate:contact", "Candidate values: Contact fields"),
 ]
+CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
+CONTACT_RESOLUTION_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
+
+
+def validate_contact_candidate_resolution(resolved_fields, lookup_field: str) -> dict[str, str]:
+    """Validate one saved Contact candidate resolution and return its field sources."""
+    if not isinstance(resolved_fields, dict) or set(resolved_fields) != CONTACT_RESOLUTION_KEYS:
+        raise ValidationError("The Contact candidate resolution has an invalid structure.")
+    if resolved_fields.get("contact_resolution_applied") is not True:
+        raise ValidationError("The Contact candidate resolution is not marked as applied.")
+
+    field_sources = resolved_fields.get("contact_field_sources")
+    if not isinstance(field_sources, dict) or set(field_sources) - CONTACT_RESOLUTION_FIELDS:
+        raise ValidationError("The Contact candidate resolution contains an unknown field.")
+    if any(not isinstance(source_column, str) or not source_column for source_column in field_sources.values()):
+        raise ValidationError("Each resolved Contact field must select one source column.")
+    if field_sources and "name" not in field_sources:
+        raise ValidationError("Select a source column for the Contact name.")
+    if field_sources and lookup_field not in field_sources:
+        raise ValidationError(f"Select a source column for the Contact {lookup_field} lookup field.")
+    return field_sources
 
 
 TARGET_FIELD_CHOICES = [

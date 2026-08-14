@@ -25,7 +25,7 @@ from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.utils.text import slugify
 import openpyxl
 
-from .models import CANDIDATE_TARGET_PREFIX, ImportProfile
+from .models import CANDIDATE_TARGET_PREFIX, ImportProfile, validate_contact_candidate_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -3260,20 +3260,22 @@ def _contact_candidate_values(
     return candidate_values
 
 
-def _resolved_contact_candidate_values(row: dict, candidate_values: dict[str, str]) -> dict[str, str] | None:
+def _resolved_contact_candidate_values(
+    row: dict,
+    candidate_values: dict[str, str],
+    lookup_field: str,
+) -> dict[str, str] | None:
     """Apply one saved row resolution to Contact candidate values."""
-    if row.get("contact_resolution_applied") is not True:
-        raise _CandidateResolutionRequired("contact", candidate_values)
-
-    field_sources = row.get("contact_field_sources")
-    if not isinstance(field_sources, dict):
-        raise _CandidateResolutionRequired(
-            "contact", candidate_values, "The saved Contact row resolution is invalid. Select it again."
+    try:
+        field_sources = validate_contact_candidate_resolution(
+            {
+                "contact_resolution_applied": row.get("contact_resolution_applied"),
+                "contact_field_sources": row.get("contact_field_sources"),
+            },
+            lookup_field,
         )
-    if set(field_sources) - {"name", "email", "phone"}:
-        raise _CandidateResolutionRequired(
-            "contact", candidate_values, "The saved Contact row resolution contains an unknown field."
-        )
+    except ValidationError as exc:
+        raise _CandidateResolutionRequired("contact", candidate_values, "; ".join(exc.messages)) from exc
 
     contact_values = {}
     for contact_field in ("name", "email", "phone"):
@@ -3288,8 +3290,6 @@ def _resolved_contact_candidate_values(row: dict, candidate_values: dict[str, st
             )
         contact_values[contact_field] = candidate_values[source_column]
 
-    if contact_values and not contact_values.get("name"):
-        raise _CandidateResolutionRequired("contact", candidate_values, "Select a source value for the Contact name.")
     return contact_values or None
 
 
@@ -3321,17 +3321,11 @@ def _primary_contact_sync_data(
         }, extra_columns
     if not candidate_values:
         return None, extra_columns
-    contact_values = _resolved_contact_candidate_values(row, candidate_values)
+    lookup_field = profile.primary_contact_lookup_field
+    contact_values = _resolved_contact_candidate_values(row, candidate_values, lookup_field)
     if not contact_values:
         return None, extra_columns
 
-    lookup_field = profile.primary_contact_lookup_field
-    if not contact_values.get(lookup_field):
-        raise _CandidateResolutionRequired(
-            "contact",
-            candidate_values,
-            f"Select a source value for the Contact {lookup_field} lookup field.",
-        )
     from tenancy.models import Contact
 
     try:

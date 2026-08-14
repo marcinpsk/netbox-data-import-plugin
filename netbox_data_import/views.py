@@ -39,6 +39,7 @@ from .models import (
     ManufacturerMapping,
     SourceResolution,
     TARGET_FIELD_CHOICES,
+    validate_contact_candidate_resolution,
 )
 from .tables import (
     ClassRoleMappingTable,
@@ -1761,29 +1762,14 @@ class SaveResolutionView(_AjaxPermissionView):
     def _validate_contact_candidate_resolution(cls, request, profile, source_id, resolved_fields):
         """Validate and normalize a Contact candidate row resolution."""
         candidates = cls._contact_candidate_values(request, profile.pk, source_id)
-        if not isinstance(resolved_fields, dict) or set(resolved_fields) != {
-            "contact_resolution_applied",
-            "contact_field_sources",
-        }:
-            raise ValidationError("The Contact candidate resolution has an invalid structure.")
-        if resolved_fields.get("contact_resolution_applied") is not True:
-            raise ValidationError("The Contact candidate resolution is not marked as applied.")
-
-        field_sources = resolved_fields.get("contact_field_sources")
-        if not isinstance(field_sources, dict) or set(field_sources) - {"name", "email", "phone"}:
-            raise ValidationError("The Contact candidate resolution contains an unknown field.")
-        if any(not isinstance(source_column, str) or not source_column for source_column in field_sources.values()):
-            raise ValidationError("Each resolved Contact field must select one source column.")
+        field_sources = validate_contact_candidate_resolution(
+            resolved_fields,
+            profile.primary_contact_lookup_field,
+        )
         missing_sources = set(field_sources.values()) - set(candidates)
         if missing_sources:
             missing = sorted(missing_sources)[0]
             raise ValidationError(f"The source column '{missing}' has no candidate value in this row.")
-        if field_sources and "name" not in field_sources:
-            raise ValidationError("Select a source column for the Contact name.")
-        if field_sources and profile.primary_contact_lookup_field not in field_sources:
-            raise ValidationError(
-                f"Select a source column for the Contact {profile.primary_contact_lookup_field} lookup field."
-            )
         return candidates
 
     def post(self, request):

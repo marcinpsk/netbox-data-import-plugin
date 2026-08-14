@@ -367,6 +367,33 @@ class SourceResolutionAPITest(BaseAPITestCase):
         self.assertEqual(data["count"], 1)
         self.assertEqual(data["results"][0]["profile"], self.p1.pk)
 
+    def test_rejects_contact_candidate_resolution_without_name(self):
+        """Do not persist a Contact candidate resolution that the importer cannot apply."""
+        import json
+
+        from netbox_data_import.models import SourceResolution
+
+        response = self.client.post(
+            "/api/plugins/data-import/source-resolutions/",
+            data=json.dumps(
+                {
+                    "profile": self.p1.pk,
+                    "source_id": "SR-CONTACT-001",
+                    "source_column": "candidate:contact",
+                    "original_value": json.dumps({"Contact": "contact@example.invalid"}),
+                    "resolved_fields": {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {"email": "Contact"},
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-001").exists())
+
 
 class ImportJobAPITest(BaseAPITestCase):
     """Tests for ImportJobViewSet ?profile_id filtering (lines 147-151 in api/views.py)."""
