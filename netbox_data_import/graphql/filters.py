@@ -36,6 +36,7 @@ else:  # pragma: no cover
         create_missing_device_types: BaseFilterLookup[bool] | None = strawberry_django.filter_field()
         preview_view_mode: StrFilterLookup[str] | None = strawberry_django.filter_field()
         capture_extra_data: BaseFilterLookup[bool] | None = strawberry_django.filter_field()
+        primary_contact_lookup_field: StrFilterLookup[str] | None = strawberry_django.filter_field()
 
 
 __all__ = ("ImportProfileFilter",)

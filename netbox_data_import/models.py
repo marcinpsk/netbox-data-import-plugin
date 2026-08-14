@@ -9,6 +9,16 @@ PREVIEW_VIEW_CHOICES = [
     ("racks", "Rack view"),
 ]
 
+CONTACT_LOOKUP_FIELD_CHOICES = [
+    ("email", "Email address"),
+    ("name", "Name"),
+]
+
+CANDIDATE_TARGET_PREFIX = "candidate:"
+CANDIDATE_TARGET_CHOICES = [
+    ("candidate:contact", "Candidate values: Contact fields"),
+]
+
 
 TARGET_FIELD_CHOICES = [
     ("rack_name", "Rack name"),
@@ -26,7 +36,13 @@ TARGET_FIELD_CHOICES = [
     ("primary_ip4", "Primary IPv4"),
     ("primary_ip6", "Primary IPv6"),
     ("oob_ip", "Out-of-band IP"),
+    ("primary_contact", "Primary contact"),
     ("source_id", "Source ID (stored in custom field)"),
+    *CANDIDATE_TARGET_CHOICES,
+]
+
+COLUMN_TRANSFORM_TARGET_FIELD_CHOICES = [
+    choice for choice in TARGET_FIELD_CHOICES if not choice[0].startswith(CANDIDATE_TARGET_PREFIX)
 ]
 
 
@@ -69,6 +85,20 @@ class ImportProfile(NetBoxModel):
         help_text=(
             "Store unmapped source column values in the data_import_source['extra'] custom field key on each device."
         ),
+    )
+    primary_contact_role = models.ForeignKey(
+        to="tenancy.ContactRole",
+        on_delete=models.PROTECT,
+        related_name="+",
+        null=True,
+        blank=True,
+        help_text="Contact role to assign when a source row contains a primary contact.",
+    )
+    primary_contact_lookup_field = models.CharField(
+        max_length=10,
+        choices=CONTACT_LOOKUP_FIELD_CHOICES,
+        default="email",
+        help_text="Contact field used to match primary contact values from the source.",
     )
 
     # Override tags reverse accessor to avoid clashes with other plugins
@@ -328,7 +358,7 @@ class ColumnTransformRule(models.Model):
 
     Example: source_column='Name', pattern='^(\w{4,8}) - (.+)$',
     group_1_target='asset_tag', group_2_target='device_name'
-    transforms "59AH76 - PROD-LAB03-SW1" into asset_tag="59AH76", device_name="PROD-LAB03-SW1".
+    transforms "TEST0001 - EXAMPLE-SWITCH-01" into asset_tag="TEST0001", device_name="EXAMPLE-SWITCH-01".
     """
 
     profile = models.ForeignKey(
@@ -389,7 +419,7 @@ class ColumnTransformRule(models.Model):
                 }
             )
 
-        valid_standard = {choice[0] for choice in TARGET_FIELD_CHOICES}
+        valid_standard = {choice[0] for choice in COLUMN_TRANSFORM_TARGET_FIELD_CHOICES}
         for attr in ("group_1_target", "group_2_target"):
             value = getattr(self, attr) or ""
             if not value:
@@ -416,11 +446,11 @@ class ColumnTransformRule(models.Model):
 
 
 class SourceResolution(models.Model):
-    """Saved manual resolution for a specific source cell value.
+    """Saved target-field decision for one source row.
 
-    When a user manually splits "59AH76 - PROD-LAB03-SW1" into asset_tag=59AH76
-    and device_name=PROD-LAB03-SW1, that resolution is saved here. On re-import,
-    parse_file applies it automatically (like git rerere).
+    A resolution can split one source value or select candidate source columns
+    for structured target fields. The import reapplies it when the same source
+    row appears in a later file.
     """
 
     profile = models.ForeignKey(
@@ -441,7 +471,7 @@ class SourceResolution(models.Model):
     )
     resolved_fields = models.JSONField(
         default=dict,
-        help_text="Dict of target_field -> resolved_value (e.g. {'device_name': 'SW1', 'asset_tag': '59AH76'})",
+        help_text="Dict of target_field -> resolved_value (e.g. {'device_name': 'SW1', 'asset_tag': 'TEST0001'})",
     )
 
     class Meta:

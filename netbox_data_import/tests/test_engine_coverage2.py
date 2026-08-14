@@ -127,20 +127,20 @@ class ReapplySavedResolutionsTest(TestCase):
             profile=self.profile,
             source_id="SRC-SPLIT",
             source_column="device_name",
-            original_value="65JP27 - Loan from VFD",
-            resolved_fields={"asset_tag": "65JP27"},
+            original_value="TEST-ASSET-002 - temporary device",
+            resolved_fields={"asset_tag": "TEST-ASSET-002"},
         )
         rows = [
             {
                 "_row_number": 1,
                 "source_id": "SRC-SPLIT",
-                "device_name": "65JP27 - Loan from VFD",
+                "device_name": "TEST-ASSET-002 - temporary device",
             }
         ]
 
         result = reapply_saved_resolutions(rows, self.profile)
 
-        self.assertEqual(result[0]["asset_tag"], "65JP27")
+        self.assertEqual(result[0]["asset_tag"], "TEST-ASSET-002")
         self.assertIsNone(result[0]["device_name"])
 
     def test_does_not_clear_target_field_when_value_diverged(self):
@@ -149,8 +149,8 @@ class ReapplySavedResolutionsTest(TestCase):
             profile=self.profile,
             source_id="SRC-MERGED",
             source_column="device_name",
-            original_value="65JP27 - Loan",
-            resolved_fields={"asset_tag": "65JP27"},
+            original_value="TEST-ASSET-002 - temporary",
+            resolved_fields={"asset_tag": "TEST-ASSET-002"},
         )
         rows = [
             {
@@ -185,7 +185,7 @@ class EnsureManufacturerPermDeniedTest(TestCase):
         from dcim.models import Manufacturer
 
         profile = _make_profile("EnsureMfgPermDry")
-        limited_user = User.objects.create_user("mfg_perm_dry_user2", "mfgd2@t.com", "pw")
+        limited_user = User.objects.create_user("mfg_perm_dry_user2", "mfgd2@example.invalid", "pw")
         result = ImportResult()
         ctx = ImportContext(
             profile=profile,
@@ -207,7 +207,7 @@ class EnsureManufacturerPermDeniedTest(TestCase):
         from dcim.models import Manufacturer
 
         profile = _make_profile("EnsureMfgPermExec2")
-        limited_user = User.objects.create_user("mfg_perm_exec_user3", "mfgex3@t.com", "pw")
+        limited_user = User.objects.create_user("mfg_perm_exec_user3", "mfgex3@example.invalid", "pw")
         result = ImportResult()
         ctx = ImportContext(
             profile=profile,
@@ -233,7 +233,7 @@ class EnsureDeviceTypePermDeniedTest(TestCase):
         from dcim.models import DeviceType, Manufacturer
 
         profile = _make_profile("EnsureDTPermDry2")
-        limited_user = User.objects.create_user("dt_perm_dry_user2", "dtp2@t.com", "pw")
+        limited_user = User.objects.create_user("dt_perm_dry_user2", "dtp2@example.invalid", "pw")
         result = ImportResult()
         ctx = ImportContext(
             profile=profile,
@@ -267,7 +267,7 @@ class EnsureDeviceTypePermDeniedTest(TestCase):
 
         Manufacturer.objects.create(name="ExistMfgForDTPerm2", slug="exist-mfg-dt-perm-cov2")
         profile = _make_profile("EnsureDTPermExec2")
-        limited_user = User.objects.create_user("dt_perm_exec_user3", "dtpe3@t.com", "pw")
+        limited_user = User.objects.create_user("dt_perm_exec_user3", "dtpe3@example.invalid", "pw")
         result = ImportResult()
         ctx = ImportContext(
             profile=profile,
@@ -310,7 +310,7 @@ class EnsureDeviceRolePermDeniedNonDryRunTest(TestCase):
             creates_rack=False,
             role_slug="test-role-ndr-perm2",
         )
-        limited_user = User.objects.create_user("role_ndr_perm_user2", "rndrp2@t.com", "pw")
+        limited_user = User.objects.create_user("role_ndr_perm_user2", "rndrp2@example.invalid", "pw")
         result = ImportResult()
         ctx = ImportContext(
             profile=profile,

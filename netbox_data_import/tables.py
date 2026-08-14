@@ -54,7 +54,7 @@ class ColumnMappingTable(tables.Table):
     """Table for displaying ColumnMapping objects inline on the profile detail page."""
 
     source_column = tables.Column()
-    target_field = tables.Column()
+    target_field = tables.Column(accessor="get_target_field_display", order_by="target_field")
     actions = tables.TemplateColumn(
         template_code="""
         <a href="{% url 'plugins:netbox_data_import:columnmapping_edit' record.pk %}" class="btn btn-sm btn-warning">

@@ -8,7 +8,7 @@ from django.test import TestCase
 
 from netbox_data_import.engine import _str_val
 from netbox_data_import.models import ImportJob, ImportProfile
-from netbox_data_import.tables import ImportJobTable
+from netbox_data_import.tables import ColumnMappingTable, ImportJobTable
 from netbox_data_import.template_content import DeviceImportDataExtension
 
 
@@ -163,6 +163,16 @@ class ImportJobTableRenderTest(TestCase):
         """render_devices_created() returns 0 when value is None."""
         table = ImportJobTable([])
         self.assertEqual(table.render_devices_created(None), 0)
+
+
+class ColumnMappingTableTest(TestCase):
+    """Test ColumnMapping table configuration."""
+
+    def test_target_display_orders_by_the_model_field(self):
+        """Sort the display label through the underlying target field."""
+        table = ColumnMappingTable([])
+
+        self.assertEqual(tuple(table.columns["target_field"].order_by), ("target_field",))
 
 
 class StrValHelperTests(TestCase):

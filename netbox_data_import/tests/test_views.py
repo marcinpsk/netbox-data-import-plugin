@@ -18,6 +18,7 @@ from netbox_data_import.models import (
     SourceResolution,
 )
 from netbox_data_import.tests.helpers import setup_preview_with_device_matches
+from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
 
@@ -979,7 +980,15 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
     def setUp(self):
         """Set up profile with mappings."""
         super().setUp()
+        from tenancy.models import ContactRole
+
         self.profile = _make_profile("YamlExportProfile")
+        self.profile.primary_contact_role = ContactRole.objects.create(
+            name="Export Primary Contact",
+            slug="export-primary-contact",
+        )
+        self.profile.primary_contact_lookup_field = "name"
+        self.profile.save(update_fields=["primary_contact_role", "primary_contact_lookup_field"])
         DeviceTypeMapping.objects.create(
             profile=self.profile,
             source_make="Dell",
@@ -1028,6 +1037,18 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         content = resp.content.decode()
         self.assertIn("Dell", content)
         self.assertIn("R660", content)
+
+    def test_export_yaml_includes_primary_contact_configuration(self):
+        """Exported YAML identifies the Contact Role by slug and the lookup field."""
+        import yaml
+
+        url = reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.profile.pk})
+
+        response = self.client.get(url)
+
+        profile_data = yaml.safe_load(response.content)["profile"]
+        self.assertEqual(profile_data["primary_contact_role"], "export-primary-contact")
+        self.assertEqual(profile_data["primary_contact_lookup_field"], "name")
 
     def test_export_404_for_missing_profile(self):
         """GET for non-existent profile pk returns 404."""
@@ -1078,6 +1099,58 @@ manufacturer_mappings:
         self.assertIn(resp.status_code, [200, 302])
         self.assertTrue(ImportProfile.objects.filter(name="ImportedProfile").exists())
 
+    def test_post_resolves_primary_contact_configuration(self):
+        """YAML import resolves the Contact Role slug and saves the lookup field."""
+        from tenancy.models import ContactRole
+
+        role = ContactRole.objects.create(name="Imported Primary Contact", slug="imported-primary-contact")
+        yaml_file = BytesIO(
+            b"""profile:
+  name: ImportedContactProfile
+  primary_contact_role: imported-primary-contact
+  primary_contact_lookup_field: name
+"""
+        )
+        yaml_file.name = "contact-profile.yaml"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"),
+            {"yaml_file": yaml_file},
+        )
+
+        self.assertIn(response.status_code, [200, 302])
+        profile = ImportProfile.objects.get(name="ImportedContactProfile")
+        self.assertEqual(profile.primary_contact_role, role)
+        self.assertEqual(profile.primary_contact_lookup_field, "name")
+
+    def test_yaml_import_can_clear_the_primary_contact_role(self):
+        """An explicit null Contact Role clears the saved profile setting."""
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        role = ContactRole.objects.create(name="Role to Clear", slug="role-to-clear")
+        profile = ImportProfile.objects.create(name="Clear Contact Role", primary_contact_role=role)
+
+        _apply_profile_yaml_data({"profile": {"name": profile.name, "primary_contact_role": None}})
+
+        profile.refresh_from_db()
+        self.assertIsNone(profile.primary_contact_role)
+
+    def test_yaml_import_rejects_an_unknown_primary_contact_role(self):
+        """An unknown Contact Role slug fails with a descriptive error."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaisesMessage(ValueError, "ContactRole with slug 'unknown-contact-role' not found"):
+            _apply_profile_yaml_data(
+                {
+                    "profile": {
+                        "name": "Unknown Contact Role",
+                        "primary_contact_role": "unknown-contact-role",
+                    }
+                }
+            )
+
     def test_post_creates_column_mappings(self):
         """POST with YAML creates column mappings."""
         url = reverse("plugins:netbox_data_import:import_profile_yaml")
@@ -1087,6 +1160,29 @@ manufacturer_mappings:
         profile = ImportProfile.objects.filter(name="ImportedProfile").first()
         self.assertIsNotNone(profile)
         self.assertTrue(ColumnMapping.objects.filter(profile=profile, target_field="device_name").exists())
+
+    def test_yaml_import_preserves_multiple_candidate_source_columns(self):
+        """One candidate target can receive values from many configured columns."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        profile, _ = _apply_profile_yaml_data(
+            {
+                "profile": {"name": "Candidate Mapping Profile"},
+                "column_mappings": [
+                    {"source_column": "Primary Contact", "target_field": "candidate:contact"},
+                    {"source_column": "Contact", "target_field": "candidate:contact"},
+                    {"source_column": "Contact Number", "target_field": "candidate:contact"},
+                    {"source_column": "Owner", "target_field": "candidate:contact"},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            set(
+                profile.column_mappings.filter(target_field="candidate:contact").values_list("source_column", flat=True)
+            ),
+            {"Primary Contact", "Contact", "Contact Number", "Owner"},
+        )
 
     def test_post_creates_manufacturer_mappings(self):
         """POST with YAML creates manufacturer mappings."""
@@ -1567,7 +1663,7 @@ class SearchNetBoxObjectsExtendedViewTest(BaseViewTestCase):
         import json
         from dcim.models import Device
 
-        # 25 devices that match the noisy "rc1" token but NOT "prod-lab03d-rc1"
+        # 25 devices that match the noisy "rc1" token but not the full query.
         for i in range(25):
             Device.objects.create(
                 name=f"other-rc1-{i:02d}",
@@ -1577,12 +1673,12 @@ class SearchNetBoxObjectsExtendedViewTest(BaseViewTestCase):
             )
         # The target device — full-string match
         target = Device.objects.create(
-            name="prod-lab03d-rc1",
+            name="example-zone03d-rc1",
             device_type=self.dt,
             role=self.role,
             site=self.site,
         )
-        resp = self.client.get(self.url + "?type=device&q=prod-lab03d-rc1")
+        resp = self.client.get(self.url + "?type=device&q=example-zone03d-rc1")
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
         names = [r["name"] for r in data["results"]]
@@ -2070,8 +2166,8 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="PROB-001").exists())
 
 
-class ImportRunViewTest(BaseViewTestCase):
-    """Tests for ImportRunView (executes the actual import)."""
+class ImportRunViewTest(IsolatedRQQueueTestMixin, BaseViewTestCase):
+    """Tests for ImportRunView and its queued import."""
 
     def _setup_session(self):
         """Populate session so ImportRunView has valid data."""
@@ -2101,13 +2197,19 @@ class ImportRunViewTest(BaseViewTestCase):
         return profile, site
 
     def test_run_import_post_creates_objects(self):
-        """POST to /import/run/ executes the import and creates NetBox objects."""
+        """The native worker executes the submitted workbook import."""
         from dcim.models import Rack, Device
 
         self._setup_session()
         url = reverse("plugins:netbox_data_import:import_run")
-        resp = self.client.post(url)
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = self.client.post(url)
         self.assertEqual(resp.status_code, 302)
+        self.assertEqual(Rack.objects.count(), 0)
+        self.assertEqual(Device.objects.count(), 0)
+
+        self.run_rq_jobs()
+
         self.assertGreater(Rack.objects.count(), 0)
         self.assertGreater(Device.objects.count(), 0)
 
@@ -4108,7 +4210,7 @@ class UnlinkDeviceViewTest(TestCase):
 
         from netbox_data_import.models import DeviceExistingMatch
 
-        cls.user = User.objects.create_superuser("test", "test@test.com", "test")
+        cls.user = User.objects.create_superuser("test", "test@example.invalid", "test")
         cls.site = Site.objects.create(name="Site 1", slug="site-1")
         cls.dt = DeviceType.objects.create(
             model="Model1",

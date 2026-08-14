@@ -41,10 +41,21 @@
   update_existing: true
   create_missing_device_types: true
   preview_view_mode: rows
+  capture_extra_data: true
+  primary_contact_role: primary-contact
+  primary_contact_lookup_field: email
 
 column_mappings:
   - source_column: Name
     target_field: device_name
+  - source_column: Primary Contact
+    target_field: candidate:contact
+  - source_column: Contact
+    target_field: candidate:contact
+  - source_column: Contact Number
+    target_field: candidate:contact
+  - source_column: Owner
+    target_field: candidate:contact
 
 class_role_mappings:
   - source_class: Server

@@ -34,7 +34,7 @@ def _make_profile(name="VCov2Test") -> ImportProfile:
 
 
 def _make_superuser(username):
-    return User.objects.create_superuser(username, f"{username}@test.com", "testpass")
+    return User.objects.create_superuser(username, f"{username}@example.invalid", "testpass")
 
 
 class ValidateModelInstanceNonDictTest(TestCase):

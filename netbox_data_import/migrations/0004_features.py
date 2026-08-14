@@ -166,7 +166,7 @@ class Migration(migrations.Migration):
                     "resolved_fields",
                     models.JSONField(
                         default=dict,
-                        help_text="Dict of target_field -> resolved_value (e.g. {'device_name': 'SW1', 'asset_tag': '59AH76'})",
+                        help_text="Dict of target_field -> resolved_value (e.g. {'device_name': 'SW1', 'asset_tag': 'TEST0001'})",
                     ),
                 ),
             ],

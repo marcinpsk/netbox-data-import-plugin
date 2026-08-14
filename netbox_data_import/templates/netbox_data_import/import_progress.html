@@ -1,0 +1,20 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'base/layout.html' %}
+
+{% block title %}Import Progress{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col col-lg-7">
+    <div class="card">
+      <div class="card-header">
+        <h5 class="mb-0"><i class="mdi mdi-database-sync"></i> Import Progress</h5>
+      </div>
+      <div class="card-body">
+        {% include 'netbox_data_import/_import_progress.html' %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

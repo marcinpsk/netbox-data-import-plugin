@@ -401,8 +401,7 @@ class RunImportIgnoredDeviceTest(TestCase):
         from netbox_data_import.models import IgnoredDevice
 
         profile = _make_profile("IgnoredMissingName")
-        # Synthesize a row with source_id but no device_name, mimicking rows
-        # like Id=3279624 in libre/example.xlsx.
+        # Synthesize a source row with an identifier but no device name.
         rows = [
             {
                 "_row_number": 2,
@@ -1231,11 +1230,11 @@ class Pass3EdgeCasesTest(TestCase):
         into asset_tag + ignored comment, leaving device_name cleared.  The row
         should not error — the asset_tag becomes the device name.
         """
-        rows = [self._device_row(device_name="", asset_tag="65JP27", source_id="P3-FB")]
+        rows = [self._device_row(device_name="", asset_tag="TEST-ASSET-002", source_id="P3-FB")]
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
         error_rows = [r for r in result.rows if r.action == "error" and "Missing device name" in r.detail]
         self.assertEqual(len(error_rows), 0)
-        named_rows = [r for r in result.rows if r.object_type == "device" and r.name == "65JP27"]
+        named_rows = [r for r in result.rows if r.object_type == "device" and r.name == "TEST-ASSET-002"]
         self.assertGreater(len(named_rows), 0)
 
     def test_unmapped_device_class_produces_error(self):
@@ -2710,14 +2709,14 @@ class MissingRoleSlugErrorTest(TestCase):
     def _row(self):
         return {
             "_row_number": 2,
-            "source_id": "307359",
-            "rack_name": "V1",
-            "device_name": "DH4-V1-52-F",
+            "source_id": "SOURCE-ROW-001",
+            "rack_name": "EXAMPLE-RACK-01",
+            "device_name": "example-patch-panel-01",
             "device_class": "Patch Panel",
-            "make": "Commscope",
-            "model": "Systimax 360G2-1U-MOD-FX",
+            "make": "Example Vendor",
+            "model": "Example Patch Panel",
             "u_height": 1,
-            "u_position": 52,
+            "u_position": 10,
         }
 
     def test_preview_reports_missing_role_error(self):

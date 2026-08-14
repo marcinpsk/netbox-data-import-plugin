@@ -2,11 +2,13 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import difflib
 import logging
+from urllib.parse import parse_qs, urlsplit
 
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -49,6 +51,9 @@ from .tables import (
 from . import engine
 
 
+_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY = "import_source_rows_job_id"
+
+
 def _safe_next_url(request, fallback: str) -> str:
     """Return a validated same-host redirect URL from POST or the fallback view name."""
     url = request.POST.get("next", "")
@@ -57,6 +62,21 @@ def _safe_next_url(request, fallback: str) -> str:
     ):
         return url
     return reverse(fallback)
+
+
+def _name_resolution_response(request, url):
+    """Return an updated preview for HTMX or redirect a standard browser."""
+    if request.headers.get("HX-Request") == "true":
+        preview_path = reverse("plugins:netbox_data_import:import_preview")
+        if urlsplit(url).path == preview_path:
+            preview_response = ImportPreviewView().render_preview(request, url)
+            if not 300 <= preview_response.status_code < 400:
+                return preview_response
+            url = preview_response.headers["Location"]
+        response = HttpResponse(status=204)
+        response["HX-Redirect"] = url
+        return response
+    return redirect(url)
 
 
 def _parse_posted_profile_id(request):
@@ -182,7 +202,9 @@ logger = logging.getLogger(__name__)
 class ImportProfileListView(generic.ObjectListView):
     """List all import profiles with their mapping counts."""
 
-    queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
+    queryset = ImportProfile.objects.select_related("primary_contact_role").prefetch_related(
+        "column_mappings", "class_role_mappings", "device_type_mappings"
+    )
     table = ImportProfileTable
     filterset = ImportProfileFilterSet
     template_name = "netbox_data_import/importprofile_list.html"
@@ -191,7 +213,9 @@ class ImportProfileListView(generic.ObjectListView):
 class ImportProfileView(generic.ObjectView):
     """Detail view for a single import profile, with inline mapping tables."""
 
-    queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
+    queryset = ImportProfile.objects.select_related("primary_contact_role").prefetch_related(
+        "column_mappings", "class_role_mappings", "device_type_mappings"
+    )
 
     def get_extra_context(self, request, instance):
         """Inject inline mapping tables into the template context."""
@@ -252,6 +276,8 @@ _PROFILE_FIELDS = (
     "update_existing",
     "create_missing_device_types",
     "preview_view_mode",
+    "capture_extra_data",
+    "primary_contact_lookup_field",
 )
 
 
@@ -267,6 +293,25 @@ def _validate_model_instance(instance, label):
         else:
             msg = "; ".join(exc.messages)
         raise ValueError(f"Validation error in {label}: {msg}") from exc
+
+
+def _profile_defaults_from_yaml(profile_data):
+    """Resolve scalar profile values and the Contact Role slug from YAML."""
+    profile_defaults = {field: profile_data[field] for field in _PROFILE_FIELDS if field in profile_data}
+    if "primary_contact_role" not in profile_data:
+        return profile_defaults
+
+    from tenancy.models import ContactRole
+
+    role_slug = profile_data["primary_contact_role"]
+    if not role_slug:
+        profile_defaults["primary_contact_role"] = None
+        return profile_defaults
+    try:
+        profile_defaults["primary_contact_role"] = ContactRole.objects.get(slug=role_slug)
+    except ContactRole.DoesNotExist as exc:
+        raise ValueError(f"ContactRole with slug '{role_slug}' not found") from exc
+    return profile_defaults
 
 
 def _get_or_init(model_class, **lookup):
@@ -396,7 +441,7 @@ def _apply_profile_yaml_data(data):
         # Only include fields that are explicitly present in the YAML so that a
         # partial reimport (e.g. just trimming child sections) does not silently
         # reset unrelated profile settings back to hard-coded defaults.
-        profile_defaults = {f: pdata[f] for f in _PROFILE_FIELDS if f in pdata}
+        profile_defaults = _profile_defaults_from_yaml(pdata)
         profile = _get_or_init(ImportProfile, name=pdata["name"])
         for field, value in profile_defaults.items():
             setattr(profile, field, value)
@@ -405,16 +450,20 @@ def _apply_profile_yaml_data(data):
 
         stats = {}
 
-        cm_target_fields = []
+        cm_ids = []
         for cm in _iter_yaml_section(data, "column_mappings", ("target_field", "source_column")):
-            instance = _get_or_init(ColumnMapping, profile=profile, target_field=cm["target_field"])
-            instance.source_column = cm["source_column"]
-            _validate_model_instance(instance, f"column_mappings[{cm['target_field']}]")
-            _save_or_refetch(instance, ColumnMapping, profile=profile, target_field=cm["target_field"])
-            cm_target_fields.append(cm["target_field"])
+            mapping_key = {
+                "profile": profile,
+                "source_column": cm["source_column"],
+                "target_field": cm["target_field"],
+            }
+            instance = _get_or_init(ColumnMapping, **mapping_key)
+            _validate_model_instance(instance, f"column_mappings[{cm['source_column']}->{cm['target_field']}]")
+            instance = _save_or_refetch(instance, ColumnMapping, **mapping_key)
+            cm_ids.append(instance.pk)
             stats["column_mappings"] = stats.get("column_mappings", 0) + 1
         if "column_mappings" in data:
-            ColumnMapping.objects.filter(profile=profile).exclude(target_field__in=cm_target_fields).delete()
+            ColumnMapping.objects.filter(profile=profile).exclude(pk__in=cm_ids).delete()
 
         _import_class_role_mappings(data, profile, stats)
 
@@ -707,13 +756,13 @@ class ImportSetupView(PermissionRequiredMixin, View):
         if profile_pk := request.GET.get("profile"):
             initial["profile"] = profile_pk
         form = ImportSetupForm(initial=initial, user=request.user)
-        return render(request, "netbox_data_import/import_setup.html", {"form": form})
+        return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
     def post(self, request):
         """Parse the uploaded file and redirect to the preview step."""
         form = ImportSetupForm(request.POST, request.FILES, user=request.user)
         if not form.is_valid():
-            return render(request, "netbox_data_import/import_setup.html", {"form": form})
+            return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
         profile = form.cleaned_data["profile"]
         excel_file = form.cleaned_data["excel_file"]
@@ -725,7 +774,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
             rows, unused_stats = engine.parse_file(excel_file, profile, return_stats=True)
         except engine.ParseError as exc:
             messages.error(request, f"Failed to parse file: {exc}")
-            return render(request, "netbox_data_import/import_setup.html", {"form": form})
+            return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
         context = {"site": site, "location": location, "tenant": tenant}
         result = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
@@ -741,6 +790,10 @@ class ImportSetupView(PermissionRequiredMixin, View):
             "tenant_id": tenant.pk if tenant else None,
             "filename": excel_file.name,
         }
+        request.session["import_preview_pending"] = True
+        request.session.pop("import_preview_source_job_id", None)
+        request.session.pop(_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY, None)
+        _clear_restored_import_job(request)
         request.session["import_unused_columns"] = {
             col: {
                 "count": int((stats or {}).get("count", 0)),
@@ -758,6 +811,10 @@ class ImportPreviewView(PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request):
+        """Render the current preview URL."""
+        return self.render_preview(request, request.get_full_path())
+
+    def render_preview(self, request, preview_url):
         """Re-run the dry-run import and render the preview template."""
         rows = request.session.get("import_rows")
         ctx = request.session.get("import_context", {})
@@ -770,12 +827,22 @@ class ImportPreviewView(PermissionRequiredMixin, View):
 
         profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=ctx.get("profile_id")).first()
         if not profile:
+            _discard_import_preview(request)
             messages.warning(request, "Import profile not found.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
         site = Site.objects.filter(pk=ctx.get("site_id")).first()
         location = Location.objects.filter(pk=ctx.get("location_id")).first() if ctx.get("location_id") else None
         tenant = Tenant.objects.filter(pk=ctx.get("tenant_id")).first() if ctx.get("tenant_id") else None
+        target_is_stale = (
+            site is None
+            or (ctx.get("location_id") and (location is None or location.site_id != site.pk))
+            or (ctx.get("tenant_id") and tenant is None)
+        )
+        if target_is_stale:
+            _discard_import_preview(request)
+            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
         context_obj = {"site": site, "location": location, "tenant": tenant}
         # Re-apply saved resolutions so any resolution saved after the initial upload
@@ -822,7 +889,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_serial": device.serial,
             }
 
-        view_mode = request.GET.get("view", profile.preview_view_mode)
+        view_mode = parse_qs(urlsplit(preview_url).query).get("view", [profile.preview_view_mode])[-1]
 
         # Build unused columns list: filter out any that are now mapped
         mapped_source_cols = set(profile.column_mappings.values_list("source_column", flat=True))
@@ -841,6 +908,11 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         unused_columns.sort(key=lambda x: -x["count"])
         conflicts_by_row = {
             str(r.row_number): r.extra_data.get("conflicts", {}) for r in result.rows if r.extra_data.get("conflicts")
+        }
+        candidate_values_by_row = {
+            str(r.row_number): r.extra_data.get("candidate_values", {})
+            for r in result.rows
+            if r.extra_data.get("candidate_values")
         }
         extra_columns_by_row = {
             str(r.row_number): r.extra_data.get("extra_columns", {})
@@ -875,6 +947,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "filename": ctx.get("filename", ""),
                 "profile_id": ctx.get("profile_id"),
                 "profile": profile,
+                "preview_url": preview_url,
                 "view_mode": view_mode,
                 "existing_resolutions_json": _json.dumps(existing_resolutions).translate(
                     {ord("<"): "\\u003C", ord(">"): "\\u003E", ord("&"): "\\u0026"}
@@ -887,6 +960,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_match_source_ids": device_match_source_ids,
                 "device_match_info": device_match_info,
                 "conflicts_by_row": conflicts_by_row,
+                "candidate_values_by_row": candidate_values_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
@@ -926,81 +1000,229 @@ def _previewed_writes_changed(stored_result, current_result):
     return _tracked_rows(stored_result) != _tracked_rows(current_result)
 
 
+def _user_import_jobs(request):
+    """Return native data-import Jobs owned by the current user."""
+    from .jobs import ImportJobRunner
+
+    return ImportJobRunner.get_jobs().filter(
+        user=request.user,
+        data__job_type=ImportJobRunner.job_type,
+    )
+
+
+def _import_setup_context(request, form):
+    """Return the setup form and the most relevant resumable import state."""
+    resume_job = _resume_import_job(request)
+    preview_rows = request.session.get("import_rows")
+    preview_context = request.session.get("import_context")
+    resume_preview = (
+        request.session.get("import_preview_pending") is True
+        and isinstance(preview_rows, list)
+        and bool(preview_rows)
+        and isinstance(preview_context, dict)
+        and bool(preview_context.get("profile_id"))
+        and bool(preview_context.get("site_id"))
+    )
+    return {"form": form, "resume_job": resume_job, "resume_preview": resume_preview}
+
+
+def _discard_import_preview(request):
+    """Remove session data that belongs only to an unsubmitted preview."""
+    for key in ("import_context", "import_result", "import_rows", "import_unused_columns"):
+        request.session.pop(key, None)
+    request.session["import_preview_pending"] = False
+    request.session.pop("import_preview_source_job_id", None)
+    request.session.pop(_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY, None)
+
+
+def _clear_restored_import_job(request):
+    """Remove a Job result that was restored beside a pending preview."""
+    request.session.pop("import_restored_job_result", None)
+    request.session.pop("import_restored_job_id", None)
+
+
+def _resume_import_job(request):
+    """Return the session Job or the user's latest active import Job."""
+    from core.choices import JobStatusChoices
+
+    jobs = _user_import_jobs(request).filter(status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES)
+    if job_pk := request.session.get("import_background_job_id"):
+        if job := jobs.filter(pk=job_pk).first():
+            return job
+    return jobs.first()
+
+
+def _import_source_rows_available(request, job):
+    """Return whether this session still owns the source rows for one Job."""
+    return request.session.get(_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY) == job.pk and isinstance(
+        request.session.get("import_rows"), list
+    )
+
+
+def _import_job_progress(job, preview_blocked=False, source_rows_available=False):
+    """Return current row progress from native Job data and RQ metadata."""
+    from core.choices import JobStatusChoices
+
+    data = job.data or {}
+    processed = int(data.get("processed") or 0)
+    total = int(data.get("total") or 0)
+    if job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES:
+        import django_rq
+
+        try:
+            queue = django_rq.get_queue(job.queue_name or "default")
+        except KeyError:
+            rq_job = None
+        else:
+            rq_job = queue.fetch_job(str(job.job_id))
+        if rq_job is not None:
+            processed = int(rq_job.meta.get("processed", processed) or 0)
+            total = int(rq_job.meta.get("total", total) or 0)
+    percentage = round(processed * 100 / total) if total else 0
+    return {
+        "job": job,
+        "processed": processed,
+        "total": total,
+        "percentage": percentage,
+        "is_active": job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES,
+        "is_completed": job.status == JobStatusChoices.STATUS_COMPLETED,
+        "is_failed": job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED),
+        "preview_available": (
+            bool(data.get("preview_result")) and isinstance(data.get("context_data"), dict) and source_rows_available
+        ),
+        "preview_blocked": preview_blocked,
+        "message": data.get("message") or "",
+    }
+
+
+def _restore_import_session(request, job):
+    """Restore preview or result data when a user returns to a Job URL."""
+    data = job.data or {}
+    if request.session.get("import_background_job_id") != job.pk:
+        request.session["import_background_job_id"] = job.pk
+    preview_is_pending = request.session.get("import_preview_pending") is True
+    failed_preview_available = (
+        data.get("preview_result")
+        and isinstance(data.get("context_data"), dict)
+        and _import_source_rows_available(request, job)
+    )
+    if failed_preview_available and not preview_is_pending:
+        request.session["import_result"] = data["preview_result"]
+        request.session["import_context"] = data["context_data"]
+        request.session["import_preview_pending"] = True
+        request.session["import_preview_source_job_id"] = job.pk
+    if data.get("result"):
+        if preview_is_pending:
+            request.session["import_restored_job_result"] = data["result"]
+            request.session["import_restored_job_id"] = data.get("import_job_id")
+        else:
+            _clear_restored_import_job(request)
+            request.session["import_result"] = data["result"]
+            request.session["import_job_id"] = data.get("import_job_id")
+            request.session["import_preview_pending"] = False
+    return data
+
+
 class ImportRunView(PermissionRequiredMixin, View):
     """Step 3: run the real import (dry_run=False)."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Execute the real import and redirect to the results page."""
+        """Queue the real import and redirect to its progress page."""
         rows = request.session.get("import_rows")
         ctx_data = request.session.get("import_context")
         if not rows or not ctx_data:
             messages.warning(request, "No import in progress.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        from dcim.models import Location, Site
-        from django.db import transaction
-        from tenancy.models import Tenant
-
         profile = get_object_or_404(
             ImportProfile.objects.restrict(request.user, "change"),
             pk=ctx_data["profile_id"],
         )
-        site = get_object_or_404(Site, pk=ctx_data["site_id"])
-        location = get_object_or_404(Location, pk=ctx_data["location_id"]) if ctx_data.get("location_id") else None
-        tenant = get_object_or_404(Tenant, pk=ctx_data["tenant_id"]) if ctx_data.get("tenant_id") else None
+        from core.choices import JobNotificationChoices
+        from .jobs import ImportJobRunner
 
-        context = {"site": site, "location": location, "tenant": tenant}
-
+        stored_preview = request.session.get("import_result") or {"rows": []}
+        _clear_restored_import_job(request)
         with transaction.atomic():
-            current_preview = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
-            stored_preview = request.session.get("import_result") or {"rows": []}
-            if _previewed_writes_changed(stored_preview, current_preview):
-                request.session["import_result"] = current_preview.to_session_dict()
-                messages.error(
-                    request,
-                    "The import preview changed after it was generated. Review the refreshed preview before importing.",
-                )
-                return redirect(reverse("plugins:netbox_data_import:import_preview"))
-
-            result = engine.run_import(
-                rows,
-                profile,
-                context,
-                dry_run=False,
+            job = ImportJobRunner.enqueue(
+                name=ImportJobRunner.name,
                 user=request.user,
-                expected_intents=_import_intents(current_preview),
+                notifications=JobNotificationChoices.NOTIFICATION_NEVER,
+                job_timeout=3600,
+                rows=rows,
+                context_data=ctx_data,
+                stored_preview=stored_preview,
             )
-            if any(row.extra_data.get("identity_state_changed") for row in result.rows):
-                transaction.set_rollback(True)
-                request.session["import_result"] = current_preview.to_session_dict()
-                messages.error(
-                    request,
-                    "NetBox identity changed during import. No changes were saved. Refresh the preview and try again.",
-                )
-                return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            job.data = {
+                "job_type": ImportJobRunner.job_type,
+                "phase": "queued",
+                "processed": 0,
+                "total": len(rows),
+                "filename": ctx_data.get("filename", ""),
+                "profile_id": profile.pk,
+                "profile_name": profile.name,
+            }
+            job.save(update_fields=["data"])
 
-        # Persist job record
-        from .models import ImportJob
+        request.session["import_background_job_id"] = job.pk
+        request.session[_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY] = job.pk
+        request.session["import_preview_pending"] = False
+        request.session.pop("import_preview_source_job_id", None)
+        return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
 
-        job = ImportJob.objects.create(
-            profile=profile,
-            input_filename=ctx_data.get("filename", ""),
-            dry_run=False,
-            site_name=site.name,
-            result_counts=result.counts,
-            result_rows=[r.to_dict() for r in result.rows],
+
+class ImportProgressView(PermissionRequiredMixin, View):
+    """Show one resumable background import and its current progress."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def get(self, request, pk):
+        """Render the full progress page."""
+        job = get_object_or_404(_user_import_jobs(request), pk=pk)
+        preview_was_pending = (
+            request.session.get("import_preview_pending") is True
+            and request.session.get("import_preview_source_job_id") != job.pk
         )
-
-        request.session["import_result"] = result.to_session_dict()
-        request.session["import_job_id"] = job.pk
-        messages.success(
+        _restore_import_session(request, job)
+        return render(
             request,
-            f"Import complete: {result.counts.get('devices_created', 0)} devices created, "
-            f"{result.counts.get('racks_created', 0)} racks created.",
+            "netbox_data_import/import_progress.html",
+            _import_job_progress(
+                job,
+                preview_blocked=preview_was_pending,
+                source_rows_available=_import_source_rows_available(request, job),
+            ),
         )
-        return redirect(reverse("plugins:netbox_data_import:import_results"))
+
+
+class ImportProgressStatusView(PermissionRequiredMixin, View):
+    """Render the HTMX progress fragment or redirect a completed import."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def get(self, request, pk):
+        """Return the current Job state."""
+        job = get_object_or_404(_user_import_jobs(request), pk=pk)
+        preview_was_pending = (
+            request.session.get("import_preview_pending") is True
+            and request.session.get("import_preview_source_job_id") != job.pk
+        )
+        data = _restore_import_session(request, job)
+        if job.status == "completed" and data.get("result"):
+            response = HttpResponse(status=204)
+            response["HX-Redirect"] = reverse("plugins:netbox_data_import:import_results")
+            return response
+        return render(
+            request,
+            "netbox_data_import/_import_progress.html",
+            _import_job_progress(
+                job,
+                preview_blocked=preview_was_pending,
+                source_rows_available=_import_source_rows_available(request, job),
+            ),
+        )
 
 
 class ImportResultsView(PermissionRequiredMixin, View):
@@ -1010,12 +1232,22 @@ class ImportResultsView(PermissionRequiredMixin, View):
 
     def get(self, request):
         """Render the results page for the most recent import."""
-        session_data = request.session.get("import_result")
+        restored_data = request.session.get("import_restored_job_result")
+        session_data = restored_data if restored_data is not None else request.session.get("import_result")
         if not session_data:
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
         result = engine.ImportResult.from_session_dict(session_data)
-        job_id = request.session.get("import_job_id")
+        if restored_data is not None:
+            job_id = request.session.get("import_restored_job_id")
+        else:
+            job_id = request.session.get("import_job_id")
+            request.session.pop("import_background_job_id", None)
+            request.session["import_preview_pending"] = False
+            request.session.pop("import_preview_source_job_id", None)
+            request.session.pop(_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY, None)
+            for key in ("import_rows", "import_context", "import_unused_columns"):
+                request.session.pop(key, None)
         return render(request, "netbox_data_import/import_results.html", {"result": result, "job_id": job_id})
 
 
@@ -1431,10 +1663,10 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
             messages.error(request, "A valid import profile is required.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
         if str(ctx_data.get("profile_id")) != str(profile_id):
             messages.error(request, "The selected profile is not the active import profile.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
 
         profile = get_object_or_404(
             ImportProfile.objects.restrict(request.user, "change"),
@@ -1444,7 +1676,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             row_number = int(request.POST.get("row_number", ""))
         except (TypeError, ValueError):
             messages.error(request, "A valid source row is required.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
 
         source_id = engine._str_val(request.POST.get("source_id"))
         source_rows = [
@@ -1454,12 +1686,12 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
         ]
         if not source_id or len(source_rows) != 1:
             messages.error(request, "The source ID and row must identify one active import row.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
 
         new_name = request.POST.get("new_name", "").strip()
         if not new_name or len(new_name) > 64:
             messages.error(request, "The device name must contain 1 to 64 characters.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
 
         effective_rows = engine.reapply_saved_resolutions(rows, profile)
         other_names = {
@@ -1469,13 +1701,13 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
         }
         if engine._identity_text(new_name) in other_names:
             messages.error(request, f"Device name '{new_name}' is already used by another source row.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
         tenant_filter = (
             {"tenant_id": ctx_data.get("tenant_id")} if ctx_data.get("tenant_id") else {"tenant__isnull": True}
         )
         if Device.objects.filter(site_id=ctx_data.get("site_id"), name__iexact=new_name, **tenant_filter).exists():
             messages.error(request, f"Device name '{new_name}' already exists at the active import site.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
 
         resolution_values = {
             "original_value": engine._str_val(source_rows[0].get("device_name")),
@@ -1490,19 +1722,69 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             )
         except IntegrityError:
             messages.error(request, "The saved name changed while this request was being processed. Try again.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
 
         if not allowed:
             messages.error(request, "Permission denied: cannot create or change this saved name.")
-            return redirect(next_url)
+            return _name_resolution_response(request, next_url)
         messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
-        return redirect(next_url)
+        return _name_resolution_response(request, next_url)
 
 
 class SaveResolutionView(_AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
     permission_required = "netbox_data_import.change_importprofile"
+
+    @staticmethod
+    def _contact_candidate_values(request, profile_id, source_id):
+        """Return Contact candidates for one active preview row."""
+        import_result = request.session.get("import_result") or {}
+        result_rows = [
+            row
+            for row in import_result.get("rows", [])
+            if str(row.get("source_id")) == str(source_id) and row.get("object_type") == "device"
+        ]
+        context = request.session.get("import_context") or {}
+        source_rows = [
+            row for row in (request.session.get("import_rows") or []) if str(row.get("source_id")) == str(source_id)
+        ]
+        if str(context.get("profile_id")) != str(profile_id) or len(source_rows) != 1 or len(result_rows) != 1:
+            raise ValidationError("The candidate resolution does not identify one active preview row.")
+
+        candidates = result_rows[0].get("extra_data", {}).get("candidate_values", {}).get("contact", {})
+        if not isinstance(candidates, dict) or not candidates:
+            raise ValidationError("The active preview row has no Contact candidate values.")
+        return {str(source_column): str(value) for source_column, value in candidates.items()}
+
+    @classmethod
+    def _validate_contact_candidate_resolution(cls, request, profile, source_id, resolved_fields):
+        """Validate and normalize a Contact candidate row resolution."""
+        candidates = cls._contact_candidate_values(request, profile.pk, source_id)
+        if not isinstance(resolved_fields, dict) or set(resolved_fields) != {
+            "contact_resolution_applied",
+            "contact_field_sources",
+        }:
+            raise ValidationError("The Contact candidate resolution has an invalid structure.")
+        if resolved_fields.get("contact_resolution_applied") is not True:
+            raise ValidationError("The Contact candidate resolution is not marked as applied.")
+
+        field_sources = resolved_fields.get("contact_field_sources")
+        if not isinstance(field_sources, dict) or set(field_sources) - {"name", "email", "phone"}:
+            raise ValidationError("The Contact candidate resolution contains an unknown field.")
+        if any(not isinstance(source_column, str) or not source_column for source_column in field_sources.values()):
+            raise ValidationError("Each resolved Contact field must select one source column.")
+        missing_sources = set(field_sources.values()) - set(candidates)
+        if missing_sources:
+            missing = sorted(missing_sources)[0]
+            raise ValidationError(f"The source column '{missing}' has no candidate value in this row.")
+        if field_sources and "name" not in field_sources:
+            raise ValidationError("Select a source column for the Contact name.")
+        if field_sources and profile.primary_contact_lookup_field not in field_sources:
+            raise ValidationError(
+                f"Select a source column for the Contact {profile.primary_contact_lookup_field} lookup field."
+            )
+        return candidates
 
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
@@ -1528,6 +1810,18 @@ class SaveResolutionView(_AjaxPermissionView):
                 ImportProfile.objects.restrict(request.user, "change"),
                 pk=profile_id,
             )
+            if source_column == "candidate:contact":
+                try:
+                    candidates = self._validate_contact_candidate_resolution(
+                        request,
+                        profile,
+                        source_id,
+                        resolved_fields,
+                    )
+                except ValidationError as exc:
+                    messages.error(request, "; ".join(exc.messages))
+                    return redirect(next_url)
+                original_value = json.dumps(candidates, sort_keys=True)
             try:
                 allowed = _save_permission_scoped_object(
                     request.user,
@@ -1767,6 +2061,11 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
                 "update_existing": profile.update_existing,
                 "create_missing_device_types": profile.create_missing_device_types,
                 "preview_view_mode": profile.preview_view_mode,
+                "capture_extra_data": profile.capture_extra_data,
+                "primary_contact_role": (
+                    profile.primary_contact_role.slug if profile.primary_contact_role_id else None
+                ),
+                "primary_contact_lookup_field": profile.primary_contact_lookup_field,
             },
             "column_mappings": [
                 {"source_column": cm.source_column, "target_field": cm.target_field}
@@ -2175,27 +2474,35 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
             messages.error(request, "Valid source column and target field are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        # Remove any existing mapping that claims the same target_field (for a different source
-        # column) before upserting, to avoid the unique constraint violation.
-        displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
-            source_column=source_column
-        )
-        displaced_source = displaced.values_list("source_column", flat=True).first()
-        displaced.delete()
-
-        _, created = ColumnMapping.objects.update_or_create(
-            profile=profile,
-            source_column=source_column,
-            defaults={"target_field": target_field},
-        )
-        if displaced_source:
-            messages.success(
-                request,
-                f"Reassigned: '{source_column}' → {target_field} (previously mapped from '{displaced_source}')",
+        if target_field.startswith("candidate:"):
+            _, created = ColumnMapping.objects.get_or_create(
+                profile=profile,
+                source_column=source_column,
+                target_field=target_field,
             )
+            verb = "Created" if created else "Kept"
+            messages.success(request, f"{verb} candidate mapping: '{source_column}' → {target_field}")
         else:
-            verb = "Created" if created else "Updated"
-            messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
+            # A quick direct mapping replaces the source column that supplied the target before it.
+            displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
+                source_column=source_column
+            )
+            displaced_source = displaced.values_list("source_column", flat=True).first()
+            displaced.delete()
+
+            _, created = ColumnMapping.objects.get_or_create(
+                profile=profile,
+                source_column=source_column,
+                target_field=target_field,
+            )
+            if displaced_source:
+                messages.success(
+                    request,
+                    f"Reassigned: '{source_column}' → {target_field} (previously mapped from '{displaced_source}')",
+                )
+            else:
+                verb = "Created" if created else "Updated"
+                messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
 
         # Re-apply all column mappings to the in-session rows so the new
         # mapping takes effect immediately without requiring a file re-upload.
@@ -2290,8 +2597,8 @@ def _device_name_filter(q: str):
     """Build a Django Q filter for device name search.
 
     Exact icontains is tried first; when the query contains separators (-, _, .)
-    individual tokens (≥3 chars) are OR-ed in so that e.g. "PROD-LAB03-SW3"
-    matches "prod-lab03-sw03.prod-lab.aorta.net" via the "LAB03" token.
+    individual tokens (≥3 chars) are OR-ed in so that e.g. "EXAMPLE-SITE03-SW3"
+    matches "edge-site03-switch03.lab.example.invalid" via the "SITE03" token.
     """
     import re as _re
 
@@ -2398,7 +2705,7 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
     def _search_devices(self, request, q, limit, results):
         """Two-phase device search: full-string matches first, then token matches.
 
-        This prevents a relevant exact-substring match (e.g. "prod-lab03d-rc1")
+        This prevents a relevant exact-substring match (e.g. "example-zone03d-rc1")
         from being pushed off the result list by noisy short tokens like "rc1"
         or "prod" that match many devices.
         """

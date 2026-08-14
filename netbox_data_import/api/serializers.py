@@ -40,6 +40,8 @@ class ImportProfileSerializer(NetBoxModelSerializer):
             "create_missing_device_types",
             "preview_view_mode",
             "capture_extra_data",
+            "primary_contact_role",
+            "primary_contact_lookup_field",
             "tags",
             "custom_fields",
             "created",

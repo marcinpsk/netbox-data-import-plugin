@@ -19,6 +19,8 @@
           <tr><th scope="row">Custom Field Name</th><td>{{ object.custom_field_name|placeholder }}</td></tr>
           <tr><th scope="row">Update Existing</th><td>{% if object.update_existing %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td></tr>
           <tr><th scope="row">Create Missing Device Types</th><td>{% if object.create_missing_device_types %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td></tr>
+          <tr><th scope="row">Primary Contact Role</th><td>{{ object.primary_contact_role|placeholder }}</td></tr>
+          <tr><th scope="row">Primary Contact Lookup</th><td>{{ object.get_primary_contact_lookup_field_display }}</td></tr>
         </table>
       </div>
     </div>
@@ -38,7 +40,7 @@
           <i class="mdi mdi-file-upload"></i> Bulk YAML Import
         </a>
         <a href="{% url 'plugins:netbox_data_import:source_resolution_list' object.pk %}" class="btn btn-outline-secondary">
-          <i class="mdi mdi-content-cut"></i> Name Resolutions
+          <i class="mdi mdi-tune-variant"></i> Row Resolutions
         </a>
         <a href="{% url 'plugins:netbox_data_import:device_type_analysis_profile' object.pk %}" class="btn btn-outline-secondary">
           <i class="mdi mdi-magnify"></i> Device Type Analysis

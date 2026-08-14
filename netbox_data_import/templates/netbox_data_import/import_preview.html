@@ -475,7 +475,7 @@
                     <input type="hidden" name="profile_id" value="{{ profile_id }}">
                     <input type="hidden" name="source_id" value="{{ row.source_id }}">
                     <input type="hidden" name="device_name" value="{{ row.name }}">
-                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <input type="hidden" name="next" value="{{ preview_url }}">
                     <button type="submit" class="btn btn-sm btn-outline-dark" title="Ignore this row">
                       <i class="mdi mdi-eye-off"></i> Ignore
                     </button>
@@ -498,18 +498,29 @@
                   {# Device error — show class mapping button if we have source_class #}
                   {% if row.extra_data.identity_conflict == 'duplicate_name' or row.extra_data.identity_conflict == 'name_placement_conflict' %}
                   {% if row.extra_data.suggested_name and row.source_id %}
-                  <form method="post" action="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}" class="d-inline-flex align-items-center gap-1">
+                  <form method="post" action="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}"
+                        hx-post="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}"
+                        hx-target="#page-content"
+                        hx-select="#page-content"
+                        hx-swap="outerHTML show:top"
+                        hx-indicator="find .ndi-use-name-indicator"
+                        hx-disabled-elt="find button"
+                        class="d-inline-flex align-items-center gap-1">
                     {% csrf_token %}
                     <input type="hidden" name="profile_id" value="{{ profile_id }}">
                     <input type="hidden" name="source_id" value="{{ row.source_id }}">
                     <input type="hidden" name="row_number" value="{{ row.row_number }}">
-                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <input type="hidden" name="next" value="{{ preview_url }}">
                     <input type="text" name="new_name" value="{{ row.extra_data.suggested_name }}"
                            maxlength="64" required class="form-control form-control-sm"
                            aria-label="Unique device name" style="width:20rem;">
                     <button type="submit" class="btn btn-sm btn-outline-success" title="Use this unique name for the source row">
                       <i class="mdi mdi-form-textbox"></i> Use name
                     </button>
+                    <span class="ndi-use-name-indicator htmx-indicator text-secondary small"
+                          role="status" aria-live="polite">
+                      <i class="mdi mdi-loading mdi-spin" aria-hidden="true"></i> Updating preview&hellip;
+                    </span>
                   </form>
                   {% endif %}
                   {% endif %}
@@ -539,7 +550,7 @@
                     <input type="hidden" name="profile_id" value="{{ profile_id }}">
                     <input type="hidden" name="source_id" value="{{ row.source_id }}">
                     <input type="hidden" name="device_name" value="{{ row.name }}">
-                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <input type="hidden" name="next" value="{{ preview_url }}">
                     <button type="submit" class="btn btn-sm btn-outline-dark" title="Ignore this device">
                       <i class="mdi mdi-eye-off"></i>
                     </button>
@@ -563,7 +574,7 @@
                     <input type="hidden" name="profile_id" value="{{ profile_id }}">
                     <input type="hidden" name="source_id" value="{{ row.source_id }}">
                     <input type="hidden" name="device_name" value="{{ row.name }}">
-                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <input type="hidden" name="next" value="{{ preview_url }}">
                     <button type="submit" class="btn btn-sm btn-outline-dark" title="Ignore this device">
                       <i class="mdi mdi-eye-off"></i>
                     </button>
@@ -576,7 +587,7 @@
                       {% csrf_token %}
                       <input type="hidden" name="profile_id" value="{{ profile_id }}">
                       <input type="hidden" name="source_id" value="{{ row.source_id }}">
-                      <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                      <input type="hidden" name="next" value="{{ preview_url }}">
                       <button type="submit" class="btn btn-sm btn-outline-secondary" title="Remove from ignore list">
                         <i class="mdi mdi-eye"></i> Unignore
                       </button>
@@ -626,6 +637,18 @@
                       <i class="mdi mdi-link-off"></i> Unlink
                     </button>
                   </form>
+                {% endif %}
+
+                {% if row.object_type == 'device' and row.extra_data.candidate_values.contact and profile_id %}
+                <button type="button"
+                        class="btn btn-sm btn-outline-warning ms-1"
+                        data-bs-toggle="modal"
+                        data-bs-target="#contactCandidateModal"
+                        data-row-number="{{ row.row_number }}"
+                        data-source-id="{{ row.source_id }}"
+                        title="Choose which candidate values supply this row's Contact fields">
+                  <i class="mdi mdi-account-question"></i> Resolve contact fields
+                </button>
                 {% endif %}
 
                 {# Conflict badge: shown when two source columns disagree on the same target field #}
@@ -763,7 +786,7 @@
           <input type="hidden" name="source_id" id="res_source_id">
           <input type="hidden" name="source_column" id="res_source_column">
           <input type="hidden" name="original_value" id="res_original_value">
-          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <input type="hidden" name="next" value="{{ preview_url }}">
           <input type="hidden" name="resolved_fields" id="res_resolved_fields">
 
           <div class="mb-3">
@@ -830,7 +853,7 @@
         <input type="hidden" name="source_id" id="conf_source_id">
         <input type="hidden" name="source_column" id="conf_source_column">
         <input type="hidden" name="original_value" id="conf_original_value" value="">
-        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <input type="hidden" name="next" value="{{ preview_url }}">
         <input type="hidden" name="resolved_fields" id="conf_resolved_fields">
         <div class="modal-body">
           <p class="text-muted small mb-3">
@@ -849,9 +872,68 @@
   </div>
 </div>
 
+{# Contact candidate row resolution #}
+<div class="modal fade" id="contactCandidateModal" tabindex="-1"
+     aria-labelledby="contactCandidateModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="contactCandidateModalLabel">
+          <i class="mdi mdi-account-question"></i> Resolve contact fields
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}"
+            id="contactCandidateForm" data-contact-lookup-field="{{ profile.primary_contact_lookup_field }}">
+        {% csrf_token %}
+        <input type="hidden" name="profile_id" value="{{ profile_id }}">
+        <input type="hidden" name="source_id" id="contactCandidateSourceId">
+        <input type="hidden" name="source_column" value="candidate:contact">
+        <input type="hidden" name="original_value" id="contactCandidateOriginalValue">
+        <input type="hidden" name="resolved_fields" id="contactCandidateResolvedFields">
+        <input type="hidden" name="next" value="{{ preview_url }}">
+        <div class="modal-body">
+          <p class="text-secondary small">
+            Choose a source column for each Contact field. You can use the same source column more than once.
+          </p>
+          <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" id="contactCandidateNone">
+            <label class="form-check-label" for="contactCandidateNone">No contact for this row</label>
+          </div>
+          <div id="contactCandidateFields" class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label" for="contactCandidateName">Contact name</label>
+              <select class="form-select" id="contactCandidateName" required></select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" for="contactCandidateEmail">Email address</label>
+              <select class="form-select" id="contactCandidateEmail"
+                      {% if profile.primary_contact_lookup_field == 'email' %}required{% endif %}></select>
+              {% if profile.primary_contact_lookup_field == 'email' %}
+              <div class="form-text">Required because this profile matches Contacts by email.</div>
+              {% endif %}
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" for="contactCandidatePhone">Phone number</label>
+              <select class="form-select" id="contactCandidatePhone"></select>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-content-save"></i> Save &amp; re-run preview
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 {{ existing_resolutions|json_script:"ndi-existing-resolutions" }}
 {{ device_match_info|json_script:"ndi-device-match-info" }}
 {{ conflicts_by_row|json_script:"ndi-conflicts-by-row" }}
+{{ candidate_values_by_row|json_script:"ndi-candidate-values-by-row" }}
 {{ extra_columns_by_row|json_script:"ndi-extra-columns-by-row" }}
 {{ split_field_values_by_source_id|json_script:"ndi-split-field-values" }}
 <script>
@@ -2524,6 +2606,81 @@ document.addEventListener('click', function(e) {
       confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
       errorDiv.textContent = 'Network error — sync failed';
       errorDiv.classList.remove('d-none');
+    });
+  });
+}());
+</script>
+<script>
+(function () {
+  var modal = document.getElementById('contactCandidateModal');
+  var form = document.getElementById('contactCandidateForm');
+  if (!modal || !form) return;
+
+  var candidateValues = JSON.parse(
+    (document.getElementById('ndi-candidate-values-by-row') || {textContent: '{}'}).textContent
+  );
+  var noContact = document.getElementById('contactCandidateNone');
+  var selects = {
+    name: document.getElementById('contactCandidateName'),
+    email: document.getElementById('contactCandidateEmail'),
+    phone: document.getElementById('contactCandidatePhone'),
+  };
+
+  function toggleContactFields() {
+    var disabled = noContact.checked;
+    var lookupField = form.dataset.contactLookupField;
+    for (var fieldName in selects) {
+      selects[fieldName].disabled = disabled;
+      selects[fieldName].required = !disabled && (fieldName === 'name' || fieldName === lookupField);
+    }
+    document.getElementById('contactCandidateFields').classList.toggle('opacity-50', disabled);
+  }
+
+  function populateSelect(select, candidates, selectedSource) {
+    select.textContent = '';
+    var emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = '— not supplied —';
+    select.appendChild(emptyOption);
+    for (var sourceColumn in candidates) {
+      var option = document.createElement('option');
+      option.value = sourceColumn;
+      option.textContent = sourceColumn + ': ' + candidates[sourceColumn];
+      option.selected = sourceColumn === selectedSource;
+      select.appendChild(option);
+    }
+  }
+
+  modal.addEventListener('show.bs.modal', function (event) {
+    var button = event.relatedTarget;
+    if (!button) return;
+    var sourceId = button.dataset.sourceId || '';
+    var rowCandidates = (candidateValues[button.dataset.rowNumber] || {}).contact || {};
+    var existing = (EXISTING_RESOLUTIONS[sourceId] || {})['candidate:contact'];
+    var resolvedFields = existing ? (existing.resolved_fields || {}) : {};
+    var selectedSources = resolvedFields.contact_field_sources || {};
+
+    document.getElementById('contactCandidateSourceId').value = sourceId;
+    document.getElementById('contactCandidateOriginalValue').value = JSON.stringify(rowCandidates);
+    for (var fieldName in selects) {
+      populateSelect(selects[fieldName], rowCandidates, selectedSources[fieldName] || '');
+    }
+    noContact.checked = resolvedFields.contact_resolution_applied === true
+      && Object.keys(selectedSources).length === 0;
+    toggleContactFields();
+  });
+
+  noContact.addEventListener('change', toggleContactFields);
+  form.addEventListener('submit', function () {
+    var fieldSources = {};
+    if (!noContact.checked) {
+      for (var fieldName in selects) {
+        if (selects[fieldName].value) fieldSources[fieldName] = selects[fieldName].value;
+      }
+    }
+    document.getElementById('contactCandidateResolvedFields').value = JSON.stringify({
+      contact_resolution_applied: true,
+      contact_field_sources: fieldSources,
     });
   });
 }());

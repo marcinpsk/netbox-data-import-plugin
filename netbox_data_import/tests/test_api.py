@@ -59,6 +59,32 @@ class ImportProfileAPITest(BaseAPITestCase):
         if resp.status_code == 201:
             self.assertTrue(ImportProfile.objects.filter(name="APICreatedProfile").exists())
 
+    def test_create_profile_with_primary_contact_configuration(self):
+        """The API saves the native Contact Role and contact lookup field."""
+        import json
+
+        from tenancy.models import ContactRole
+
+        role = ContactRole.objects.create(name="API Primary Contact", slug="api-primary-contact")
+
+        response = self.client.post(
+            "/api/plugins/data-import/profiles/",
+            data=json.dumps(
+                {
+                    "name": "API Contact Profile",
+                    "primary_contact_role": role.pk,
+                    "primary_contact_lookup_field": "name",
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        profile = ImportProfile.objects.get(name="API Contact Profile")
+        self.assertEqual(profile.primary_contact_role, role)
+        self.assertEqual(profile.primary_contact_lookup_field, "name")
+
 
 class ColumnMappingAPITest(BaseAPITestCase):
     """Tests for the ColumnMapping REST API with profile_id filter."""

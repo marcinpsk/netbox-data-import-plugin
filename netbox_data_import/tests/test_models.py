@@ -24,6 +24,8 @@ class ImportProfileModelTest(TestCase):
         self.assertEqual(profile.sheet_name, "Data")
         self.assertTrue(profile.update_existing)
         self.assertTrue(profile.create_missing_device_types)
+        self.assertIsNone(profile.primary_contact_role)
+        self.assertEqual(profile.primary_contact_lookup_field, "email")
 
     def test_profile_name_unique(self):
         """Two profiles with the same name cannot coexist."""
@@ -106,6 +108,22 @@ class ColumnTransformRuleModelTest(TestCase):
             source_column="Inventory Label",
             pattern=r"^(.+)$",
             group_1_target="extra_json:",
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            rule.clean()
+
+        self.assertIn("group_1_target", error.exception.message_dict)
+
+    def test_clean_rejects_a_candidate_mapping_target(self):
+        """A transform cannot replace the source-column provenance of a candidate value."""
+        from django.core.exceptions import ValidationError
+
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Contact",
+            pattern=r"^(.+)$",
+            group_1_target="candidate:contact",
         )
 
         with self.assertRaises(ValidationError) as error:
