@@ -133,10 +133,13 @@ class SourceResolutionSerializer(serializers.ModelSerializer):
                 candidate_values = json.loads(original_value)
                 if not isinstance(candidate_values, dict):
                     raise ValueError
+                configured_sources = profile.column_mappings.filter(target_field="candidate:contact").values_list(
+                    "source_column", flat=True
+                )
                 validate_contact_candidate_resolution(
                     resolved_fields,
                     profile.primary_contact_lookup_field,
-                    candidate_values,
+                    set(candidate_values) & set(configured_sources),
                 )
             except (TypeError, ValueError, json.JSONDecodeError):
                 raise serializers.ValidationError(

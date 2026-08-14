@@ -424,6 +424,41 @@ class SourceResolutionAPITest(BaseAPITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-002").exists())
 
+    def test_rejects_contact_candidate_resolution_with_unconfigured_source_column(self):
+        """Do not trust candidate source columns supplied only by the API client."""
+        import json
+
+        from netbox_data_import.models import SourceResolution
+
+        ColumnMapping.objects.create(
+            profile=self.p1,
+            source_column="Owner",
+            target_field="candidate:contact",
+        )
+        response = self.client.post(
+            "/api/plugins/data-import/source-resolutions/",
+            data=json.dumps(
+                {
+                    "profile": self.p1.pk,
+                    "source_id": "SR-CONTACT-003",
+                    "source_column": "candidate:contact",
+                    "original_value": json.dumps({"Missing Column": "Example Owner"}),
+                    "resolved_fields": {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {
+                            "name": "Missing Column",
+                            "email": "Missing Column",
+                        },
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-003").exists())
+
 
 class ImportJobAPITest(BaseAPITestCase):
     """Tests for ImportJobViewSet ?profile_id filtering (lines 147-151 in api/views.py)."""
