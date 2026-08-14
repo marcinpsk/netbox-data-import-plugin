@@ -23,6 +23,7 @@ Tests:
 
 import argparse
 import os
+import re
 import sys
 import time
 
@@ -103,10 +104,12 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
             page.wait_for_load_state("networkidle", timeout=10000)
             assert page.url == f"{base_url}/dcim/devices/{device_id}/librenms-sync/", f"redirected to {page.url}"
             title = page.locator("h1.page-title").inner_text(timeout=5000)
-            assert expected_device_name in title, f"title={title!r}"
+            assert title == expected_device_name, f"title={title!r}"
             ok(f"librenms-sync page loads for device {device_id}")
         except Exception as e:
             fail("librenms-sync page loads", e)
+            browser.close()
+            return passed, failed
 
         # ── Test 2: Module bays ───────────────────────────────────────────────
         try:
@@ -123,6 +126,7 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
             fail("module bays page", e)
 
         # ── Tests 3+4 / 5+6: Install + verify interface naming ───────────────
+        created_module_ids = []
         for bay_id, bay_name, expected_iface in bays:
             # Install via UI
             try:
@@ -130,12 +134,14 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
                     f"{base_url}/dcim/modules/add/"
                     f"?device={device_id}&module_bay={bay_id}"
                     f"&manufacturer={manufacturer_id}"
-                    f"&return_url=/dcim/devices/{device_id}/module-bays/"
                 )
                 page.wait_for_load_state("networkidle", timeout=10000)
                 tomselect_pick(page, "id_module_type", module_type_model)
                 page.locator('button[name="_create"]').click()
                 page.wait_for_load_state("networkidle", timeout=15000)
+                created_module_match = re.fullmatch(rf"{re.escape(base_url)}/dcim/modules/(\d+)/", page.url)
+                assert created_module_match, f"unexpected redirect after module install: {page.url}"
+                created_module_ids.append(int(created_module_match.group(1)))
                 assert page.locator(f"text={module_type_model}").count() > 0, (
                     f"module not shown after install (url={page.url})"
                 )
@@ -176,8 +182,6 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
         print("\n  [cleanup] removing test modules via API...")
         try:
             import urllib.request
-            import urllib.parse
-            import json as _json
 
             # Reuse the browser session cookie for API calls
             cookies = ctx.cookies()
@@ -189,18 +193,8 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
                 "Content-Type": "application/json",
             }
 
-            # List modules on device (follow pagination)
-            module_ids = []
-            next_url = f"{base_url}/api/dcim/modules/?device_id={device_id}"
-            while next_url:
-                req = urllib.request.Request(next_url, headers=headers)
-                with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
-                    data = _json.loads(resp.read())
-                module_ids.extend(m["id"] for m in data.get("results", []))
-                next_url = data.get("next")
-
             removed = 0
-            for mid in module_ids:
+            for mid in created_module_ids:
                 del_req = urllib.request.Request(
                     f"{base_url}/api/dcim/modules/{mid}/",
                     headers=headers,

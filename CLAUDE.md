@@ -1,18 +1,18 @@
 # Agent skills
 
-### Issue tracker
+## Issue tracker
 
 Issues and specs use GitHub Issues through the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
-### Triage labels
+## Triage labels
 
 Triage uses the five default canonical labels. See `docs/agents/triage-labels.md`.
 
-### Domain docs
+## Domain docs
 
 Domain documentation uses a single-context layout. See `docs/agents/domain.md`.
 
-### NetBox tests
+## NetBox tests
 
 Run Django tests inside the repository devcontainer. Use a unique PostgreSQL database and a dedicated Redis sidecar for each task. NetBox's `RQQueueTestMixin` calls Redis `FLUSHALL`, so a database number on the shared Redis service does not provide isolation between tasks.
 
