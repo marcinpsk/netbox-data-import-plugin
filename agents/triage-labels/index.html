@@ -8,31 +8,27 @@
       
       
       
-        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/configuration/">
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/agents/triage-labels/">
       
       
-        <link rel="prev" href="../installation/">
-      
-      
-        <link rel="next" href="../contributing/">
       
       
         
       
       
-      <link rel="icon" href="../assets/images/favicon.png">
+      <link rel="icon" href="../../assets/images/favicon.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
       
-        <title>Configuration - NetBox Data Import</title>
+        <title>Triage labels - NetBox Data Import</title>
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
       
       
 
@@ -51,7 +47,7 @@
       
     
     
-    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
       
 
@@ -76,7 +72,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#configuration" class="md-skip">
+        <a href="#triage-labels" class="md-skip">
           Skip to content
         </a>
       
@@ -92,7 +88,7 @@
 
 <header class="md-header md-header--shadow" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href=".." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
       
   
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
@@ -112,7 +108,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Configuration
+              Triage labels
             
           </span>
         </div>
@@ -228,7 +224,7 @@
 
 <nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href=".." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
       
   
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
@@ -258,7 +254,7 @@
   
   
     <li class="md-nav__item">
-      <a href=".." class="md-nav__link">
+      <a href="../.." class="md-nav__link">
         
   
   
@@ -285,7 +281,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../installation/" class="md-nav__link">
+      <a href="../../installation/" class="md-nav__link">
         
   
   
@@ -309,37 +305,10 @@
       
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
         
   
   
@@ -355,48 +324,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#native-primary-contacts" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Native primary contacts
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#import-progress" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Import progress
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -408,7 +335,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../contributing/" class="md-nav__link">
+      <a href="../../contributing/" class="md-nav__link">
         
   
   
@@ -435,7 +362,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../changelog/" class="md-nav__link">
+      <a href="../../changelog/" class="md-nav__link">
         
   
   
@@ -475,36 +402,6 @@
     
   
   
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#native-primary-contacts" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Native primary contacts
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#import-progress" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Import progress
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
 </nav>
                   </div>
                 </div>
@@ -523,27 +420,46 @@
   
 
 
-<h1 id="configuration">Configuration</h1>
-<h2 id="native-primary-contacts">Native primary contacts</h2>
-<p>Map the source contact column to the <code>primary_contact</code> target field. Then configure these fields on the Import Profile:</p>
-<ul>
-<li><strong>Primary Contact Role</strong> selects the NetBox Contact Role for the assignment. A role is required when a row contains contact data.</li>
-<li><strong>Primary Contact Lookup Field</strong> selects <code>Email address</code> or <code>Name</code>. Matching is case-insensitive.</li>
-</ul>
-<p>Email lookup validates each source value as an email address. A new Contact uses the source value for both its name and email. Name lookup creates a Contact with only its name. Use email lookup when Contact names can change.</p>
-<p>During a non-preview sync, the plugin creates or reuses the Contact and assigns it to the imported Device with primary priority. If the configured role already has one primary assignment, the plugin updates that assignment when the source contact changes. It does not delete the old Contact.</p>
-<p>The sync also migrates <code>data_import_source.extra.primary_contact</code> from existing Devices. It removes only <code>primary_contact</code> from the JSON data and preserves other extra values. A failed contact sync rolls back the Device update and keeps the legacy JSON value.</p>
-<p>The importing user needs the applicable native NetBox permissions:</p>
-<ul>
-<li><code>tenancy.view_contact</code> to reuse an existing Contact</li>
-<li><code>tenancy.add_contact</code> to create a Contact</li>
-<li><code>tenancy.add_contactassignment</code> to create an assignment</li>
-<li><code>tenancy.change_contactassignment</code> to change an assignment</li>
-</ul>
-<h2 id="import-progress">Import progress</h2>
-<p>When you submit the import setup form, the page shows a loading indicator while it reads the workbook and generates the preview. You can leave an unsubmitted preview and return to it later. Open <strong>Run Import</strong> and select <strong>Resume preview</strong>.</p>
-<p>After you confirm a preview, the plugin queues a native NetBox background Job and opens its progress page. The page uses NetBox's HTMX support to show the number of processed source rows and update the progress bar automatically.</p>
-<p>You can leave the progress page while the Job runs. Open <strong>Run Import</strong> and select <strong>Resume import</strong> to return to the latest active Job. The direct progress URL also restores a completed result or a refreshed preview after a safe validation failure.</p>
+<h1 id="triage-labels">Triage labels</h1>
+<p>The skills use five canonical triage roles. This file maps those roles to the label strings in this repo's issue tracker.</p>
+<table>
+<thead>
+<tr>
+<th>Canonical role</th>
+<th>Tracker label</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>needs-triage</code></td>
+<td><code>needs-triage</code></td>
+<td>A maintainer must evaluate the issue</td>
+</tr>
+<tr>
+<td><code>needs-info</code></td>
+<td><code>needs-info</code></td>
+<td>Waiting for information from the reporter</td>
+</tr>
+<tr>
+<td><code>ready-for-agent</code></td>
+<td><code>ready-for-agent</code></td>
+<td>Fully specified and ready for an agent</td>
+</tr>
+<tr>
+<td><code>ready-for-human</code></td>
+<td><code>ready-for-human</code></td>
+<td>Requires human implementation</td>
+</tr>
+<tr>
+<td><code>wontfix</code></td>
+<td><code>wontfix</code></td>
+<td>Will not be implemented</td>
+</tr>
+</tbody>
+</table>
+<p>When a skill mentions a canonical role, use the corresponding tracker label from this table.</p>
+<p>Edit the tracker label column if the repository's vocabulary changes.</p>
 
 
 
@@ -593,10 +509,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.sections"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
       
     
   </body>
