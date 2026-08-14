@@ -1762,14 +1762,11 @@ class SaveResolutionView(_AjaxPermissionView):
     def _validate_contact_candidate_resolution(cls, request, profile, source_id, resolved_fields):
         """Validate and normalize a Contact candidate row resolution."""
         candidates = cls._contact_candidate_values(request, profile.pk, source_id)
-        field_sources = validate_contact_candidate_resolution(
+        validate_contact_candidate_resolution(
             resolved_fields,
             profile.primary_contact_lookup_field,
+            candidates,
         )
-        missing_sources = set(field_sources.values()) - set(candidates)
-        if missing_sources:
-            missing = sorted(missing_sources)[0]
-            raise ValidationError(f"The source column '{missing}' has no candidate value in this row.")
         return candidates
 
     def post(self, request):

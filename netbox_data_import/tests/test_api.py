@@ -394,6 +394,36 @@ class SourceResolutionAPITest(BaseAPITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-001").exists())
 
+    def test_rejects_contact_candidate_resolution_with_missing_source_column(self):
+        """Do not persist a Contact mapping to a source column that is absent from the row."""
+        import json
+
+        from netbox_data_import.models import SourceResolution
+
+        response = self.client.post(
+            "/api/plugins/data-import/source-resolutions/",
+            data=json.dumps(
+                {
+                    "profile": self.p1.pk,
+                    "source_id": "SR-CONTACT-002",
+                    "source_column": "candidate:contact",
+                    "original_value": json.dumps({"Owner": "Example Owner"}),
+                    "resolved_fields": {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {
+                            "name": "Missing Column",
+                            "email": "Missing Column",
+                        },
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-002").exists())
+
 
 class ImportJobAPITest(BaseAPITestCase):
     """Tests for ImportJobViewSet ?profile_id filtering (lines 147-151 in api/views.py)."""

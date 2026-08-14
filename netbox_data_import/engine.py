@@ -3273,6 +3273,7 @@ def _resolved_contact_candidate_values(
                 "contact_field_sources": row.get("contact_field_sources"),
             },
             lookup_field,
+            candidate_values,
         )
     except ValidationError as exc:
         raise _CandidateResolutionRequired("contact", candidate_values, "; ".join(exc.messages)) from exc

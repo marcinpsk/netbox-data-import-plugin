@@ -23,7 +23,11 @@ CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
 
 
-def validate_contact_candidate_resolution(resolved_fields, lookup_field: str) -> dict[str, str]:
+def validate_contact_candidate_resolution(
+    resolved_fields,
+    lookup_field: str,
+    available_source_columns,
+) -> dict[str, str]:
     """Validate one saved Contact candidate resolution and return its field sources."""
     if not isinstance(resolved_fields, dict) or set(resolved_fields) != CONTACT_RESOLUTION_KEYS:
         raise ValidationError("The Contact candidate resolution has an invalid structure.")
@@ -39,6 +43,10 @@ def validate_contact_candidate_resolution(resolved_fields, lookup_field: str) ->
         raise ValidationError("Select a source column for the Contact name.")
     if field_sources and lookup_field not in field_sources:
         raise ValidationError(f"Select a source column for the Contact {lookup_field} lookup field.")
+    missing_sources = set(field_sources.values()) - set(available_source_columns)
+    if missing_sources:
+        missing = sorted(missing_sources)[0]
+        raise ValidationError(f"The source column '{missing}' has no candidate value in this row.")
     return field_sources
 
 
