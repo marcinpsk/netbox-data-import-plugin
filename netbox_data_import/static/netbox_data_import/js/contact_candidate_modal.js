@@ -64,6 +64,7 @@
       valueField: 'id',
       labelField: 'label',
       searchField: ['name', 'email', 'phone'],
+      plugins: ['remove_button'],
       maxItems: 1,
       load: function (query, callback) {
         if (query.length < 2) {
@@ -134,6 +135,7 @@
     var selectedSources = resolvedFields.contact_field_sources || {};
     var selectedValues = resolvedFields.contact_field_values || {};
     var suggestion = contactSuggestions[button.dataset.rowNumber];
+    var proposeSuggestion = !existing && suggestion;
 
     document.getElementById('contactCandidateSourceId').value = sourceId;
     document.getElementById('contactCandidateOriginalValue').value = JSON.stringify(rowCandidates);
@@ -150,7 +152,7 @@
     if (suggestionMessage) {
       suggestionMessage.classList.toggle('d-none', !suggestion);
       suggestionMessage.textContent = suggestion
-        ? 'A NetBox Contact with this row\'s configured identity already exists. Select it below to reuse it.'
+        ? 'A NetBox Contact with this row\'s configured identity already exists. It is proposed below for reuse.'
         : '';
     }
     for (var fieldName in selects) {
@@ -161,6 +163,10 @@
     noContact.checked = resolvedFields.contact_resolution_applied === true
       && Object.keys(selectedSources).length === 0;
     toggleContactFields();
+    if (proposeSuggestion && existingContact.tomselect) {
+      existingContact.tomselect.setValue(String(suggestion.id), true);
+      applyExistingContact(String(suggestion.id));
+    }
   });
 
   noContact.addEventListener('change', toggleContactFields);

@@ -153,3 +153,69 @@ test("contact picker searches NetBox and copies the selected Contact details", a
   await expect(page.locator("#contactCandidateEmailValue")).toHaveValue("found.contact@example.invalid");
   await expect(page.locator("#contactCandidatePhoneValue")).toHaveValue("+1 202-555-0105");
 });
+
+test("detected NetBox Contact is proposed in the picker", async ({ page }) => {
+  const fixture = previewFixture.replace(
+    '<script id="ndi-contact-suggestions-by-row" type="application/json">{}</script>',
+    `<script id="ndi-contact-suggestions-by-row" type="application/json">
+      {"second-row":{"id":83,"name":"Proposed Contact","email":"second@example.invalid","phone":"+1 202-555-0106"}}
+    </script>`,
+  );
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: tomSelectSource });
+  await page.evaluate(() => {
+    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
+      new TomSelect(document.getElementById(id), { create: false });
+    }
+  });
+  await page.addScriptTag({ content: controllerSource });
+
+  await openRow(page, "second-row", "source-second");
+
+  await expect(page.locator("#contactCandidateExisting + .ts-wrapper .ts-control .item")).toContainText(
+    "Proposed Contact · second@example.invalid · +1 202-555-0106",
+  );
+  await expect(page.locator("#contactCandidateContactId")).toHaveValue("83");
+  await expect(page.locator("#contactCandidateNameValue")).toHaveValue("Proposed Contact");
+  await expect(page.locator("#contactCandidateEmailValue")).toHaveValue("second@example.invalid");
+});
+
+test("detected Contact can be replaced through picker search", async ({ page }) => {
+  await page.route("**/contact-lookup/?q=*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        results: [{
+          id: 84,
+          name: "Replacement Contact",
+          email: "replacement@example.invalid",
+          phone: "+1 202-555-0107",
+        }],
+      }),
+    });
+  });
+  const fixture = previewFixture.replace(
+    '<script id="ndi-contact-suggestions-by-row" type="application/json">{}</script>',
+    `<script id="ndi-contact-suggestions-by-row" type="application/json">
+      {"second-row":{"id":83,"name":"Proposed Contact","email":"second@example.invalid","phone":"+1 202-555-0106"}}
+    </script>`,
+  );
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: tomSelectSource });
+  await page.evaluate(() => {
+    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
+      new TomSelect(document.getElementById(id), { create: false });
+    }
+  });
+  await page.addScriptTag({ content: controllerSource });
+  await openRow(page, "second-row", "source-second");
+
+  const picker = page.locator("#contactCandidateExisting + .ts-wrapper");
+  await picker.locator(".remove").click();
+  await picker.locator(".ts-control input").fill("replacement");
+  await expect(picker.locator(".ts-dropdown .option")).toContainText("Replacement Contact");
+  await picker.locator(".ts-dropdown .option").click();
+
+  await expect(page.locator("#contactCandidateContactId")).toHaveValue("84");
+  await expect(page.locator("#contactCandidateEmailValue")).toHaveValue("replacement@example.invalid");
+});
