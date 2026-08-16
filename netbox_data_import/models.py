@@ -565,3 +565,46 @@ class DeviceExistingMatch(models.Model):
     def __str__(self):
         tag = f" / {self.source_asset_tag}" if self.source_asset_tag else ""
         return f"{self.source_id}{tag} → Device #{self.netbox_device_id} ({self.device_name})"
+
+
+class IgnoredFieldDifference(models.Model):
+    """Preserve one exact file/NetBox value pair for a device field difference."""
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="ignored_field_differences",
+    )
+    source_id = models.CharField(
+        max_length=200,
+        help_text="Source ID of the row this review applies to",
+    )
+    netbox_device_id = models.PositiveIntegerField(
+        help_text="Primary key of the matched NetBox Device",
+    )
+    target_field = models.CharField(
+        max_length=100,
+        help_text="Target field whose current difference is ignored",
+    )
+    file_snapshot = models.JSONField(
+        default=dict,
+        help_text="Normalized and display values from the source row",
+    )
+    netbox_snapshot = models.JSONField(
+        default=dict,
+        help_text="Normalized and display values from the matched NetBox device",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_id", "target_field"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "source_id", "netbox_device_id", "target_field"],
+                name="ndi_ignored_diff_profile_source_device_field",
+            ),
+        ]
+        verbose_name = "Ignored Field Difference"
+        verbose_name_plural = "Ignored Field Differences"
+
+    def __str__(self):
+        return f"{self.source_id}/{self.target_field} on device #{self.netbox_device_id} (ignored)"

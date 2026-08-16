@@ -2453,6 +2453,56 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(DeviceExistingMatch.objects.filter(pk=denied_binding.pk).exists())
 
+    def test_unlink_review_cleanup_rolls_back_without_review_delete_permission(self):
+        from dcim.models import Device
+        from netbox_data_import.models import IgnoredFieldDifference
+
+        device = Device.objects.create(
+            name="unlink-review-permission-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        binding = DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="UNLINK-REVIEW-PERMISSION",
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+        review = IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id=binding.source_id,
+            netbox_device_id=device.pk,
+            target_field="status",
+            file_snapshot={"canonical": "offline", "display": "offline"},
+            netbox_snapshot={"canonical": "active", "display": "active"},
+        )
+        user = get_user_model().objects.create_user(username="unlink-review-permission-user", password="testpass")
+        self._grant_object_permission(
+            user,
+            "Change review cleanup profile",
+            ImportProfile,
+            ["change"],
+            {"pk": self.profile.pk},
+        )
+        self._grant_object_permission(
+            user,
+            "Delete review cleanup binding",
+            DeviceExistingMatch,
+            ["delete"],
+            {"pk": binding.pk},
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:unlink_device"),
+            {"profile_id": self.profile.pk, "source_id": binding.source_id},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(DeviceExistingMatch.objects.filter(pk=binding.pk).exists())
+        self.assertTrue(IgnoredFieldDifference.objects.filter(pk=review.pk).exists())
+
     def test_duplicate_name_resolution_update_requires_change_permission(self):
         existing = SourceResolution.objects.create(
             profile=self.profile,

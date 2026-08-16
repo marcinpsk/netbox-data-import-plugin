@@ -34,6 +34,7 @@ from .models import (
     ColumnTransformRule,
     DeviceExistingMatch,
     DeviceTypeMapping,
+    IgnoredFieldDifference,
     ImportJob,
     ImportProfile,
     ManufacturerMapping,
@@ -50,6 +51,7 @@ from .tables import (
     ImportProfileTable,
 )
 from . import engine
+from .device_field_review import DeviceFieldReviewer
 
 
 _IMPORT_SOURCE_ROWS_JOB_SESSION_KEY = "import_source_rows_job_id"
@@ -110,6 +112,50 @@ def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=
         if not allowed:
             transaction.set_rollback(True)
         return allowed
+
+
+class _FieldReviewBindingRejected(Exception):
+    """Abort a field-review transaction without leaving a partial device link."""
+
+
+def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
+    """Persist the confirmed source-to-device identity for a field review."""
+    if not source_id:
+        return False, "A field review requires a source ID."
+    existing_match = (
+        DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
+    )
+    if existing_match is not None and existing_match.netbox_device_id != device.pk:
+        return (
+            False,
+            f"Source '{source_id}' is already linked to device #{existing_match.netbox_device_id}.",
+        )
+    conflicting_match = (
+        DeviceExistingMatch.objects.select_for_update()
+        .filter(profile=profile, netbox_device_id=device.pk)
+        .exclude(source_id=source_id)
+        .first()
+    )
+    if conflicting_match is not None:
+        return (
+            False,
+            f"Device '{device.name}' is already linked to source '{conflicting_match.source_id}'.",
+        )
+    if existing_match is not None and existing_match.netbox_device_id == device.pk:
+        return True, ""
+    allowed = _save_permission_scoped_object(
+        user,
+        DeviceExistingMatch,
+        {"profile": profile, "source_id": source_id},
+        {
+            "netbox_device_id": device.pk,
+            "device_name": device.name,
+            "source_asset_tag": source_asset_tag,
+        },
+    )
+    if not allowed:
+        return False, "Permission denied: cannot persist the source-to-device field-review match."
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +1004,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "unused_columns": unused_columns,
                 "target_field_choices": TARGET_FIELD_CHOICES,
                 "syncable_fields": SyncDeviceFieldView._ALLOWED_FIELDS,
+                "reviewable_fields": DeviceFieldReviewer.reviewable_fields(),
                 "device_match_source_ids": device_match_source_ids,
                 "device_match_info": device_match_info,
                 "conflicts_by_row": conflicts_by_row,
@@ -1356,6 +1403,204 @@ class UnignoreDeviceView(PermissionRequiredMixin, View):
                 messages.success(request, "Device removed from ignore list.")
             else:
                 messages.warning(request, "Device was not on the ignore list (may be ignored by class mapping).")
+        return redirect(next_url)
+
+
+def _fresh_device_field_review_preview(request):
+    """Return the active preview state after resolving it against current NetBox data."""
+    rows = request.session.get("import_rows")
+    ctx_data = request.session.get("import_context")
+    if (
+        request.session.get("import_preview_pending") is not True
+        or not isinstance(rows, list)
+        or not rows
+        or not isinstance(ctx_data, dict)
+    ):
+        return None
+
+    from dcim.models import Location, Site
+    from tenancy.models import Tenant
+
+    try:
+        profile_id = int(ctx_data.get("profile_id"))
+    except (TypeError, ValueError):
+        return None
+    profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=profile_id).first()
+    site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
+    location = Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
+    tenant = Tenant.objects.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
+    if profile is None or site is None:
+        return None
+    if ctx_data.get("location_id") and (location is None or location.site_id != site.pk):
+        return None
+    if ctx_data.get("tenant_id") and tenant is None:
+        return None
+
+    rows = engine.reapply_saved_resolutions(rows, profile)
+    context = {"site": site, "location": location, "tenant": tenant}
+    result = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
+    request.session["import_rows"] = _serialize_rows(rows)
+    request.session["import_result"] = result.to_session_dict()
+    return profile, result
+
+
+def _field_review_row(request):
+    """Return the current row and target field for a review POST."""
+    preview = _fresh_device_field_review_preview(request)
+    if preview is None:
+        return None
+    profile, result = preview
+    try:
+        row_number = int(request.POST.get("row_number", ""))
+    except (TypeError, ValueError):
+        return None
+    target_field = request.POST.get("target_field", "").strip()
+    row = next(
+        (
+            item
+            for item in result.rows
+            if item.row_number == row_number and item.object_type == "device" and item.action in {"update", "error"}
+        ),
+        None,
+    )
+    if row is None or DeviceFieldReviewer.definition(target_field) is None:
+        return None
+    if not engine._str_val(row.source_id):
+        return None
+    if target_field not in DeviceFieldReviewer.reviewable_fields():
+        return None
+    return profile, result, row, target_field
+
+
+class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
+    """Ignore one exact current field difference for a matched Device."""
+
+    permission_required = "netbox_data_import.add_ignoredfielddifference"
+
+    def post(self, request):
+        """Save current snapshots from a fresh active preview."""
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+        review = _field_review_row(request)
+        if review is None:
+            messages.error(request, "The selected field difference is no longer present. Refresh the preview.")
+            return redirect(next_url)
+        profile, _result, row, target_field = review
+        if target_field not in row.extra_data.get("field_diff", {}):
+            messages.error(request, "The selected field difference is no longer present. Refresh the preview.")
+            return redirect(next_url)
+        snapshots = row.extra_data.get("field_review_snapshots", {}).get(target_field)
+        device_id = row.extra_data.get("netbox_device_id")
+        if not isinstance(snapshots, dict) or not device_id:
+            messages.error(request, "The selected field difference has no current matched device.")
+            return redirect(next_url)
+
+        from dcim.models import Device
+
+        device = Device.objects.restrict(request.user, "view").filter(pk=device_id).first()
+        if device is None:
+            messages.error(request, "The matched NetBox device is no longer available.")
+            return redirect(next_url)
+        lookup = {
+            "profile": profile,
+            "source_id": row.source_id,
+            "netbox_device_id": device.pk,
+            "target_field": target_field,
+        }
+        defaults = {
+            "file_snapshot": snapshots.get("file", {}),
+            "netbox_snapshot": snapshots.get("netbox", {}),
+        }
+        try:
+            with transaction.atomic():
+                binding_allowed, binding_error = _ensure_field_review_device_match(
+                    request.user,
+                    profile,
+                    row.source_id,
+                    device,
+                    engine._str_val(row.extra_data.get("asset_tag"))[:50],
+                )
+                if not binding_allowed:
+                    raise _FieldReviewBindingRejected(binding_error)
+                allowed = _save_permission_scoped_object(
+                    request.user,
+                    IgnoredFieldDifference,
+                    lookup,
+                    defaults,
+                )
+                if not allowed:
+                    raise _FieldReviewBindingRejected("Permission denied: cannot create or change this field review.")
+        except _FieldReviewBindingRejected as exc:
+            messages.error(request, str(exc))
+            return redirect(next_url)
+        except IntegrityError:
+            messages.error(
+                request, "The field review or device link changed while this request was being processed. Try again."
+            )
+            return redirect(next_url)
+        messages.success(request, f"Ignored the current {target_field} difference.")
+        return redirect(next_url)
+
+
+class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
+    """Remove one exact current field-difference review for a matched Device."""
+
+    permission_required = "netbox_data_import.delete_ignoredfielddifference"
+
+    def post(self, request):
+        """Delete only the review represented by the fresh active preview."""
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+        review = _field_review_row(request)
+        if review is None:
+            messages.error(request, "The selected field review is no longer current. Refresh the preview.")
+            return redirect(next_url)
+        profile, _result, row, target_field = review
+        if target_field not in row.extra_data.get("field_ignored", {}):
+            messages.error(request, "The selected field review is no longer current. Refresh the preview.")
+            return redirect(next_url)
+        device_id = row.extra_data.get("netbox_device_id")
+        from dcim.models import Device
+
+        device = Device.objects.restrict(request.user, "view").filter(pk=device_id).first()
+        if device is None:
+            messages.error(request, "The matched NetBox device is no longer available.")
+            return redirect(next_url)
+        try:
+            with transaction.atomic():
+                record = (
+                    IgnoredFieldDifference.objects.select_for_update()
+                    .filter(
+                        profile=profile,
+                        source_id=row.source_id,
+                        netbox_device_id=device.pk,
+                        target_field=target_field,
+                    )
+                    .first()
+                )
+                if record is None:
+                    messages.error(request, "The selected field review is no longer current. Refresh the preview.")
+                    return redirect(next_url)
+                if not request.user.has_perm("netbox_data_import.delete_ignoredfielddifference", record):
+                    messages.error(request, "Permission denied: cannot remove this field review.")
+                    return redirect(next_url)
+                binding_allowed, binding_error = _ensure_field_review_device_match(
+                    request.user,
+                    profile,
+                    row.source_id,
+                    device,
+                    engine._str_val(row.extra_data.get("asset_tag"))[:50],
+                )
+                if not binding_allowed:
+                    raise _FieldReviewBindingRejected(binding_error)
+                record.delete()
+        except _FieldReviewBindingRejected as exc:
+            messages.error(request, str(exc))
+            return redirect(next_url)
+        except IntegrityError:
+            messages.error(
+                request, "The field review or device link changed while this request was being processed. Try again."
+            )
+            return redirect(next_url)
+        messages.success(request, f"Showing the {target_field} difference again.")
         return redirect(next_url)
 
 
@@ -2968,7 +3213,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                 continue
 
             if device is not None and match_method == "name":
-                position = engine._coerce_int(row.get("u_position"))
+                position = engine._coerce_position(row.get("u_position"))
                 side_map, _, _ = engine._get_translation_maps()
                 face = side_map.get(engine._str_val(row.get("face")).lower())
                 if engine._device_placement_differs(
@@ -3186,14 +3431,36 @@ class UnlinkDeviceView(_AjaxPermissionView):
                 binding = (
                     DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
                 )
-                if binding is not None and request.user.has_perm(
+                dependent_reviews = list(
+                    IgnoredFieldDifference.objects.select_for_update().filter(
+                        profile=profile,
+                        source_id=source_id,
+                    )
+                )
+                if binding is not None and not request.user.has_perm(
                     "netbox_data_import.delete_deviceexistingmatch",
                     binding,
                 ):
-                    binding.delete()
-                    messages.success(request, f"Unlinked source '{source_id}'.")
-                elif binding is not None:
                     messages.error(request, "Permission denied: cannot delete this device link.")
+                elif any(
+                    not request.user.has_perm("netbox_data_import.delete_ignoredfielddifference", review)
+                    for review in dependent_reviews
+                ):
+                    messages.error(request, "Permission denied: cannot remove the dependent field reviews.")
+                else:
+                    if dependent_reviews:
+                        IgnoredFieldDifference.objects.filter(
+                            pk__in=[review.pk for review in dependent_reviews]
+                        ).delete()
+                    if binding is not None:
+                        binding.delete()
+                    if dependent_reviews:
+                        messages.success(
+                            request,
+                            f"Unlinked source '{source_id}' and removed {len(dependent_reviews)} field review(s).",
+                        )
+                    elif binding is not None:
+                        messages.success(request, f"Unlinked source '{source_id}'.")
 
         return redirect(next_url)
 
