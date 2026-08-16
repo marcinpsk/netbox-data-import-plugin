@@ -459,6 +459,16 @@ class ImportPreviewViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertContains(resp, "sample_cans.xlsx")
 
+    def test_contact_literal_inputs_have_accessible_names(self):
+        """The three Contact literal inputs expose names to assistive technology."""
+        self._setup_session()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, 'aria-label="Contact name value"')
+        self.assertContains(response, 'aria-label="Email address value"')
+        self.assertContains(response, 'aria-label="Phone number value"')
+
     def test_first_preview_get_renders_the_materialized_upload_result(self):
         """The upload result is not calculated again on its redirect target."""
         self._setup_session()

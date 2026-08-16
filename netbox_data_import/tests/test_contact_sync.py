@@ -13,6 +13,7 @@ from unittest import skipUnless
 
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.db import close_old_connections
 from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import reverse
@@ -21,6 +22,7 @@ from core.models import Job
 from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 from tenancy.models import Contact, ContactAssignment, ContactRole
 
+from netbox_data_import.contact_resolution import ContactSelection, PrimaryContactResolver
 from netbox_data_import.engine import parse_file, reapply_saved_resolutions, run_import
 from netbox_data_import.jobs import ImportJobRunner
 from netbox_data_import.models import (
@@ -30,6 +32,7 @@ from netbox_data_import.models import (
     ImportProfile,
     SourceResolution,
 )
+from netbox_data_import.object_permissions import ObjectPermissionDenied
 
 
 LOCAL_EXAMPLE_PATH = Path(__file__).resolve().parents[3] / "libre" / "example.xlsx"
@@ -344,6 +347,29 @@ class NativeContactSyncTest(TestCase):
         permission.users.add(user)
         return permission
 
+    def _cache_contact_preview(self, row):
+        """Store one candidate preview for a real resolution request."""
+        user = get_user_model().objects.create_superuser(
+            username="contact-preview-action-user",
+            email="contact-preview-action-user@example.invalid",
+            password="testpass",
+        )
+        self.client.force_login(user)
+        result = run_import([row], self.profile, {"site": self.site}, dry_run=True, user=user)
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = [row]
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "contact-candidates.xlsx",
+        }
+        session["import_preview_pending"] = True
+        session.save()
+        return user
+
     def test_sync_migrates_legacy_primary_contact_to_native_assignment(self):
         """An update sync moves only the legacy contact value out of JSON."""
         result = self._sync()
@@ -386,6 +412,125 @@ class NativeContactSyncTest(TestCase):
             device_row.extra_data["candidate_values"]["contact"],
             row["_candidate_values"]["contact"],
         )
+
+    def test_review_loads_candidate_columns_from_the_profile(self):
+        """The resolver owns candidate mapping lookup and extra-column removal."""
+        ColumnMapping.objects.create(
+            profile=self.profile,
+            source_column="Candidate email",
+            target_field="candidate:contact",
+        )
+        row = self._row(
+            _extra_columns={"Candidate email": "candidate@example.invalid"},
+            contact_resolution_applied=True,
+            contact_field_sources={
+                "name": "Candidate email",
+                "email": "Candidate email",
+            },
+        )
+
+        review = PrimaryContactResolver.review(None, row, self.profile)
+        result = run_import([row], self.profile, {"site": self.site}, dry_run=True)
+
+        self.assertEqual(review.candidate_values, {"Candidate email": "candidate@example.invalid"})
+        self.assertEqual(review.extra_columns, {})
+        self.assertEqual(review.plan["assignment_action"], "create")
+        self.assertFalse(result.has_errors, [item.to_dict() for item in result.rows])
+
+    def test_review_preserves_validation_errors_without_candidate_values(self):
+        """A literal-only resolution keeps its precise validation failure."""
+        row = self._row(
+            contact_resolution_applied=True,
+            contact_field_sources={},
+            contact_field_values={
+                "name": "Invalid Contact",
+                "email": "not-an-email",
+            },
+        )
+
+        with self.assertRaisesMessage(ValidationError, "valid email"):
+            PrimaryContactResolver.review(self.device, row, self.profile)
+
+    def test_review_without_contact_data_has_no_contact_plan(self):
+        """A row without Contact data leaves native assignments unchanged."""
+        self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
+        self.device.save(update_fields=["custom_field_data"])
+
+        review = PrimaryContactResolver.review(self.device, self._row(), self.profile)
+
+        self.assertIsNone(review.selection)
+        self.assertIsNone(review.plan)
+
+    def test_contact_suggestion_skips_blank_and_invalid_email_candidates(self):
+        """Only candidate values valid for the configured lookup reach the query."""
+        suggestion = PrimaryContactResolver.suggest(
+            {"Blank": "", "Name": "Not an email"},
+            self.profile,
+        )
+
+        self.assertIsNone(suggestion)
+
+    def test_new_device_contact_plan_requires_assignment_permission(self):
+        """A new Device plan checks assignment permission before any write."""
+        user = get_user_model().objects.create_user(username="new-device-contact-plan-user")
+        row = self._row(
+            contact_resolution_applied=True,
+            contact_field_sources={},
+            contact_field_values={
+                "name": "New Device Contact",
+                "email": "new-device-contact@example.invalid",
+            },
+        )
+        self._grant_object_permission(user, Contact, ["add"])
+
+        with self.assertRaisesMessage(ObjectPermissionDenied, "tenancy.add_contactassignment"):
+            PrimaryContactResolver.review(None, row, self.profile, user=user)
+
+    def test_selected_contact_validation_uses_the_current_netbox_identity(self):
+        """A saved selection fails when its Contact disappears or changes identity."""
+        contact = Contact.objects.create(name="Selected Contact", email="selected@example.invalid")
+        row = self._row(
+            contact_resolution_applied=True,
+            contact_field_sources={},
+            contact_field_values={},
+            contact_id=contact.pk,
+        )
+        contact.delete()
+
+        with self.assertRaisesMessage(ValidationError, "no longer exists"):
+            PrimaryContactResolver.review(self.device, row, self.profile)
+
+        replacement = Contact.objects.create(name="Selected Contact", email="selected@example.invalid")
+        row.update(
+            contact_id=replacement.pk,
+            contact_field_values={
+                "name": replacement.name,
+                "email": "changed@example.invalid",
+            },
+        )
+        with self.assertRaisesMessage(ValidationError, "no longer has the chosen email"):
+            PrimaryContactResolver.review(self.device, row, self.profile)
+
+    def test_selected_contact_must_be_visible_to_the_operator(self):
+        """A valid saved Contact ID cannot bypass object visibility."""
+        contact = Contact.objects.create(name="Hidden Contact", email="hidden@example.invalid")
+        user = get_user_model().objects.create_user(username="hidden-contact-selection-user")
+        row = self._row(
+            contact_resolution_applied=True,
+            contact_field_sources={},
+            contact_field_values={},
+            contact_id=contact.pk,
+        )
+
+        with self.assertRaisesMessage(ObjectPermissionDenied, "tenancy.view_contact"):
+            PrimaryContactResolver.review(self.device, row, self.profile, user=user)
+
+    def test_contact_plan_requires_the_configured_lookup_value(self):
+        """The planner rejects an incomplete selection at its write boundary."""
+        selection = ContactSelection(values={"name": "Incomplete Contact"})
+
+        with self.assertRaisesMessage(ValidationError, "Contact email lookup field"):
+            PrimaryContactResolver._plan(self.device, self.profile, selection)
 
     def test_saved_contact_resolution_maps_candidate_values_to_native_fields(self):
         """One saved row decision supplies Contact name, email, and phone."""
@@ -706,6 +851,162 @@ class NativeContactSyncTest(TestCase):
             ],
         )
 
+    def test_contact_lookup_requires_two_search_characters(self):
+        """The Contact search endpoint avoids broad one-character queries."""
+        user = get_user_model().objects.create_superuser(
+            username="short-contact-lookup-user",
+            email="short-contact-lookup-user@example.invalid",
+            password="testpass",
+        )
+        self.client.force_login(user)
+
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:contact_lookup"),
+            {"q": "x"},
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"results": []})
+
+    def test_contact_resolution_requires_one_active_preview_row(self):
+        """A resolution cannot bind to source data outside the active preview."""
+        user = get_user_model().objects.create_superuser(
+            username="missing-contact-preview-user",
+            email="missing-contact-preview-user@example.invalid",
+            password="testpass",
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "CONTACT-001",
+                "source_column": "candidate:contact",
+                "original_value": "",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {},
+                    }
+                ),
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(SourceResolution.objects.exists())
+
+    def test_contact_resolution_requires_candidate_values_in_the_preview(self):
+        """A stale row without Contact candidates cannot save a decision."""
+        row = self._row(
+            _candidate_values={"contact": {"Contact": "candidate@example.invalid"}},
+        )
+        self._cache_contact_preview(row)
+        session = self.client.session
+        device_row = next(item for item in session["import_result"]["rows"] if item["object_type"] == "device")
+        device_row["extra_data"]["candidate_values"]["contact"] = {}
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "CONTACT-001",
+                "source_column": "candidate:contact",
+                "original_value": "",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {},
+                    }
+                ),
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(SourceResolution.objects.exists())
+
+    def test_contact_resolution_rechecks_the_linked_device(self):
+        """An immediate Contact update fails if the previewed Device was deleted."""
+        row = self._row(
+            _candidate_values={"contact": {"Contact": "candidate@example.invalid"}},
+        )
+        self._cache_contact_preview(row)
+        self.device.delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "CONTACT-001",
+                "source_column": "candidate:contact",
+                "original_value": "",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {
+                            "name": "Contact",
+                            "email": "Contact",
+                        },
+                    }
+                ),
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(SourceResolution.objects.exists())
+
+    def test_contact_resolution_rejects_invalid_literal_details(self):
+        """Immediate Contact validation rolls back the saved row decision."""
+        row = self._row(
+            _candidate_values={"contact": {"Contact": "candidate@example.invalid"}},
+        )
+        self._cache_contact_preview(row)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "CONTACT-001",
+                "source_column": "candidate:contact",
+                "original_value": "",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {},
+                        "contact_field_values": {
+                            "name": "Invalid Contact",
+                            "email": "not-an-email",
+                        },
+                    }
+                ),
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(SourceResolution.objects.exists())
+
     def test_contact_resolution_rejects_a_source_outside_the_row_candidates(self):
         """The resolution boundary rejects source columns that the row did not provide."""
         self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
@@ -858,6 +1159,27 @@ class NativeContactSyncTest(TestCase):
         self.assertEqual(selected_assignment.priority, "primary")
         self.assertEqual(ContactAssignment.objects.filter(object_id=self.device.pk).count(), 2)
 
+    def test_sync_promotes_a_secondary_assignment_without_a_current_primary(self):
+        """An existing secondary assignment becomes the only primary assignment."""
+        contact = Contact.objects.create(
+            name="Secondary Contact",
+            email="secondary.contact@example.invalid",
+        )
+        assignment = ContactAssignment.objects.create(
+            object_type=ContentType.objects.get_for_model(self.device),
+            object_id=self.device.pk,
+            contact=contact,
+            role=self.contact_role,
+            priority="secondary",
+        )
+
+        result = self._sync(self._row(primary_contact=contact.email))
+
+        self.assertFalse(result.has_errors, [item.to_dict() for item in result.rows])
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.priority, "primary")
+        self.assertEqual(ContactAssignment.objects.filter(object_id=self.device.pk).count(), 1)
+
     def test_sync_rejects_ambiguous_primary_assignments_for_the_role(self):
         """Two native primary assignments fail instead of selecting one to replace."""
         object_type = ContentType.objects.get_for_model(self.device)
@@ -899,6 +1221,19 @@ class NativeContactSyncTest(TestCase):
             self.device.custom_field_data["data_import_source"]["extra"],
             {"depth": 750, "room": "Test Room"},
         )
+
+    def test_sync_removes_an_empty_legacy_extra_mapping(self):
+        """Migrating the last legacy value removes the empty extra mapping."""
+        self.device.custom_field_data["data_import_source"]["extra"] = {
+            "primary_contact": "primary.contact@example.com"
+        }
+        self.device.save(update_fields=["custom_field_data"])
+
+        result = self._sync()
+
+        self.assertFalse(result.has_errors, [item.to_dict() for item in result.rows])
+        self.device.refresh_from_db()
+        self.assertNotIn("extra", self.device.custom_field_data["data_import_source"])
 
     def test_sync_can_match_primary_contacts_by_name(self):
         """A profile can treat the source contact value as a name."""

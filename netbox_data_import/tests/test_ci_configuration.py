@@ -42,3 +42,9 @@ class NetBoxMainWorkflowTest(TestCase):
 
         self.assertIn("pytest-xdist ruff pre-commit playwright", setup)
         self.assertIn("python -m playwright install --with-deps chromium", setup)
+
+    def test_javascript_workflow_does_not_persist_checkout_credentials(self):
+        """Do not expose the workflow token to pull-request JavaScript."""
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "js-test.yaml"
+
+        self.assertIn("persist-credentials: false", workflow.read_text())

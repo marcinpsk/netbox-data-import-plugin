@@ -97,6 +97,42 @@ test("placement sync defers field-detail refresh", async ({ page }) => {
   await expect(page.locator("#ndi-run-import")).toBeDisabled();
 });
 
+test("a failed row action shows its error and clears it on retry", async ({ page }) => {
+  let requestCount = 0;
+  await page.route("**/ignore-field-difference/", async (route) => {
+    requestCount += 1;
+    await route.fulfill({
+      status: requestCount === 1 ? 409 : 200,
+      contentType: "application/json",
+      body: JSON.stringify(
+        requestCount === 1
+          ? { ok: false, error: "The field difference changed." }
+          : {
+              ok: true,
+              row_number: 1,
+              preview_state: "recalculation_required",
+              message: "Ignored the current difference.",
+            },
+      ),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  const button = page.locator(".ndi-field-review-form button");
+  await button.click();
+
+  await expect(button).toBeEnabled();
+  await expect(button).toHaveClass(/btn-danger/);
+  await expect(page.locator(".ndi-row-action-error")).toHaveText("The field difference changed.");
+
+  await button.click();
+
+  await expect(button).toContainText("Saved");
+  await expect(button).not.toHaveClass(/btn-danger/);
+  await expect(page.locator(".ndi-row-action-error")).toHaveCount(0);
+});
+
 test("ignored field badge keeps readable contrast in both themes", async ({ page }) => {
   await page.setContent(`
     <style>

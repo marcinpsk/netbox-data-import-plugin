@@ -1012,6 +1012,11 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertContains(response, 'data-source-make="Mapping Action Vendor"')
         self.assertContains(response, "Map DT")
 
+        execution = run_import(rows, profile, {"site": self.site}, dry_run=False, user=self.user)
+        execution_row = next(row for row in execution.rows if row.object_type == "device")
+        self.assertEqual(execution_row.action, "error")
+        self.assertEqual(execution_row.extra_data["identity_conflict"], "derived_slug_collision")
+
     def test_update_preview_lists_every_field_that_the_writer_changes(self):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
         from tenancy.models import Tenant

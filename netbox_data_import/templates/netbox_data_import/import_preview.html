@@ -975,12 +975,14 @@
               <label class="form-label" for="contactCandidateName">Contact name</label>
               <select class="form-select" id="contactCandidateName"></select>
               <input type="text" class="form-control mt-2" id="contactCandidateNameValue"
+                     aria-label="Contact name value"
                      placeholder="Or enter a contact name">
             </div>
             <div class="col-md-4">
               <label class="form-label" for="contactCandidateEmail">Email address</label>
               <select class="form-select" id="contactCandidateEmail"></select>
               <input type="email" class="form-control mt-2" id="contactCandidateEmailValue"
+                     aria-label="Email address value"
                      placeholder="Or enter an email address">
               {% if profile.primary_contact_lookup_field == 'email' %}
               <div class="form-text">Required because this profile matches Contacts by email.</div>
@@ -990,6 +992,7 @@
               <label class="form-label" for="contactCandidatePhone">Phone number</label>
               <select class="form-select" id="contactCandidatePhone"></select>
               <input type="text" class="form-control mt-2" id="contactCandidatePhoneValue"
+                     aria-label="Phone number value"
                      placeholder="Or enter a phone number">
             </div>
           </div>

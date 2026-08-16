@@ -58,6 +58,12 @@
     }
   }
 
+  function hasContactSelection(resolvedFields) {
+    return Object.keys(resolvedFields.contact_field_sources || {}).length > 0
+      || Object.keys(resolvedFields.contact_field_values || {}).length > 0
+      || Boolean(resolvedFields.contact_id);
+  }
+
   if (window.TomSelect) {
     if (existingContact.tomselect) existingContact.tomselect.destroy();
     new window.TomSelect(existingContact, {
@@ -130,7 +136,8 @@
     if (!button) return;
     var sourceId = button.dataset.sourceId || '';
     var rowCandidates = (candidateValues[button.dataset.rowNumber] || {}).contact || {};
-    var existing = (EXISTING_RESOLUTIONS[sourceId] || {})['candidate:contact'];
+    var resolutions = window.EXISTING_RESOLUTIONS || {};
+    var existing = (resolutions[sourceId] || {})['candidate:contact'];
     var resolvedFields = existing ? (existing.resolved_fields || {}) : {};
     var selectedSources = resolvedFields.contact_field_sources || {};
     var selectedValues = resolvedFields.contact_field_values || {};
@@ -160,8 +167,14 @@
       valueInputs[fieldName].value = selectedValues[fieldName] || '';
       valueInputs[fieldName].setCustomValidity('');
     }
+    if (resolvedFields.contact_id && suggestion
+        && String(suggestion.id) === String(resolvedFields.contact_id)
+        && Object.keys(selectedSources).length === 0
+        && Object.keys(selectedValues).length === 0) {
+      applyExistingContact(String(resolvedFields.contact_id));
+    }
     noContact.checked = resolvedFields.contact_resolution_applied === true
-      && Object.keys(selectedSources).length === 0;
+      && !hasContactSelection(resolvedFields);
     toggleContactFields();
     if (proposeSuggestion && existingContact.tomselect) {
       existingContact.tomselect.setValue(String(suggestion.id), true);

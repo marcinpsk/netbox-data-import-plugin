@@ -4,6 +4,7 @@
 
 import os
 
+from django.core.exceptions import ValidationError
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
@@ -13,12 +14,15 @@ from netbox_data_import.engine import (
     ImportResult,
     RowResult,
     _apply_transform_rules,
+    _coerce_position,
     _ensure_device_role,
     _ensure_device_type,
     _ensure_manufacturer,
     _find_existing_device,
     _identity_text,
+    _intent_matches,
     _perm_denied_row,
+    _rack_validation_error_row,
     _resolve_device_type_slugs,
     _write_device_row,
     _write_rack_to_db,
@@ -288,6 +292,41 @@ class RunImportDeviceTypeMappingTest(TestCase):
         ]
         self.assertLessEqual(len(mapping_queries), 1, mapping_queries)
 
+    def test_preview_relation_lookups_do_not_grow_per_row(self):
+        """Repeated Device Types and roles use one lookup per import run."""
+
+        def relation_selects(row_count, prefix):
+            rows = [
+                {
+                    "_row_number": row_number,
+                    "source_id": f"{prefix}-{row_number}",
+                    "device_name": f"{prefix.lower()}-device-{row_number}",
+                    "device_class": "Server",
+                    "make": "Dell",
+                    "model": "PowerEdge R640",
+                    "u_height": 1,
+                    "rack_name": "",
+                    "u_position": "",
+                    "serial": "",
+                    "asset_tag": "",
+                    "status": "active",
+                }
+                for row_number in range(1, row_count + 1)
+            ]
+            with CaptureQueriesContext(connection) as queries:
+                run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+            return [
+                query["sql"]
+                for query in queries
+                if query["sql"].lstrip().startswith("SELECT")
+                and ('FROM "dcim_devicetype"' in query["sql"] or 'FROM "dcim_devicerole"' in query["sql"])
+            ]
+
+        two_rows = relation_selects(2, "RELATION-TWO")
+        eight_rows = relation_selects(8, "RELATION-EIGHT")
+
+        self.assertEqual(len(eight_rows), len(two_rows), eight_rows)
+
 
 class ResolveDeviceTypeSlugsTest(TestCase):
     """Tests for the _resolve_device_type_slugs helper."""
@@ -497,6 +536,7 @@ class ImportResultPropertyTest(TestCase):
         """rack_groups() groups devices under their rack name."""
         result = ImportResult()
         result.rows = [
+            RowResult(0, "empty", "", "skip", "rack", ""),
             RowResult(1, "r1", "Rack-A", "create", "rack", ""),
             RowResult(2, "d1", "server-01", "create", "device", "", rack_name="Rack-A"),
             RowResult(3, "d2", "server-02", "create", "device", "", rack_name="Rack-A"),
@@ -507,6 +547,46 @@ class ImportResultPropertyTest(TestCase):
         self.assertEqual(len(groups["Rack-A"]["devices"]), 2)
         self.assertIn("Rack-B", groups)
         self.assertEqual(len(groups["Rack-B"]["devices"]), 1)
+        self.assertNotIn("", groups)
+
+    def test_numeric_and_intent_boundaries_fail_closed(self):
+        """Non-finite positions and changed object identities reject stale writes."""
+        profile = ImportProfile.objects.create(name="Intent Boundary Profile")
+        ctx = ImportContext(
+            profile=profile,
+            site=None,
+            location=None,
+            tenant=None,
+            dry_run=False,
+            result=ImportResult(),
+            expected_intents={(1, "device"): {"action": "update", "object_id": 12}},
+        )
+
+        self.assertEqual(_coerce_position("NaN", default=9), 9)
+        self.assertFalse(_intent_matches(ctx, {"_row_number": 1}, "device", "update", object_id=13))
+
+    def test_rack_validation_errors_keep_django_and_runtime_messages(self):
+        """Rack write failures expose one stable first-line description."""
+        row = {"_row_number": 4}
+
+        validation_row = _rack_validation_error_row(
+            row,
+            "RACK-SOURCE",
+            "Rack A",
+            ValidationError(["First problem", "Second problem"]),
+            "create",
+        )
+        runtime_row = _rack_validation_error_row(
+            row,
+            "RACK-SOURCE",
+            "Rack A",
+            RuntimeError("Runtime problem\ninternal detail"),
+            "update",
+        )
+
+        self.assertIn("First problem; Second problem", validation_row.detail)
+        self.assertIn("Runtime problem", runtime_row.detail)
+        self.assertNotIn("internal detail", runtime_row.detail)
 
     def test_recompute_counts_errors(self):
         """_recompute_counts sets has_errors=True when error rows exist."""

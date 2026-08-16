@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
 
+from netbox_data_import.device_field_review import DeviceFieldReviewer
 from netbox_data_import.engine import run_import
 from netbox_data_import.models import (
     ClassRoleMapping,
@@ -127,6 +128,24 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             **values,
         }
 
+    def _ignore_and_recalculate(self, target_field="u_position"):
+        """Save one review and materialize its ignored state."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            {
+                "profile_id": self.profile.pk,
+                "row_number": 1,
+                "target_field": target_field,
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_preview"))
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+    def _cached_device_row(self, session):
+        """Return the Device row stored in one materialized preview session."""
+        return next(row for row in session["import_result"]["rows"] if row["object_type"] == "device")
+
     def test_user_can_ignore_the_exact_current_field_difference(self):
         """A reviewed value pair moves from Fields Differ to Fields Ignored."""
         response = self.client.post(
@@ -216,6 +235,156 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.assertFalse(IgnoredFieldDifference.objects.exists())
         self.assertFalse(self.client.session.get("import_preview_dirty", False))
 
+    def test_ignore_returns_json_when_the_difference_is_no_longer_present(self):
+        """An asynchronous Ignore request receives the specific stale-row error."""
+        session = self.client.session
+        device_row = next(row for row in session["import_result"]["rows"] if row["object_type"] == "device")
+        device_row["extra_data"]["field_diff"].pop("u_position")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json(),
+            {"ok": False, "error": "The selected field difference is no longer present. Refresh the preview."},
+        )
+
+    def test_ignore_returns_json_without_an_active_preview(self):
+        """A row action rejects a request after its preview session is cleared."""
+        action = self._json_action(
+            profile_id=self.profile.pk,
+            row_number=1,
+            target_field="u_position",
+        )
+        session = self.client.session
+        session.pop("import_preview_pending")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            action,
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer current", response.json()["error"])
+
+    def test_ignore_returns_json_after_the_profile_is_deleted(self):
+        """A row action rejects a cached preview whose profile is unavailable."""
+        action = self._json_action(
+            profile_id=self.profile.pk,
+            row_number=1,
+            target_field="u_position",
+        )
+        self.profile.delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            action,
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer current", response.json()["error"])
+
+    def test_ignore_returns_json_when_the_cached_match_is_incomplete(self):
+        """Ignore reports an incomplete cached match without returning HTML."""
+        session = self.client.session
+        device_row = next(row for row in session["import_result"]["rows"] if row["object_type"] == "device")
+        device_row["extra_data"].pop("netbox_device_id")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no current matched device", response.json()["error"])
+
+    def test_ignore_returns_json_when_the_matched_device_is_deleted(self):
+        """Ignore rechecks that the previewed Device is still visible."""
+        self.device.delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer available", response.json()["error"])
+
+    def test_ignore_returns_json_when_the_saved_binding_conflicts(self):
+        """Ignore reports a changed source binding without returning HTML."""
+        from dcim.models import Device
+
+        replacement = Device.objects.create(
+            name="field-review-conflicting-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        DeviceExistingMatch.objects.filter(profile=self.profile, source_id="FIELD-REVIEW-ROW").update(
+            netbox_device_id=replacement.pk,
+            device_name=replacement.name,
+        )
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already linked", response.json()["error"])
+
+    def test_ignore_rejects_a_device_linked_to_another_source(self):
+        """A field review cannot claim a Device owned by another source row."""
+        DeviceExistingMatch.objects.filter(profile=self.profile, source_id="FIELD-REVIEW-ROW").delete()
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="OTHER-SOURCE-ROW",
+            netbox_device_id=self.device.pk,
+            device_name=self.device.name,
+        )
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already linked to source", response.json()["error"])
+        self.assertFalse(IgnoredFieldDifference.objects.exists())
+
     def test_ignore_rejects_a_stale_preview_revision(self):
         """A row action from an older browser preview cannot change state."""
         response = self.client.post(
@@ -232,6 +401,36 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.assertFalse(response.json()["ok"])
         self.assertIn("recalculate", response.json()["error"].lower())
         self.assertFalse(IgnoredFieldDifference.objects.exists())
+
+    def test_ignore_rejects_an_invalid_row_number(self):
+        """A malformed row identity cannot select a cached difference."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number="invalid",
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer current", response.json()["error"])
+
+    def test_ignore_rejects_an_unknown_target_field(self):
+        """Only fields in the shared review registry can be ignored."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="unknown_field",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer current", response.json()["error"])
 
     def test_placement_sync_uses_cached_intent_and_defers_recalculation(self):
         """Placement sync ignores forged values and marks the preview as stale."""
@@ -287,6 +486,182 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         session = self.client.session
         self.assertTrue(session["import_preview_dirty"])
         self.assertEqual(session["import_result"], previous_result)
+
+    def test_field_sync_applies_a_fractional_cached_position(self):
+        """The field action preserves a valid half-U preview value."""
+        self.rows[0]["u_position"] = "7.5"
+        self._save_rows(self.rows)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field="u_position", row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, Decimal("7.5"))
+
+    def test_placement_sync_applies_a_fractional_cached_position(self):
+        """The placement action preserves a valid half-U preview value."""
+        self.rows[0]["u_position"] = "7.5"
+        self._save_rows(self.rows)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            self._json_action(row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, Decimal("7.5"))
+
+    def test_field_sync_rejects_a_request_without_an_active_preview(self):
+        """A field action cannot use client values after preview state is cleared."""
+        action = self._json_action(field="u_position", row_number=1)
+        session = self.client.session
+        session.pop("import_preview_pending")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            action,
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer available", response.json()["error"])
+
+    def test_field_sync_rejects_an_invalid_row_number(self):
+        """A malformed cached row identity cannot authorize a field write."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field="u_position", row_number="invalid"),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer available", response.json()["error"])
+
+    def test_placement_sync_rejects_a_request_without_an_active_preview(self):
+        """Placement cannot use posted values after preview state is cleared."""
+        action = self._json_action(row_number=1)
+        session = self.client.session
+        session.pop("import_preview_pending")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            action,
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer available", response.json()["error"])
+
+    def test_field_sync_rejects_a_cached_row_without_a_device(self):
+        """A cached row without a matched Device cannot authorize a field write."""
+        session = self.client.session
+        self._cached_device_row(session)["extra_data"].pop("netbox_device_id")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field="u_position", row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer available", response.json()["error"])
+
+    def test_field_sync_rejects_a_deleted_matched_device(self):
+        """A cached Device ID is rechecked before a field write."""
+        self.device.delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field="u_position", row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer available", response.json()["error"])
+
+    def test_field_sync_rejects_a_difference_removed_from_the_cached_row(self):
+        """A field write requires the exact difference shown to the operator."""
+        session = self.client.session
+        self._cached_device_row(session)["extra_data"]["field_diff"].pop("u_position")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field="u_position", row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer present", response.json()["error"])
+
+    def test_field_sync_rejects_a_cached_difference_without_snapshots(self):
+        """A field write requires the authoritative values saved with the preview."""
+        session = self.client.session
+        self._cached_device_row(session)["extra_data"]["field_review_snapshots"].pop("u_position")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field="u_position", row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no authoritative", response.json()["error"])
+
+    def test_field_sync_rejects_a_changed_netbox_value(self):
+        """A changed baseline requires a new preview before a field write."""
+        self.device.position = 6
+        self.device.save(update_fields=["position"])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field="u_position", row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("changed", response.json()["error"])
+
+    def test_placement_sync_rejects_a_cached_row_without_identity_state(self):
+        """Placement needs the complete NetBox baseline stored by the preview."""
+        session = self.client.session
+        self._cached_device_row(session)["extra_data"].pop("_identity_state")
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            self._json_action(row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("placement changed", response.json()["error"])
+
+    def test_placement_sync_rejects_a_changed_netbox_placement(self):
+        """Placement cannot overwrite a Device changed after preview."""
+        self.device.position = 6
+        self.device.save(update_fields=["position"])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            self._json_action(row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("placement changed", response.json()["error"])
 
     def test_informational_differences_can_be_ignored(self):
         """Device name and U height differences can move to the ignored section."""
@@ -1112,6 +1487,55 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.assertEqual(device_row.extra_data["field_diff"]["u_position"], {"netbox": "6", "file": "7"})
         self.assertNotIn("u_position", device_row.extra_data.get("field_ignored", {}))
 
+    def test_multiple_stale_review_devices_block_preview_and_execution(self):
+        """A source row cannot choose between reviews bound to different Devices."""
+        from dcim.models import Device
+
+        DeviceExistingMatch.objects.filter(profile=self.profile, source_id="FIELD-REVIEW-ROW").delete()
+        second_device = Device.objects.create(
+            name="second-reviewed-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        for device in (self.device, second_device):
+            IgnoredFieldDifference.objects.create(
+                profile=self.profile,
+                source_id="FIELD-REVIEW-ROW",
+                netbox_device_id=device.pk,
+                target_field="status",
+                file_snapshot={"canonical": "offline", "display": "offline"},
+                netbox_snapshot={"canonical": "active", "display": "active"},
+            )
+        self.rows[0].update(device_name="unmatched-reviewed-device", serial="")
+
+        preview = run_import(self.rows, self.profile, {"site": self.site}, dry_run=True, user=self.user)
+        execution = run_import(self.rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        for result in (preview, execution):
+            device_row = next(row for row in result.rows if row.object_type == "device")
+            self.assertEqual(device_row.action, "error", device_row.to_dict())
+            self.assertEqual(device_row.extra_data["identity_conflict"], "ambiguous_field_review")
+
+    def test_one_stale_review_device_restores_the_matched_identity(self):
+        """One field review keeps its Device match after source identity changes."""
+        DeviceExistingMatch.objects.filter(profile=self.profile, source_id="FIELD-REVIEW-ROW").delete()
+        IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id="FIELD-REVIEW-ROW",
+            netbox_device_id=self.device.pk,
+            target_field="status",
+            file_snapshot={"canonical": "offline", "display": "offline"},
+            netbox_snapshot={"canonical": "active", "display": "active"},
+        )
+        self.rows[0].update(device_name="renamed-reviewed-device", serial="")
+
+        result = run_import(self.rows, self.profile, {"site": self.site}, dry_run=True, user=self.user)
+
+        device_row = next(row for row in result.rows if row.object_type == "device")
+        self.assertEqual(device_row.action, "update", device_row.to_dict())
+        self.assertEqual(device_row.extra_data["netbox_device_id"], self.device.pk)
+
     def test_unignore_restores_the_current_difference(self):
         """Unignore removes the current review and shows its difference again."""
         self.client.post(
@@ -1148,6 +1572,28 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             ).exists()
         )
 
+    def test_field_registry_normalizes_unexpected_values_at_its_boundary(self):
+        """The registry keeps snapshots stable for malformed source values."""
+        malformed_position = object()
+
+        field_diff = DeviceFieldReviewer.field_diff(
+            self.device,
+            {
+                "u_position": malformed_position,
+                "device_type": "legacy-type-value",
+            },
+        )
+        informational = DeviceFieldReviewer.field_diff(
+            self.device,
+            {"device_name": "different-device-name"},
+            include_informational=True,
+        )
+
+        self.assertEqual(field_diff["u_position"]["file"], str(malformed_position))
+        self.assertEqual(field_diff["device_type"]["file"], "legacy-type-value")
+        self.assertIn("device_name", informational)
+        self.assertIsNone(DeviceFieldReviewer.current_snapshot(self.device, "unsupported"))
+
     def test_unignore_defers_preview_recalculation_for_javascript_callers(self):
         """Unignore saves immediately and leaves the materialized preview unchanged."""
         self.client.post(
@@ -1181,6 +1627,102 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.assertTrue(session["import_preview_dirty"])
         self.assertEqual(session["import_result"], previous_result)
         self.assertFalse(IgnoredFieldDifference.objects.exists())
+
+    def test_unignore_rejects_an_unknown_target_field(self):
+        """Unignore accepts only a current field from the shared registry."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:unignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="unknown_field",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer current", response.json()["error"])
+
+    def test_unignore_rejects_a_field_that_is_not_ignored(self):
+        """Unignore cannot remove a review absent from the cached row."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:unignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer current", response.json()["error"])
+
+    def test_unignore_rejects_a_changed_source_binding(self):
+        """Unignore does not preserve a review under a different Device binding."""
+        from dcim.models import Device
+
+        self._ignore_and_recalculate()
+        replacement = Device.objects.create(
+            name="unignore-binding-replacement",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        DeviceExistingMatch.objects.filter(profile=self.profile, source_id="FIELD-REVIEW-ROW").update(
+            netbox_device_id=replacement.pk,
+            device_name=replacement.name,
+        )
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:unignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("already linked", response.json()["error"])
+        self.assertTrue(IgnoredFieldDifference.objects.exists())
+
+    def test_unignore_returns_json_when_the_review_record_disappears(self):
+        """Unignore reports a stale materialized review without returning HTML."""
+        self._ignore_and_recalculate()
+        IgnoredFieldDifference.objects.all().delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:unignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer current", response.json()["error"])
+
+    def test_unignore_returns_json_when_the_matched_device_disappears(self):
+        """Unignore reports a deleted matched Device without returning HTML."""
+        self._ignore_and_recalculate()
+        self.device.delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:unignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer available", response.json()["error"])
 
     def test_unlink_removes_dependent_field_reviews(self):
         """Unlink removes active and stale field reviews before releasing the source row."""

@@ -13,6 +13,10 @@
   function setPending(button, label) {
     button.dataset.originalHtml = button.innerHTML;
     button.disabled = true;
+    button.classList.remove('btn-danger');
+    button.title = '';
+    var container = button.closest('form') || button.parentElement;
+    container?.querySelector('.ndi-row-action-error')?.remove();
     button.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> ' + label;
   }
 
@@ -21,6 +25,14 @@
     button.innerHTML = button.dataset.originalHtml || button.textContent;
     button.title = message;
     button.classList.add('btn-danger');
+    var container = button.closest('form') || button.parentElement;
+    if (container) {
+      var error = document.createElement('div');
+      error.className = 'ndi-row-action-error small text-danger mt-2';
+      error.setAttribute('role', 'alert');
+      error.textContent = message;
+      container.appendChild(error);
+    }
   }
 
   function markSaved(button, message) {

@@ -61,8 +61,6 @@ def _device_rack_display(device) -> str:
 
 def _device_type_value(device):
     """Return the canonical and display data for the current DeviceType."""
-    if not getattr(device, "device_type_id", None):
-        return None
     device_type = device.device_type
     manufacturer = device_type.manufacturer
     return (manufacturer.slug, device_type.slug, manufacturer.name, device_type.model)
@@ -263,8 +261,6 @@ class DeviceFieldReviewer:
         effective = dict(proposal)
         ignored = {}
         for target_field, (file_snapshot, netbox_snapshot) in snapshots.items():
-            if target_field not in differing and target_field not in informational:
-                continue
             record = self._ignored_records.get((_text(source_id), matched_device.pk, target_field))
             if record is None:
                 continue

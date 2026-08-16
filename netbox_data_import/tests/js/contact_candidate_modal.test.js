@@ -90,6 +90,14 @@ beforeEach(() => {
 });
 
 describe("contact candidate modal", () => {
+  it("opens a row when no saved-resolution global is present", () => {
+    addPreviewFixture();
+    delete window.EXISTING_RESOLUTIONS;
+
+    expect(() => openRow("first-row", "source-first")).not.toThrow();
+    expect(document.getElementById("contactCandidateName").value).toBe("");
+  });
+
   it("keeps candidate options visible in Tom Select after opening a row", () => {
     addPreviewFixture();
     openRow("first-row", "source-first");
@@ -164,6 +172,60 @@ describe("contact candidate modal", () => {
         phone: "+1 202-555-0104",
       },
       contact_id: null,
+    });
+  });
+
+  it("reopens literal and selected-Contact resolutions as Contact choices", () => {
+    addPreviewFixture({
+      "source-second": {
+        "candidate:contact": {
+          resolved_fields: {
+            contact_resolution_applied: true,
+            contact_field_sources: {},
+            contact_field_values: {
+              name: "Saved Literal Contact",
+              email: "saved.literal@example.invalid",
+            },
+            contact_id: null,
+          },
+        },
+      },
+    });
+
+    openRow("second-row", "source-second");
+
+    expect(document.getElementById("contactCandidateNone").checked).toBe(false);
+    expect(document.getElementById("contactCandidateNameValue").disabled).toBe(false);
+    expect(document.getElementById("contactCandidateNameValue").value).toBe("Saved Literal Contact");
+
+    addPreviewFixture({
+      "source-first": {
+        "candidate:contact": {
+          resolved_fields: {
+            contact_resolution_applied: true,
+            contact_field_sources: {},
+            contact_field_values: {},
+            contact_id: 41,
+          },
+        },
+      },
+    });
+
+    openRow("first-row", "source-first");
+
+    expect(document.getElementById("contactCandidateNone").checked).toBe(false);
+    expect(document.getElementById("contactCandidateExisting").tomselect.getValue()).toBe("41");
+    expect(document.getElementById("contactCandidateForm").dispatchEvent(new Event("submit", { cancelable: true })))
+      .toBe(true);
+    expect(JSON.parse(document.getElementById("contactCandidateResolvedFields").value)).toEqual({
+      contact_resolution_applied: true,
+      contact_field_sources: {},
+      contact_field_values: {
+        name: "Existing First Contact",
+        email: "first@example.invalid",
+        phone: "+1 202-555-0103",
+      },
+      contact_id: 41,
     });
   });
 

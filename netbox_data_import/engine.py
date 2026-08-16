@@ -183,6 +183,8 @@ class ImportContext:
     # Memoizes ``DeviceType.u_height == 0`` lookups by ``(mfg_slug, dt_slug)``
     # to avoid an N+1 query in preview for large imports.
     zero_u_cache: dict = field(default_factory=dict)
+    device_type_cache: dict = field(default_factory=dict)
+    device_role_cache: dict = field(default_factory=dict)
     # Captures the previewed identity action for each row. Execute mode must
     # not change a previewed create into an update, or update another object.
     expected_intents: dict = field(default_factory=dict)
@@ -241,10 +243,7 @@ def _coerce_position(value, default=None):
         return default
     if not position.is_finite():
         return default
-    try:
-        if not math.isfinite(float(position)):
-            return default
-    except (OverflowError, ValueError):
+    if not math.isfinite(float(position)):
         return default
     if position == position.to_integral_value():
         return int(position)
@@ -1602,8 +1601,6 @@ def _ambiguous_serial_row(row, source_id, device_name, rack_name, serial):
 
 def _device_binding_conflict(profile, source_id, device):
     """Return the source ID already bound to *device*, if it differs."""
-    if device is None:
-        return None
     match = profile.device_matches.filter(netbox_device_id=device.pk).exclude(source_id=source_id).first()
     return match.source_id if match else None
 
@@ -1902,6 +1899,24 @@ def _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType, cache=None)
     if cache is not None:
         cache[key] = result
     return result
+
+
+def _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug):
+    """Return one DeviceType lookup result for this import run."""
+    key = (mfg_slug, dt_slug)
+    if key not in ctx.device_type_cache:
+        ctx.device_type_cache[key] = DeviceType.objects.filter(
+            manufacturer__slug=mfg_slug,
+            slug=dt_slug,
+        ).first()
+    return ctx.device_type_cache[key]
+
+
+def _cached_device_role(ctx, DeviceRole, role_slug):
+    """Return one DeviceRole lookup result for this import run."""
+    if role_slug not in ctx.device_role_cache:
+        ctx.device_role_cache[role_slug] = DeviceRole.objects.filter(slug=role_slug).first()
+    return ctx.device_role_cache[role_slug]
 
 
 def _zero_u_overrides(device_type, position, face, ignored_fields=()):
@@ -2240,12 +2255,12 @@ def _preview_device_row(  # noqa: C901
     review_u_height = _coerce_int(u_height_raw, 1)
     u_height = max(1, review_u_height)
 
-    device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
+    device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
     dt_exists = device_type is not None
     is_zero_u = _is_zero_u_device_type(mfg_slug, dt_slug, dt_exists, DeviceType, ctx.zero_u_cache)
     from dcim.models import DeviceRole
 
-    source_device_role = DeviceRole.objects.filter(slug=role_slug).first() if role_slug is not _NOT_PROVIDED else None
+    source_device_role = _cached_device_role(ctx, DeviceRole, role_slug) if role_slug is not _NOT_PROVIDED else None
     source_role_missing = role_slug is not _NOT_PROVIDED and source_device_role is None
     source_type_missing = device_type is None
 
@@ -2343,7 +2358,7 @@ def _preview_device_row(  # noqa: C901
         effective_type = effective["device_type"]
         mfg_slug, dt_slug = effective_type[:2]
         if review is not None and "device_type" in review.ignored:
-            device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
+            device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
             dt_exists = device_type is not None
             source_type_missing = False
         can_create_type = ctx.profile.create_missing_device_types and (
@@ -2761,8 +2776,8 @@ def _write_device_row(  # noqa: C901
     ambiguous_names: frozenset = frozenset(),
 ):
     rack_name = _str_val(row.get("rack_name"))
-    device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
-    device_role = DeviceRole.objects.filter(slug=crm.role_slug).first()
+    device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
+    device_role = _cached_device_role(ctx, DeviceRole, crm.role_slug)
     source_type_missing = device_type is None
     source_role_missing = device_role is None
 
@@ -2877,7 +2892,7 @@ def _write_device_row(  # noqa: C901
         mfg_slug, dt_slug = effective_type[:2]
         role_slug = effective["role"]
         if review is not None and "device_type" in review.ignored:
-            device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
+            device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
             if device_type is None:
                 return _identity_state_error(
                     row,
@@ -2899,7 +2914,7 @@ def _write_device_row(  # noqa: C901
                 extra_data={"identity_conflict": "device_type_not_found", "netbox_device_id": device.pk},
             )
         if review is not None and "role" in review.ignored:
-            device_role = DeviceRole.objects.filter(slug=role_slug).first()
+            device_role = _cached_device_role(ctx, DeviceRole, role_slug)
             if device_role is None:
                 return _identity_state_error(
                     row,

@@ -323,6 +323,21 @@ class ApplyColumnMappingsTest(TestCase):
         self.assertEqual(result[0]["asset_tag"], "TAG-EXTRA")
         self.assertNotIn("Asset Tag", result[0].get("_extra_columns", {}))
 
+    def test_candidate_mapping_collects_values_without_promoting_a_field(self):
+        """Candidate mappings retain their source labels for row-level review."""
+        from netbox_data_import.engine import apply_column_mappings
+
+        profile = self._make_profile_with_mapping("Contact Email", "candidate:contact")
+        rows = [{"_extra_columns": {"Contact Email": "candidate@example.invalid"}}]
+
+        result = apply_column_mappings(rows, profile)
+
+        self.assertEqual(
+            result[0]["_candidate_values"]["contact"],
+            {"Contact Email": "candidate@example.invalid"},
+        )
+        self.assertNotIn("Contact Email", result[0].get("_extra_columns", {}))
+
     def test_returns_rows(self):
         """apply_column_mappings returns the modified rows list."""
         from netbox_data_import.engine import apply_column_mappings
