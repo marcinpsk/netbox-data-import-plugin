@@ -208,6 +208,22 @@ class DeviceFieldReviewer:
         """Return fields shown for information but not assigned by the writer."""
         return frozenset(d.target_field for d in _FIELD_DEFINITIONS if not d.writable)
 
+    @staticmethod
+    def current_snapshot(matched_device, target_field: str) -> dict[str, str] | None:
+        """Return the current canonical NetBox snapshot for one registered field."""
+        definition = _DEFINITIONS_BY_FIELD.get(target_field)
+        if definition is None:
+            return None
+        value = definition.current_value(matched_device)
+        if target_field != "rack_name":
+            return definition.snapshot(value)
+        snapshot = definition.snapshot(value, _device_rack_display(matched_device))
+        location_id = (
+            getattr(matched_device.rack, "location_id", None) if getattr(matched_device, "rack_id", None) else None
+        )
+        snapshot["canonical"] = f"{location_id or ''}:{snapshot['canonical']}"
+        return snapshot
+
     def review_device_ids(self, source_id: str) -> frozenset[int]:
         """Return unique Device IDs bound to reviews for one source row."""
         return self._review_device_ids.get(_text(source_id), frozenset())

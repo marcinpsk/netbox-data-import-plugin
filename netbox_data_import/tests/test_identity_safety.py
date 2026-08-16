@@ -948,6 +948,70 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertEqual(device_row.action, "error")
         self.assertEqual(device_row.extra_data.get("identity_conflict"), "derived_slug_collision")
 
+    def test_slug_collision_error_renders_the_device_type_mapping_action(self):
+        """A competing row error does not hide the Device Type remediation."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        manufacturer = Manufacturer.objects.create(name="Mapping Action Vendor", slug="mapping-action-vendor")
+        DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Switch-6505",
+            slug="mapping-action-vendor-switch-6505",
+            u_height=1,
+        )
+        Device.objects.create(
+            name="mapping-action-existing-a",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="DUPLICATE-MAPPING-ACTION",
+        )
+        Device.objects.create(
+            name="mapping-action-existing-b",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="DUPLICATE-MAPPING-ACTION",
+        )
+        profile = ImportProfile.objects.create(
+            name="Mapping Action Profile",
+            sheet_name="Data",
+            create_missing_device_types=True,
+        )
+        ClassRoleMapping.objects.create(
+            profile=profile,
+            source_class="Server",
+            creates_rack=False,
+            role_slug=self.role.slug,
+        )
+        rows = [
+            {
+                **self._device_row(2, "MAP-ACTION", "mapping-action-source", self.rack_a, 1),
+                "make": manufacturer.name,
+                "model": "Switch 6505",
+                "serial": "DUPLICATE-MAPPING-ACTION",
+            }
+        ]
+        result = run_import(rows, profile, {"site": self.site}, dry_run=True, user=self.user)
+        session = self.client.session
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "mapping-action.xlsx",
+        }
+        session["import_result"] = result.to_session_dict()
+        session["import_preview_pending"] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, "Add an explicit device type mapping.")
+        self.assertContains(response, 'data-source-make="Mapping Action Vendor"')
+        self.assertContains(response, "Map DT")
+
     def test_update_preview_lists_every_field_that_the_writer_changes(self):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
         from tenancy.models import Tenant

@@ -105,18 +105,27 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         }
         session["import_result"] = preview.to_session_dict()
         session["import_preview_pending"] = True
+        session["import_preview_revision"] = "current-preview-revision"
         session.save()
 
     def _save_rows(self, rows):
-        """Replace the active preview's source rows."""
+        """Replace source rows and materialize the preview a browser would show."""
         session = self.client.session
         session["import_rows"] = _serialize_rows(rows)
         session.save()
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
     def _preview_device_row(self):
         """Return the current device preview row."""
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         return response, next(row for row in response.context["result"].rows if row.object_type == "device")
+
+    def _json_action(self, **values):
+        """Add the current materialized preview revision to one JSON action."""
+        return {
+            "preview_revision": self.client.session["import_preview_revision"],
+            **values,
+        }
 
     def test_user_can_ignore_the_exact_current_field_difference(self):
         """A reviewed value pair moves from Fields Differ to Fields Ignored."""
@@ -154,38 +163,88 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             'class="badge ndi-badge-ignored ndi-diff-toggle mt-1"',
         )
 
-    def test_ignore_returns_a_fresh_preview_row_for_javascript_callers(self):
-        """Ignore updates one preview row without navigating away from the page."""
+    def test_ignore_defers_preview_recalculation_for_javascript_callers(self):
+        """Ignore saves immediately and marks the displayed preview as stale."""
+        previous_result = self.client.session["import_result"]
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["row_number"], 1)
+        self.assertEqual(payload["preview_state"], "recalculation_required")
+        self.assertNotIn("row_html", payload)
+        session = self.client.session
+        self.assertTrue(session["import_preview_dirty"])
+        self.assertEqual(session["import_result"], previous_result)
+        self.assertTrue(
+            IgnoredFieldDifference.objects.filter(
+                profile=self.profile,
+                source_id="FIELD-REVIEW-ROW",
+                netbox_device_id=self.device.pk,
+                target_field="u_position",
+            ).exists()
+        )
+
+    def test_ignore_rejects_a_changed_netbox_value_without_saving(self):
+        """A stale preview cannot save a review for a different NetBox value."""
+        self.device.position = 6
+        self.device.save(update_fields=["position"])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("recalculate", response.json()["error"].lower())
+        self.assertFalse(IgnoredFieldDifference.objects.exists())
+        self.assertFalse(self.client.session.get("import_preview_dirty", False))
+
+    def test_ignore_rejects_a_stale_preview_revision(self):
+        """A row action from an older browser preview cannot change state."""
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),
             {
-                "profile_id": self.profile.pk,
+                "preview_revision": "older-preview-revision",
                 "row_number": 1,
                 "target_field": "u_position",
             },
             HTTP_ACCEPT="application/json",
         )
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertTrue(payload["ok"], payload)
-        self.assertEqual(payload["row_number"], 1)
-        self.assertIn('id="row-1"', payload["row_html"])
-        self.assertIn("1 field(s) ignored", payload["row_html"])
-        self.assertIn('id="ignored-field-1-u_position"', payload["row_html"])
-        self.assertNotIn('id="diff-field-1-u_position"', payload["row_html"])
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("recalculate", response.json()["error"].lower())
+        self.assertFalse(IgnoredFieldDifference.objects.exists())
 
-    def test_placement_sync_returns_recalculated_field_details(self):
-        """Placement sync returns a row whose synchronized differences are gone."""
+    def test_placement_sync_uses_cached_intent_and_defers_recalculation(self):
+        """Placement sync ignores forged values and marks the preview as stale."""
+        previous_result = self.client.session["import_result"]
         response = self.client.post(
             reverse("plugins:netbox_data_import:sync_placement"),
-            {
-                "device_id": self.device.pk,
-                "rack_name": self.rack.name,
-                "u_position": "7",
-                "face": "front",
-                "row_number": 1,
-            },
+            self._json_action(
+                device_id=self.device.pk,
+                rack_name="forged-rack",
+                u_position="11",
+                face="rear",
+                row_number=1,
+            ),
             HTTP_ACCEPT="application/json",
         )
 
@@ -193,8 +252,41 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         payload = response.json()
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(payload["row_number"], 1)
-        self.assertIn('id="row-1"', payload["row_html"])
-        self.assertNotIn('id="diff-field-1-u_position"', payload["row_html"])
+        self.assertEqual(payload["preview_state"], "recalculation_required")
+        self.assertNotIn("row_html", payload)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.rack_id, self.rack.pk)
+        self.assertEqual(self.device.position, 7)
+        self.assertEqual(self.device.face, "front")
+        session = self.client.session
+        self.assertTrue(session["import_preview_dirty"])
+        self.assertEqual(session["import_result"], previous_result)
+
+    def test_field_sync_uses_cached_intent_and_defers_recalculation(self):
+        """Field sync writes the previewed value instead of posted client data."""
+        previous_result = self.client.session["import_result"]
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(
+                device_id=self.device.pk,
+                field="u_position",
+                value="11",
+                row_number=1,
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["preview_state"], "recalculation_required")
+        self.assertNotIn("row_html", payload)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, 7)
+        session = self.client.session
+        self.assertTrue(session["import_preview_dirty"])
+        self.assertEqual(session["import_result"], previous_result)
 
     def test_informational_differences_can_be_ignored(self):
         """Device name and U height differences can move to the ignored section."""
@@ -263,6 +355,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         """An ignored fractional position is not truncated while another field writes."""
         self.device.position = Decimal("5.5")
         self.device.save(update_fields=["position"])
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),
@@ -1030,6 +1123,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
                 "next": reverse("plugins:netbox_data_import:import_preview"),
             },
         )
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         response = self.client.post(
             reverse("plugins:netbox_data_import:unignore_field_difference"),
             {
@@ -1053,6 +1147,40 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
                 target_field="u_position",
             ).exists()
         )
+
+    def test_unignore_defers_preview_recalculation_for_javascript_callers(self):
+        """Unignore saves immediately and leaves the materialized preview unchanged."""
+        self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            {
+                "profile_id": self.profile.pk,
+                "row_number": 1,
+                "target_field": "u_position",
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        previous_result = self.client.session["import_result"]
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:unignore_field_difference"),
+            self._json_action(
+                profile_id=self.profile.pk,
+                row_number=1,
+                target_field="u_position",
+            ),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["preview_state"], "recalculation_required")
+        self.assertNotIn("row_html", payload)
+        session = self.client.session
+        self.assertTrue(session["import_preview_dirty"])
+        self.assertEqual(session["import_result"], previous_result)
+        self.assertFalse(IgnoredFieldDifference.objects.exists())
 
     def test_unlink_removes_dependent_field_reviews(self):
         """Unlink removes active and stale field reviews before releasing the source row."""
@@ -1245,6 +1373,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         session = self.client.session
         session["import_context"]["location_id"] = import_location.pk
         session.save()
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),
@@ -1381,6 +1510,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         session = self.client.session
         session["import_context"]["location_id"] = import_location.pk
         session.save()
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),
@@ -1438,6 +1568,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         session = self.client.session
         session["import_context"]["location_id"] = import_location.pk
         session.save()
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),

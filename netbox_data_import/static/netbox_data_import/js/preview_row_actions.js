@@ -6,6 +6,10 @@
     return document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   }
 
+  function previewRevision() {
+    return document.getElementById('ndi-preview-revision')?.value || '';
+  }
+
   function setPending(button, label) {
     button.dataset.originalHtml = button.innerHTML;
     button.disabled = true;
@@ -19,34 +23,22 @@
     button.classList.add('btn-danger');
   }
 
-  function replacePreviewRow(rowNumber, rowHtml) {
-    var oldRow = document.getElementById('row-' + rowNumber);
-    var oldDetail = document.getElementById('diff-' + rowNumber);
-    if (!oldRow) throw new Error('The preview row is no longer present.');
-    var expanded = oldDetail?.classList.contains('show') || false;
-
-    var table = document.createElement('table');
-    table.innerHTML = '<tbody>' + rowHtml + '</tbody>';
-    var newRow = table.querySelector('#row-' + CSS.escape(String(rowNumber)));
-    var newDetail = table.querySelector('#diff-' + CSS.escape(String(rowNumber)));
-    if (!newRow) throw new Error('The refreshed preview row is invalid.');
-
-    oldRow.replaceWith(newRow);
-    if (oldDetail) {
-      if (newDetail) oldDetail.replaceWith(newDetail);
-      else oldDetail.remove();
-    } else if (newDetail) {
-      newRow.after(newDetail);
-    }
-    if (expanded && newDetail) {
-      newDetail.classList.add('show');
-      document.querySelectorAll('[data-diff-target="diff-' + CSS.escape(String(rowNumber)) + '"]')
-        .forEach(function (toggle) { toggle.setAttribute('aria-expanded', 'true'); });
+  function markSaved(button, message) {
+    button.disabled = true;
+    button.innerHTML = '<i class="mdi mdi-check"></i> Saved';
+    button.title = message || 'Saved. Recalculate the preview to refresh this row.';
+    var staleNotice = document.getElementById('ndi-preview-stale');
+    if (staleNotice) staleNotice.hidden = false;
+    var runImport = document.getElementById('ndi-run-import');
+    if (runImport) {
+      runImport.disabled = true;
+      runImport.title = 'Recalculate the preview before importing.';
     }
   }
 
   function postAction(url, body, button, pendingLabel, placementError) {
     setPending(button, pendingLabel);
+    body.set('preview_revision', previewRevision());
     return fetch(url, {
       method: 'POST',
       headers: {
@@ -64,7 +56,10 @@
         });
       })
       .then(function (payload) {
-        replacePreviewRow(payload.row_number, payload.row_html);
+        if (payload.preview_state !== 'recalculation_required') {
+          throw new Error('The preview action returned an invalid state.');
+        }
+        markSaved(button, payload.message);
         return payload;
       })
       .catch(function (error) {
@@ -94,10 +89,6 @@
     var url;
     if (placement) {
       body = new URLSearchParams({
-        device_id: button.dataset.deviceId,
-        rack_name: button.dataset.rackName,
-        u_position: button.dataset.uPosition || '',
-        face: button.dataset.face || '',
         row_number: button.dataset.rowId,
       });
       url = button.dataset.actionUrl || '/plugins/data-import/sync-placement/';
@@ -106,10 +97,7 @@
     }
 
     body = new URLSearchParams({
-      device_id: button.dataset.deviceId,
       field: button.dataset.field,
-      value: button.dataset.value,
-      profile_id: button.dataset.profileId || '',
       row_number: button.dataset.rowId,
     });
     url = button.dataset.actionUrl || '/plugins/data-import/sync-device-field/';

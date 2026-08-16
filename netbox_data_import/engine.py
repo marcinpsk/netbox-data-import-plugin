@@ -197,6 +197,7 @@ class ImportContext:
     candidate_source_columns: dict[str, frozenset[str]] = field(default_factory=dict)
     progress_callback: Callable[[int, int], None] | None = None
     field_reviewer: DeviceFieldReviewer | None = None
+    device_type_identity: _DeviceTypeIdentityResolver | None = None
     effective_duplicate_identity: dict[int, dict[str, str | None]] = field(default_factory=dict)
 
 
@@ -633,39 +634,75 @@ def _parse_ip_with_prefix(raw_value: str) -> str | None:
         return None
 
 
-def _resolve_device_type_slugs(make: str, model: str, profile: ImportProfile) -> tuple[str, str, bool]:
-    """Return (manufacturer_slug, device_type_slug, is_explicit_mapping).
+def _normalize_mapping_text(value: str) -> str:
+    r"""Normalize whitespace and decode JavaScript-style \uXXXX escapes."""
+    value = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), value)
+    return " ".join(value.split())
 
-    Check DeviceTypeMapping first; fall back to auto-slugify.
-    Both make and model are expected to be whitespace-normalized.
-    """
 
-    def _normalize(s: str) -> str:
-        r"""Normalize whitespace and decode JS-style \uXXXX escape sequences."""
-        s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
-        return " ".join(s.split())
+class _DeviceTypeIdentityResolver:
+    """Resolve all profile Device Type identities from two batch-loaded indexes."""
 
-    # Direct lookup (fast path — matches normalized stored records)
-    mapping = profile.device_type_mappings.filter(source_make=make, source_model=model).first()
-    # Fallback: stored records may have un-normalized whitespace or JS unicode escapes
-    if not mapping:
-        for m in profile.device_type_mappings.filter(source_make__iexact=make):
-            if _normalize(m.source_model) == model:
-                mapping = m
-                break
-    if mapping:
-        return mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug, True
+    def __init__(self, device_type_mappings, manufacturer_mappings):
+        self.device_type_mappings = tuple(device_type_mappings)
+        self.manufacturer_mappings = tuple(manufacturer_mappings)
+        self._device_types_exact = {}
+        self._device_types_by_make = {}
+        for mapping in self.device_type_mappings:
+            self._device_types_exact.setdefault((mapping.source_make, mapping.source_model), mapping)
+            self._device_types_by_make.setdefault(mapping.source_make.lower(), []).append(mapping)
+        self._manufacturers_exact = {}
+        for mapping in self.manufacturer_mappings:
+            self._manufacturers_exact.setdefault(mapping.source_make, mapping)
+        self.mapped_source_makes = frozenset(self._manufacturers_exact)
 
-    # Check manufacturer-only mapping (maps source make to existing mfg slug)
-    mfg_mapping = profile.manufacturer_mappings.filter(source_make=make).first()
-    if not mfg_mapping:
-        for m in profile.manufacturer_mappings.all():
-            if _normalize(m.source_make) == make:
-                mfg_mapping = m
-                break
-    manufacturer_slug = mfg_mapping.netbox_manufacturer_slug if mfg_mapping else slugify(make)[:50]
-    device_type_slug = slugify(f"{make}-{model}")[:50]
-    return manufacturer_slug, device_type_slug, False
+    @classmethod
+    def for_profile(cls, profile):
+        """Load both mapping tables once for one import run."""
+        return cls(
+            profile.device_type_mappings.all(),
+            profile.manufacturer_mappings.all(),
+        )
+
+    def resolve(self, make: str, model: str) -> tuple[str, str, bool]:
+        """Return manufacturer slug, Device Type slug, and explicit status."""
+        mapping = self._device_types_exact.get((make, model))
+        if mapping is None:
+            mapping = next(
+                (
+                    candidate
+                    for candidate in self._device_types_by_make.get(make.lower(), ())
+                    if _normalize_mapping_text(candidate.source_model) == model
+                ),
+                None,
+            )
+        if mapping is not None:
+            return mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug, True
+
+        manufacturer_mapping = self._manufacturers_exact.get(make)
+        if manufacturer_mapping is None:
+            manufacturer_mapping = next(
+                (
+                    candidate
+                    for candidate in self.manufacturer_mappings
+                    if _normalize_mapping_text(candidate.source_make) == make
+                ),
+                None,
+            )
+        manufacturer_slug = (
+            manufacturer_mapping.netbox_manufacturer_slug if manufacturer_mapping is not None else slugify(make)[:50]
+        )
+        return manufacturer_slug, slugify(f"{make}-{model}")[:50], False
+
+
+def _resolve_device_type_slugs(
+    make: str,
+    model: str,
+    profile: ImportProfile,
+    resolver: _DeviceTypeIdentityResolver | None = None,
+) -> tuple[str, str, bool]:
+    """Resolve one Device Type identity through a shared batch index."""
+    return (resolver or _DeviceTypeIdentityResolver.for_profile(profile)).resolve(make, model)
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +915,12 @@ def _pass1_device_review(row, ctx, crm, Device):
         return None
     make = " ".join((_str_val(row.get("make")) or "Unknown").split())
     model = " ".join((_str_val(row.get("model")) or "Unknown").split())
-    mfg_slug, dt_slug, _explicit_identity = _resolve_device_type_slugs(make, model, ctx.profile)
+    mfg_slug, dt_slug, _explicit_identity = _resolve_device_type_slugs(
+        make,
+        model,
+        ctx.profile,
+        ctx.device_type_identity,
+    )
     device_name = _effective_device_name(row)
     matched_device, _match_method = _find_existing_device(
         ctx.profile,
@@ -921,7 +963,12 @@ def _pass1_ensure_types(rows, ctx, class_role_map):
         u_height_raw = row.get("u_height", 1)
         u_height = max(1, _coerce_int(u_height_raw, 1))
 
-        mfg_slug, dt_slug, explicit_identity = _resolve_device_type_slugs(make, model, ctx.profile)
+        mfg_slug, dt_slug, explicit_identity = _resolve_device_type_slugs(
+            make,
+            model,
+            ctx.profile,
+            ctx.device_type_identity,
+        )
         review = _pass1_device_review(row, ctx, crm, Device)
         if review is None or "device_type" not in review.ignored:
             _ensure_manufacturer(
@@ -3481,7 +3528,12 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
             )
             continue
 
-        mfg_slug, dt_slug, is_explicit_mapping = _resolve_device_type_slugs(make, model, ctx.profile)
+        mfg_slug, dt_slug, is_explicit_mapping = _resolve_device_type_slugs(
+            make,
+            model,
+            ctx.profile,
+            ctx.device_type_identity,
+        )
         u_height_raw = row.get("u_height", 1)
         u_height = max(1, _coerce_int(u_height_raw, 1))
 
@@ -3606,7 +3658,17 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
         if slug_conflict:
             row_result.action = "error"
             row_result.detail = slug_conflict
-            row_result.extra_data["identity_conflict"] = "derived_slug_collision"
+            row_result.extra_data.update(
+                {
+                    "identity_conflict": "derived_slug_collision",
+                    "source_make": make,
+                    "source_model": model,
+                    "mfg_slug": mfg_slug,
+                    "dt_slug": dt_slug,
+                    "u_height": u_height,
+                    "is_explicit_mapping": is_explicit_mapping,
+                }
+            )
         ctx.result.rows.append(row_result)
 
     if ctx.progress_callback is not None:
@@ -3711,6 +3773,7 @@ def _active_ignored_device_type_rows(
     site,
     tenant,
     user,
+    device_type_identity,
 ):
     """Return source rows whose exact active type review suppresses type planning."""
     if field_reviewer is None or site is None:
@@ -3729,7 +3792,12 @@ def _active_ignored_device_type_rows(
             continue
         make = " ".join((_str_val(row.get("make")) or "Unknown").split())
         model = " ".join((_str_val(row.get("model")) or "Unknown").split())
-        mfg_slug, dt_slug, _explicit_identity = _resolve_device_type_slugs(make, model, profile)
+        mfg_slug, dt_slug, _explicit_identity = _resolve_device_type_slugs(
+            make,
+            model,
+            profile,
+            device_type_identity,
+        )
         matched_device, _match_method = _find_existing_device(
             profile,
             source_id,
@@ -3764,18 +3832,25 @@ def _derived_slug_conflicts(
     site=None,
     tenant=None,
     user=None,
+    device_type_identity=None,
 ):
     """Return per-row errors for different source identities that derive one slug."""
     manufacturer_groups = {}
     device_type_groups = {}
-    mapped_source_makes = frozenset(profile.manufacturer_mappings.values_list("source_make", flat=True))
+    device_type_identity = device_type_identity or _DeviceTypeIdentityResolver.for_profile(profile)
+    mapped_source_makes = device_type_identity.mapped_source_makes
     for row in rows:
         crm = class_role_map.get(_str_val(row.get("device_class")))
         if not _is_writing_device_row(row, crm, ignored_source_ids):
             continue
         make = " ".join((_str_val(row.get("make")) or "Unknown").split())
         model = " ".join((_str_val(row.get("model")) or "Unknown").split())
-        mfg_slug, dt_slug, explicit_device_type = _resolve_device_type_slugs(make, model, profile)
+        mfg_slug, dt_slug, explicit_device_type = _resolve_device_type_slugs(
+            make,
+            model,
+            profile,
+            device_type_identity,
+        )
         explicit_manufacturer = explicit_device_type or make in mapped_source_makes
         record = {
             "row_number": row.get("_row_number"),
@@ -3795,6 +3870,7 @@ def _derived_slug_conflicts(
         site,
         tenant,
         user,
+        device_type_identity,
     )
     conflicts = {}
     _add_within_file_slug_conflicts(
@@ -3870,6 +3946,7 @@ def run_import(
         candidate_source_columns=_build_candidate_source_columns(profile),
         progress_callback=progress_callback,
         field_reviewer=DeviceFieldReviewer.for_profile(profile),
+        device_type_identity=_DeviceTypeIdentityResolver.for_profile(profile),
     )
     ctx.slug_conflicts_by_row = _derived_slug_conflicts(
         rows,
@@ -3880,6 +3957,7 @@ def run_import(
         site=ctx.site,
         tenant=ctx.tenant,
         user=ctx.user,
+        device_type_identity=ctx.device_type_identity,
     )
 
     if dry_run:

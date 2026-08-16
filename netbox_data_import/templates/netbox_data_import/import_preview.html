@@ -49,6 +49,7 @@
 {% endblock %}
 
 {% block content %}
+<input type="hidden" id="ndi-preview-revision" value="{{ preview_revision }}">
 <div class="row">
   <div class="col">
 
@@ -126,10 +127,14 @@
           </form>
           {% endif %}
 
+          <a href="{{ preview_url }}" class="btn btn-outline-primary" id="ndi-recalculate-preview">
+            <i class="mdi mdi-refresh"></i> Recalculate Preview
+          </a>
+
           {% if not result.has_errors %}
           <form method="post" action="{% url 'plugins:netbox_data_import:import_run' %}">
             {% csrf_token %}
-            <button type="submit" class="btn btn-success">
+            <button type="submit" class="btn btn-success" id="ndi-run-import">
               <i class="mdi mdi-database-import"></i> Run Import
             </button>
           </form>
@@ -146,12 +151,18 @@
           {% endif %}
         </div>
 
+        <div id="ndi-preview-stale" class="alert alert-info mt-3 mb-0" hidden>
+          <i class="mdi mdi-content-save-check"></i>
+          Saved changes are pending. Recalculate the preview before import.
+          <a href="{{ preview_url }}" class="alert-link ms-1">Recalculate Preview</a>
+        </div>
+
         {% if result.counts.errors %}
         <div class="alert alert-warning mt-3 mb-0">
           <i class="mdi mdi-information"></i>
           <strong>{{ result.counts.errors }} row{{ result.counts.errors|pluralize }} need attention.</strong>
           Use the buttons in the last column to add mappings, link existing devices, or ignore rows.
-          The preview refreshes automatically after each fix.
+          Recalculate the preview after you finish the row actions.
         </div>
         {% endif %}
 
@@ -720,10 +731,6 @@
                   <div class="mb-2">
                     <button type="button" class="btn btn-xs btn-outline-success ndi-sync-placement-btn"
                             data-action-url="{% url 'plugins:netbox_data_import:sync_placement' %}"
-                            data-device-id="{{ row.extra_data.netbox_device_id }}"
-                            data-rack-name="{{ row.rack_name }}"
-                            data-u-position="{{ row.extra_data.u_position|default:'' }}"
-                            data-face="{{ row.extra_data.face|default:'' }}"
                             data-row-id="{{ row.row_number }}"
                             title="Set rack{% if row.extra_data.u_position %}, position{% endif %}{% if row.extra_data.face %}, face{% endif %} atomically">
                       <i class="mdi mdi-package-variant"></i> Sync placement
@@ -755,10 +762,7 @@
                           {% if field_name in syncable_fields %}
                           <button type="button" class="btn btn-xs btn-outline-primary ndi-sync-btn"
                                   data-action-url="{% url 'plugins:netbox_data_import:sync_device_field' %}"
-                                  data-device-id="{{ row.extra_data.netbox_device_id }}"
                                   data-field="{{ field_name }}"
-                                  data-value="{{ vals.file }}"
-                                  data-profile-id="{{ profile_id|default:'' }}"
                                   data-row-id="{{ row.row_number }}"
                                   title="Sync this field to NetBox now">
                             <i class="mdi mdi-sync"></i>
@@ -769,7 +773,6 @@
                           {% if row.source_id and field_name in reviewable_fields %}
                           <form method="post" action="{% url 'plugins:netbox_data_import:ignore_field_difference' %}" class="d-inline ms-1 ndi-field-review-form">
                             {% csrf_token %}
-                            <input type="hidden" name="profile_id" value="{{ profile_id }}">
                             <input type="hidden" name="row_number" value="{{ row.row_number }}">
                             <input type="hidden" name="target_field" value="{{ field_name }}">
                             <input type="hidden" name="next" value="{{ preview_url }}">
@@ -792,7 +795,6 @@
                         <td>
                           <form method="post" action="{% url 'plugins:netbox_data_import:unignore_field_difference' %}" class="d-inline ndi-field-review-form">
                             {% csrf_token %}
-                            <input type="hidden" name="profile_id" value="{{ profile_id }}">
                             <input type="hidden" name="row_number" value="{{ row.row_number }}">
                             <input type="hidden" name="target_field" value="{{ field_name }}">
                             <input type="hidden" name="next" value="{{ preview_url }}">

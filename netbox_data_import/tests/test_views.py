@@ -459,6 +459,23 @@ class ImportPreviewViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertContains(resp, "sample_cans.xlsx")
 
+    def test_first_preview_get_renders_the_materialized_upload_result(self):
+        """The upload result is not calculated again on its redirect target."""
+        self._setup_session()
+        session = self.client.session
+        stored_result = session["import_result"]
+        session["import_rows"][0]["device_name"] = "changed-after-materialization"
+        session["import_preview_use_materialized_once"] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["result"].to_session_dict(), stored_result)
+        self.assertNotIn("import_preview_use_materialized_once", self.client.session)
+        self.assertContains(response, 'id="ndi-preview-revision"')
+        self.assertContains(response, "Recalculate Preview")
+
 
 class ImportPreviewViewContextTest(BaseViewTestCase):
     """Tests for ImportPreviewView device matching context."""
@@ -2218,6 +2235,22 @@ class ImportRunViewTest(IsolatedRQQueueTestMixin, BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:import_run")
         resp = self.client.post(url)
         self.assertEqual(resp.status_code, 302)
+
+    def test_run_import_rejects_a_stale_materialized_preview(self):
+        """A pending row action must be recalculated before import starts."""
+        self._setup_session()
+        session = self.client.session
+        session["import_preview_dirty"] = True
+        session.save()
+
+        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertNotIn("import_background_job_id", self.client.session)
 
 
 class ImportProfileYamlWithTransformRuleTest(BaseViewTestCase):

@@ -4,7 +4,9 @@
 
 import os
 
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 
 from netbox_data_import.engine import (
     ImportContext,
@@ -257,6 +259,34 @@ class RunImportDeviceTypeMappingTest(TestCase):
         # Should not error — mapping exists
         error_rows = [r for r in result.rows if r.action == "error"]
         self.assertEqual(error_rows, [])
+
+    def test_mapping_table_is_loaded_once_for_a_batch(self):
+        """Repeated Device Types do not repeat the same mapping query per row."""
+        rows = [
+            {
+                "_row_number": row_number,
+                "source_id": f"MAPPED-{row_number}",
+                "device_name": f"mapped-device-{row_number}",
+                "device_class": "Server",
+                "make": "Dell",
+                "model": "PowerEdge R640",
+                "u_height": 1,
+                "rack_name": "",
+                "u_position": "",
+                "serial": "",
+                "asset_tag": "",
+                "status": "active",
+            }
+            for row_number in range(1, 13)
+        ]
+
+        with CaptureQueriesContext(connection) as queries:
+            run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+
+        mapping_queries = [
+            query["sql"] for query in queries if "netbox_data_import_devicetypemapping" in query["sql"].lower()
+        ]
+        self.assertLessEqual(len(mapping_queries), 1, mapping_queries)
 
 
 class ResolveDeviceTypeSlugsTest(TestCase):

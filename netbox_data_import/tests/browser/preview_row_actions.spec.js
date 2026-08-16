@@ -18,6 +18,12 @@ const previewStyles = previewTemplate.match(/<style>([\s\S]*?)<\/style>/)[1];
 const fixture = `
   <base href="http://preview.test/">
   <input name="csrfmiddlewaretoken" value="token">
+  <input id="ndi-preview-revision" value="preview-revision">
+  <div id="ndi-preview-stale" hidden>
+    Saved changes are pending. Recalculate the preview before import.
+    <a href="/plugins/data-import/import/preview/">Recalculate Preview</a>
+  </div>
+  <button id="ndi-run-import" type="submit">Run Import</button>
   <table><tbody>
     <tr id="row-1"><td>
       <button class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="true">Fields differ</button>
@@ -34,17 +40,20 @@ const fixture = `
   </tbody></table>
 `;
 
-test("Ignore shows pending feedback and replaces only the expanded preview row", async ({ page }) => {
+test("Ignore saves without recalculating and marks the preview stale", async ({ page }) => {
   let requestCount = 0;
+  let requestBody = "";
   await page.route("**/ignore-field-difference/", async (route) => {
     requestCount += 1;
+    requestBody = route.request().postData() || "";
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
         ok: true,
         row_number: 1,
-        row_html: '<tr id="row-1"><td>1 field(s) ignored</td></tr><tr id="diff-1" class="ndi-diff-row"><td id="ignored-field-1-u_position">Ignored</td></tr>',
+        preview_state: "recalculation_required",
+        message: "Ignored the current u_position difference.",
       }),
     });
   });
@@ -55,33 +64,37 @@ test("Ignore shows pending feedback and replaces only the expanded preview row",
   await button.click();
   await expect(button).toBeDisabled();
   await expect(button).toContainText("Updating");
-  await expect(page.locator("#row-1")).toContainText("1 field(s) ignored");
+  await expect(button).toContainText("Saved");
 
   expect(requestCount).toBe(1);
+  expect(requestBody).toContain("preview-revision");
   await expect(page.locator("#diff-1")).toHaveClass(/show/);
-  await expect(page.locator("#ignored-field-1-u_position")).toBeVisible();
+  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
+  await expect(page.locator("#ndi-run-import")).toBeDisabled();
 });
 
-test("placement sync replaces stale expanded field details", async ({ page }) => {
+test("placement sync defers field-detail refresh", async ({ page }) => {
   await page.route("**/sync-placement/", async (route) => {
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
         ok: true,
         row_number: 1,
-        row_html: '<tr id="row-1"><td>Placement synchronized</td></tr><tr id="diff-1" class="ndi-diff-row"><td id="diff-field-1-status">Status differs</td></tr>',
+        preview_state: "recalculation_required",
+        message: "Placement synchronized.",
       }),
     });
   });
   await page.setContent(fixture);
   await page.addScriptTag({ content: controllerSource });
 
-  await page.getByRole("button", { name: "Sync placement" }).click();
+  const button = page.locator(".ndi-sync-placement-btn");
+  await button.click();
 
-  await expect(page.locator("#row-1")).toContainText("Placement synchronized");
+  await expect(button).toContainText("Saved");
   await expect(page.locator("#diff-1")).toHaveClass(/show/);
-  await expect(page.locator("#diff-field-1-status")).toBeVisible();
-  await expect(page.locator("#diff-field-1-u_position")).toHaveCount(0);
+  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
+  await expect(page.locator("#ndi-run-import")).toBeDisabled();
 });
 
 test("ignored field badge keeps readable contrast in both themes", async ({ page }) => {
