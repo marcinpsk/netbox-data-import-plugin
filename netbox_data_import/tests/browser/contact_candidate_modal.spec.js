@@ -15,16 +15,20 @@ const tomSelectSource = readFileSync(
 );
 
 const previewFixture = `
+  <base href="http://preview.test/">
   <div id="contactCandidateModal">
-    <form id="contactCandidateForm" data-contact-lookup-field="email">
+    <form id="contactCandidateForm" data-contact-lookup-field="email" data-contact-lookup-url="/contact-lookup/">
       <input type="hidden" id="contactCandidateSourceId">
       <input type="hidden" id="contactCandidateOriginalValue">
       <input type="hidden" id="contactCandidateResolvedFields">
+      <input type="hidden" id="contactCandidateContactId">
       <input type="checkbox" id="contactCandidateNone">
       <div id="contactCandidateFields">
-        <label>Contact name<select id="contactCandidateName" required></select></label>
-        <label>Email address<select id="contactCandidateEmail" required></select></label>
-        <label>Phone number<select id="contactCandidatePhone"></select></label>
+        <div id="contactCandidateSuggestion" class="d-none"></div>
+        <label>Existing NetBox Contact<select id="contactCandidateExisting"></select></label>
+        <label>Contact name<select id="contactCandidateName"></select><input id="contactCandidateNameValue"></label>
+        <label>Email address<select id="contactCandidateEmail"></select><input id="contactCandidateEmailValue"></label>
+        <label>Phone number<select id="contactCandidatePhone"></select><input id="contactCandidatePhoneValue"></label>
       </div>
     </form>
   </div>
@@ -47,6 +51,7 @@ const previewFixture = `
     {"first-row":{"contact":{"Contact Name":"First Contact","Contact Email":"first@example.invalid"}},
      "second-row":{"contact":{"Owner Name":"Second Contact","Owner Email":"second@example.invalid"}}}
   </script>
+  <script id="ndi-contact-suggestions-by-row" type="application/json">{}</script>
 `;
 
 async function openRow(page, rowNumber, sourceId) {
@@ -110,4 +115,41 @@ test("contact candidate fields stay visible and synchronized in the browser", as
     await expect(page.locator(selector)).not.toBeDisabled();
     await expect(page.locator(`${selector} + .ts-wrapper`)).not.toHaveClass(/(^|\s)disabled(\s|$)/);
   }
+});
+
+test("contact picker searches NetBox and copies the selected Contact details", async ({ page }) => {
+  await page.route("**/contact-lookup/?q=*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        results: [{
+          id: 73,
+          name: "Found Contact",
+          email: "found.contact@example.invalid",
+          phone: "+1 202-555-0105",
+        }],
+      }),
+    });
+  });
+  await page.setContent(previewFixture);
+  await page.addScriptTag({ content: tomSelectSource });
+  await page.evaluate(() => {
+    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
+      new TomSelect(document.getElementById(id), { create: false });
+    }
+  });
+  await page.addScriptTag({ content: controllerSource });
+  await openRow(page, "first-row", "source-first");
+
+  const pickerInput = page.locator("#contactCandidateExisting + .ts-wrapper .ts-control input");
+  await pickerInput.fill("found.contact");
+  await expect(page.locator("#contactCandidateExisting + .ts-wrapper .ts-dropdown .option")).toContainText(
+    "Found Contact",
+  );
+  await page.locator("#contactCandidateExisting + .ts-wrapper .ts-dropdown .option").click();
+
+  await expect(page.locator("#contactCandidateContactId")).toHaveValue("73");
+  await expect(page.locator("#contactCandidateNameValue")).toHaveValue("Found Contact");
+  await expect(page.locator("#contactCandidateEmailValue")).toHaveValue("found.contact@example.invalid");
+  await expect(page.locator("#contactCandidatePhoneValue")).toHaveValue("+1 202-555-0105");
 });

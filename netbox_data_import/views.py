@@ -51,7 +51,10 @@ from .tables import (
     ImportProfileTable,
 )
 from . import engine
+from .contact_resolution import PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
+from .object_permissions import ObjectPermissionDenied
+from .preview_row_actions import extract_preview_row
 
 
 _IMPORT_SOURCE_ROWS_JOB_SESSION_KEY = "import_source_rows_job_id"
@@ -961,6 +964,11 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             for r in result.rows
             if r.extra_data.get("candidate_values")
         }
+        contact_suggestions_by_row = {
+            str(r.row_number): r.extra_data["contact_suggestion"]
+            for r in result.rows
+            if r.extra_data.get("contact_suggestion")
+        }
         extra_columns_by_row = {
             str(r.row_number): r.extra_data.get("extra_columns", {})
             for r in result.rows
@@ -1009,6 +1017,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_match_info": device_match_info,
                 "conflicts_by_row": conflicts_by_row,
                 "candidate_values_by_row": candidate_values_by_row,
+                "contact_suggestions_by_row": contact_suggestions_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
@@ -1444,6 +1453,32 @@ def _fresh_device_field_review_preview(request):
     return profile, result
 
 
+def _wants_json(request) -> bool:
+    """Return whether one preview action expects a JSON response."""
+    return "application/json" in request.headers.get("Accept", "")
+
+
+def _preview_row_action_response(request, row_number, **payload):
+    """Return one row rendered through the authoritative full-preview path."""
+    from django.http import JsonResponse
+
+    try:
+        row_number = int(row_number)
+    except (TypeError, ValueError):
+        return JsonResponse({"ok": False, "error": "A valid source row is required."}, status=400)
+    preview_response = ImportPreviewView().render_preview(
+        request,
+        reverse("plugins:netbox_data_import:import_preview"),
+    )
+    if preview_response.status_code != 200:
+        return JsonResponse({"ok": False, "error": "The active preview is no longer available."}, status=409)
+    try:
+        row_html = extract_preview_row(preview_response.content.decode(), row_number)
+    except ValueError as exc:
+        return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+    return JsonResponse({"ok": True, "row_number": row_number, "row_html": row_html, **payload})
+
+
 def _field_review_row(request):
     """Return the current row and target field for a review POST."""
     preview = _fresh_device_field_review_preview(request)
@@ -1538,6 +1573,8 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
             )
             return redirect(next_url)
         messages.success(request, f"Ignored the current {target_field} difference.")
+        if _wants_json(request):
+            return _preview_row_action_response(request, row.row_number)
         return redirect(next_url)
 
 
@@ -1601,6 +1638,8 @@ class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
             )
             return redirect(next_url)
         messages.success(request, f"Showing the {target_field} difference again.")
+        if _wants_json(request):
+            return _preview_row_action_response(request, row.row_number)
         return redirect(next_url)
 
 
@@ -1684,6 +1723,40 @@ class _AjaxPermissionView(ConditionalLoginRequiredMixin, View):
         return super().dispatch(request, *args, **kwargs)
 
 
+class ContactLookupView(_AjaxPermissionView):
+    """Search visible NetBox Contacts for the contact-resolution picker."""
+
+    permission_required = "tenancy.view_contact"
+
+    def get(self, request):
+        """Return a small real-shape Contact result set."""
+        from django.db.models import Q
+        from django.http import JsonResponse
+        from tenancy.models import Contact
+
+        query = request.GET.get("q", "").strip()
+        if len(query) < 2:
+            return JsonResponse({"results": []})
+        contacts = (
+            Contact.objects.restrict(request.user, "view")
+            .filter(Q(name__icontains=query) | Q(email__icontains=query) | Q(phone__icontains=query))
+            .order_by("name", "email", "pk")[:20]
+        )
+        return JsonResponse(
+            {
+                "results": [
+                    {
+                        "id": contact.pk,
+                        "name": contact.name,
+                        "email": contact.email,
+                        "phone": contact.phone,
+                    }
+                    for contact in contacts
+                ]
+            }
+        )
+
+
 class SyncDeviceFieldView(_AjaxPermissionView):
     """Apply a single field value from the import file to an existing NetBox device."""
 
@@ -1724,6 +1797,12 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             )
             return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
+        if request.POST.get("row_number") and _wants_json(request):
+            return _preview_row_action_response(
+                request,
+                request.POST["row_number"],
+                display=display,
+            )
         return JsonResponse({"ok": True, "display": display})
 
     def _apply_field(self, device, field, value, status_map):
@@ -1816,6 +1895,19 @@ def _lookup_rack_for_device(device, value):
     return racks[0], None
 
 
+def _validate_device_placement(device) -> None:
+    """Run NetBox validation and reject only errors caused by placement fields."""
+    try:
+        device.full_clean()
+    except ValidationError as exc:
+        if not hasattr(exc, "message_dict"):
+            raise
+        placement_fields = {"rack", "location", "position", "face", "device_type", "__all__"}
+        errors = {field: messages for field, messages in exc.message_dict.items() if field in placement_fields}
+        if errors:
+            raise ValidationError(errors) from exc
+
+
 class SyncPlacementView(_AjaxPermissionView):
     """Atomically sync rack + (optional) u_position + (optional) face for a device.
 
@@ -1864,7 +1956,7 @@ class SyncPlacementView(_AjaxPermissionView):
             update_fields.append("face")
 
         try:
-            device.full_clean()
+            _validate_device_placement(device)
         except ValidationError as exc:
             if hasattr(exc, "message_dict"):
                 msg = "; ".join(f"{f}: {', '.join(es)}" for f, es in exc.message_dict.items())
@@ -1886,7 +1978,14 @@ class SyncPlacementView(_AjaxPermissionView):
             parts.append(f"U{device.position}")
         if "face" in update_fields:
             parts.append(device.face)
-        return JsonResponse({"ok": True, "display": ", ".join(parts)})
+        display = ", ".join(parts)
+        if request.POST.get("row_number") and _wants_json(request):
+            return _preview_row_action_response(
+                request,
+                request.POST["row_number"],
+                display=display,
+            )
+        return JsonResponse({"ok": True, "display": display})
 
 
 # ---------------------------------------------------------------------------
@@ -1983,8 +2082,8 @@ class SaveResolutionView(_AjaxPermissionView):
     permission_required = "netbox_data_import.change_importprofile"
 
     @staticmethod
-    def _contact_candidate_values(request, profile_id, source_id):
-        """Return Contact candidates for one active preview row."""
+    def _contact_candidate_context(request, profile_id, source_id):
+        """Return Contact candidates and row state for one active preview row."""
         import_result = request.session.get("import_result") or {}
         result_rows = [
             row
@@ -2001,7 +2100,17 @@ class SaveResolutionView(_AjaxPermissionView):
         candidates = result_rows[0].get("extra_data", {}).get("candidate_values", {}).get("contact", {})
         if not isinstance(candidates, dict) or not candidates:
             raise ValidationError("The active preview row has no Contact candidate values.")
-        return {str(source_column): str(value) for source_column, value in candidates.items()}
+        return (
+            {str(source_column): str(value) for source_column, value in candidates.items()},
+            source_rows[0],
+            result_rows[0],
+        )
+
+    @classmethod
+    def _contact_candidate_values(cls, request, profile_id, source_id):
+        """Return Contact candidates for one active preview row."""
+        candidates, _source_row, _result_row = cls._contact_candidate_context(request, profile_id, source_id)
+        return candidates
 
     @classmethod
     def _validate_contact_candidate_resolution(cls, request, profile, source_id, resolved_fields):
@@ -2038,33 +2147,65 @@ class SaveResolutionView(_AjaxPermissionView):
                 ImportProfile.objects.restrict(request.user, "change"),
                 pk=profile_id,
             )
+            contact_context = None
             if source_column == "candidate:contact":
                 try:
-                    candidates = self._validate_contact_candidate_resolution(
-                        request,
-                        profile,
-                        source_id,
+                    candidates, source_row, result_row = self._contact_candidate_context(request, profile.pk, source_id)
+                    validate_contact_candidate_resolution(
                         resolved_fields,
+                        profile.primary_contact_lookup_field,
+                        candidates,
                     )
                 except ValidationError as exc:
                     messages.error(request, "; ".join(exc.messages))
                     return redirect(next_url)
                 original_value = json.dumps(candidates, sort_keys=True)
+                contact_context = (source_row, result_row)
             try:
-                allowed = _save_permission_scoped_object(
-                    request.user,
-                    SourceResolution,
-                    {"profile": profile, "source_id": source_id, "source_column": source_column},
-                    {
-                        "original_value": original_value or "",
-                        "resolved_fields": resolved_fields,
-                    },
-                )
+                with transaction.atomic():
+                    allowed = _save_permission_scoped_object(
+                        request.user,
+                        SourceResolution,
+                        {"profile": profile, "source_id": source_id, "source_column": source_column},
+                        {
+                            "original_value": original_value or "",
+                            "resolved_fields": resolved_fields,
+                        },
+                    )
+                    contact_updated = False
+                    if allowed and contact_context is not None:
+                        source_row, result_row = contact_context
+                        device_id = result_row.get("extra_data", {}).get("netbox_device_id")
+                        if device_id:
+                            from dcim.models import Device
+
+                            device = Device.objects.restrict(request.user, "change").filter(pk=device_id).first()
+                            if device is None:
+                                raise ObjectPermissionDenied("dcim.change_device")
+                            resolved_row = dict(source_row)
+                            resolved_row.update(resolved_fields)
+                            contact_review = PrimaryContactResolver.review(
+                                device,
+                                resolved_row,
+                                profile,
+                                request.user,
+                            )
+                            PrimaryContactResolver.apply(device, profile, contact_review, request.user)
+                            contact_updated = True
             except IntegrityError:
                 messages.error(request, "The resolution changed while this request was being processed. Try again.")
                 return redirect(next_url)
+            except ObjectPermissionDenied as exc:
+                messages.error(request, f"Permission denied: {exc}")
+                return redirect(next_url)
+            except ValidationError as exc:
+                messages.error(request, "; ".join(exc.messages))
+                return redirect(next_url)
             if allowed:
-                messages.success(request, "Resolution saved. Re-run the import to apply it.")
+                if contact_updated:
+                    messages.success(request, "Resolution saved and the linked Device Contact was updated.")
+                else:
+                    messages.success(request, "Resolution saved. Re-run the import to apply it.")
             else:
                 messages.error(request, "Permission denied: cannot create or change this resolution.")
         return redirect(next_url)

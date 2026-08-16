@@ -20,16 +20,21 @@ CANDIDATE_TARGET_CHOICES = [
     ("candidate:contact", "Candidate values: Contact fields"),
 ]
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
-CONTACT_RESOLUTION_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
+CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
+CONTACT_RESOLUTION_KEYS = CONTACT_RESOLUTION_REQUIRED_KEYS | frozenset({"contact_field_values", "contact_id"})
 
 
 def validate_contact_candidate_resolution(
     resolved_fields,
     lookup_field: str,
     available_source_columns,
-) -> dict[str, str]:
-    """Validate one saved Contact candidate resolution and return its field sources."""
-    if not isinstance(resolved_fields, dict) or set(resolved_fields) != CONTACT_RESOLUTION_KEYS:
+) -> dict:
+    """Validate and normalize one saved Contact candidate resolution."""
+    if (
+        not isinstance(resolved_fields, dict)
+        or not CONTACT_RESOLUTION_REQUIRED_KEYS <= set(resolved_fields)
+        or set(resolved_fields) - CONTACT_RESOLUTION_KEYS
+    ):
         raise ValidationError("The Contact candidate resolution has an invalid structure.")
     if resolved_fields.get("contact_resolution_applied") is not True:
         raise ValidationError("The Contact candidate resolution is not marked as applied.")
@@ -39,15 +44,43 @@ def validate_contact_candidate_resolution(
         raise ValidationError("The Contact candidate resolution contains an unknown field.")
     if any(not isinstance(source_column, str) or not source_column for source_column in field_sources.values()):
         raise ValidationError("Each resolved Contact field must select one source column.")
-    if field_sources and "name" not in field_sources:
-        raise ValidationError("Select a source column for the Contact name.")
-    if field_sources and lookup_field not in field_sources:
-        raise ValidationError(f"Select a source column for the Contact {lookup_field} lookup field.")
     missing_sources = set(field_sources.values()) - set(available_source_columns)
     if missing_sources:
         missing = sorted(missing_sources)[0]
         raise ValidationError(f"The source column '{missing}' has no candidate value in this row.")
-    return field_sources
+
+    field_values = resolved_fields.get("contact_field_values", {})
+    if not isinstance(field_values, dict) or set(field_values) - CONTACT_RESOLUTION_FIELDS:
+        raise ValidationError("The Contact candidate resolution contains an unknown literal field.")
+    if any(not isinstance(value, str) or not value.strip() for value in field_values.values()):
+        raise ValidationError("Each literal Contact field must contain text.")
+    overlap = set(field_sources) & set(field_values)
+    if overlap:
+        raise ValidationError(f"Select a source column or enter a value for Contact {sorted(overlap)[0]}, not both.")
+
+    contact_id = resolved_fields.get("contact_id")
+    if contact_id in ("", None):
+        contact_id = None
+    elif isinstance(contact_id, bool):
+        raise ValidationError("The selected Contact ID is invalid.")
+    else:
+        try:
+            contact_id = int(contact_id)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("The selected Contact ID is invalid.") from exc
+        if contact_id < 1:
+            raise ValidationError("The selected Contact ID is invalid.")
+
+    supplied_fields = set(field_sources) | set(field_values)
+    if supplied_fields and "name" not in supplied_fields:
+        raise ValidationError("Select a source column or enter a value for the Contact name.")
+    if supplied_fields and lookup_field not in supplied_fields:
+        raise ValidationError(f"Select a source column or enter a value for the Contact {lookup_field} lookup field.")
+    return {
+        "field_sources": field_sources,
+        "field_values": {field: value.strip() for field, value in field_values.items()},
+        "contact_id": contact_id,
+    }
 
 
 TARGET_FIELD_CHOICES = [

@@ -437,7 +437,7 @@
                 {% if row.extra_data.field_ignored %}
                   {% with ignored=row.extra_data.field_ignored %}
                   <br>
-                  <button type="button" class="badge bg-secondary ndi-diff-toggle mt-1"
+                  <button type="button" class="badge ndi-badge-ignored ndi-diff-toggle mt-1"
                           data-diff-target="diff-{{ row.row_number }}"
                           aria-controls="diff-{{ row.row_number }}"
                           aria-expanded="false"
@@ -719,6 +719,7 @@
                   {% if row.rack_name %}
                   <div class="mb-2">
                     <button type="button" class="btn btn-xs btn-outline-success ndi-sync-placement-btn"
+                            data-action-url="{% url 'plugins:netbox_data_import:sync_placement' %}"
                             data-device-id="{{ row.extra_data.netbox_device_id }}"
                             data-rack-name="{{ row.rack_name }}"
                             data-u-position="{{ row.extra_data.u_position|default:'' }}"
@@ -753,6 +754,7 @@
                         <td>
                           {% if field_name in syncable_fields %}
                           <button type="button" class="btn btn-xs btn-outline-primary ndi-sync-btn"
+                                  data-action-url="{% url 'plugins:netbox_data_import:sync_device_field' %}"
                                   data-device-id="{{ row.extra_data.netbox_device_id }}"
                                   data-field="{{ field_name }}"
                                   data-value="{{ vals.file }}"
@@ -765,7 +767,7 @@
                           <span class="text-muted small">(manual)</span>
                           {% endif %}
                           {% if row.source_id and field_name in reviewable_fields %}
-                          <form method="post" action="{% url 'plugins:netbox_data_import:ignore_field_difference' %}" class="d-inline ms-1">
+                          <form method="post" action="{% url 'plugins:netbox_data_import:ignore_field_difference' %}" class="d-inline ms-1 ndi-field-review-form">
                             {% csrf_token %}
                             <input type="hidden" name="profile_id" value="{{ profile_id }}">
                             <input type="hidden" name="row_number" value="{{ row.row_number }}">
@@ -788,7 +790,7 @@
                         </td>
                         <td class="text-muted">{{ vals.file|default:"—" }}</td>
                         <td>
-                          <form method="post" action="{% url 'plugins:netbox_data_import:unignore_field_difference' %}" class="d-inline">
+                          <form method="post" action="{% url 'plugins:netbox_data_import:unignore_field_difference' %}" class="d-inline ndi-field-review-form">
                             {% csrf_token %}
                             <input type="hidden" name="profile_id" value="{{ profile_id }}">
                             <input type="hidden" name="row_number" value="{{ row.row_number }}">
@@ -938,31 +940,46 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}"
-            id="contactCandidateForm" data-contact-lookup-field="{{ profile.primary_contact_lookup_field }}">
+            id="contactCandidateForm"
+            data-contact-lookup-field="{{ profile.primary_contact_lookup_field }}"
+            data-contact-lookup-url="{% url 'plugins:netbox_data_import:contact_lookup' %}">
         {% csrf_token %}
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
         <input type="hidden" name="source_id" id="contactCandidateSourceId">
         <input type="hidden" name="source_column" value="candidate:contact">
         <input type="hidden" name="original_value" id="contactCandidateOriginalValue">
         <input type="hidden" name="resolved_fields" id="contactCandidateResolvedFields">
+        <input type="hidden" id="contactCandidateContactId">
         <input type="hidden" name="next" value="{{ preview_url }}">
         <div class="modal-body">
           <p class="text-secondary small">
-            Choose a source column for each Contact field. You can use the same source column more than once.
+            Choose a source column or enter a value for each Contact field. You can also find an existing NetBox Contact.
           </p>
           <div class="form-check mb-3">
             <input class="form-check-input" type="checkbox" id="contactCandidateNone">
             <label class="form-check-label" for="contactCandidateNone">No contact for this row</label>
           </div>
           <div id="contactCandidateFields" class="row g-3">
+            <div class="col-12">
+              <div id="contactCandidateSuggestion" class="alert alert-info d-none mb-0" role="status"></div>
+            </div>
+            <div class="col-12">
+              <label class="form-label" for="contactCandidateExisting">Existing NetBox Contact</label>
+              <select class="form-select" id="contactCandidateExisting"
+                      placeholder="Type a name, email address, or phone number"></select>
+              <div class="form-text">Selecting a Contact copies its current details into the fields below.</div>
+            </div>
             <div class="col-md-4">
               <label class="form-label" for="contactCandidateName">Contact name</label>
-              <select class="form-select" id="contactCandidateName" required></select>
+              <select class="form-select" id="contactCandidateName"></select>
+              <input type="text" class="form-control mt-2" id="contactCandidateNameValue"
+                     placeholder="Or enter a contact name">
             </div>
             <div class="col-md-4">
               <label class="form-label" for="contactCandidateEmail">Email address</label>
-              <select class="form-select" id="contactCandidateEmail"
-                      {% if profile.primary_contact_lookup_field == 'email' %}required{% endif %}></select>
+              <select class="form-select" id="contactCandidateEmail"></select>
+              <input type="email" class="form-control mt-2" id="contactCandidateEmailValue"
+                     placeholder="Or enter an email address">
               {% if profile.primary_contact_lookup_field == 'email' %}
               <div class="form-text">Required because this profile matches Contacts by email.</div>
               {% endif %}
@@ -970,6 +987,8 @@
             <div class="col-md-4">
               <label class="form-label" for="contactCandidatePhone">Phone number</label>
               <select class="form-select" id="contactCandidatePhone"></select>
+              <input type="text" class="form-control mt-2" id="contactCandidatePhoneValue"
+                     placeholder="Or enter a phone number">
             </div>
           </div>
         </div>
@@ -988,6 +1007,7 @@
 {{ device_match_info|json_script:"ndi-device-match-info" }}
 {{ conflicts_by_row|json_script:"ndi-conflicts-by-row" }}
 {{ candidate_values_by_row|json_script:"ndi-candidate-values-by-row" }}
+{{ contact_suggestions_by_row|json_script:"ndi-contact-suggestions-by-row" }}
 {{ extra_columns_by_row|json_script:"ndi-extra-columns-by-row" }}
 {{ split_field_values_by_source_id|json_script:"ndi-split-field-values" }}
 <script>
@@ -2328,132 +2348,6 @@ document.addEventListener('click', function(e) {
   }
 });
 
-// Per-field sync via fetch
-document.addEventListener('click', function(e) {
-  const btn = e.target.closest('.ndi-sync-btn');
-  if (!btn) return;
-
-  const deviceId = btn.dataset.deviceId;
-  const field = btn.dataset.field;
-  const value = btn.dataset.value;
-  const profileId = btn.dataset.profileId;
-
-  btn.disabled = true;
-  btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i>';
-
-  const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
-  const body = new URLSearchParams({
-    device_id: deviceId,
-    field: field,
-    value: value,
-    profile_id: profileId,
-  });
-
-  fetch('{% url "plugins:netbox_data_import:sync_device_field" %}', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'X-CSRFToken': csrfToken,
-    },
-    body: body.toString(),
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (data.ok) {
-      const rowId = btn.dataset.rowId;
-      const fieldName = btn.dataset.field;
-      const fieldRow = document.getElementById(`diff-field-${rowId}-${fieldName}`);
-      if (fieldRow) {
-        const nbCell = fieldRow.querySelector('.ndi-diff-netbox-val');
-        if (nbCell) {
-          const synced = document.createElement('span');
-          synced.className = 'ndi-diff-synced';
-          synced.textContent = nbCell.textContent;
-          const updated = document.createElement('strong');
-          updated.textContent = data.display;
-          nbCell.textContent = '';
-          nbCell.appendChild(synced);
-          nbCell.appendChild(document.createTextNode(' '));
-          nbCell.appendChild(updated);
-        }
-      }
-      btn.innerHTML = '<i class="mdi mdi-check text-success"></i>';
-      btn.disabled = true;
-    } else {
-      btn.disabled = false;
-      btn.innerHTML = '<i class="mdi mdi-sync"></i>';
-      btn.title = data.error || 'Sync failed';
-      btn.classList.add('btn-danger');
-      btn.classList.remove('btn-outline-primary');
-    }
-  })
-  .catch(() => {
-    btn.disabled = false;
-    btn.innerHTML = '<i class="mdi mdi-sync"></i>';
-    btn.title = 'Network error — sync failed';
-    btn.classList.add('btn-danger');
-    btn.classList.remove('btn-outline-primary');
-  });
-});
-
-// Sync placement bundle (rack + position + face atomic)
-document.addEventListener('click', function(e) {
-  const btn = e.target.closest('.ndi-sync-placement-btn');
-  if (!btn) return;
-
-  const deviceId = btn.dataset.deviceId;
-  const rackName = btn.dataset.rackName;
-  const uPosition = btn.dataset.uPosition || '';
-  const face = btn.dataset.face || '';
-
-  const originalHTML = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Syncing...';
-
-  const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
-  const body = new URLSearchParams({
-    device_id: deviceId,
-    rack_name: rackName,
-    u_position: uPosition,
-    face: face,
-  });
-
-  fetch('{% url "plugins:netbox_data_import:sync_placement" %}', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'X-CSRFToken': csrfToken,
-    },
-    body: body.toString(),
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (data.ok) {
-      // Build DOM nodes (not innerHTML) so data.display cannot inject markup.
-      while (btn.firstChild) btn.removeChild(btn.firstChild);
-      const icon = document.createElement('i');
-      icon.className = 'mdi mdi-check';
-      btn.appendChild(icon);
-      btn.appendChild(document.createTextNode(' Synced: ' + (data.display || '')));
-      btn.classList.remove('btn-outline-success');
-      btn.classList.add('btn-success');
-    } else {
-      btn.disabled = false;
-      btn.innerHTML = originalHTML;
-      btn.title = data.error || 'Placement sync failed';
-      btn.classList.add('btn-danger');
-      btn.classList.remove('btn-outline-success');
-      alert('Placement sync failed: ' + (data.error || 'unknown error'));
-    }
-  })
-  .catch(() => {
-    btn.disabled = false;
-    btn.innerHTML = originalHTML;
-    btn.title = 'Network error — placement sync failed';
-    btn.classList.add('btn-danger');
-    btn.classList.remove('btn-outline-success');
-  });
-});
 </script>
 
 {# ===== Per-row sync confirmation modal ===== #}
@@ -2665,6 +2559,7 @@ document.addEventListener('click', function(e) {
 }());
 </script>
 <script src="{% static 'netbox_data_import/js/contact_candidate_modal.js' %}"></script>
+<script src="{% static 'netbox_data_import/js/preview_row_actions.js' %}"></script>
 <script>
 (function () {
   var CONFLICTS_BY_ROW = JSON.parse(

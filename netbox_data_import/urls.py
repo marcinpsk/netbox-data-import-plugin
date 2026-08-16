@@ -92,6 +92,7 @@ urlpatterns = [
     path("remove-extra-ip/", views.RemoveExtraIpView.as_view(), name="remove_extra_ip"),
     path("sync-device-field/", views.SyncDeviceFieldView.as_view(), name="sync_device_field"),
     path("sync-placement/", views.SyncPlacementView.as_view(), name="sync_placement"),
+    path("contact-lookup/", views.ContactLookupView.as_view(), name="contact_lookup"),
     # Save resolution (rerere)
     path("save-resolution/", views.SaveResolutionView.as_view(), name="save_resolution"),
     path("resolve-duplicate-name/", views.ResolveDuplicateNameView.as_view(), name="resolve_duplicate_name"),

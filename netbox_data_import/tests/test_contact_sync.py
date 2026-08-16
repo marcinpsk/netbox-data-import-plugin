@@ -23,7 +23,13 @@ from tenancy.models import Contact, ContactAssignment, ContactRole
 
 from netbox_data_import.engine import parse_file, reapply_saved_resolutions, run_import
 from netbox_data_import.jobs import ImportJobRunner
-from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
+from netbox_data_import.models import (
+    ClassRoleMapping,
+    ColumnMapping,
+    DeviceExistingMatch,
+    ImportProfile,
+    SourceResolution,
+)
 
 
 LOCAL_EXAMPLE_PATH = Path(__file__).resolve().parents[3] / "libre" / "example.xlsx"
@@ -552,6 +558,153 @@ class NativeContactSyncTest(TestCase):
         )
         self.assertEqual(resolution.resolved_fields["contact_field_sources"]["name"], "Contact")
         self.assertEqual(resolution.resolved_fields["contact_field_sources"]["email"], "Contact")
+
+    def test_linked_contact_resolution_applies_immediately_and_proposes_reuse(self):
+        """Saving a resolution updates its Device and suggests the Contact on another row."""
+        existing_contact = Contact.objects.create(
+            name="Existing Contact",
+            email="existing.contact@example.invalid",
+            phone="+1 202-555-0101",
+        )
+        second_device = Device.objects.create(
+            name="second-contact-test-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.device_role,
+        )
+        DeviceExistingMatch.objects.bulk_create(
+            [
+                DeviceExistingMatch(
+                    profile=self.profile,
+                    source_id="CONTACT-001",
+                    netbox_device_id=self.device.pk,
+                    device_name=self.device.name,
+                ),
+                DeviceExistingMatch(
+                    profile=self.profile,
+                    source_id="CONTACT-002",
+                    netbox_device_id=second_device.pk,
+                    device_name=second_device.name,
+                ),
+            ]
+        )
+        self.device.custom_field_data["data_import_source"]["extra"]["primary_contact"] = "not an email"
+        self.device.save(update_fields=["custom_field_data"])
+        first_row = self._row(
+            _candidate_values={
+                "contact": {
+                    "Owner": "Existing Contact",
+                    "Contact": "existing.contact@example.invalid",
+                    "Contact Number": "+1 202-555-0101",
+                }
+            }
+        )
+        second_row = self._row(
+            _row_number=3,
+            source_id="CONTACT-002",
+            device_name=second_device.name,
+            _candidate_values={
+                "contact": {
+                    "Owner": "Existing Contact",
+                    "Contact": "existing.contact@example.invalid",
+                }
+            },
+        )
+        user = get_user_model().objects.create_superuser(
+            username="linked-contact-resolution-user",
+            email="linked-contact-resolution@example.invalid",
+            password="testpass",
+        )
+        self.client.force_login(user)
+        preview = run_import([first_row, second_row], self.profile, {"site": self.site}, dry_run=True, user=user)
+        session = self.client.session
+        session["import_result"] = preview.to_session_dict()
+        session["import_rows"] = [first_row, second_row]
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "contact-candidates.xlsx",
+        }
+        session["import_preview_pending"] = True
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "CONTACT-001",
+                "source_column": "candidate:contact",
+                "original_value": "",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {},
+                        "contact_field_values": {
+                            "name": "Existing Contact",
+                            "email": "existing.contact@example.invalid",
+                            "phone": "+1 202-555-0101",
+                        },
+                        "contact_id": existing_contact.pk,
+                    }
+                ),
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        assignment = ContactAssignment.objects.get(
+            object_type=ContentType.objects.get_for_model(self.device),
+            object_id=self.device.pk,
+            role=self.contact_role,
+            priority="primary",
+        )
+        self.assertEqual(assignment.contact, existing_contact)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.custom_field_data["data_import_source"]["extra"], {"depth": 750})
+
+        preview_response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        second_result = next(row for row in preview_response.context["result"].rows if row.source_id == "CONTACT-002")
+        self.assertEqual(second_result.extra_data["contact_suggestion"]["id"], existing_contact.pk)
+        self.assertContains(preview_response, "Existing NetBox Contact")
+
+    def test_contact_lookup_finds_visible_contacts(self):
+        """The contact picker searches real NetBox Contacts."""
+        contact = Contact.objects.create(
+            name="Lookup Contact",
+            email="lookup.contact@example.invalid",
+            phone="+1 202-555-0102",
+        )
+        user = get_user_model().objects.create_superuser(
+            username="contact-lookup-user",
+            email="contact-lookup-user@example.invalid",
+            password="testpass",
+        )
+        self.client.force_login(user)
+
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:contact_lookup"),
+            {"q": "lookup.contact"},
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["results"],
+            [
+                {
+                    "id": contact.pk,
+                    "name": contact.name,
+                    "email": contact.email,
+                    "phone": contact.phone,
+                }
+            ],
+        )
 
     def test_contact_resolution_rejects_a_source_outside_the_row_candidates(self):
         """The resolution boundary rejects source columns that the row did not provide."""

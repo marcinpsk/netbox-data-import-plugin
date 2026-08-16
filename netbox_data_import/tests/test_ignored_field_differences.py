@@ -149,6 +149,52 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.assertContains(preview_response, "1 field(s) ignored")
         self.assertContains(preview_response, 'data-diff-target="diff-1"')
         self.assertContains(preview_response, 'aria-controls="diff-1"')
+        self.assertContains(
+            preview_response,
+            'class="badge ndi-badge-ignored ndi-diff-toggle mt-1"',
+        )
+
+    def test_ignore_returns_a_fresh_preview_row_for_javascript_callers(self):
+        """Ignore updates one preview row without navigating away from the page."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            {
+                "profile_id": self.profile.pk,
+                "row_number": 1,
+                "target_field": "u_position",
+            },
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["row_number"], 1)
+        self.assertIn('id="row-1"', payload["row_html"])
+        self.assertIn("1 field(s) ignored", payload["row_html"])
+        self.assertIn('id="ignored-field-1-u_position"', payload["row_html"])
+        self.assertNotIn('id="diff-field-1-u_position"', payload["row_html"])
+
+    def test_placement_sync_returns_recalculated_field_details(self):
+        """Placement sync returns a row whose synchronized differences are gone."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            {
+                "device_id": self.device.pk,
+                "rack_name": self.rack.name,
+                "u_position": "7",
+                "face": "front",
+                "row_number": 1,
+            },
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["row_number"], 1)
+        self.assertIn('id="row-1"', payload["row_html"])
+        self.assertNotIn('id="diff-field-1-u_position"', payload["row_html"])
 
     def test_informational_differences_can_be_ignored(self):
         """Device name and U height differences can move to the ignored section."""

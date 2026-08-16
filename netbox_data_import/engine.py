@@ -21,13 +21,17 @@ from typing import Literal
 from io import BytesIO
 
 from django.core.exceptions import ValidationError
-from django.core.validators import validate_email
-from django.db import DatabaseError, IntegrityError, connection, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.utils.text import slugify
 import openpyxl
 
+from .contact_resolution import ContactResolutionRequired, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
-from .models import CANDIDATE_TARGET_PREFIX, ImportProfile, validate_contact_candidate_resolution
+from .models import CANDIDATE_TARGET_PREFIX, ImportProfile
+from .object_permissions import (
+    ObjectPermissionDenied as _ObjectPermissionDenied,
+    enforce_saved_object_permission as _enforce_saved_object_permission,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,26 +40,11 @@ class ParseError(Exception):
     """Raised when the source file cannot be parsed."""
 
 
-class _ObjectPermissionDenied(Exception):
-    """Raised to roll back a write outside an object permission constraint."""
-
-
 class _DeviceBindingConflict(IntegrityError):
     """Raised when one source binding would replace another device identity."""
 
 
-class _CandidateResolutionRequired(ValidationError):
-    """Raised when one row has candidate values but no saved row resolution."""
-
-    def __init__(self, candidate_target: str, candidate_values: dict[str, str], message: str | None = None):
-        self.candidate_target = candidate_target
-        self.candidate_values = candidate_values
-        super().__init__(
-            {
-                candidate_target: message
-                or (f"Select which candidate values supply {candidate_target} fields, or select no {candidate_target}.")
-            }
-        )
+_CandidateResolutionRequired = ContactResolutionRequired
 
 
 # ---------------------------------------------------------------------------
@@ -722,12 +711,6 @@ def _perm_denied_row(perm: str, row: dict, name: str, object_type: str) -> RowRe
         object_type=object_type,
         detail=f"Permission denied: {perm}",
     )
-
-
-def _enforce_saved_object_permission(obj, user, action):
-    """Reject a saved object whose final state is outside the user's permission scope."""
-    if user is not None and not obj.__class__.objects.restrict(user, action).filter(pk=obj.pk).exists():
-        raise _ObjectPermissionDenied(f"{obj._meta.app_label}.{action}_{obj._meta.model_name}")
 
 
 def _ensure_manufacturer(
@@ -2569,21 +2552,22 @@ def _preview_device_row(  # noqa: C901
         identity_conflict = claim_conflict
 
     primary_contact_plan = None
+    contact_suggestion = None
     if action in ("create", "update"):
         try:
-            primary_contact, unused_extra_columns = _primary_contact_sync_data(
-                matched_device, row, review_ctx.profile, review_ctx.candidate_source_columns
-            )
-            primary_contact_plan = _plan_primary_contact_sync(
+            contact_review = PrimaryContactResolver.review(
                 matched_device,
+                row,
                 review_ctx.profile,
-                primary_contact,
                 ctx.user,
+                candidate_source_columns=review_ctx.candidate_source_columns,
             )
+            primary_contact_plan = contact_review.plan
+            contact_suggestion = contact_review.suggestion
         except _ObjectPermissionDenied as exc:
             return _perm_denied_row(str(exc), row, device_name, "device")
         except ValidationError as exc:
-            return _rack_position_error_row(
+            error_row = _rack_position_error_row(
                 row,
                 source_id,
                 device_name,
@@ -2595,6 +2579,11 @@ def _preview_device_row(  # noqa: C901
                 exc,
                 action,
             )
+            if matched_device is not None:
+                error_row.netbox_url = matched_device.get_absolute_url()
+                error_row.extra_data["netbox_device_id"] = matched_device.pk
+                error_row.extra_data["_identity_state"] = _device_identity_state(matched_device)
+            return error_row
 
     return RowResult(
         row_number=row["_row_number"],
@@ -2631,6 +2620,7 @@ def _preview_device_row(  # noqa: C901
             **({"field_non_writable": field_non_writable} if field_non_writable else {}),
             **({"field_review_snapshots": field_snapshots} if field_snapshots else {}),
             **({"primary_contact_plan": primary_contact_plan} if primary_contact_plan is not None else {}),
+            **({"contact_suggestion": contact_suggestion} if contact_suggestion is not None else {}),
             **({"identity_conflict": identity_conflict} if identity_conflict else {}),
             **({"netbox_device_id": matched_device.pk} if matched_device is not None and action != "skip" else {}),
             **({"_identity_state": _device_identity_state(matched_device)} if matched_device is not None else {}),
@@ -2689,6 +2679,11 @@ def _rack_position_error_row(row, source_id, device_name, make, model, asset_tag
             **(
                 {"candidate_values": {exc.candidate_target: exc.candidate_values}}
                 if isinstance(exc, _CandidateResolutionRequired)
+                else {}
+            ),
+            **(
+                {"contact_suggestion": exc.suggestion}
+                if isinstance(exc, _CandidateResolutionRequired) and exc.suggestion is not None
                 else {}
             ),
         },
@@ -3026,8 +3021,12 @@ def _write_device_row(  # noqa: C901
             device.tenant = write_ctx.tenant
             ip_json = {}
             try:
-                primary_contact, extra_columns = _primary_contact_sync_data(
-                    device, row, ctx.profile, ctx.candidate_source_columns
+                contact_review = PrimaryContactResolver.review(
+                    device,
+                    row,
+                    ctx.profile,
+                    ctx.user,
+                    candidate_source_columns=ctx.candidate_source_columns,
                 )
                 with transaction.atomic():
                     device.full_clean()
@@ -3037,8 +3036,14 @@ def _write_device_row(  # noqa: C901
                         assigned = _assign_ip_to_device(device, ip_field, ip_str)
                         if not assigned:
                             ip_json[ip_field] = ip_str
-                    _sync_primary_contact(device, ctx.profile, primary_contact, ctx.user)
-                    _store_source_id(device, ctx.profile, source_id, extra_columns, ip_json or None)
+                    PrimaryContactResolver.apply(device, ctx.profile, contact_review, ctx.user)
+                    _store_source_id(
+                        device,
+                        ctx.profile,
+                        source_id,
+                        contact_review.extra_columns,
+                        ip_json or None,
+                    )
                     _enforce_saved_object_permission(device, ctx.user, "change")
             except _ObjectPermissionDenied as exc:
                 return _perm_denied_row(str(exc) or "dcim.change_device", row, device_name, "device")
@@ -3101,8 +3106,12 @@ def _write_device_row(  # noqa: C901
         return _perm_denied_row("dcim.add_device", row, device_name, "device")
     ip_json = {ip_field: ip_str for ip_field, ip_str in (ip_fields or {}).items()}
     try:
-        primary_contact, extra_columns = _primary_contact_sync_data(
-            None, row, ctx.profile, ctx.candidate_source_columns
+        contact_review = PrimaryContactResolver.review(
+            None,
+            row,
+            ctx.profile,
+            ctx.user,
+            candidate_source_columns=ctx.candidate_source_columns,
         )
         with transaction.atomic():
             device = Device(
@@ -3123,8 +3132,14 @@ def _write_device_row(  # noqa: C901
             device.full_clean()
             device.save()
             _bind_device_source(ctx.profile, source_id, device, asset_tag)
-            _sync_primary_contact(device, ctx.profile, primary_contact, ctx.user)
-            _store_source_id(device, ctx.profile, source_id, extra_columns, ip_json or None)
+            PrimaryContactResolver.apply(device, ctx.profile, contact_review, ctx.user)
+            _store_source_id(
+                device,
+                ctx.profile,
+                source_id,
+                contact_review.extra_columns,
+                ip_json or None,
+            )
             _enforce_saved_object_permission(device, ctx.user, "add")
     except _ObjectPermissionDenied as exc:
         return _perm_denied_row(str(exc) or "dcim.add_device", row, device_name, "device")
@@ -3874,7 +3889,7 @@ def run_import(
     else:
         with transaction.atomic():
             if profile.primary_contact_role_id is not None:
-                _lock_contact_enabled_import()
+                PrimaryContactResolver.lock_imports()
             _pass1_ensure_types(rows, ctx, class_role_map)
             _pass2_process_racks(rows, ctx, class_role_map)
             _pass3_process_devices(rows, ctx, class_role_map)
@@ -3898,254 +3913,6 @@ def _build_candidate_source_columns(profile: ImportProfile) -> dict[str, frozens
             target = mapping.target_field.removeprefix(CANDIDATE_TARGET_PREFIX)
             grouped.setdefault(target, set()).add(mapping.source_column)
     return {target: frozenset(source_columns) for target, source_columns in grouped.items()}
-
-
-def _contact_candidate_values(
-    row: dict, candidate_source_columns: dict[str, frozenset[str]], extra_columns: dict
-) -> dict[str, str]:
-    """Collect configured Contact candidate values and remove them from extra JSON."""
-    row_values = row.get("_candidate_values", {}).get("contact", {})
-    candidate_values = (
-        {str(source_column): _str_val(value) for source_column, value in row_values.items() if _str_val(value)}
-        if isinstance(row_values, dict)
-        else {}
-    )
-    for source_column in candidate_source_columns.get("contact", ()):
-        value = _str_val(extra_columns.pop(source_column, ""))
-        if value and source_column not in candidate_values:
-            candidate_values[source_column] = value
-    return candidate_values
-
-
-def _resolved_contact_candidate_values(
-    row: dict,
-    candidate_values: dict[str, str],
-    lookup_field: str,
-) -> dict[str, str] | None:
-    """Apply one saved row resolution to Contact candidate values."""
-    try:
-        field_sources = validate_contact_candidate_resolution(
-            {
-                "contact_resolution_applied": row.get("contact_resolution_applied"),
-                "contact_field_sources": row.get("contact_field_sources"),
-            },
-            lookup_field,
-            candidate_values,
-        )
-    except ValidationError as exc:
-        raise _CandidateResolutionRequired("contact", candidate_values, "; ".join(exc.messages)) from exc
-
-    contact_values = {}
-    for contact_field in ("name", "email", "phone"):
-        source_column = _str_val(field_sources.get(contact_field))
-        if not source_column:
-            continue
-        if source_column not in candidate_values:
-            raise _CandidateResolutionRequired(
-                "contact",
-                candidate_values,
-                f"The selected source column '{source_column}' has no value in this row. Select another source.",
-            )
-        contact_values[contact_field] = candidate_values[source_column]
-
-    return contact_values or None
-
-
-def _primary_contact_sync_data(
-    obj,
-    row: dict,
-    profile: ImportProfile,
-    candidate_source_columns: dict[str, frozenset[str]],
-) -> tuple[dict[str, str] | None, dict]:
-    """Resolve native Contact fields and return extra data that must remain in JSON."""
-    extra_columns = {}
-    if obj is not None:
-        source_data = getattr(obj, "custom_field_data", {}).get("data_import_source", {})
-        if isinstance(source_data, dict) and isinstance(source_data.get("extra"), dict):
-            extra_columns.update(source_data["extra"])
-    row_extra = row.get("_extra_columns")
-    if isinstance(row_extra, dict):
-        extra_columns.update(row_extra)
-
-    primary_contact = _str_val(row.get("primary_contact")) or _str_val(extra_columns.get("primary_contact"))
-    extra_columns.pop("primary_contact", None)
-
-    candidate_values = _contact_candidate_values(row, candidate_source_columns, extra_columns)
-
-    if primary_contact:
-        return {
-            "name": primary_contact,
-            profile.primary_contact_lookup_field: primary_contact,
-        }, extra_columns
-    if not candidate_values:
-        return None, extra_columns
-    lookup_field = profile.primary_contact_lookup_field
-    contact_values = _resolved_contact_candidate_values(row, candidate_values, lookup_field)
-    if not contact_values:
-        return None, extra_columns
-
-    from tenancy.models import Contact
-
-    try:
-        Contact(**contact_values).full_clean()
-    except ValidationError as exc:
-        raise _CandidateResolutionRequired("contact", candidate_values, "; ".join(exc.messages)) from exc
-    return contact_values, extra_columns
-
-
-def _plan_primary_contact_assignment(obj, profile, contact, user, lock):
-    """Validate assignment state and return the affected assignments and action."""
-    from django.contrib.contenttypes.models import ContentType
-    from tenancy.models import ContactAssignment
-
-    if obj is None:
-        if user is not None and not user.has_perm("tenancy.add_contactassignment"):
-            raise _ObjectPermissionDenied("tenancy.add_contactassignment")
-        return None, None, "create"
-
-    assignment_scope = {
-        "object_type": ContentType.objects.get_for_model(obj),
-        "object_id": obj.pk,
-        "role": profile.primary_contact_role,
-    }
-    assignments = ContactAssignment.objects.select_for_update() if lock else ContactAssignment.objects
-    primary_assignments = list(assignments.filter(**assignment_scope, priority="primary")[:2])
-    if len(primary_assignments) > 1:
-        raise ValidationError(
-            {"primary_contact": "More than one primary assignment exists for the selected contact role."}
-        )
-    primary_assignment = primary_assignments[0] if primary_assignments else None
-    assignment = assignments.filter(**assignment_scope, contact=contact).first() if contact.pk is not None else None
-
-    if primary_assignment is not None and primary_assignment.contact_id != contact.pk:
-        _enforce_saved_object_permission(primary_assignment, user, "change")
-        if assignment is None:
-            return primary_assignment, None, "replace"
-        _enforce_saved_object_permission(assignment, user, "change")
-        return primary_assignment, assignment, "demote_and_promote"
-    if assignment is None:
-        if user is not None and not user.has_perm("tenancy.add_contactassignment"):
-            raise _ObjectPermissionDenied("tenancy.add_contactassignment")
-        return primary_assignment, None, "create"
-    if assignment.priority != "primary":
-        _enforce_saved_object_permission(assignment, user, "change")
-        return primary_assignment, assignment, "promote"
-    return primary_assignment, assignment, "unchanged"
-
-
-def _plan_primary_contact_sync(
-    obj, profile: ImportProfile, contact_values: dict[str, str] | None, user=None, lock=False
-) -> dict | None:
-    """Validate one contact sync and return its serializable write plan."""
-    if not contact_values:
-        return None
-    if profile.primary_contact_role_id is None:
-        raise ValidationError({"primary_contact": "Select a primary contact role on the import profile."})
-
-    from tenancy.models import Contact
-
-    lookup_field = profile.primary_contact_lookup_field
-    value = _str_val(contact_values.get(lookup_field))
-    if not value:
-        raise ValidationError(
-            {"primary_contact": f"Select a source value for the Contact {lookup_field} lookup field."}
-        )
-    if lookup_field == "email":
-        validate_email(value)
-    proposed_contact = Contact(**contact_values)
-    proposed_contact.full_clean()
-    lookup = {f"{lookup_field}__iexact": value}
-    contact_queryset = Contact.objects.select_for_update() if lock else Contact.objects
-    contacts = list(contact_queryset.filter(**lookup)[:2])
-    if len(contacts) > 1:
-        raise ValidationError({"primary_contact": f"More than one contact has the {lookup_field} value '{value}'."})
-    if contacts:
-        contact = contacts[0]
-        if user is not None and not Contact.objects.restrict(user, "view").filter(pk=contact.pk).exists():
-            raise _ObjectPermissionDenied("tenancy.view_contact")
-    else:
-        if user is not None and not user.has_perm("tenancy.add_contact"):
-            raise _ObjectPermissionDenied("tenancy.add_contact")
-        contact = proposed_contact
-
-    primary_assignment, assignment, assignment_action = _plan_primary_contact_assignment(
-        obj,
-        profile,
-        contact,
-        user,
-        lock,
-    )
-
-    return {
-        "lookup_field": lookup_field,
-        "value": value,
-        "contact_values": contact_values,
-        "role_id": profile.primary_contact_role_id,
-        "contact_id": contact.pk,
-        "contact_action": "reuse" if contact.pk is not None else "create",
-        "primary_assignment_id": primary_assignment.pk if primary_assignment is not None else None,
-        "assignment_id": assignment.pk if assignment is not None else None,
-        "assignment_action": assignment_action,
-    }
-
-
-def _lock_contact_enabled_import() -> None:
-    """Serialize imports that can write native Contacts."""
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ["netbox_data_import.contact_sync"])
-
-
-def _sync_primary_contact(obj, profile: ImportProfile, contact_values: dict[str, str] | None, user=None) -> None:
-    """Apply the validated native Contact write plan."""
-    if not contact_values:
-        return
-
-    from django.contrib.contenttypes.models import ContentType
-    from tenancy.models import Contact, ContactAssignment
-
-    with transaction.atomic():
-        plan = _plan_primary_contact_sync(obj, profile, contact_values, user, lock=True)
-        if plan["contact_id"] is None:
-            contact = Contact(**plan["contact_values"])
-            contact.full_clean()
-            contact.save()
-            _enforce_saved_object_permission(contact, user, "add")
-        else:
-            contact = Contact.objects.get(pk=plan["contact_id"])
-
-        assignment_scope = {
-            "object_type": ContentType.objects.get_for_model(obj),
-            "object_id": obj.pk,
-            "role": profile.primary_contact_role,
-        }
-        action = plan["assignment_action"]
-        assignment = None
-        if action == "replace":
-            assignment = ContactAssignment.objects.get(pk=plan["primary_assignment_id"])
-            assignment.contact = contact
-            assignment.full_clean()
-            assignment.save(update_fields=["contact"])
-            _enforce_saved_object_permission(assignment, user, "change")
-        elif action == "demote_and_promote":
-            previous_assignment = ContactAssignment.objects.get(pk=plan["primary_assignment_id"])
-            previous_assignment.priority = "secondary"
-            previous_assignment.full_clean()
-            previous_assignment.save(update_fields=["priority"])
-            _enforce_saved_object_permission(previous_assignment, user, "change")
-            assignment = ContactAssignment.objects.get(pk=plan["assignment_id"])
-        elif action in ("promote", "unchanged"):
-            assignment = ContactAssignment.objects.get(pk=plan["assignment_id"])
-
-        if assignment is None:
-            assignment = ContactAssignment(contact=contact, priority="primary", **assignment_scope)
-            assignment.full_clean()
-            assignment.save()
-            _enforce_saved_object_permission(assignment, user, "add")
-        elif assignment.priority != "primary":
-            assignment.priority = "primary"
-            assignment.full_clean()
-            assignment.save(update_fields=["priority"])
-            _enforce_saved_object_permission(assignment, user, "change")
 
 
 def _store_source_id(

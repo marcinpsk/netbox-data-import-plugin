@@ -4029,6 +4029,31 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertEqual(self.device_no_loc.position, 5)
         self.assertEqual(self.device_no_loc.face, "front")
 
+    def test_placement_ignores_unrelated_invalid_oob_assignment(self):
+        """An existing invalid OOB pointer does not block a placement-only update."""
+        from ipam.models import IPAddress
+
+        oob_ip = IPAddress.objects.create(address="198.18.0.1/24")
+        self.device_no_loc.oob_ip = oob_ip
+        self.device_no_loc.save(update_fields=["oob_ip"])
+
+        response = self.client.post(
+            self.placement_url,
+            {
+                "device_id": self.device_no_loc.pk,
+                "rack_name": "R1",
+                "u_position": "5",
+                "face": "front",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+        self.assertEqual(self.device_no_loc.position, 5)
+        self.assertEqual(self.device_no_loc.face, "front")
+
     def test_placement_rack_only(self):
         """Placement with no position/face only sets the rack, leaving existing position/face intact."""
         # Pre-seed: device already placed in the rack with a known position and face.

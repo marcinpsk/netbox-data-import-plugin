@@ -7,7 +7,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:browser": "playwright test netbox_data_import/tests/browser/contact_candidate_modal.spec.js"
+    "test:browser": "playwright test netbox_data_import/tests/browser"
   },
   "engines": {
     "node": "^24.15.0 || >=26.0.0"

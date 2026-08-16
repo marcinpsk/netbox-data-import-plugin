@@ -29,24 +29,41 @@ const candidates = {
   },
 };
 
+const contactSuggestions = {
+  "first-row": {
+    id: 41,
+    name: "Existing First Contact",
+    email: "first@example.invalid",
+    phone: "+1 202-555-0103",
+  },
+};
+
 function addPreviewFixture(resolutions = {}) {
   document.body.innerHTML = `
     <div id="contactCandidateModal">
-      <form id="contactCandidateForm" data-contact-lookup-field="email">
+      <form id="contactCandidateForm" data-contact-lookup-field="email" data-contact-lookup-url="/contact-lookup/">
         <input type="hidden" id="contactCandidateSourceId">
         <input type="hidden" id="contactCandidateOriginalValue">
         <input type="hidden" id="contactCandidateResolvedFields">
+        <input type="hidden" id="contactCandidateContactId">
         <input type="checkbox" id="contactCandidateNone">
         <div id="contactCandidateFields">
-          <select id="contactCandidateName" required></select>
-          <select id="contactCandidateEmail" required></select>
+          <div id="contactCandidateSuggestion" class="d-none"></div>
+          <select id="contactCandidateExisting"></select>
+          <select id="contactCandidateName"></select>
+          <input id="contactCandidateNameValue">
+          <select id="contactCandidateEmail"></select>
+          <input id="contactCandidateEmailValue">
           <select id="contactCandidatePhone"></select>
+          <input id="contactCandidatePhoneValue">
         </div>
       </form>
     </div>
     <script id="ndi-candidate-values-by-row" type="application/json">${JSON.stringify(candidates)}</script>
+    <script id="ndi-contact-suggestions-by-row" type="application/json">${JSON.stringify(contactSuggestions)}</script>
   `;
   window.EXISTING_RESOLUTIONS = resolutions;
+  window.TomSelect = TomSelect;
   for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
     new TomSelect(document.getElementById(id), { create: false });
   }
@@ -127,5 +144,59 @@ describe("contact candidate modal", () => {
       expect(select.disabled).toBe(false);
       expect(select.tomselect.isDisabled).toBe(false);
     }
+  });
+
+  it("saves typed Contact details when no source column supplies them", () => {
+    addPreviewFixture();
+    openRow("second-row", "source-second");
+    document.getElementById("contactCandidateNameValue").value = "Typed Contact";
+    document.getElementById("contactCandidateEmailValue").value = "typed@example.invalid";
+    document.getElementById("contactCandidatePhoneValue").value = "+1 202-555-0104";
+
+    document.getElementById("contactCandidateForm").dispatchEvent(new Event("submit", { cancelable: true }));
+
+    expect(JSON.parse(document.getElementById("contactCandidateResolvedFields").value)).toEqual({
+      contact_resolution_applied: true,
+      contact_field_sources: {},
+      contact_field_values: {
+        name: "Typed Contact",
+        email: "typed@example.invalid",
+        phone: "+1 202-555-0104",
+      },
+      contact_id: null,
+    });
+  });
+
+  it("offers the matched NetBox Contact and copies its current details", () => {
+    addPreviewFixture();
+    openRow("first-row", "source-first");
+    const existing = document.getElementById("contactCandidateExisting");
+
+    expect(existing.tomselect.options["41"].email).toBe("first@example.invalid");
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+    existing.tomselect.setValue("41");
+
+    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
+    expect(document.getElementById("contactCandidateNameValue").value).toBe("Existing First Contact");
+    expect(document.getElementById("contactCandidateEmailValue").value).toBe("first@example.invalid");
+    expect(document.getElementById("contactCandidatePhoneValue").value).toBe("+1 202-555-0103");
+  });
+
+  it("submits no Contact after an existing Contact was selected", () => {
+    addPreviewFixture();
+    openRow("first-row", "source-first");
+    document.getElementById("contactCandidateExisting").tomselect.setValue("41");
+    const checkbox = document.getElementById("contactCandidateNone");
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+
+    document.getElementById("contactCandidateForm").dispatchEvent(new Event("submit", { cancelable: true }));
+
+    expect(JSON.parse(document.getElementById("contactCandidateResolvedFields").value)).toEqual({
+      contact_resolution_applied: true,
+      contact_field_sources: {},
+      contact_field_values: {},
+      contact_id: null,
+    });
   });
 });
