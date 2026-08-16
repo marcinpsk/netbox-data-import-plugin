@@ -5,6 +5,8 @@
 from pathlib import Path
 from unittest import TestCase
 
+import yaml
+
 
 class NetBoxMainWorkflowTest(TestCase):
     """Keep the NetBox main canary in validation mode."""
@@ -46,5 +48,7 @@ class NetBoxMainWorkflowTest(TestCase):
     def test_javascript_workflow_does_not_persist_checkout_credentials(self):
         """Do not expose the workflow token to pull-request JavaScript."""
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "js-test.yaml"
+        steps = yaml.safe_load(workflow.read_text())["jobs"]["test-js"]["steps"]
+        checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
 
-        self.assertIn("persist-credentials: false", workflow.read_text())
+        self.assertIs(checkout.get("with", {}).get("persist-credentials"), False)
