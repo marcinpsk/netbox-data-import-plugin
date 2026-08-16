@@ -13,9 +13,11 @@ build/
 .venv/
 venv/
 .env
+node_modules/
 
 # Testing / coverage
 .pytest_cache/
+test-results/
 .tox/
 .nox/
 .coverage

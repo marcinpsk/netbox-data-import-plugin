@@ -12,6 +12,8 @@ path = [
     "netbox_data_import/migrations/**",
     "netbox_data_import/tests/fixtures/**",
     ".gitignore",
+    "package.json",
+    "package-lock.json",
     ".envrc",
     "uv.lock",
     ".devcontainer/devcontainer.json",
