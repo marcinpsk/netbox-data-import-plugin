@@ -125,20 +125,13 @@ def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=
         return allowed
 
 
-class _FieldReviewBindingRejected(Exception):
-    """Abort a field-review transaction without leaving a partial device link."""
-
-
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
     """Persist the confirmed source-to-device identity for a field review."""
     existing_match = (
         DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
     )
     if existing_match is not None and existing_match.netbox_device_id != device.pk:
-        return (
-            False,
-            f"Source '{source_id}' is already linked to device #{existing_match.netbox_device_id}.",
-        )
+        return False, "conflict"
     conflicting_match = (
         DeviceExistingMatch.objects.select_for_update()
         .filter(profile=profile, netbox_device_id=device.pk)
@@ -146,10 +139,7 @@ def _ensure_field_review_device_match(user, profile, source_id, device, source_a
         .first()
     )
     if conflicting_match is not None:
-        return (
-            False,
-            f"Device '{device.name}' is already linked to source '{conflicting_match.source_id}'.",
-        )
+        return False, "conflict"
     if existing_match is not None and existing_match.netbox_device_id == device.pk:
         return True, ""
     allowed = _save_permission_scoped_object(
@@ -163,7 +153,7 @@ def _ensure_field_review_device_match(user, profile, source_id, device, source_a
         },
     )
     if not allowed:
-        return False, "Permission denied: cannot persist the source-to-device field-review match."
+        return False, "permission"
     return True, ""
 
 
@@ -1650,7 +1640,12 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
                     engine._str_val(row.extra_data.get("asset_tag"))[:50],
                 )
                 if not binding_allowed:
-                    raise _FieldReviewBindingRejected(binding_error)
+                    message = (
+                        "Permission denied: cannot persist the source-to-device field-review match."
+                        if binding_error == "permission"
+                        else "The source row or device is already linked elsewhere."
+                    )
+                    return _preview_action_error(request, next_url, message)
                 allowed = _save_permission_scoped_object(
                     request.user,
                     IgnoredFieldDifference,
@@ -1658,9 +1653,11 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
                     defaults,
                 )
                 if not allowed:
-                    raise _FieldReviewBindingRejected("Permission denied: cannot create or change this field review.")
-        except _FieldReviewBindingRejected as exc:
-            return _preview_action_error(request, next_url, str(exc))
+                    return _preview_action_error(
+                        request,
+                        next_url,
+                        "Permission denied: cannot create or change this field review.",
+                    )
         except IntegrityError:
             return _preview_action_error(
                 request,
@@ -1739,10 +1736,13 @@ class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
                     engine._str_val(row.extra_data.get("asset_tag"))[:50],
                 )
                 if not binding_allowed:
-                    raise _FieldReviewBindingRejected(binding_error)
+                    message = (
+                        "Permission denied: cannot persist the source-to-device field-review match."
+                        if binding_error == "permission"
+                        else "The source row or device is already linked elsewhere."
+                    )
+                    return _preview_action_error(request, next_url, message)
                 record.delete()
-        except _FieldReviewBindingRejected as exc:
-            return _preview_action_error(request, next_url, str(exc))
         except IntegrityError:
             return _preview_action_error(
                 request,

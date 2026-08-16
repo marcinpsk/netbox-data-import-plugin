@@ -362,7 +362,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.assertIn("already linked", response.json()["error"])
 
     def test_ignore_rejects_a_device_linked_to_another_source(self):
-        """A field review cannot claim a Device owned by another source row."""
+        """A field review rejects a claimed Device without exposing the other source."""
         DeviceExistingMatch.objects.filter(profile=self.profile, source_id="FIELD-REVIEW-ROW").delete()
         DeviceExistingMatch.objects.create(
             profile=self.profile,
@@ -382,7 +382,8 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         )
 
         self.assertEqual(response.status_code, 409)
-        self.assertIn("already linked to source", response.json()["error"])
+        self.assertIn("already linked", response.json()["error"])
+        self.assertNotIn("OTHER-SOURCE-ROW", response.json()["error"])
         self.assertFalse(IgnoredFieldDifference.objects.exists())
 
     def test_ignore_rejects_a_stale_preview_revision(self):
