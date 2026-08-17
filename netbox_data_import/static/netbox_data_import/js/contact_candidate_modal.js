@@ -73,12 +73,13 @@
       plugins: ['remove_button'],
       maxItems: 1,
       load: function (query, callback) {
-        if (query.length < 2) {
+        var lookupUrl = form.dataset.contactLookupUrl;
+        if (query.length < 2 || !lookupUrl) {
           callback();
           return;
         }
-        var separator = form.dataset.contactLookupUrl.includes('?') ? '&' : '?';
-        fetch(form.dataset.contactLookupUrl + separator + 'q=' + encodeURIComponent(query), {
+        var separator = lookupUrl.includes('?') ? '&' : '?';
+        fetch(lookupUrl + separator + 'q=' + encodeURIComponent(query), {
           headers: {'Accept': 'application/json'},
         })
           .then(function (response) { return response.json(); })

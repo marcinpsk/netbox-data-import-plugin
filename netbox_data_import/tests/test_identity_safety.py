@@ -1571,6 +1571,23 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 self.assertEqual([item.action for item in device_rows], ["error", "error"])
                 self.assertTrue(all(item.extra_data.get("identity_conflict") == conflict_kind for item in device_rows))
 
+    def test_rack_view_sorts_whole_and_half_u_positions_together(self):
+        """A half-U position stays numeric so the rack view can sort the whole group."""
+        rows = [
+            self._device_row(2, "HALF-U-A", "half-u-device-a", self.rack_a, "7.5"),
+            self._device_row(3, "HALF-U-B", "half-u-device-b", self.rack_a, 1),
+        ]
+
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [item for item in result.rows if item.object_type == "device"]
+        positions = [item.extra_data.get("u_position") for item in device_rows]
+
+        self.assertTrue(all(isinstance(value, (int, float)) for value in positions), positions)
+        self.assertEqual(
+            [item.name for item in result.rack_groups[self.rack_a.name]["devices"]],
+            ["half-u-device-b", "half-u-device-a"],
+        )
+
     def test_none_like_source_ids_are_not_persisted_as_bindings(self):
         rows = [
             self._device_row(2, "N/A", "none-like-source-a", self.rack_a, 1),

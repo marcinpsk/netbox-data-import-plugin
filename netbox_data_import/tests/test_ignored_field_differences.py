@@ -520,6 +520,25 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.device.refresh_from_db()
         self.assertEqual(self.device.position, Decimal("7.5"))
 
+    def test_field_sync_rejects_a_serial_the_writer_would_truncate(self):
+        """Sync refuses an overlong value instead of writing a different one than the preview showed."""
+        overlong_serial = "S" * 60
+        self.rows[0]["serial"] = overlong_serial
+        self._save_rows(self.rows)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field="serial", row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"], payload)
+        self.assertIn("50", payload["error"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.serial, "FIELD-REVIEW-SERIAL")
+
     def test_field_sync_rejects_a_request_without_an_active_preview(self):
         """A field action cannot use client values after preview state is cleared."""
         action = self._json_action(field="u_position", row_number=1)

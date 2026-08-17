@@ -1007,6 +1007,39 @@ class NativeContactSyncTest(TestCase):
         )
         self.assertFalse(SourceResolution.objects.exists())
 
+    def test_contact_resolution_rejects_a_non_integral_contact_id(self):
+        """A fractional Contact ID is rejected instead of truncated to another Contact."""
+        contact = Contact.objects.create(name="Truncation Target", email="truncation@example.invalid")
+        row = self._row(
+            _candidate_values={"contact": {"Contact": "candidate@example.invalid"}},
+        )
+        self._cache_contact_preview(row)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "CONTACT-001",
+                "source_column": "candidate:contact",
+                "original_value": "",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {},
+                        "contact_id": contact.pk + 0.9,
+                    }
+                ),
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(SourceResolution.objects.exists())
+
     def test_contact_resolution_rejects_a_source_outside_the_row_candidates(self):
         """The resolution boundary rejects source columns that the row did not provide."""
         self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}

@@ -1742,10 +1742,11 @@ def _normalize_for_compare(val) -> str:
 
 
 def _result_position(value):
-    """Return a JSON-safe position for preview result metadata."""
-    if value is None or isinstance(value, (int, float, str, bool)):
-        return value
-    return _normalize_for_compare(value)
+    """Return a JSON-safe number so whole and half-U positions stay sortable together."""
+    if value is None:
+        return None
+    number = float(value)
+    return int(number) if number.is_integer() else number
 
 
 _NOT_PROVIDED = object()

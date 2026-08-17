@@ -1930,9 +1930,18 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             )
         return JsonResponse({"ok": True, "display": display})
 
+    @staticmethod
+    def _writer_safe_text(device, label, model_field, value):
+        """Reject a value the writer would otherwise truncate away from what the preview showed."""
+        text = str(value)
+        limit = type(device)._meta.get_field(model_field).max_length
+        if len(text) > limit:
+            raise ValueError(f"The {label} is {len(text)} characters; NetBox allows {limit}.")
+        return text
+
     def _apply_field(self, device, field, value, status_map):
         if field == "device_name":
-            new_name = str(value)[:64]
+            new_name = self._writer_safe_text(device, "device name", "name", value)
             if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
                 raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
             device.name = new_name
@@ -1960,12 +1969,12 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             return device.status
 
         if field == "serial":
-            device.serial = str(value)[:50]
+            device.serial = self._writer_safe_text(device, "serial", "serial", value)
             device.save(update_fields=["serial"])
             return device.serial
 
         if field == "asset_tag":
-            device.asset_tag = str(value)[:50] if value else None
+            device.asset_tag = self._writer_safe_text(device, "asset tag", "asset_tag", value) if value else None
             device.save(update_fields=["asset_tag"])
             return device.asset_tag
 

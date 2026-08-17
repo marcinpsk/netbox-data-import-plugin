@@ -24,6 +24,22 @@ CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "con
 CONTACT_RESOLUTION_KEYS = CONTACT_RESOLUTION_REQUIRED_KEYS | frozenset({"contact_field_values", "contact_id"})
 
 
+def _validated_contact_id(contact_id):
+    """Return a saved Contact ID as a positive int, rejecting anything int() would reshape."""
+    if contact_id in ("", None):
+        return None
+    # int() truncates, so a JSON float would silently select a different Contact.
+    if isinstance(contact_id, bool) or (isinstance(contact_id, float) and not contact_id.is_integer()):
+        raise ValidationError("The selected Contact ID is invalid.")
+    try:
+        contact_id = int(contact_id)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("The selected Contact ID is invalid.") from exc
+    if contact_id < 1:
+        raise ValidationError("The selected Contact ID is invalid.")
+    return contact_id
+
+
 def validate_contact_candidate_resolution(
     resolved_fields,
     lookup_field: str,
@@ -58,18 +74,7 @@ def validate_contact_candidate_resolution(
     if overlap:
         raise ValidationError(f"Select a source column or enter a value for Contact {sorted(overlap)[0]}, not both.")
 
-    contact_id = resolved_fields.get("contact_id")
-    if contact_id in ("", None):
-        contact_id = None
-    elif isinstance(contact_id, bool):
-        raise ValidationError("The selected Contact ID is invalid.")
-    else:
-        try:
-            contact_id = int(contact_id)
-        except (TypeError, ValueError) as exc:
-            raise ValidationError("The selected Contact ID is invalid.") from exc
-        if contact_id < 1:
-            raise ValidationError("The selected Contact ID is invalid.")
+    contact_id = _validated_contact_id(resolved_fields.get("contact_id"))
 
     supplied_fields = set(field_sources) | set(field_values)
     if supplied_fields and "name" not in supplied_fields:

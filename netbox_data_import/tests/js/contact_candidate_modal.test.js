@@ -38,10 +38,11 @@ const contactSuggestions = {
   },
 };
 
-function addPreviewFixture(resolutions = {}) {
+function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/" } = {}) {
+  const lookupAttribute = lookupUrl === null ? "" : ` data-contact-lookup-url="${lookupUrl}"`;
   document.body.innerHTML = `
     <div id="contactCandidateModal">
-      <form id="contactCandidateForm" data-contact-lookup-field="email" data-contact-lookup-url="/contact-lookup/">
+      <form id="contactCandidateForm" data-contact-lookup-field="email"${lookupAttribute}>
         <input type="hidden" id="contactCandidateSourceId">
         <input type="hidden" id="contactCandidateOriginalValue">
         <input type="hidden" id="contactCandidateResolvedFields">
@@ -96,6 +97,20 @@ describe("contact candidate modal", () => {
 
     expect(() => openRow("first-row", "source-first")).not.toThrow();
     expect(document.getElementById("contactCandidateName").value).toBe("");
+  });
+
+  /* Tom Select debounces `load` through loadThrottle, so the guard is observed
+   * through its callback rather than a synchronous return. */
+  it("keeps the contact picker usable when the template omits the lookup URL", async () => {
+    addPreviewFixture({}, { lookupUrl: null });
+    openRow("first-row", "source-first");
+
+    const existing = document.getElementById("contactCandidateExisting");
+    const loaded = new Promise((resolveLoad) => {
+      existing.tomselect.settings.load.call(existing.tomselect, "query", resolveLoad);
+    });
+
+    await expect(loaded).resolves.toBeUndefined();
   });
 
   it("keeps candidate options visible in Tom Select after opening a row", () => {

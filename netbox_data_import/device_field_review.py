@@ -59,6 +59,17 @@ def _device_rack_display(device) -> str:
     return _text(rack.name)
 
 
+def _device_rack_location_id(device):
+    """Return the location that scopes a device's rack, if it has one."""
+    return getattr(device.rack, "location_id", None) if getattr(device, "rack_id", None) else None
+
+
+def _scope_rack_canonical(snapshot: dict[str, str], location_id) -> dict[str, str]:
+    """Prefix a rack canonical value with its location so both sides compare the same way."""
+    snapshot["canonical"] = f"{location_id or ''}:{snapshot['canonical']}"
+    return snapshot
+
+
 def _device_type_value(device):
     """Return the canonical and display data for the current DeviceType."""
     device_type = device.device_type
@@ -216,11 +227,7 @@ class DeviceFieldReviewer:
         if target_field != "rack_name":
             return definition.snapshot(value)
         snapshot = definition.snapshot(value, _device_rack_display(matched_device))
-        location_id = (
-            getattr(matched_device.rack, "location_id", None) if getattr(matched_device, "rack_id", None) else None
-        )
-        snapshot["canonical"] = f"{location_id or ''}:{snapshot['canonical']}"
-        return snapshot
+        return _scope_rack_canonical(snapshot, _device_rack_location_id(matched_device))
 
     def review_device_ids(self, source_id: str) -> frozenset[int]:
         """Return unique Device IDs bound to reviews for one source row."""
@@ -305,17 +312,10 @@ class DeviceFieldReviewer:
             netbox_override = None
             if definition.target_field == "rack_name":
                 netbox_override = _device_rack_display(matched_device)
-                file_snapshot["canonical"] = f"{proposal.get('_rack_location_id') or ''}:{file_snapshot['canonical']}"
-                netbox_snapshot_location = (
-                    getattr(matched_device.rack, "location_id", None)
-                    if getattr(matched_device, "rack_id", None)
-                    else None
-                )
-            else:
-                netbox_snapshot_location = None
+                _scope_rack_canonical(file_snapshot, proposal.get("_rack_location_id"))
             netbox_snapshot = definition.snapshot(netbox_value, netbox_override)
             if definition.target_field == "rack_name":
-                netbox_snapshot["canonical"] = f"{netbox_snapshot_location or ''}:{netbox_snapshot['canonical']}"
+                _scope_rack_canonical(netbox_snapshot, _device_rack_location_id(matched_device))
             if file_snapshot["canonical"] == netbox_snapshot["canonical"]:
                 continue
             snapshots[definition.target_field] = (file_snapshot, netbox_snapshot)

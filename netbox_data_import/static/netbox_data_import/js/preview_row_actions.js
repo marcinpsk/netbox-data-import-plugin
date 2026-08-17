@@ -60,7 +60,10 @@
       body: body,
     })
       .then(function (response) {
-        return response.json().then(function (payload) {
+        // An HTML error page or login redirect would surface as a JSON parse error.
+        return response.json().catch(function () {
+          throw new Error('The server returned an unexpected response (HTTP ' + response.status + ').');
+        }).then(function (payload) {
           if (!response.ok || !payload.ok) {
             throw new Error(payload.error || 'The preview action failed.');
           }
