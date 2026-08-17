@@ -1052,12 +1052,24 @@ var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : 
 var splitFieldValuesEl = document.getElementById('ndi-split-field-values');
 var SPLIT_FIELD_VALUES = splitFieldValuesEl ? JSON.parse(splitFieldValuesEl.textContent) : {};
 
-// Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
-document.addEventListener('DOMContentLoaded', function() {
+/* Modal wiring delegates from `document` and binds once. A row action can swap #page-content
+   through HTMX, which replaces every modal element and never fires DOMContentLoaded again. */
+(function() {
+  if (window.ndiPreviewModalsBound) return;
+  window.ndiPreviewModalsBound = true;
+
+  function onModalShow(modalId, populate) {
+    document.addEventListener('show.bs.modal', function(event) {
+      // No trigger means no row to read: leave the form empty and let the server refuse it.
+      if (event.target.id !== modalId || !event.relatedTarget) return;
+      populate(event);
+    });
+  }
 
   // Highlight the conflicting row when a "Jump to row N" link is clicked.
-  document.querySelectorAll('.ndi-jump-to-row').forEach(function(link) {
-    link.addEventListener('click', function(e) {
+  document.addEventListener('click', function(e) {
+    var link = e.target.closest('.ndi-jump-to-row');
+    if (link) {
       var targetRow = link.dataset.targetRow;
       var el = document.getElementById('row-' + targetRow);
       if (el) {
@@ -1066,10 +1078,10 @@ document.addEventListener('DOMContentLoaded', function() {
         el.classList.add('ndi-jump-flash');
         setTimeout(function() { el.classList.remove('ndi-jump-flash'); }, 2000);
       }
-    });
+    }
   });
 
-  document.getElementById('splitNameModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('splitNameModal', function(event) {
     var btn = event.relatedTarget;
     var sourceId = btn.dataset.sourceId;
     var sourceColumn = btn.dataset.sourceColumn;
@@ -1091,7 +1103,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   });
 
-  document.getElementById('deviceTypeMappingModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('deviceTypeMappingModal', function(event) {
     var btn = event.relatedTarget;
     document.getElementById('dtm_source_make').value = btn.dataset.sourceMake || '';
     document.getElementById('dtm_source_model').value = btn.dataset.sourceModel || '';
@@ -1106,7 +1118,7 @@ document.addEventListener('DOMContentLoaded', function() {
     _dtmSetMapped(false);
   });
 
-  document.getElementById('classMappingModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('classMappingModal', function(event) {
     var btn = event.relatedTarget;
     var sourceClass = btn.dataset.sourceClass || '';
     document.getElementById('cm_source_class').value = sourceClass;
@@ -1145,7 +1157,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   });
 
-  document.getElementById('manufacturerMappingModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('manufacturerMappingModal', function(event) {
     var btn = event.relatedTarget;
     document.getElementById('mm_source_make').value = btn.dataset.sourceMake || '';
     document.getElementById('mm_profile_id').value = btn.dataset.profileId || '';
@@ -1158,7 +1170,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setTimeout(mmSearch, 200);
   });
 
-  document.getElementById('deviceMatchModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('deviceMatchModal', function(event) {
     var btn = event.relatedTarget;
     var sourceName = btn.dataset.sourceName || '';
     var sourceId = btn.dataset.sourceId || '';
@@ -1188,7 +1200,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setTimeout(dmSearch, 200);
   });
 
-});
+}());
 
 function reSplit(fileResolvedFields) {
   fileResolvedFields = fileResolvedFields || {};
@@ -2560,6 +2572,10 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
       body.appendChild(section);
     }
   });
+
+  // Bound once: an HTMX swap re-runs this script, and a second listener would post twice.
+  if (window.ndiConflictResolveBound) return;
+  window.ndiConflictResolveBound = true;
 
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('.ndi-conflict-resolve-btn');
