@@ -57,7 +57,11 @@ A saved decision that selects or derives target-field values for one source row.
 _Avoid_: Override, exception
 
 **Candidate Snapshot**:
-The frozen list of eligible NetBox candidates supplied to the provider in one proposal request, identified by opaque candidate ids. A proposal is fresh only while it still equals the current eligible set.
+The frozen list of eligible NetBox candidates supplied to the Inference Backend in one proposal request, identified by opaque candidate ids. A proposal is fresh only while it still equals the current eligible set.
+
+**Inference Backend**:
+The configured AI inference endpoint (API root, model, credential reference) that answers proposal requests. It only suggests; it has no authority over NetBox.
+_Avoid_: Provider, AI provider (NetBox core uses Provider for circuit carriers)
 
 **Resolution Proposal**:
 An unaccepted suggestion of Target Field values. It has no authority to change NetBox; accepted values become a Row Resolution.
