@@ -2,8 +2,6 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Coverage tests for template_content, forms, and tables modules."""
 
-from unittest.mock import MagicMock, patch
-
 from django.test import TestCase
 
 from netbox_data_import.engine import _str_val
@@ -21,69 +19,69 @@ def _make_profile(name="MiscTest") -> ImportProfile:
 
 
 class DeviceImportDataExtensionTest(TestCase):
-    """Tests for DeviceImportDataExtension.right_page() covering all branches."""
+    """Render the Device detail card against a real Device and its real custom field."""
 
-    def _make_ext(self, context):
-        ext = DeviceImportDataExtension.__new__(DeviceImportDataExtension)
-        ext.context = context
-        return ext
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        site = Site.objects.create(name="Card Site", slug="card-site")
+        manufacturer = Manufacturer.objects.create(name="Card Mfg", slug="card-mfg")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="Card Model", slug="card-model", u_height=1
+        )
+        role = DeviceRole.objects.create(name="Card Role", slug="card-role")
+        cls.device = Device.objects.create(name="card-device", site=site, device_type=device_type, role=role)
+
+    def _render(self, import_data, **device_attrs):
+        """Return the card HTML the Device page would show for one stored import payload."""
+        for name, value in device_attrs.items():
+            setattr(self.device, name, value)
+        self.device.custom_field_data["data_import_source"] = import_data
+        extension = DeviceImportDataExtension({"object": self.device})
+        return extension.left_page()
+
+    def test_card_renders_in_the_left_column(self):
+        """NetBox appends plugin content to a column end; this card belongs to the left one."""
+        self.assertTrue(hasattr(DeviceImportDataExtension, "left_page"))
+        with self.assertRaises(NotImplementedError):
+            DeviceImportDataExtension({"object": self.device}).right_page()
 
     def test_returns_empty_string_when_no_object_in_context(self):
-        """right_page() returns '' when context has no 'object' key."""
-        ext = self._make_ext({})
-        self.assertEqual(ext.right_page(), "")
+        """A list view has no object, so the card renders nothing."""
+        self.assertEqual(DeviceImportDataExtension({}).left_page(), "")
 
-    def test_returns_empty_string_when_cf_is_none(self):
-        """right_page() returns '' when device.cf is None (no custom fields)."""
-        obj = MagicMock()
-        obj.cf = None
-        ext = self._make_ext({"object": obj})
-        self.assertEqual(ext.right_page(), "")
+    def test_returns_empty_string_without_stored_import_data(self):
+        """A device the plugin never imported shows no card."""
+        self.assertEqual(DeviceImportDataExtension({"object": self.device}).left_page(), "")
 
-    def test_returns_empty_string_when_no_import_data_in_cf(self):
-        """right_page() returns '' when data_import_source is not in cf."""
-        obj = MagicMock()
-        obj.cf = {}
-        ext = self._make_ext({"object": obj})
-        self.assertEqual(ext.right_page(), "")
+    def test_renders_source_columns_and_metadata(self):
+        """Extra source columns and the import metadata reach the rendered card."""
+        html = self._render({"source_id": "SRC-1", "profile_name": "Card Profile", "extra": {"jira_id": "J-42"}})
 
-    def test_renders_when_import_data_present(self):
-        """right_page() calls self.render() when data_import_source is in cf."""
-        obj = MagicMock()
-        obj.cf = {"data_import_source": {"source_id": "SRC-1", "extra": {"jira_id": "J-42"}}}
-        ext = self._make_ext({"object": obj})
-        with patch.object(ext, "render", return_value="<rendered>") as mock_render:
-            result = ext.right_page()
-        self.assertEqual(result, "<rendered>")
-        mock_render.assert_called_once()
-        _, kwargs = mock_render.call_args
-        self.assertIn("import_data", kwargs["extra_context"])
-        self.assertIn("extra_columns", kwargs["extra_context"])
-        self.assertEqual(kwargs["extra_context"]["extra_columns"], {"jira_id": "J-42"})
+        self.assertIn("Import Data", html)
+        self.assertIn("jira_id", html)
+        self.assertIn("J-42", html)
+        self.assertIn("SRC-1", html)
+        self.assertIn("Card Profile", html)
 
-    def test_renders_when_import_data_has_no_extra_key(self):
-        """right_page() works when data_import_source exists but has no 'extra' key."""
-        obj = MagicMock()
-        obj.cf = {"data_import_source": {"source_id": "SRC-2"}}
-        ext = self._make_ext({"object": obj})
-        with patch.object(ext, "render", return_value="<ok>"):
-            result = ext.right_page()
-        self.assertEqual(result, "<ok>")
+    def test_reports_a_stored_ip_that_netbox_does_not_hold(self):
+        """An IP the import could not assign natively is listed as not assigned."""
+        html = self._render({"source_id": "SRC-3", "_ip": {"primary_ip4": "10.0.0.1/32"}})
 
-    def test_renders_with_ip_data_populates_ip_status(self):
-        """right_page() populates ip_status when data_import_source has _ip key — lines 29-37."""
-        obj = MagicMock()
-        obj.primary_ip4 = None
-        obj.cf = {"data_import_source": {"source_id": "SRC-3", "_ip": {"primary_ip4": "10.0.0.1/32"}}}
-        ext = self._make_ext({"object": obj})
-        with patch.object(ext, "render", return_value="<rendered-ip>") as mock_render:
-            result = ext.right_page()
-        self.assertEqual(result, "<rendered-ip>")
-        _, kwargs = mock_render.call_args
-        ip_status = kwargs["extra_context"]["ip_status"]
-        self.assertIn("primary_ip4", ip_status)
-        self.assertFalse(ip_status["primary_ip4"]["in_netbox"])
-        self.assertEqual(ip_status["primary_ip4"]["value"], "10.0.0.1/32")
+        self.assertIn("Primary IPv4", html)
+        self.assertIn("10.0.0.1/32", html)
+        self.assertIn("Not assigned", html)
+
+    def test_reports_a_stored_ip_that_netbox_already_holds(self):
+        """An IP that reached NetBox natively is listed as present."""
+        from ipam.models import IPAddress
+
+        address = IPAddress.objects.create(address="10.0.0.9/32")
+
+        html = self._render({"source_id": "SRC-4", "_ip": {"primary_ip4": "10.0.0.9/32"}}, primary_ip4=address)
+
+        self.assertIn("In NetBox", html)
 
 
 class ImportSetupFormValidationTest(TestCase):

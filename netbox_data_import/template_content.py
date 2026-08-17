@@ -4,12 +4,16 @@ from netbox.plugins import PluginTemplateExtension
 
 
 class DeviceImportDataExtension(PluginTemplateExtension):
-    """Adds an import data card to the Device detail page right panel."""
+    """Adds an import data card to the Device detail page.
+
+    NetBox appends plugin content to the end of a column, so the closest supported position to
+    the Tags panel is the left column, below the rack elevation drawing that ends the right one.
+    """
 
     models = ["dcim.device"]
 
-    def right_page(self):
-        """Render import data card for the Device detail page right column."""
+    def left_page(self):
+        """Render import data card for the Device detail page left column."""
         obj = self.context.get("object")
         if not obj:
             return ""
