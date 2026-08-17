@@ -26,7 +26,7 @@ class NetBoxMainWorkflowTest(TestCase):
         """Do not skip a heading level below the document title."""
         agent_instructions = Path(__file__).resolve().parents[2] / "AGENTS.md"
 
-        self.assertNotIn("\n### ", agent_instructions.read_text())
+        self.assertNotRegex(agent_instructions.read_text(), r"(?m)^#{3,}\s")
 
     def test_agent_instructions_use_shell_safe_test_values(self):
         """Keep the documented test command safe to paste into a shell."""

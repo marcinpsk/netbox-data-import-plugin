@@ -88,5 +88,5 @@ See [`docs/agents/domain.md`](docs/agents/domain.md).
 - Use `NetBoxModel`, `NetBoxModelViewSet`, `NetBoxModelForm`, and similar. Never raw Django/DRF.
 - Commits follow Conventional Commits format (enforced by a pre-commit hook).
 - Never add a `Co-authored-by` trailer to commit messages.
-- Keep a model and its migration in step. `netbox_data_import/tests/test_migrations.py` fails when
-  a field change has no migration.
+- Migrations are generated artifacts. Change a model, then run
+  `netbox-manage makemigrations netbox_data_import`. Do not hand-edit a migration.
