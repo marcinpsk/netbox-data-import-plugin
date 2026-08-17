@@ -12,7 +12,22 @@ const previewTemplate = readFileSync(
   resolve(process.cwd(), "netbox_data_import/templates/netbox_data_import/import_preview.html"),
   "utf8",
 );
-const modalWiring = previewTemplate.match(/\/\* Modal wiring[\s\S]*?\n\}\(\)\);/)[0];
+/* A silent extraction failure would run the tests against no code, or against a block cut short
+ * at a nested IIFE, so both the match and its last handler are checked here. */
+const modalWiringMatch = previewTemplate.match(/\/\* Modal wiring[\s\S]*?\n\}\(\)\);/);
+if (!modalWiringMatch) {
+  throw new Error(
+    "import_preview.html holds no '/* Modal wiring' block that ends with '}());'. " +
+      "Update this extraction, or move the wiring into a static .js file.",
+  );
+}
+const modalWiring = modalWiringMatch[0];
+if (!modalWiring.includes("setTimeout(dmSearch, 200)")) {
+  throw new Error(
+    "The '/* Modal wiring' block extracted from import_preview.html stops before its last " +
+      "handler. A nested '}());' cut it short.",
+  );
+}
 const bootstrapSource = readFileSync(resolve(process.cwd(), "node_modules/bootstrap/dist/js/bootstrap.js"), "utf8");
 
 /* Only the elements the class-mapping handler touches. */

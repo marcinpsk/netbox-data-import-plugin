@@ -50,9 +50,8 @@ class DeviceImportDataExtensionTest(TestCase):
 
     def test_card_renders_in_the_left_column(self):
         """NetBox appends plugin content to a column end; this card belongs to the left one."""
-        self.assertTrue(hasattr(DeviceImportDataExtension, "left_page"))
-        with self.assertRaises(NotImplementedError):
-            DeviceImportDataExtension({"object": self.device}).right_page()
+        self.assertIn("Import Data", self._render("SRC-COLUMN"))
+        self.assertNotIn("right_page", DeviceImportDataExtension.__dict__)
 
     def test_returns_empty_string_when_no_object_in_context(self):
         """A list view has no object, so the card renders nothing."""

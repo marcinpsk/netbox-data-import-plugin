@@ -146,6 +146,17 @@ class StoreSourceIdExtraTest(TestCase):
         self.assertEqual(record.source_id, "SRC-1")
         self.assertEqual(record.profile, self.profile)
 
+    def test_unassigned_ips_are_written_to_the_import_record(self):
+        """The Device card reads `unassigned_ips`, so the write must keep the mapping it is given."""
+        _store_source_id(self.device, self.profile, "SRC-5", ip_data={"primary_ip4": "10.0.0.1/32"})
+
+        self.assertEqual(self._stored().unassigned_ips, {"primary_ip4": "10.0.0.1/32"})
+
+    def test_record_holds_no_unassigned_ips_when_none_are_left_over(self):
+        _store_source_id(self.device, self.profile, "SRC-6", ip_data=None)
+
+        self.assertEqual(self._stored().unassigned_ips, {})
+
     def test_record_holds_no_extra_columns_when_none_are_captured(self):
         _store_source_id(self.device, self.profile, "SRC-2", extra_columns=None)
 
