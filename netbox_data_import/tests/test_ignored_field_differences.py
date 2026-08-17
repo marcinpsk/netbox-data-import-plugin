@@ -182,6 +182,26 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             'class="badge ndi-badge-ignored ndi-diff-toggle mt-1"',
         )
 
+    def test_preview_offers_placement_sync_while_the_placement_differs(self):
+        """The action stays available while a placement sync would write something."""
+        response, row = self._preview_device_row()
+
+        self.assertNotIn("placement_matches", row.extra_data)
+        self.assertContains(response, "ndi-sync-placement-btn")
+        self.assertContains(response, "btn-outline-success ndi-sync-placement-btn")
+
+    def test_preview_greys_out_a_placement_sync_that_would_write_nothing(self):
+        """A matched placement keeps the button visible but inert, not green."""
+        self.device.position = 7
+        self.device.serial = "SERIAL-DIFFERS-SO-THE-ROW-STILL-EXPANDS"
+        self.device.save(update_fields=["position", "serial"])
+
+        response, row = self._preview_device_row()
+
+        self.assertTrue(row.extra_data["placement_matches"])
+        self.assertContains(response, "Placement already matches this row")
+        self.assertNotContains(response, "ndi-sync-placement-btn")
+
     def test_preview_renders_field_differences_collapsed(self):
         """The row collapses through `hidden`, so it holds while the page is still loading."""
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))

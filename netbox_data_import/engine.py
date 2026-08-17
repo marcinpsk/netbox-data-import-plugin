@@ -1042,6 +1042,27 @@ def _device_rack_identity_label(device):
     return _rack_identity_label(device.rack.name, device.rack.location)
 
 
+def placement_sync_is_noop(device, rack_name, position, face) -> bool:
+    """Return whether one placement sync would leave *device* unchanged.
+
+    Mirrors the placement writer: it always sets the rack, sets position and face only when the
+    source supplies them, and clears both for a zero-U device type.
+    """
+    device_type = getattr(device, "device_type", None)
+    if device_type is not None and device_type.u_height == 0:
+        if device.position is not None or device.face:
+            return False
+        position = face = None
+    device_rack_name = device.rack.name if device.rack_id else ""
+    if _identity_text(device_rack_name) != _identity_text(rack_name):
+        return False
+    if position is not None and _normalize_for_compare(device.position) != _normalize_for_compare(position):
+        return False
+    if face and (device.face or "") != face:
+        return False
+    return True
+
+
 def _device_placement_differs(device, source_location_id, rack_name, position, face):
     """Return whether a source placement differs from a NetBox device placement."""
     device_rack_name = device.rack.name if device.rack_id else ""
@@ -2692,6 +2713,13 @@ def _preview_device_row(  # noqa: C901
                     "netbox_rack_name": matched_device.rack.name if matched_device.rack_id else "",
                     "netbox_position": _normalize_for_compare(matched_device.position),
                     "netbox_face": matched_device.face or "",
+                    # Only set when a placement sync has nothing to write, so an older preview
+                    # that predates this key keeps offering the action.
+                    **(
+                        {"placement_matches": True}
+                        if placement_sync_is_noop(matched_device, rack_name, position, device_face)
+                        else {}
+                    ),
                 }
                 if matched_device is not None
                 else {}

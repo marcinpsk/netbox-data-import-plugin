@@ -726,10 +726,17 @@
                 <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
                   {% if row.rack_name %}
                   <div class="mb-2">
-                    <button type="button" class="btn btn-xs btn-outline-success ndi-sync-placement-btn"
-                            data-action-url="{% url 'plugins:netbox_data_import:sync_placement' %}"
-                            data-row-id="{{ row.row_number }}"
-                            title="Set rack{% if row.extra_data.u_position %}, position{% endif %}{% if row.extra_data.face %}, face{% endif %} atomically">
+                    {# Grey and inert when the placement already matches: green means it writes something #}
+                    <button type="button"
+                            class="btn btn-xs {% if row.extra_data.placement_matches %}btn-outline-secondary{% else %}btn-outline-success ndi-sync-placement-btn{% endif %}"
+                            {% if row.extra_data.placement_matches %}
+                              disabled
+                              title="Placement already matches this row"
+                            {% else %}
+                              data-action-url="{% url 'plugins:netbox_data_import:sync_placement' %}"
+                              data-row-id="{{ row.row_number }}"
+                              title="Set rack{% if row.extra_data.u_position %}, position{% endif %}{% if row.extra_data.face %}, face{% endif %} atomically"
+                            {% endif %}>
                       <i class="mdi mdi-package-variant"></i> Sync placement
                     </button>
                     <span class="text-muted small ms-2">rack=<strong>{{ row.rack_name }}</strong>{% if row.extra_data.u_position %}, U{{ row.extra_data.u_position }}{% endif %}{% if row.extra_data.face %}, {{ row.extra_data.face }}{% endif %}</span>
