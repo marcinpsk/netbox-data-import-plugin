@@ -60,6 +60,25 @@ _Avoid_: Cable row
 A reviewed change that replaces one direct LLDP-derived Cable with physical Cable segments and patch-panel pass-throughs. The resulting path terminates on the same two endpoint Devices.
 _Avoid_: Cable amendment
 
+**Termination Reference**:
+The source-side naming of one port within a Source Trace: device, cards, and port labels. Port class and location values corroborate it but do not identify it.
+_Avoid_: Endpoint string
+
+**Segment Evidence**:
+One source-claimed physical cable between two Termination References, carrying one CableClass label.
+_Avoid_: Hop row
+
+**Pass-Through Claim**:
+The implied continuation through one device between two consecutive Segment Evidence entries. Entry and exit can name the same port.
+_Avoid_: Panel mapping
+
+**Endpoint Summary**:
+The From and To statement of a Source Trace's two endpoint Termination References without path detail. It corroborates path evidence and is the fallback when no path evidence exists.
+_Avoid_: From/To header
+
+**CableClass**:
+The source label for one cable's kind. It maps to Cable Type and Cable Profile only through Import Profile policy.
+
 **Cable Type**:
 The fixed NetBox Cable value that describes the physical medium or classification of one Cable segment.
 
