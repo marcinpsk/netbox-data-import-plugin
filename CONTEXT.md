@@ -56,6 +56,9 @@ _Avoid_: Contact candidates, fallback columns
 A saved decision that selects or derives target-field values for one source row. The import reapplies the decision when that row appears in a later file.
 _Avoid_: Override, exception
 
+**Candidate Snapshot**:
+The frozen list of eligible NetBox candidates supplied to the provider in one proposal request, identified by opaque candidate ids. A proposal is fresh only while it still equals the current eligible set.
+
 **Resolution Proposal**:
 An unaccepted suggestion of Target Field values. It has no authority to change NetBox; accepted values become a Row Resolution.
 _Avoid_: AI answer, automatic resolution
