@@ -1,0 +1,1712 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> -->
+<!-- PROTOTYPE - throwaway, not production code (wayfinder ticket #83). One file, no build, no server. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Source Trace review workspace - logic prototype</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --line: #e3e6eb;
+    --line-soft: #eef0f4;
+    --ink: #1b2027;
+    --muted: #6b7480;
+    --accent: #2b6cb0;
+    --accent-soft: #eaf1fa;
+    --ok: #1f6f43;
+    --ok-soft: #e9f5ee;
+    --warn: #8a6100;
+    --warn-soft: #fdf5e3;
+    --bad: #a52a1a;
+    --bad-soft: #fbeeec;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 36px 24px 80px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 10px; letter-spacing: -0.01em; }
+  .question {
+    background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 6px; padding: 14px 18px; margin: 0 0 10px; max-width: 900px;
+  }
+  .question .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--accent); font-weight: 700; }
+  .question p { margin: 6px 0 0; }
+  .subtle { color: var(--muted); font-size: 12.5px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; margin-bottom: 16px; }
+  .card.flat { background: transparent; border: none; padding: 0; }
+  .sec { font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); font-weight: 700; margin: 0 0 10px; }
+  .sec.mt { margin-top: 18px; }
+  .grid2 { display: grid; grid-template-columns: 1.05fr 1fr; gap: 16px; align-items: start; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+  .badge {
+    display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid transparent; letter-spacing: .01em; white-space: nowrap;
+  }
+  .b-ok { background: var(--ok-soft); color: var(--ok); border-color: #cfe6d9; }
+  .b-warn { background: var(--warn-soft); color: var(--warn); border-color: #ecd9a8; }
+  .b-bad { background: var(--bad-soft); color: var(--bad); border-color: #eecdc7; }
+  .b-info { background: var(--accent-soft); color: var(--accent); border-color: #cfe0f2; }
+  .b-mute { background: #f1f2f5; color: var(--muted); border-color: #e2e4e9; }
+  button {
+    font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line);
+    background: #fff; color: var(--ink); cursor: pointer; text-align: left;
+  }
+  button:hover:enabled { border-color: #c8ccd4; background: #fbfcfd; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:enabled { background: #255e9a; }
+  button.step-current { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); font-weight: 600; }
+  button.step-done { color: var(--muted); background: #fafbfc; }
+  button.wide { width: 100%; }
+  .act { display: inline-block; margin: 0 8px 10px 0; vertical-align: top; max-width: 340px; }
+  .act .reason { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.35; }
+  .row { display: flex; gap: 10px; align-items: baseline; }
+  .row.wrap { flex-wrap: wrap; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .glance { display: flex; flex-wrap: wrap; gap: 10px 26px; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft); margin-bottom: 14px; }
+  .glance div { min-width: 110px; }
+  .glance .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 700; }
+  .glance .v { font-size: 13.5px; margin-top: 2px; }
+  .changed { background: var(--accent-soft); border: 1px solid #cfe0f2; border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; font-size: 13px; }
+  .notice { border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12.5px; }
+  .notice.warn { background: var(--warn-soft); border: 1px solid #ecd9a8; color: #6b4c00; }
+  .notice.ok { background: var(--ok-soft); border: 1px solid #cfe6d9; color: var(--ok); }
+  .notice.bad { background: var(--bad-soft); border: 1px solid #eecdc7; color: var(--bad); }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 6px 8px 6px 0; vertical-align: top; border-bottom: 1px solid var(--line-soft); }
+  th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 700; }
+  .seg { padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+  .seg:last-child { border-bottom: none; }
+  .seg .num { display: inline-block; width: 20px; color: var(--muted); font-size: 12px; }
+  .pass { color: var(--muted); font-size: 11.5px; padding-left: 20px; }
+  .field { border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; background: #fdfdfe; }
+  .field.attention { border-color: #d5dde6; background: #fff; }
+  .prop { border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; margin: 10px 0 0; background: #f9fafc; }
+  .prop.stale { border-color: #ecd9a8; background: var(--warn-soft); }
+  .prop.failed { border-color: #eecdc7; background: var(--bad-soft); }
+  .prop .cand { font-weight: 600; margin: 8px 0 4px; }
+  .prop .meta { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+  .hist { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+  .hist li { margin: 2px 0; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .steps { display: flex; flex-direction: column; gap: 6px; max-width: 640px; }
+  .steps .act { max-width: none; margin: 0; }
+  .picker { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-top: 10px; background: #fff; }
+  .picker input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; width: 260px; }
+  .cands { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; max-width: 380px; }
+  .log li { padding: 3px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
+  .log li:last-child { border-bottom: none; }
+  ul.plain { list-style: none; margin: 0; padding: 0; }
+  details summary { cursor: pointer; font-size: 12.5px; color: var(--muted); padding: 4px 0; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 26px; max-width: 900px; }
+</style>
+
+<div class="wrap">
+  <h1>Source Trace review workspace</h1>
+  <div class="question">
+    <span class="lbl">The question this prototype answers</span>
+    <p>Can one review workspace make the complete Source Trace understandable, support deterministic
+      termination search, and show asynchronous Resolution Proposals without implying that AI has
+      applied a change?</p>
+  </div>
+  <p class="subtle">Prototype for wayfinder ticket #83. Everything below is simulated in the page. Time does not
+    pass on its own: the provider only moves when you press a provider button. Start with a walkthrough under the
+    workspace, or open the free-play drawer at the bottom.</p>
+
+  <div id="app"></div>
+
+  <footer>
+    Sample traces are derived from the redacted trace workbook fixtures in this repository
+    (<span class="mono">trace_fiber.xlsx</span>, <span class="mono">trace_copper.xlsx</span>, sheet "Trace From To").
+    Device, panel and cassette names are the redacted names from those files.
+  </footer>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * PURE MODULE - the part worth keeping.
+ * A state machine over the review workspace: initialState, can, apply,
+ * plus selectors. No DOM access, no browser globals, no timers, no handlers.
+ * ------------------------------------------------------------------ */
+var TraceReview = (function () {
+  'use strict';
+
+  function clone(value) { return JSON.parse(JSON.stringify(value)); }
+  function unique(list) { return list.filter(function (v, i) { return list.indexOf(v) === i; }); }
+
+  var MAX_ATTEMPTS = 3;
+
+  /* ---------- construction ---------- */
+
+  function initialState(demo, options) {
+    var traceId = (options && options.traceId) || demo.traces[0].id;
+    return {
+      demo: { traces: clone(demo.traces), answers: clone(demo.answers), provider: demo.provider },
+      netbox: clone(demo.netbox),
+      reviewed: { cables: clone(demo.netbox.cables) },
+      selectedTraceId: traceId,
+      previewOpen: true,
+      resolutions: {},
+      proposals: [],
+      proposalSeq: 0,
+      seq: 0,
+      lastChange: 'Review workspace opened.',
+      lastResult: null,
+      log: [{ seq: 0, kind: 'info', text: 'Review workspace opened.' }]
+    };
+  }
+
+  /* ---------- basic lookups ---------- */
+
+  function fieldKey(traceId, index, side) { return traceId + ':' + index + ':' + side; }
+
+  function trace(state, traceId) {
+    var wanted = traceId || state.selectedTraceId;
+    return state.demo.traces.filter(function (t) { return t.id === wanted; })[0] || null;
+  }
+
+  function fieldByKey(state, key) {
+    var parts = String(key).split(':');
+    var t = trace(state, parts[0]);
+    if (!t) { return null; }
+    var segment = t.segments[Number(parts[1])];
+    if (!segment) { return null; }
+    var term = segment[parts[2]];
+    if (!term) { return null; }
+    return {
+      key: key,
+      traceId: parts[0],
+      index: Number(parts[1]),
+      side: parts[2],
+      device: term.device,
+      claimed: term.port,
+      kind: term.kind,
+      card: term.card || null,
+      cassette: term.cassette || null,
+      label: term.port + ' @ ' + term.device,
+      where: 'Segment ' + (Number(parts[1]) + 1) + ', ' + (parts[2] === 'left' ? 'left' : 'right') + ' termination'
+    };
+  }
+
+  function fieldsFor(state, traceId) {
+    var t = trace(state, traceId);
+    if (!t) { return []; }
+    var out = [];
+    t.segments.forEach(function (segment, i) {
+      out.push(fieldByKey(state, fieldKey(t.id, i, 'left')));
+      out.push(fieldByKey(state, fieldKey(t.id, i, 'right')));
+    });
+    return out;
+  }
+
+  function devicePorts(state, device) { return state.netbox.devices[device] || null; }
+
+  /* ---------- termination resolution ---------- */
+
+  function eligibleCandidates(state, field, query) {
+    var ports = devicePorts(state, field.device) || [];
+    var names = ports
+      .filter(function (p) { return p.kind === field.kind; })
+      .map(function (p) { return p.name; });
+    if (query) {
+      var q = String(query).toLowerCase();
+      names = names.filter(function (n) { return n.toLowerCase().indexOf(q) !== -1; });
+    }
+    return names;
+  }
+
+  function automaticMatch(state, field) {
+    var exact = eligibleCandidates(state, field, null).filter(function (n) { return n === field.claimed; });
+    return exact.length === 1 ? exact[0] : null;
+  }
+
+  function resolutionFor(state, key) { return state.resolutions[key] || null; }
+
+  function resolvedCandidate(state, field) {
+    var saved = resolutionFor(state, field.key);
+    if (saved) { return saved.candidate; }
+    return automaticMatch(state, field);
+  }
+
+  function proposalsFor(state, key) {
+    return state.proposals.filter(function (p) { return p.fieldKey === key; });
+  }
+
+  function last(list) { return list.length ? list[list.length - 1] : null; }
+
+  function isStale(state, proposal) {
+    if (!proposal || proposal.status !== 'completed' || !proposal.candidate) { return false; }
+    var field = fieldByKey(state, proposal.fieldKey);
+    var now = eligibleCandidates(state, field, null);
+    return now.join('|') !== proposal.snapshot.join('|');
+  }
+
+  /* A proposal is active while it can still change or still needs a decision. */
+  function activeProposal(state, key) {
+    return last(proposalsFor(state, key).filter(function (p) {
+      if (p.status === 'queued' || p.status === 'running') { return true; }
+      return p.status === 'completed' && !!p.candidate && !isStale(state, p);
+    }));
+  }
+
+  function undecidedProposal(state, key) {
+    return last(proposalsFor(state, key).filter(function (p) { return p.status === 'completed'; }));
+  }
+
+  function fieldStatus(state, field) {
+    var saved = resolutionFor(state, field.key);
+    if (saved) {
+      return saved.via === 'manual'
+        ? { status: 'manually resolved', tone: 'ok', candidate: saved.candidate }
+        : { status: 'accepted', tone: 'ok', candidate: saved.candidate };
+    }
+    var auto = automaticMatch(state, field);
+    if (auto) { return { status: 'automatically resolved', tone: 'ok', candidate: auto, note: 'unique exact name match' }; }
+
+    var proposals = proposalsFor(state, field.key);
+    var current = last(proposals);
+    if (current) {
+      if (current.status === 'queued') {
+        return { status: 'proposed', tone: 'info', candidate: null, note: 'proposal queued (attempt ' + current.attempt + ' of ' + MAX_ATTEMPTS + ')' };
+      }
+      if (current.status === 'running') {
+        return { status: 'proposed', tone: 'info', candidate: null, note: 'provider is working (attempt ' + current.attempt + ' of ' + MAX_ATTEMPTS + ')' };
+      }
+      if (current.status === 'completed' && current.candidate) {
+        return isStale(state, current)
+          ? { status: 'stale', tone: 'warn', candidate: null, note: 'the candidate list changed after the suggestion was made' }
+          : { status: 'proposed', tone: 'info', candidate: null, note: 'a suggestion is waiting for your decision' };
+      }
+      if (current.status === 'failed') {
+        return { status: 'failed', tone: 'bad', candidate: null, note: current.reason };
+      }
+    }
+    return { status: 'unresolved', tone: 'warn', candidate: null, note: 'no unique exact name match on ' + field.device };
+  }
+
+  /* ---------- topology ---------- */
+
+  function samePort(a, b) { return !!a && !!b && a.device === b.device && a.port === b.port; }
+
+  function cableAt(cables, endpoint) {
+    return cables.filter(function (c) { return samePort(c.a, endpoint) || samePort(c.b, endpoint); })[0] || null;
+  }
+
+  function physicalBetween(cables, a, b) {
+    return cables.filter(function (c) {
+      if (c.kind !== 'physical') { return false; }
+      return (samePort(c.a, a) && samePort(c.b, b)) || (samePort(c.a, b) && samePort(c.b, a));
+    })[0] || null;
+  }
+
+  function describeCable(c) {
+    var head = c.kind === 'logical' ? 'Logical Cable' : (c.cableClass + ' cable');
+    return head + ' ' + c.a.device + ' ' + c.a.port + ' <-> ' + c.b.device + ' ' + c.b.port
+      + (c.source ? ' (' + c.source + ')' : '');
+  }
+
+  function unknownDevices(state, traceId) {
+    var t = trace(state, traceId);
+    var named = [];
+    t.segments.forEach(function (s) { named.push(s.left.device, s.right.device); });
+    return unique(named.filter(function (d) { return !state.netbox.devices[d]; }));
+  }
+
+  /* The planned physical topology, evaluated against a given cable list. */
+  function plan(state, traceId, cables) {
+    var t = trace(state, traceId);
+    var list = cables || state.reviewed.cables;
+    var endpointA = null;
+    var endpointB = null;
+    var firstLeft = fieldByKey(state, fieldKey(t.id, 0, 'left'));
+    var lastRight = fieldByKey(state, fieldKey(t.id, t.segments.length - 1, 'right'));
+    var firstCandidate = resolvedCandidate(state, firstLeft);
+    var lastCandidate = resolvedCandidate(state, lastRight);
+    if (firstCandidate) { endpointA = { device: firstLeft.device, port: firstCandidate }; }
+    if (lastCandidate) { endpointB = { device: lastRight.device, port: lastCandidate }; }
+
+    var logical = null;
+    if (endpointA && endpointB) {
+      logical = list.filter(function (c) {
+        if (c.kind !== 'logical') { return false; }
+        return (samePort(c.a, endpointA) && samePort(c.b, endpointB)) || (samePort(c.a, endpointB) && samePort(c.b, endpointA));
+      })[0] || null;
+    }
+
+    var rows = [];
+    var unresolved = 0;
+    var conflicts = [];
+
+    t.segments.forEach(function (segment, i) {
+      var lf = fieldByKey(state, fieldKey(t.id, i, 'left'));
+      var rf = fieldByKey(state, fieldKey(t.id, i, 'right'));
+      var lc = resolvedCandidate(state, lf);
+      var rc = resolvedCandidate(state, rf);
+      if (!lc) { unresolved += 1; }
+      if (!rc) { unresolved += 1; }
+      if (!lc || !rc) {
+        rows.push({ index: i, segment: segment, status: 'waiting', a: null, b: null, note: 'waiting for the termination to resolve' });
+        return;
+      }
+      var a = { device: lf.device, port: lc };
+      var b = { device: rf.device, port: rc };
+      var existing = physicalBetween(list, a, b);
+      if (existing) {
+        rows.push({ index: i, segment: segment, status: 'reuse', a: a, b: b, note: 'a matching cable already exists' });
+        return;
+      }
+      var blockers = [a, b].map(function (ep) {
+        var c = cableAt(list, ep);
+        if (!c) { return null; }
+        if (logical && c.id === logical.id) { return null; }
+        return { endpoint: ep, cable: c };
+      }).filter(Boolean);
+      if (blockers.length) {
+        blockers.forEach(function (bl) {
+          conflicts.push({
+            endpoint: bl.endpoint,
+            text: bl.endpoint.port + ' on ' + bl.endpoint.device + ' is already used by ' + describeCable(bl.cable)
+          });
+        });
+        rows.push({ index: i, segment: segment, status: 'conflict', a: a, b: b, note: blockers[0].endpoint.port + ' on ' + blockers[0].endpoint.device + ' is occupied' });
+        return;
+      }
+      rows.push({ index: i, segment: segment, status: 'create', a: a, b: b, note: 'create this cable' });
+    });
+
+    var creates = rows.filter(function (r) { return r.status === 'create'; }).length;
+    var reuses = rows.filter(function (r) { return r.status === 'reuse'; }).length;
+    return {
+      rows: rows,
+      logical: logical,
+      endpointA: endpointA,
+      endpointB: endpointB,
+      unresolved: unresolved,
+      conflicts: conflicts,
+      creates: creates,
+      reuses: reuses,
+      changes: creates + (logical ? 1 : 0)
+    };
+  }
+
+  function disposition(state, traceId) {
+    var missing = unknownDevices(state, traceId);
+    if (missing.length) {
+      return {
+        value: 'invalid',
+        reason: 'The Source Trace names ' + missing.join(', ') + ', which does not exist in NetBox. No segment list can be built from it.'
+      };
+    }
+    var p = plan(state, traceId);
+    if (p.unresolved > 0) {
+      return { value: 'blocked', reason: p.unresolved + ' termination Target Field(s) do not resolve to a NetBox port yet.' };
+    }
+    if (p.conflicts.length) {
+      return { value: 'blocked', reason: p.conflicts[0].text };
+    }
+    if (p.changes === 0) {
+      return { value: 'no-op', reason: 'Every planned segment already exists and no direct Logical Cable remains.' };
+    }
+    return {
+      value: 'actionable',
+      reason: p.creates + ' cable(s) to create' + (p.logical ? ', 1 Logical Cable to delete' : '') + ', ' + p.reuses + ' existing cable(s) to reuse.'
+    };
+  }
+
+  function reviewIsStale(state) {
+    return JSON.stringify(state.netbox.cables) !== JSON.stringify(state.reviewed.cables);
+  }
+
+  function summary(state) {
+    var fields = fieldsFor(state, state.selectedTraceId);
+    var resolved = fields.filter(function (f) { return !!resolvedCandidate(state, f); }).length;
+    var active = fields.filter(function (f) { return !!activeProposal(state, f.key); }).length;
+    return {
+      fields: fields.length,
+      resolved: resolved,
+      activeProposals: active,
+      savedDecisions: Object.keys(state.resolutions).length,
+      totalProposals: state.proposals.length
+    };
+  }
+
+  /* ---------- legality ---------- */
+
+  function providerAnswer(state, key) { return state.demo.answers[key] || null; }
+
+  function answerCandidate(state, key) {
+    var answer = providerAnswer(state, key);
+    if (!answer) { return null; }
+    var field = fieldByKey(state, key);
+    var names = eligibleCandidates(state, field, null);
+    if (answer.candidateMatch) {
+      var hit = names.filter(function (n) { return n.indexOf(answer.candidateMatch) !== -1; })[0];
+      return hit || null;
+    }
+    return names.indexOf(answer.candidate) !== -1 ? answer.candidate : null;
+  }
+
+  function no(reason) { return { ok: false, reason: reason }; }
+  var YES = { ok: true, reason: '' };
+
+  function can(state, action) {
+    var field = action.fieldKey ? fieldByKey(state, action.fieldKey) : null;
+    var operatorAction = [
+      'SELECT_TRACE', 'RESOLVE_MANUALLY', 'ASK_AI', 'CANCEL_PROPOSAL',
+      'ACCEPT_PROPOSAL', 'REJECT_PROPOSAL', 'SYNCHRONIZE'
+    ].indexOf(action.type) !== -1;
+    if (operatorAction && !state.previewOpen) {
+      return no('the preview is closed');
+    }
+
+    switch (action.type) {
+      case 'SELECT_TRACE':
+        return trace(state, action.traceId) ? YES : no('unknown Source Trace');
+
+      case 'RESOLVE_MANUALLY':
+        if (!field) { return no('unknown termination'); }
+        if (activeProposal(state, field.key)) { return no('a proposal is waiting for a decision on this termination'); }
+        if (eligibleCandidates(state, field, null).indexOf(action.candidate) === -1) {
+          return no('that port is not an eligible ' + field.kind + ' on ' + field.device);
+        }
+        return YES;
+
+      case 'ASK_AI':
+        if (!field) { return no('unknown termination'); }
+        if (!state.demo.provider) { return no('no resolution provider is configured'); }
+        if (resolvedCandidate(state, field)) { return no('the termination is already resolved'); }
+        if (activeProposal(state, field.key)) { return no('a proposal is already active for this termination'); }
+        if (!providerAnswer(state, field.key)) { return no('this demo has no provider answer for this termination'); }
+        return YES;
+
+      case 'CANCEL_PROPOSAL': {
+        var running = last(proposalsFor(state, action.fieldKey).filter(function (p) {
+          return p.status === 'queued' || p.status === 'running';
+        }));
+        return running ? YES : no('no proposal is queued or running for this termination');
+      }
+
+      case 'ACCEPT_PROPOSAL': {
+        var pending = undecidedProposal(state, action.fieldKey);
+        if (!pending) { return no('there is no completed suggestion to accept'); }
+        if (!pending.candidate) { return no('the provider returned no candidate'); }
+        if (isStale(state, pending)) { return no('the suggestion is stale: the candidate list changed after it was made'); }
+        return YES;
+      }
+
+      case 'REJECT_PROPOSAL': {
+        var rejectable = undecidedProposal(state, action.fieldKey);
+        return rejectable ? YES : no('there is no completed suggestion to reject');
+      }
+
+      case 'PROVIDER_PROGRESS': {
+        var queued = last(proposalsFor(state, action.fieldKey).filter(function (p) { return p.status === 'queued'; }));
+        return queued ? YES : no('no proposal is queued for the provider');
+      }
+
+      case 'PROVIDER_RETURNS_CANDIDATE':
+      case 'PROVIDER_RETURNS_NO_MATCH':
+      case 'PROVIDER_FAILS_TEMPORARY':
+      case 'PROVIDER_FAILS_BAD_RESPONSE': {
+        var busy = last(proposalsFor(state, action.fieldKey).filter(function (p) { return p.status === 'running'; }));
+        if (!busy) { return no('no proposal is running for this termination'); }
+        if (action.type === 'PROVIDER_RETURNS_CANDIDATE' && !answerCandidate(state, action.fieldKey)) {
+          return no('the demo has no candidate left that matches this termination');
+        }
+        return YES;
+      }
+
+      case 'RENAME_PORT': {
+        var ports = devicePorts(state, action.device) || [];
+        return ports.filter(function (p) { return p.name === action.port; }).length
+          ? YES : no(action.port + ' no longer exists on ' + action.device);
+      }
+
+      case 'OCCUPY_PORT': {
+        var taken = cableAt(state.netbox.cables, { device: action.device, port: action.port });
+        return taken ? no('that port already carries ' + describeCable(taken)) : YES;
+      }
+
+      case 'SYNCHRONIZE': {
+        var d = disposition(state, action.traceId || state.selectedTraceId);
+        if (d.value === 'invalid') { return no('the Source Trace is invalid: ' + d.reason); }
+        if (d.value === 'blocked') { return no('the unit is blocked: ' + d.reason); }
+        if (d.value === 'no-op') { return no('already synchronized, there is nothing to write'); }
+        return YES;
+      }
+
+      case 'CLOSE_PREVIEW':
+        return state.previewOpen ? YES : no('the preview is already closed');
+
+      case 'OPEN_PREVIEW':
+        return state.previewOpen ? no('the preview is already open') : YES;
+
+      case 'RECHECK':
+        return state.previewOpen ? YES : no('the preview is closed');
+
+      default:
+        return no('unknown action');
+    }
+  }
+
+  /* ---------- transitions ---------- */
+
+  function actionLabel(state, action) {
+    var field = action.fieldKey ? fieldByKey(state, action.fieldKey) : null;
+    var suffix = field ? ' for ' + field.label : '';
+    var labels = {
+      SELECT_TRACE: 'Open a Source Trace review',
+      RESOLVE_MANUALLY: 'Resolve the termination by hand' + suffix,
+      ASK_AI: 'Ask AI' + suffix,
+      CANCEL_PROPOSAL: 'Cancel the proposal' + suffix,
+      ACCEPT_PROPOSAL: 'Accept the suggestion' + suffix,
+      REJECT_PROPOSAL: 'Reject the suggestion' + suffix,
+      PROVIDER_PROGRESS: 'Provider makes progress' + suffix,
+      PROVIDER_RETURNS_CANDIDATE: 'Provider returns a candidate' + suffix,
+      PROVIDER_RETURNS_NO_MATCH: 'Provider returns no match' + suffix,
+      PROVIDER_FAILS_TEMPORARY: 'Provider fails (temporary)' + suffix,
+      PROVIDER_FAILS_BAD_RESPONSE: 'Provider fails (bad response)' + suffix,
+      RENAME_PORT: 'Rename a port in NetBox',
+      OCCUPY_PORT: 'Cable a port in NetBox',
+      SYNCHRONIZE: 'Synchronize this trace',
+      CLOSE_PREVIEW: 'Close the preview',
+      OPEN_PREVIEW: 'Reopen the preview',
+      RECHECK: 'Re-read NetBox for this review'
+    };
+    return labels[action.type] || action.type;
+  }
+
+  function note(s, kind, text) {
+    s.log.unshift({ seq: s.seq, kind: kind, text: text });
+    s.lastChange = text;
+  }
+
+  function refreshReview(s) { s.reviewed.cables = clone(s.netbox.cables); }
+
+  function apply(state, action) {
+    var verdict = can(state, action);
+    var s = clone(state);
+    s.seq += 1;
+    if (!verdict.ok) {
+      s.log.unshift({ seq: s.seq, kind: 'blocked', text: 'Refused: ' + actionLabel(state, action) + ' - ' + verdict.reason });
+      s.lastChange = 'Nothing changed. ' + actionLabel(state, action) + ' is not allowed: ' + verdict.reason;
+      return s;
+    }
+    var field = action.fieldKey ? fieldByKey(s, action.fieldKey) : null;
+
+    switch (action.type) {
+      case 'SELECT_TRACE': {
+        s.selectedTraceId = action.traceId;
+        refreshReview(s);
+        note(s, 'info', 'Opened the review for ' + trace(s, action.traceId).name + '.');
+        break;
+      }
+
+      case 'RESOLVE_MANUALLY': {
+        s.resolutions[field.key] = { candidate: action.candidate, via: 'manual', at: s.seq };
+        note(s, 'ok', 'Row Resolution saved: ' + field.label + ' -> ' + action.candidate + ' (chosen by the operator).');
+        break;
+      }
+
+      case 'ASK_AI': {
+        s.proposalSeq += 1;
+        var answer = providerAnswer(s, field.key);
+        s.proposals.push({
+          id: 'P' + s.proposalSeq,
+          fieldKey: field.key,
+          status: 'queued',
+          attempt: 1,
+          model: answer.model,
+          snapshot: eligibleCandidates(s, field, null),
+          candidate: null,
+          explanation: null,
+          reason: null,
+          createdAt: s.seq
+        });
+        note(s, 'info', 'Resolution Proposal P' + s.proposalSeq + ' queued for ' + field.label + '. Nothing has been applied.');
+        break;
+      }
+
+      case 'CANCEL_PROPOSAL': {
+        var toCancel = last(proposalsFor(s, field.key).filter(function (p) { return p.status === 'queued' || p.status === 'running'; }));
+        toCancel.status = 'cancelled';
+        note(s, 'info', 'Proposal ' + toCancel.id + ' cancelled for ' + field.label + '.');
+        break;
+      }
+
+      case 'ACCEPT_PROPOSAL': {
+        var accepted = undecidedProposal(s, field.key);
+        accepted.status = 'accepted';
+        s.resolutions[field.key] = { candidate: accepted.candidate, via: 'proposal', proposalId: accepted.id, at: s.seq };
+        note(s, 'ok', 'Row Resolution saved: ' + field.label + ' -> ' + accepted.candidate
+          + ' (accepted from ' + accepted.id + '). The NetBox topology is unchanged.');
+        break;
+      }
+
+      case 'REJECT_PROPOSAL': {
+        var rejected = undecidedProposal(s, field.key);
+        rejected.status = 'rejected';
+        note(s, 'info', 'Suggestion ' + rejected.id + ' rejected for ' + field.label + '. The termination stays unresolved.');
+        break;
+      }
+
+      case 'PROVIDER_PROGRESS': {
+        var starting = last(proposalsFor(s, field.key).filter(function (p) { return p.status === 'queued'; }));
+        starting.status = 'running';
+        note(s, 'info', 'Provider started ' + starting.id + ' (attempt ' + starting.attempt + ' of ' + MAX_ATTEMPTS + ').');
+        break;
+      }
+
+      case 'PROVIDER_RETURNS_CANDIDATE': {
+        var done = last(proposalsFor(s, field.key).filter(function (p) { return p.status === 'running'; }));
+        var ans = providerAnswer(s, field.key);
+        done.status = 'completed';
+        done.candidate = answerCandidate(s, field.key);
+        done.explanation = ans.explanation;
+        note(s, 'info', 'Provider returned a candidate for ' + done.id + ': ' + done.candidate
+          + '. It is a suggestion only - nothing was applied.');
+        break;
+      }
+
+      case 'PROVIDER_RETURNS_NO_MATCH': {
+        var empty = last(proposalsFor(s, field.key).filter(function (p) { return p.status === 'running'; }));
+        empty.status = 'completed';
+        empty.candidate = null;
+        empty.explanation = providerAnswer(s, field.key).noMatch;
+        note(s, 'warn', 'Provider could not pick a candidate for ' + empty.id + '. Resolve ' + field.label + ' by hand.');
+        break;
+      }
+
+      case 'PROVIDER_FAILS_TEMPORARY': {
+        var flaky = last(proposalsFor(s, field.key).filter(function (p) { return p.status === 'running'; }));
+        if (flaky.attempt < MAX_ATTEMPTS) {
+          flaky.attempt += 1;
+          flaky.status = 'queued';
+          flaky.reason = 'provider unreachable (temporary)';
+          note(s, 'warn', 'Attempt ' + (flaky.attempt - 1) + ' of ' + flaky.id + ' failed (provider unreachable). Attempt '
+            + flaky.attempt + ' of ' + MAX_ATTEMPTS + ' queued automatically.');
+        } else {
+          flaky.status = 'failed';
+          flaky.reason = 'provider unreachable after ' + MAX_ATTEMPTS + ' attempts';
+          note(s, 'bad', 'Proposal ' + flaky.id + ' failed: provider unreachable after ' + MAX_ATTEMPTS + ' attempts.');
+        }
+        break;
+      }
+
+      case 'PROVIDER_FAILS_BAD_RESPONSE': {
+        var broken = last(proposalsFor(s, field.key).filter(function (p) { return p.status === 'running'; }));
+        broken.status = 'failed';
+        broken.reason = 'invalid provider response';
+        note(s, 'bad', 'Proposal ' + broken.id + ' failed: invalid provider response. This failure is not retried automatically.');
+        break;
+      }
+
+      case 'RENAME_PORT': {
+        var ports = s.netbox.devices[action.device];
+        ports.forEach(function (p) { if (p.name === action.port) { p.name = action.newName; } });
+        note(s, 'warn', 'NetBox changed elsewhere: ' + action.device + ' port "' + action.port + '" renamed to "' + action.newName + '".');
+        break;
+      }
+
+      case 'OCCUPY_PORT': {
+        s.netbox.cables.push({
+          id: 'X' + s.seq,
+          kind: 'physical',
+          cableClass: action.cableClass,
+          a: { device: action.device, port: action.port },
+          b: { device: action.byDevice, port: action.byPort },
+          source: 'cabled by another team'
+        });
+        note(s, 'warn', 'NetBox changed elsewhere: ' + action.device + ' ' + action.port + ' was cabled to '
+          + action.byDevice + ' ' + action.byPort + '. This review was rendered before that change.');
+        break;
+      }
+
+      case 'SYNCHRONIZE': {
+        var traceId = action.traceId || s.selectedTraceId;
+        var live = plan(s, traceId, s.netbox.cables);
+        if (live.conflicts.length) {
+          refreshReview(s);
+          s.lastResult = {
+            kind: 'bad',
+            text: 'Synchronization failed and rolled back. Nothing was written. ' + live.conflicts[0].text
+          };
+          note(s, 'bad', s.lastResult.text);
+          break;
+        }
+        if (live.logical) {
+          s.netbox.cables = s.netbox.cables.filter(function (c) { return c.id !== live.logical.id; });
+        }
+        var created = 0;
+        live.rows.filter(function (r) { return r.status === 'create'; }).forEach(function (r) {
+          created += 1;
+          s.netbox.cables.push({
+            id: 'N' + s.seq + '-' + created,
+            kind: 'physical',
+            cableClass: r.segment.cableClass,
+            a: r.a,
+            b: r.b,
+            source: 'created from Source Trace'
+          });
+        });
+        refreshReview(s);
+        s.lastResult = {
+          kind: 'ok',
+          text: 'Synchronized in one transaction: ' + (live.logical ? 'deleted 1 Logical Cable, ' : '')
+            + 'created ' + created + ' cable(s), reused ' + live.reuses + ' existing cable(s).'
+        };
+        note(s, 'ok', s.lastResult.text);
+        break;
+      }
+
+      case 'CLOSE_PREVIEW': {
+        s.previewOpen = false;
+        note(s, 'info', 'Preview closed. Resolution Proposals keep running: they belong to the termination, not to the preview.');
+        break;
+      }
+
+      case 'OPEN_PREVIEW': {
+        s.previewOpen = true;
+        refreshReview(s);
+        note(s, 'info', 'Preview reopened. Proposal state is unchanged.');
+        break;
+      }
+
+      case 'RECHECK': {
+        refreshReview(s);
+        note(s, 'info', 'Re-read the NetBox topology for this review.');
+        break;
+      }
+
+      default:
+        break;
+    }
+    return s;
+  }
+
+  return {
+    MAX_ATTEMPTS: MAX_ATTEMPTS,
+    initialState: initialState,
+    can: can,
+    apply: apply,
+    actionLabel: actionLabel,
+    fieldKey: fieldKey,
+    fieldByKey: fieldByKey,
+    fieldsFor: fieldsFor,
+    trace: trace,
+    eligibleCandidates: eligibleCandidates,
+    automaticMatch: automaticMatch,
+    resolvedCandidate: resolvedCandidate,
+    resolutionFor: resolutionFor,
+    proposalsFor: proposalsFor,
+    activeProposal: activeProposal,
+    undecidedProposal: undecidedProposal,
+    isStale: isStale,
+    fieldStatus: fieldStatus,
+    plan: plan,
+    disposition: disposition,
+    describeCable: describeCable,
+    cableAt: cableAt,
+    reviewIsStale: reviewIsStale,
+    summary: summary,
+    answerCandidate: answerCandidate,
+    providerAnswer: providerAnswer,
+    devicePorts: devicePorts
+  };
+}());
+</script>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * RENDERING SHELL - throwaway. Demo data, walkthroughs, DOM.
+ * ------------------------------------------------------------------ */
+(function () {
+  'use strict';
+
+  /* ---------- simulated NetBox device inventory ---------- */
+
+  function iface(names) { return names.map(function (n) { return { name: n, kind: 'Interface' }; }); }
+  function panel(fronts, rears) {
+    return fronts.map(function (n) { return { name: n, kind: 'FrontPort' }; })
+      .concat(rears.map(function (n) { return { name: n, kind: 'RearPort' }; }));
+  }
+  var FRONTS = ['01', '02', '03', '04', '05', '06'];
+  var REARS = ['R01', 'R02', 'R03', 'R04', 'R05', 'R06'];
+  function stdPanel() { return panel(FRONTS, REARS); }
+
+  var DEVICES = {
+    'DEV-01': iface(['Eth 05', 'Eth 06', 'mgmt0', 'Slot 0/0/1', 'Slot 0/2/1', 'Slot 0/3/1', 'Slot 1/0/0']),
+    'DEV-02': iface(['08', '09', '10', '11', '12', '13', 'Slot 3/2/2']),
+    'DEV-03': iface(['Eth 05', '48']),
+    'H1-V3-52-F': stdPanel(),
+    'H1-V7-4-F': stdPanel(),
+    'H1-V7-11-F': stdPanel(),
+    'H1-ODF1-22-F': stdPanel(),
+    'H1-ODF1-23-F': stdPanel(),
+    'H1-ODF1-24-F': stdPanel(),
+    'H1-Q7-2-F': stdPanel(),
+    'H1-Q7-11-F': stdPanel(),
+    'H1-T7-2-F': stdPanel(),
+    'H1-T11-52-F': stdPanel(),
+    'H1-T8-51-F': stdPanel(),
+    'H1-T7-42-F': stdPanel(),
+    /* This panel names its rear ports per cassette, so the workbook name "R03" matches three of them. */
+    'H1-Q10-52-F': panel(
+      ['H1-Q10-52-1-F 03', 'H1-Q10-52-2-F 03', 'H1-Q10-52-3-F 03'],
+      ['H1-Q10-52-1-F R03', 'H1-Q10-52-2-F R03', 'H1-Q10-52-3-F R03',
+        'H1-Q10-52-1-F R04', 'H1-Q10-52-2-F R04', 'H1-Q10-52-3-F R04']
+    )
+    /* H1-T7-11-F is deliberately absent: it makes the fourth Source Trace structurally invalid. */
+  };
+
+  function term(device, port, kind, extra) {
+    var t = { device: device, port: port, kind: kind };
+    if (extra && extra.card) { t.card = extra.card; }
+    if (extra && extra.cassette) { t.cassette = extra.cassette; }
+    return t;
+  }
+  function seg(left, cableClass, right) { return { left: left, cableClass: cableClass, right: right }; }
+
+  var FIBER_CASSETTES = {
+    v3: 'H1-V3-52-1-F - H1-V7-4-3-F',
+    v7a: 'H1-V7-4-3-F - H1-V3-52-1-F',
+    v7b: 'H1-V7-11-1-F - H1-ODF1-22-2-F',
+    odf22: 'H1-ODF1-22-2-F - H1-V7-11-1-F',
+    odf24: 'H1-ODF1-24-3-F - H1-Q7-11-4-F',
+    q711: 'H1-Q7-11-4-F - H1-ODF1-24-3-F',
+    q72: 'H1-Q7-2-1-F - H1-Q10-52-1-F',
+    q1052: 'H1-Q10-52-1-F - H1-Q7-2-1-F'
+  };
+
+  var TRACES = [
+    {
+      id: 'fiber',
+      name: 'Fiber trace - DEV-01 2/1 to H1-Q10-52-F R03',
+      from: 'DEV-01 > Slot 0 > 2/1 (Port)',
+      to: 'H1-Q10-52-F > H1-Q10-52-1-F - H1-Q7-2-1-F > R03 (Fiber Pair Back)',
+      origin: 'trace_fiber.xlsx, first trace block',
+      segments: [
+        seg(term('DEV-01', '2/1', 'Interface', { card: 'Slot 0' }), 'MM Fiber LC-LC', term('H1-V3-52-F', '01', 'FrontPort', { cassette: FIBER_CASSETTES.v3 })),
+        seg(term('H1-V3-52-F', 'R01', 'RearPort', { cassette: FIBER_CASSETTES.v3 }), 'Inter-Building Backbone', term('H1-V7-4-F', 'R01', 'RearPort', { cassette: FIBER_CASSETTES.v7a })),
+        seg(term('H1-V7-4-F', '01', 'FrontPort', { cassette: FIBER_CASSETTES.v7a }), 'MM Fiber LC-LC', term('H1-V7-11-F', '01', 'FrontPort', { cassette: FIBER_CASSETTES.v7b })),
+        seg(term('H1-V7-11-F', 'R01', 'RearPort', { cassette: FIBER_CASSETTES.v7b }), 'Inter-Building Backbone', term('H1-ODF1-22-F', 'R01', 'RearPort', { cassette: FIBER_CASSETTES.odf22 })),
+        seg(term('H1-ODF1-22-F', '01', 'FrontPort', { cassette: FIBER_CASSETTES.odf22 }), 'MM Fiber LC-LC', term('H1-ODF1-24-F', '05', 'FrontPort', { cassette: FIBER_CASSETTES.odf24 })),
+        seg(term('H1-ODF1-24-F', 'R05', 'RearPort', { cassette: FIBER_CASSETTES.odf24 }), 'OM4', term('H1-Q7-11-F', 'R05', 'RearPort', { cassette: FIBER_CASSETTES.q711 })),
+        seg(term('H1-Q7-11-F', '05', 'FrontPort', { cassette: FIBER_CASSETTES.q711 }), 'MM Fiber LC-LC', term('H1-Q7-2-F', '03', 'FrontPort', { cassette: FIBER_CASSETTES.q72 })),
+        seg(term('H1-Q7-2-F', 'R03', 'RearPort', { cassette: FIBER_CASSETTES.q72 }), 'OM4', term('H1-Q10-52-F', 'R03', 'RearPort', { cassette: FIBER_CASSETTES.q1052 }))
+      ],
+      conflictTarget: { device: 'H1-ODF1-24-F', port: '05', byDevice: 'DEV-11', byPort: 'Slot 0/1/1', cableClass: 'MM Fiber LC-LC' }
+    },
+    {
+      id: 'copper',
+      name: 'Copper trace - DEV-01 Eth 05 to DEV-02 08',
+      from: 'DEV-01 > Eth 05 (NIC)',
+      to: 'DEV-02 > 08 (Switch Port)',
+      origin: 'trace_copper.xlsx, first trace block',
+      segments: [
+        seg(term('DEV-01', 'Eth 05', 'Interface'), 'Cat 6a Straight', term('H1-T8-51-F', '01', 'FrontPort', { cassette: 'H1-T8-51-F - H1-T7-42-F' })),
+        seg(term('H1-T8-51-F', 'R01', 'RearPort', { cassette: 'H1-T8-51-F - H1-T7-42-F' }), 'Cat 6a', term('H1-T7-42-F', 'R01', 'RearPort', { cassette: 'H1-T7-42-F - H1-T8-51-F' })),
+        seg(term('H1-T7-42-F', '01', 'FrontPort', { cassette: 'H1-T7-42-F - H1-T8-51-F' }), 'Cat 6a Straight', term('DEV-02', '08', 'Interface'))
+      ],
+      conflictTarget: { device: 'H1-T7-42-F', port: '01', byDevice: 'DEV-09', byPort: 'Eth 01', cableClass: 'Cat 6a Straight' }
+    },
+    {
+      id: 'noop',
+      name: 'Copper trace - DEV-03 Eth 05 to DEV-02 09',
+      from: 'DEV-03 > Eth 05 (NIC)',
+      to: 'DEV-02 > 09 (Switch Port)',
+      origin: 'trace_copper.xlsx, second trace block',
+      segments: [
+        seg(term('DEV-03', 'Eth 05', 'Interface'), 'Cat 6a Straight', term('H1-T8-51-F', '02', 'FrontPort', { cassette: 'H1-T8-51-F - H1-T7-42-F' })),
+        seg(term('H1-T8-51-F', 'R02', 'RearPort', { cassette: 'H1-T8-51-F - H1-T7-42-F' }), 'Cat 6a', term('H1-T7-42-F', 'R02', 'RearPort', { cassette: 'H1-T7-42-F - H1-T8-51-F' })),
+        seg(term('H1-T7-42-F', '02', 'FrontPort', { cassette: 'H1-T7-42-F - H1-T8-51-F' }), 'Cat 6a Straight', term('DEV-02', '09', 'Interface'))
+      ]
+    },
+    {
+      id: 'invalid',
+      name: 'Fiber trace - DEV-02 2/2 to DEV-03 48',
+      from: 'DEV-02 > Slot 3 > 2/2 (Port)',
+      to: 'DEV-03 > 48 (Switch Port)',
+      origin: 'trace_fiber.xlsx, third trace block',
+      segments: [
+        seg(term('DEV-02', '2/2', 'Interface', { card: 'Slot 3' }), 'MM Fiber LC-LC', term('H1-V3-52-F', '03', 'FrontPort')),
+        seg(term('H1-V3-52-F', 'R03', 'RearPort'), 'Inter-Building Backbone', term('H1-V7-4-F', 'R03', 'RearPort')),
+        seg(term('H1-V7-4-F', '03', 'FrontPort'), 'MM Fiber LC-LC', term('H1-V7-11-F', '04', 'FrontPort')),
+        seg(term('H1-V7-11-F', 'R04', 'RearPort'), 'Inter-Building Backbone', term('H1-ODF1-22-F', 'R04', 'RearPort')),
+        seg(term('H1-ODF1-22-F', '04', 'FrontPort'), 'MM Fiber LC-LC', term('H1-ODF1-23-F', '02', 'FrontPort')),
+        seg(term('H1-ODF1-23-F', 'R02', 'RearPort'), 'OM4', term('H1-T7-11-F', 'R02', 'RearPort')),
+        seg(term('H1-T7-11-F', '02', 'FrontPort'), 'MM Fiber LC-LC', term('H1-T7-2-F', '01', 'FrontPort')),
+        seg(term('H1-T7-2-F', 'R01', 'RearPort'), 'Fiber Cable', term('H1-T11-52-F', 'R01', 'RearPort')),
+        seg(term('H1-T11-52-F', '01', 'FrontPort'), 'MM Fiber LC-LC', term('DEV-03', '48', 'Interface'))
+      ]
+    }
+  ];
+
+  var CABLES = [
+    { id: 'C1', kind: 'physical', cableClass: 'Inter-Building Backbone', a: { device: 'H1-V3-52-F', port: 'R01' }, b: { device: 'H1-V7-4-F', port: 'R01' }, source: 'trunk, already in NetBox' },
+    { id: 'C2', kind: 'physical', cableClass: 'Inter-Building Backbone', a: { device: 'H1-V7-11-F', port: 'R01' }, b: { device: 'H1-ODF1-22-F', port: 'R01' }, source: 'trunk, already in NetBox' },
+    { id: 'C3', kind: 'physical', cableClass: 'Cat 6a', a: { device: 'H1-T8-51-F', port: 'R01' }, b: { device: 'H1-T7-42-F', port: 'R01' }, source: 'trunk, already in NetBox' },
+    { id: 'C4', kind: 'logical', cableClass: 'Logical', a: { device: 'DEV-01', port: 'Eth 05' }, b: { device: 'DEV-02', port: '08' }, source: 'from LLDP sync' },
+    { id: 'C5', kind: 'physical', cableClass: 'Cat 6a Straight', a: { device: 'DEV-03', port: 'Eth 05' }, b: { device: 'H1-T8-51-F', port: '02' }, source: 'created from an earlier Source Trace' },
+    { id: 'C6', kind: 'physical', cableClass: 'Cat 6a', a: { device: 'H1-T8-51-F', port: 'R02' }, b: { device: 'H1-T7-42-F', port: 'R02' }, source: 'trunk, already in NetBox' },
+    { id: 'C7', kind: 'physical', cableClass: 'Cat 6a Straight', a: { device: 'H1-T7-42-F', port: '02' }, b: { device: 'DEV-02', port: '09' }, source: 'created from an earlier Source Trace' }
+  ];
+
+  var ANSWERS = {
+    'fiber:0:left': {
+      model: 'trace-assist-8b (local)',
+      candidateMatch: 'Slot 0/2/1',
+      explanation: 'The source row names card "Slot 0" and port "2/1". DEV-01 has one interface that carries both, '
+        + 'Slot 0/2/1. No other interface on the device combines that card with that port number.',
+      noMatch: 'The source row names card "Slot 0" and port "2/1". Several interfaces on DEV-01 end in a similar '
+        + 'number and the row does not say which card layout the export used.'
+    },
+    'fiber:7:right': {
+      model: 'trace-assist-8b (local)',
+      candidateMatch: '52-1-F R03',
+      explanation: 'The source row names cassette H1-Q10-52-1-F - H1-Q7-2-1-F. On H1-Q10-52-F only one rear port belongs '
+        + 'to cassette H1-Q10-52-1-F, and its position is R03, so port "R03" in the workbook is that rear port.',
+      noMatch: 'Three rear ports on H1-Q10-52-F end in R03, one per cassette. The source row gives the cassette label '
+        + 'but nothing in the row rules out the other two, so no single candidate can be chosen.'
+    }
+  };
+
+  var DEMO = {
+    provider: 'trace-assist-8b (local)',
+    traces: TRACES,
+    answers: ANSWERS,
+    netbox: { devices: DEVICES, cables: CABLES }
+  };
+
+  /* ---------- guided walkthroughs ---------- */
+
+  var FIBER_FAR = 'fiber:7:right';
+  var FIBER_NEAR = 'fiber:0:left';
+  var RENAMED = 'H1-Q10-52-1-F R03 (relabelled)';
+
+  function look(label) { return { label: 'Look: ' + label, ui: 'observe' }; }
+
+  var WALKTHROUGHS = [
+    {
+      id: 'happy',
+      title: '1. Resolve and synchronize',
+      trace: 'fiber',
+      blurb: 'The fiber Source Trace has eight segments. Fourteen of its sixteen terminations resolve by themselves '
+        + 'on a unique exact name match. Two do not: the device port on DEV-01 and the rear port on the far panel. '
+        + 'The unit stays blocked until both resolve.',
+      watch: 'Watch the disposition badge move from blocked to actionable only after both terminations resolve, and watch '
+        + 'the same trace report no-op when you review it again after synchronizing.',
+      steps: [
+        { label: 'Review the fiber Source Trace', action: { type: 'SELECT_TRACE', traceId: 'fiber' } },
+        { label: 'Search terminations for 2/1 @ DEV-01', ui: 'openPicker', fieldKey: FIBER_NEAR },
+        { label: 'Type "2/1" in the search box', ui: 'setQuery', query: '2/1' },
+        { label: 'Pick Slot 0/2/1', action: { type: 'RESOLVE_MANUALLY', fieldKey: FIBER_NEAR, candidate: 'Slot 0/2/1' } },
+        { label: 'Ask AI about R03 @ H1-Q10-52-F', action: { type: 'ASK_AI', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider returns candidate', action: { type: 'PROVIDER_RETURNS_CANDIDATE', fieldKey: FIBER_FAR } },
+        look('the card is badged "Proposal - not applied" and waits for you'),
+        { label: 'Accept suggestion', action: { type: 'ACCEPT_PROPOSAL', fieldKey: FIBER_FAR } },
+        look('the unit is now actionable and the plan lists 6 creates and 2 reuses'),
+        { label: 'Synchronize this trace', action: { type: 'SYNCHRONIZE' } },
+        { label: 'Review this trace again', action: { type: 'SELECT_TRACE', traceId: 'fiber' } },
+        look('the same trace now reports no-op: every segment exists')
+      ]
+    },
+    {
+      id: 'suggest',
+      title: '2. The AI can only suggest',
+      trace: 'fiber',
+      blurb: 'A completed proposal is a suggestion, never a change. The operator decides, and even accepting only writes '
+        + 'a Row Resolution: the NetBox topology stays untouched until Synchronize runs.',
+      watch: 'Watch the proposal card wording and the "Current NetBox topology" panel. Nothing in NetBox moves during this '
+        + 'whole walkthrough. Rejecting leaves the termination unresolved, and asking again starts a new proposal row.',
+      steps: [
+        { label: 'Review the fiber Source Trace', action: { type: 'SELECT_TRACE', traceId: 'fiber' } },
+        { label: 'Ask AI about R03 @ H1-Q10-52-F', action: { type: 'ASK_AI', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider returns candidate', action: { type: 'PROVIDER_RETURNS_CANDIDATE', fieldKey: FIBER_FAR } },
+        look('badge "Proposal - not applied", muted card, two operator buttons'),
+        { label: 'Reject', action: { type: 'REJECT_PROPOSAL', fieldKey: FIBER_FAR } },
+        look('the termination is unresolved again and the rejected proposal stays in the history'),
+        { label: 'Ask AI again', action: { type: 'ASK_AI', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider returns candidate', action: { type: 'PROVIDER_RETURNS_CANDIDATE', fieldKey: FIBER_FAR } },
+        { label: 'Accept suggestion', action: { type: 'ACCEPT_PROPOSAL', fieldKey: FIBER_FAR } },
+        look('a Row Resolution was saved, and NetBox still shows no new cable')
+      ]
+    },
+    {
+      id: 'stale',
+      title: '3. Stale proposal',
+      trace: 'fiber',
+      blurb: 'A proposal records the candidate list it saw. If someone renames a port in NetBox while the operator thinks, '
+        + 'the suggestion no longer describes the current state.',
+      watch: 'Staleness is computed, never stored: the card turns stale the moment the candidate list changes, and Accept '
+        + 'is disabled with the reason. Asking again takes a fresh snapshot.',
+      steps: [
+        { label: 'Review the fiber Source Trace', action: { type: 'SELECT_TRACE', traceId: 'fiber' } },
+        { label: 'Ask AI about R03 @ H1-Q10-52-F', action: { type: 'ASK_AI', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider returns candidate', action: { type: 'PROVIDER_RETURNS_CANDIDATE', fieldKey: FIBER_FAR } },
+        { label: 'Someone renames that rear port in NetBox', action: { type: 'RENAME_PORT', device: 'H1-Q10-52-F', port: 'H1-Q10-52-1-F R03', newName: RENAMED } },
+        look('the card is stale and Accept is disabled with the reason'),
+        { label: 'Ask AI again', action: { type: 'ASK_AI', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider returns candidate', action: { type: 'PROVIDER_RETURNS_CANDIDATE', fieldKey: FIBER_FAR } },
+        { label: 'Accept suggestion', action: { type: 'ACCEPT_PROPOSAL', fieldKey: FIBER_FAR } },
+        look('the fresh proposal points at the renamed port and both rows stay in the history')
+      ]
+    },
+    {
+      id: 'trouble',
+      title: '4. Provider trouble',
+      trace: 'fiber',
+      blurb: 'The provider can be unreachable, can answer with nonsense, or can honestly report that it cannot choose. '
+        + 'Each case reads differently and none of them blocks the operator.',
+      watch: 'A temporary failure retries by itself up to three attempts, then fails with a typed reason. A no-match card '
+        + 'has no Accept button at all: the operator resolves by hand.',
+      steps: [
+        { label: 'Review the fiber Source Trace', action: { type: 'SELECT_TRACE', traceId: 'fiber' } },
+        { label: 'Ask AI about R03 @ H1-Q10-52-F', action: { type: 'ASK_AI', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider fails (temporary)', action: { type: 'PROVIDER_FAILS_TEMPORARY', fieldKey: FIBER_FAR } },
+        look('attempt 2 of 3 was queued automatically'),
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider fails (temporary)', action: { type: 'PROVIDER_FAILS_TEMPORARY', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider fails (temporary)', action: { type: 'PROVIDER_FAILS_TEMPORARY', fieldKey: FIBER_FAR } },
+        look('the proposal is failed with a typed reason, and the retries stopped at three attempts'),
+        { label: 'Ask AI again', action: { type: 'ASK_AI', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Provider returns no-match', action: { type: 'PROVIDER_RETURNS_NO_MATCH', fieldKey: FIBER_FAR } },
+        look('the no-match card explains itself and offers no Accept button'),
+        { label: 'Search terminations for R03 @ H1-Q10-52-F', ui: 'openPicker', fieldKey: FIBER_FAR },
+        { label: 'Type "52-1" in the search box', ui: 'setQuery', query: '52-1' },
+        { label: 'Pick H1-Q10-52-1-F R03', action: { type: 'RESOLVE_MANUALLY', fieldKey: FIBER_FAR, candidate: 'H1-Q10-52-1-F R03' } }
+      ]
+    },
+    {
+      id: 'closed',
+      title: '5. Closed preview',
+      trace: 'fiber',
+      blurb: 'Proposals belong to the termination, not to the preview window. An operator can close the preview, do '
+        + 'something else, and come back.',
+      watch: 'The proposal keeps its identity and attempt count across close and reopen. The provider can finish while the '
+        + 'preview is closed, and the answer is waiting when the operator returns.',
+      steps: [
+        { label: 'Review the fiber Source Trace', action: { type: 'SELECT_TRACE', traceId: 'fiber' } },
+        { label: 'Ask AI about R03 @ H1-Q10-52-F', action: { type: 'ASK_AI', fieldKey: FIBER_FAR } },
+        { label: 'Provider makes progress', action: { type: 'PROVIDER_PROGRESS', fieldKey: FIBER_FAR } },
+        { label: 'Close preview', action: { type: 'CLOSE_PREVIEW' } },
+        look('the workspace is gone but the proposal is still running'),
+        { label: 'Provider returns candidate (preview still closed)', action: { type: 'PROVIDER_RETURNS_CANDIDATE', fieldKey: FIBER_FAR } },
+        { label: 'Reopen preview', action: { type: 'OPEN_PREVIEW' } },
+        look('the suggestion is waiting, with its original proposal id'),
+        { label: 'Accept suggestion', action: { type: 'ACCEPT_PROPOSAL', fieldKey: FIBER_FAR } }
+      ]
+    },
+    {
+      id: 'nothing',
+      title: '6. Nothing to do',
+      trace: 'noop',
+      blurb: 'A Source Trace that was already synchronized must not look like work. Every segment of this copper trace '
+        + 'already exists as a matching cable and no direct Logical Cable remains.',
+      watch: 'The disposition is no-op, every planned segment says "reuse existing", and the Synchronize button is disabled '
+        + 'with a reason instead of hidden.',
+      steps: [
+        { label: 'Review the already synchronized trace', action: { type: 'SELECT_TRACE', traceId: 'noop' } },
+        look('all six terminations resolved by exact name match'),
+        look('each of the three planned segments says "reuse existing"'),
+        look('Synchronize is disabled: already synchronized, there is nothing to write')
+      ]
+    },
+    {
+      id: 'moved',
+      title: '7. The world moved',
+      trace: 'copper',
+      blurb: 'The copper trace resolves completely by itself and is actionable: delete the Logical Cable that LLDP sync '
+        + 'created, then build the real path. Between the review and the click, someone patches one of the ports it needs.',
+      watch: 'Synchronize re-reads NetBox before it writes. The whole unit is one transaction, so the failure rolls back '
+        + 'and nothing is written. Afterwards the unit is blocked with the conflict named.',
+      steps: [
+        { label: 'Review the copper Source Trace', action: { type: 'SELECT_TRACE', traceId: 'copper' } },
+        look('every termination resolved automatically and the unit is actionable'),
+        { label: 'Someone cables H1-T7-42-F 01 in NetBox', action: { type: 'OCCUPY_PORT', device: 'H1-T7-42-F', port: '01', byDevice: 'DEV-09', byPort: 'Eth 01', cableClass: 'Cat 6a Straight' } },
+        look('the review was rendered before that change and says so'),
+        { label: 'Synchronize this trace', action: { type: 'SYNCHRONIZE' } },
+        look('nothing was written, and the unit is now blocked with the conflict named')
+      ]
+    }
+  ];
+
+  /* ---------- shell state ---------- */
+
+  var state = TraceReview.initialState(DEMO, { traceId: 'fiber' });
+  var ui = { tab: null, step: 0, pickerField: null, pickerQuery: '', freePlayOpen: false, focusPicker: false };
+  var handlers = [];
+  var inputs = [];
+  var root = document.getElementById('app');
+
+  function esc(text) {
+    return String(text === null || text === undefined ? '' : text)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function dispatch(action) {
+    state = TraceReview.apply(state, action);
+    render();
+  }
+
+  /* Renders a button plus, when it is disabled, the reason under it. */
+  function button(label, options, fn) {
+    var opts = options || {};
+    var enabled = opts.enabled !== false;
+    var index = handlers.push(fn || function () {}) - 1;
+    var classes = ['btn'];
+    if (opts.primary) { classes.push('primary'); }
+    if (opts.cls) { classes.push(opts.cls); }
+    var title = enabled ? (opts.title || label) : (label + ' - disabled: ' + (opts.reason || 'not possible now'));
+    var html = '<div class="act"><button data-h="' + index + '" class="' + classes.join(' ') + '"'
+      + (enabled ? '' : ' disabled') + ' title="' + esc(title) + '">' + esc(label) + '</button>';
+    if (!enabled && opts.reason && !opts.quiet) { html += '<div class="reason">disabled: ' + esc(opts.reason) + '</div>'; }
+    if (enabled && opts.sub) { html += '<div class="reason">' + esc(opts.sub) + '</div>'; }
+    html += '</div>';
+    return html;
+  }
+
+  function actionButton(label, action, options) {
+    var verdict = TraceReview.can(state, action);
+    var opts = options || {};
+    opts.enabled = verdict.ok;
+    opts.reason = verdict.reason;
+    return button(label, opts, function () { dispatch(action); });
+  }
+
+  function badge(text, tone) {
+    var map = { ok: 'b-ok', warn: 'b-warn', bad: 'b-bad', info: 'b-info', mute: 'b-mute' };
+    return '<span class="badge ' + (map[tone] || 'b-mute') + '">' + esc(text) + '</span>';
+  }
+
+  function dispositionTone(value) {
+    if (value === 'actionable') { return 'ok'; }
+    if (value === 'no-op') { return 'mute'; }
+    if (value === 'blocked') { return 'warn'; }
+    return 'bad';
+  }
+
+  /* ---------- workspace ---------- */
+
+  function renderTraceList() {
+    var html = '<div class="card"><p class="sec">Source Traces in this import</p><table><tr>'
+      + '<th>Source Trace</th><th>Segments</th><th>Synchronization Unit</th><th></th></tr>';
+    state.demo.traces.forEach(function (t) {
+      var d = TraceReview.disposition(state, t.id);
+      var selected = t.id === state.selectedTraceId;
+      html += '<tr><td>' + esc(t.name) + '<div class="subtle mono">' + esc(t.from) + ' -&gt; ' + esc(t.to) + '</div></td>'
+        + '<td>' + t.segments.length + '</td>'
+        + '<td>' + badge(d.value, dispositionTone(d.value)) + '</td>'
+        + '<td>' + (selected
+          ? '<span class="subtle">in review</span>'
+          : actionButton('Review', { type: 'SELECT_TRACE', traceId: t.id }, {})) + '</td></tr>';
+    });
+    html += '</table></div>';
+    return html;
+  }
+
+  function renderGlance(t, d) {
+    var s = TraceReview.summary(state);
+    var cells = [
+      ['Source Trace', esc(t.name)],
+      ['Synchronization Unit', badge(d.value, dispositionTone(d.value))],
+      ['Terminations resolved', s.resolved + ' of ' + s.fields],
+      ['Active proposals', String(s.activeProposals)],
+      ['Saved decisions', String(s.savedDecisions)],
+      ['Preview', state.previewOpen ? 'open' : 'closed'],
+      ['Simulated step', String(state.seq)]
+    ];
+    var html = '<div class="glance">';
+    cells.forEach(function (c) { html += '<div><div class="k">' + c[0] + '</div><div class="v">' + c[1] + '</div></div>'; });
+    html += '</div>';
+    html += '<div class="changed"><strong>What just changed:</strong> ' + esc(state.lastChange) + '</div>';
+    html += '<div class="subtle">Why: ' + esc(d.reason) + '</div>';
+    return html;
+  }
+
+  function renderEvidence(t) {
+    var html = '<div class="card"><p class="sec">Source Trace evidence</p>'
+      + '<table><tr><th>From</th><td class="mono">' + esc(t.from) + '</td></tr>'
+      + '<tr><th>To</th><td class="mono">' + esc(t.to) + '</td></tr></table>'
+      + '<p class="sec mt">Segments as the source describes them (' + t.segments.length + ')</p>';
+    t.segments.forEach(function (segment, i) {
+      html += '<div class="seg"><span class="num">' + (i + 1) + '</span>'
+        + '<span class="mono">' + esc(segment.left.port + ' @ ' + segment.left.device)
+        + ' --' + esc(segment.cableClass) + '-- '
+        + esc(segment.right.port + ' @ ' + segment.right.device) + '</span></div>';
+      var next = t.segments[i + 1];
+      if (next && next.left.device === segment.right.device) {
+        html += '<div class="pass">pass-through inside ' + esc(segment.right.device) + ': '
+          + esc(segment.right.port) + ' to ' + esc(next.left.port) + '</div>';
+      }
+    });
+    html += '<p class="subtle" style="margin-top:12px">Source: ' + esc(t.origin) + '</p></div>';
+    return html;
+  }
+
+  function renderProposalCard(field, proposal) {
+    var stale = TraceReview.isStale(state, proposal);
+    var cls = 'prop';
+    if (stale) { cls += ' stale'; }
+    if (proposal.status === 'failed') { cls += ' failed'; }
+    var html = '<div class="' + cls + '">';
+
+    if (proposal.status === 'queued' || proposal.status === 'running') {
+      html += badge('Proposal ' + proposal.status, 'info')
+        + ' <span class="subtle">' + esc(proposal.id) + ', attempt ' + proposal.attempt + ' of ' + TraceReview.MAX_ATTEMPTS + '</span>'
+        + '<div class="meta">Nothing has been applied. In this prototype time only moves when you press a provider button:</div>'
+        + '<div style="margin-top:8px">'
+        + actionButton('Provider makes progress', { type: 'PROVIDER_PROGRESS', fieldKey: field.key }, { primary: true })
+        + actionButton('Provider returns candidate', { type: 'PROVIDER_RETURNS_CANDIDATE', fieldKey: field.key }, {})
+        + actionButton('Provider returns no-match', { type: 'PROVIDER_RETURNS_NO_MATCH', fieldKey: field.key }, {})
+        + actionButton('Provider fails (temporary)', { type: 'PROVIDER_FAILS_TEMPORARY', fieldKey: field.key }, {})
+        + actionButton('Provider fails (bad response)', { type: 'PROVIDER_FAILS_BAD_RESPONSE', fieldKey: field.key }, {})
+        + '</div>';
+    } else if (proposal.status === 'failed') {
+      html += badge('Proposal failed', 'bad')
+        + ' <span class="subtle">' + esc(proposal.id) + '</span>'
+        + '<div class="cand">Reason: ' + esc(proposal.reason) + '</div>'
+        + '<div class="meta">Provider ' + esc(proposal.model) + ', ' + proposal.attempt + ' attempt(s). No change was made.</div>';
+    } else if (proposal.status === 'completed' && !proposal.candidate) {
+      html += badge('No candidate - resolve by hand', 'warn')
+        + ' <span class="subtle">' + esc(proposal.id) + '</span>'
+        + '<div class="cand">The provider could not choose a candidate.</div>'
+        + '<div>' + esc(proposal.explanation) + '</div>'
+        + '<div class="meta">Provider ' + esc(proposal.model) + ', ' + proposal.attempt + ' attempt(s). There is nothing to accept.</div>';
+    } else if (proposal.status === 'completed') {
+      html += badge(stale ? 'Proposal - stale, not applied' : 'Proposal - not applied', stale ? 'warn' : 'info')
+        + ' <span class="subtle">' + esc(proposal.id) + '</span>'
+        + '<div class="cand">Suggested: <span class="mono">' + esc(proposal.candidate) + '</span> (' + esc(field.kind) + ')</div>'
+        + '<div>' + esc(proposal.explanation) + '</div>';
+      if (stale) {
+        html += '<div class="meta"><strong>Stale:</strong> the eligible ports on ' + esc(field.device)
+          + ' changed after this suggestion was made. It describes a state that no longer exists.</div>';
+      }
+      html += '<div class="meta">Provider ' + esc(proposal.model) + ', attempt ' + proposal.attempt + ' of ' + TraceReview.MAX_ATTEMPTS
+        + '. This is a suggestion for the operator. It has not changed anything in NetBox.</div>'
+        + '<div style="margin-top:10px">'
+        + actionButton('Accept suggestion', { type: 'ACCEPT_PROPOSAL', fieldKey: field.key }, { primary: true })
+        + actionButton('Reject', { type: 'REJECT_PROPOSAL', fieldKey: field.key }, {})
+        + '</div>';
+    } else {
+      html += badge('Proposal ' + proposal.status, 'mute') + ' <span class="subtle">' + esc(proposal.id) + '</span>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderPicker(field) {
+    var names = TraceReview.eligibleCandidates(state, field, ui.pickerQuery);
+    var all = TraceReview.eligibleCandidates(state, field, null);
+    var idx = inputs.push(function (value) { ui.pickerQuery = value; ui.focusPicker = true; render(); }) - 1;
+    var html = '<div class="picker"><p class="sec">Termination search on ' + esc(field.device) + '</p>'
+      + '<input id="picker-input" data-i="' + idx + '" value="' + esc(ui.pickerQuery) + '" placeholder="Filter by name">'
+      + '<div class="subtle" style="margin-top:6px">' + names.length + ' of ' + all.length + ' eligible '
+      + esc(field.kind) + '(s) on ' + esc(field.device) + '. Only ports of the kind the source claims are listed.</div>'
+      + '<div class="cands">';
+    names.forEach(function (name) {
+      html += actionButton(name, { type: 'RESOLVE_MANUALLY', fieldKey: field.key, candidate: name }, { cls: 'wide' });
+    });
+    if (!names.length) { html += '<div class="subtle">No eligible port matches that search.</div>'; }
+    html += '</div>'
+      + button('Close search', {}, function () { ui.pickerField = null; ui.pickerQuery = ''; render(); })
+      + '</div>';
+    return html;
+  }
+
+  function renderField(field) {
+    var status = TraceReview.fieldStatus(state, field);
+    var proposals = TraceReview.proposalsFor(state, field.key);
+    var current = proposals.length ? proposals[proposals.length - 1] : null;
+    var html = '<div class="field attention">'
+      + '<div class="row wrap"><strong class="mono">' + esc(field.claimed) + ' @ ' + esc(field.device) + '</strong>'
+      + badge(status.status, status.tone) + badge(field.kind, 'mute')
+      + '<span class="subtle">' + esc(field.where) + '</span></div>';
+    if (field.card) { html += '<div class="subtle">source names card ' + esc(field.card) + '</div>'; }
+    if (field.cassette) { html += '<div class="subtle">source names cassette ' + esc(field.cassette) + '</div>'; }
+    if (status.candidate) {
+      html += '<div style="margin-top:6px">Target Field: <span class="mono">' + esc(status.candidate) + '</span>'
+        + ' <span class="subtle">' + esc(status.note || '') + '</span></div>';
+    } else {
+      html += '<div class="subtle" style="margin-top:6px">Target Field: not set - ' + esc(status.note || '') + '</div>';
+    }
+
+    if (current) { html += renderProposalCard(field, current); }
+
+    if (proposals.length) {
+      html += '<div class="hist"><strong>Proposal history for this termination</strong><ul class="plain">';
+      proposals.forEach(function (p) {
+        var stale = TraceReview.isStale(state, p) ? ', stale' : '';
+        html += '<li>' + esc(p.id) + ' - ' + esc(p.status) + stale + ', attempt ' + p.attempt
+          + (p.candidate ? ', candidate ' + esc(p.candidate) : '')
+          + (p.reason ? ', ' + esc(p.reason) : '') + ' (opened at step ' + p.createdAt + ')</li>';
+      });
+      html += '</ul></div>';
+    }
+
+    html += '<div style="margin-top:10px">'
+      + button('Search terminations', { enabled: state.previewOpen, reason: 'the preview is closed' }, function () {
+        ui.pickerField = field.key; ui.pickerQuery = ''; ui.focusPicker = true; render();
+      })
+      + actionButton(proposals.length ? 'Ask AI again' : 'Ask AI', { type: 'ASK_AI', fieldKey: field.key }, {})
+      + actionButton('Cancel proposal', { type: 'CANCEL_PROPOSAL', fieldKey: field.key }, {})
+      + '</div>';
+
+    if (ui.pickerField === field.key) { html += renderPicker(field); }
+    html += '</div>';
+    return html;
+  }
+
+  function renderTerminations(t) {
+    var fields = TraceReview.fieldsFor(state, t.id);
+    var attention = [];
+    var settled = [];
+    fields.forEach(function (f) {
+      var status = TraceReview.fieldStatus(state, f);
+      if (status.status === 'automatically resolved' && !TraceReview.proposalsFor(state, f.key).length) {
+        settled.push({ field: f, status: status });
+      } else {
+        attention.push(f);
+      }
+    });
+    var html = '<div class="card"><p class="sec">Terminations</p>'
+      + '<div class="subtle" style="margin-bottom:10px">Resolution provider configured: ' + esc(state.demo.provider)
+      + '. Automatic resolution happens only on a unique exact name match.</div>';
+    attention.forEach(function (f) { html += renderField(f); });
+    if (!attention.length) { html += '<div class="notice ok">Every termination on this trace resolves to a NetBox port.</div>'; }
+    if (settled.length) {
+      html += '<details><summary>' + settled.length + ' termination(s) resolved automatically by exact name match</summary><table>';
+      settled.forEach(function (row) {
+        html += '<tr><td class="mono">' + esc(row.field.claimed + ' @ ' + row.field.device) + '</td>'
+          + '<td>' + badge(row.field.kind, 'mute') + '</td>'
+          + '<td class="mono">' + esc(row.status.candidate) + '</td>'
+          + '<td>' + badge('automatically resolved', 'ok') + '</td></tr>';
+      });
+      html += '</table></details>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderCurrentTopology(t) {
+    var p = TraceReview.plan(state, t.id);
+    var html = '<div class="card"><p class="sec">Current NetBox topology</p><ul class="plain">';
+    [['From', p.endpointA, t.segments[0].left], ['To', p.endpointB, t.segments[t.segments.length - 1].right]]
+      .forEach(function (pair) {
+        var label = pair[0];
+        var endpoint = pair[1];
+        var claimed = pair[2];
+        if (!endpoint) {
+          html += '<li><strong>' + label + ':</strong> <span class="subtle">' + esc(claimed.port + ' @ ' + claimed.device)
+            + ' does not resolve to a NetBox port yet.</span></li>';
+          return;
+        }
+        var cable = TraceReview.cableAt(state.reviewed.cables, endpoint);
+        html += '<li><strong>' + label + ':</strong> <span class="mono">' + esc(endpoint.device + ' ' + endpoint.port) + '</span> - '
+          + (cable ? esc(TraceReview.describeCable(cable)) : '<span class="subtle">no cable</span>') + '</li>';
+      });
+    html += '</ul>';
+    html += '<div class="subtle" style="margin-top:8px">' + p.reuses + ' cable(s) on this path already exist and can be reused.</div>';
+    if (TraceReview.reviewIsStale(state)) {
+      html += '<div class="notice warn" style="margin-top:10px">NetBox changed since this review was rendered. '
+        + 'The panels below still show the state this review was built from.</div>'
+        + actionButton('Re-read NetBox for this review', { type: 'RECHECK' }, {});
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderProposedTopology(t, d) {
+    var p = TraceReview.plan(state, t.id);
+    var html = '<div class="card"><p class="sec">Proposed physical topology</p>';
+    if (d.value === 'invalid') {
+      html += '<div class="notice bad">' + esc(d.reason) + '</div>';
+    }
+    if (p.logical) {
+      html += '<div class="seg"><span class="num">-</span><span class="mono">' + esc(TraceReview.describeCable(p.logical))
+        + '</span> ' + badge('delete logical cable first', 'warn') + '</div>';
+    }
+    p.rows.forEach(function (row) {
+      var tone = { create: 'info', reuse: 'mute', conflict: 'bad', waiting: 'warn' }[row.status];
+      var text = { create: 'create', reuse: 'reuse existing', conflict: 'conflict', waiting: 'waiting for termination' }[row.status];
+      var line = row.a
+        ? row.a.device + ' ' + row.a.port + ' --' + row.segment.cableClass + '-- ' + row.b.device + ' ' + row.b.port
+        : row.segment.left.port + ' @ ' + row.segment.left.device + ' --' + row.segment.cableClass + '-- '
+          + row.segment.right.port + ' @ ' + row.segment.right.device;
+      html += '<div class="seg"><span class="num">' + (row.index + 1) + '</span><span class="mono">' + esc(line) + '</span> '
+        + badge(text, tone) + '<div class="pass">' + esc(row.note) + '</div></div>';
+    });
+    if (d.value === 'no-op') {
+      html += '<div class="notice ok" style="margin-top:12px">Already synchronized - no changes.</div>';
+    }
+    if (p.conflicts.length) {
+      html += '<div class="notice bad" style="margin-top:12px"><strong>Conflict:</strong> ' + esc(p.conflicts[0].text) + '</div>';
+    }
+    html += '<div style="margin-top:12px">'
+      + actionButton('Synchronize this trace', { type: 'SYNCHRONIZE', traceId: t.id }, { primary: true })
+      + '</div>';
+    if (state.lastResult) {
+      html += '<div class="notice ' + (state.lastResult.kind === 'ok' ? 'ok' : 'bad') + '"><strong>Result:</strong> '
+        + esc(state.lastResult.text) + '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderDecisions() {
+    var keys = Object.keys(state.resolutions);
+    var html = '<div class="card"><p class="sec">Saved decisions (Row Resolutions)</p>';
+    if (!keys.length) {
+      html += '<div class="subtle">No Row Resolution has been saved yet. Automatic exact-name matches are recomputed, not saved.</div>';
+    } else {
+      html += '<table><tr><th>Termination</th><th>Target Field</th><th>How</th></tr>';
+      keys.forEach(function (k) {
+        var f = TraceReview.fieldByKey(state, k);
+        var r = state.resolutions[k];
+        html += '<tr><td class="mono">' + esc(f.claimed + ' @ ' + f.device) + '</td>'
+          + '<td class="mono">' + esc(r.candidate) + '</td>'
+          + '<td>' + esc(r.via === 'manual' ? 'chosen by the operator' : 'accepted from proposal ' + r.proposalId)
+          + ' <span class="subtle">(step ' + r.at + ')</span></td></tr>';
+      });
+      html += '</table>';
+    }
+    html += '<div class="subtle" style="margin-top:8px">Saving a decision never touches the NetBox topology. Only Synchronize writes cables.</div></div>';
+    return html;
+  }
+
+  function renderLog() {
+    var html = '<div class="card"><p class="sec">Activity log</p><ul class="plain log">';
+    state.log.slice(0, 10).forEach(function (entry) {
+      var tone = { ok: 'ok', bad: 'bad', warn: 'warn', blocked: 'bad', info: 'mute' }[entry.kind] || 'mute';
+      html += '<li>' + badge('step ' + entry.seq, tone) + ' ' + esc(entry.text) + '</li>';
+    });
+    html += '</ul></div>';
+    return html;
+  }
+
+  function renderWorkspace() {
+    if (!state.previewOpen) {
+      return '<div class="card"><p class="sec">Review workspace</p>'
+        + '<div class="notice warn">Preview closed - proposals keep running.</div>'
+        + '<div class="subtle">Resolution Proposals belong to the termination, not to this window. '
+        + state.proposals.filter(function (p) { return p.status === 'queued' || p.status === 'running'; }).length
+        + ' proposal(s) are queued or running right now.</div>'
+        + '<div style="margin-top:12px">' + actionButton('Reopen preview', { type: 'OPEN_PREVIEW' }, { primary: true }) + '</div>'
+        + '</div>';
+    }
+    var t = TraceReview.trace(state, state.selectedTraceId);
+    var d = TraceReview.disposition(state, t.id);
+    var html = '<div class="card"><p class="sec">Review workspace</p>' + renderGlance(t, d) + '</div>';
+    html += renderTraceList();
+    html += '<div class="grid2"><div>' + renderEvidence(t)
+      + (d.value === 'invalid' ? '' : renderTerminations(t)) + '</div><div>'
+      + renderCurrentTopology(t) + renderProposedTopology(t, d) + renderDecisions() + renderLog()
+      + '</div></div>';
+    return html;
+  }
+
+  /* ---------- walkthroughs ---------- */
+
+  function startWalkthrough(w) {
+    state = TraceReview.initialState(DEMO, { traceId: w.trace });
+    ui.tab = w.id;
+    ui.step = 0;
+    ui.pickerField = null;
+    ui.pickerQuery = '';
+    render();
+  }
+
+  function runStep(step) {
+    if (step.action) {
+      state = TraceReview.apply(state, step.action);
+      if (step.action.type === 'RESOLVE_MANUALLY') { ui.pickerField = null; ui.pickerQuery = ''; }
+    } else if (step.ui === 'openPicker') {
+      ui.pickerField = step.fieldKey;
+      ui.pickerQuery = '';
+      state = Object.assign({}, state, { lastChange: 'Opened the termination search.' });
+    } else if (step.ui === 'setQuery') {
+      ui.pickerQuery = step.query;
+      state = Object.assign({}, state, { lastChange: 'Searched terminations for "' + step.query + '".' });
+    }
+    ui.step += 1;
+    render();
+  }
+
+  function renderWalkthroughs() {
+    var html = '<div class="card"><p class="sec">Guided walkthroughs</p><div class="tabs">';
+    WALKTHROUGHS.forEach(function (w) {
+      html += button(w.title, { cls: ui.tab === w.id ? 'on' : '' }, function () { startWalkthrough(w); });
+    });
+    html += '</div>';
+    if (!ui.tab) {
+      html += '<div class="subtle">Pick a walkthrough. Starting one resets the workspace to that scenario\'s known '
+        + 'starting state, then walks you through it one button at a time.</div></div>';
+      return html;
+    }
+    var current = WALKTHROUGHS.filter(function (w) { return w.id === ui.tab; })[0];
+    html += '<p>' + esc(current.blurb) + '</p>'
+      + '<p class="subtle"><strong>What to watch for:</strong> ' + esc(current.watch) + '</p>'
+      + '<p class="sec mt">Steps</p><div class="steps">';
+    current.steps.forEach(function (step, i) {
+      var done = i < ui.step;
+      var isCurrent = i === ui.step;
+      var label = (i + 1) + '. ' + step.label;
+      if (done) {
+        html += button(label + '  (done)', { cls: 'step-done wide', enabled: false, quiet: true, reason: 'already done in this run' }, null);
+        return;
+      }
+      if (!isCurrent) {
+        html += button(label, { cls: 'wide', enabled: false, quiet: true, reason: 'earlier steps come first' }, null);
+        return;
+      }
+      if (step.action) {
+        var verdict = TraceReview.can(state, step.action);
+        html += button(label, {
+          cls: 'step-current wide',
+          enabled: verdict.ok,
+          reason: 'not possible right now - ' + verdict.reason,
+          sub: 'next step'
+        }, function () { runStep(step); });
+      } else {
+        html += button(label, { cls: 'step-current wide', sub: 'next step' }, function () { runStep(step); });
+      }
+    });
+    html += '</div>';
+    if (ui.step >= current.steps.length) {
+      html += '<div class="notice ok" style="margin-top:12px">Walkthrough finished. Keep poking with free play below, '
+        + 'or start another walkthrough.</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  /* ---------- free play ---------- */
+
+  function attentionFields(traceId) {
+    return Object.keys(state.demo.answers)
+      .filter(function (k) { return k.indexOf(traceId + ':') === 0; })
+      .map(function (k) { return TraceReview.fieldByKey(state, k); });
+  }
+
+  function renderFreePlay() {
+    var t = TraceReview.trace(state, state.selectedTraceId);
+    var fields = attentionFields(t.id);
+    var html = '<div class="card"><p class="sec">Free play - every action, always visible</p>'
+      + '<div class="subtle" style="margin-bottom:12px">Actions that are not legal right now stay visible but disabled, '
+      + 'with the reason underneath. Which actions are legal is part of the model, so it is on show here.</div>';
+
+    html += '<p class="sec mt">Operator actions</p>';
+    state.demo.traces.forEach(function (other) {
+      html += actionButton('Review ' + other.name, { type: 'SELECT_TRACE', traceId: other.id }, {});
+    });
+    fields.forEach(function (f) {
+      html += '<div class="subtle" style="margin:8px 0 4px"><strong class="mono">' + esc(f.claimed + ' @ ' + f.device) + '</strong></div>';
+      html += button('Search terminations', { enabled: state.previewOpen, reason: 'the preview is closed' }, function () {
+        ui.pickerField = f.key; ui.pickerQuery = ''; ui.focusPicker = true; render();
+      });
+      var first = TraceReview.eligibleCandidates(state, f, null)[0];
+      html += actionButton('Resolve by hand to the first eligible port' + (first ? ' (' + first + ')' : ''),
+        { type: 'RESOLVE_MANUALLY', fieldKey: f.key, candidate: first }, {});
+      html += actionButton('Ask AI', { type: 'ASK_AI', fieldKey: f.key }, {});
+      html += actionButton('Cancel proposal', { type: 'CANCEL_PROPOSAL', fieldKey: f.key }, {});
+      html += actionButton('Accept suggestion', { type: 'ACCEPT_PROPOSAL', fieldKey: f.key }, {});
+      html += actionButton('Reject suggestion', { type: 'REJECT_PROPOSAL', fieldKey: f.key }, {});
+    });
+    if (!fields.length) {
+      html += '<div class="subtle">Every termination on this trace resolves by exact name match, so there is nothing to '
+        + 'resolve by hand and nothing to ask the provider about.</div>';
+    }
+    html += '<div style="margin-top:8px">' + actionButton('Synchronize this trace', { type: 'SYNCHRONIZE', traceId: t.id }, { primary: true }) + '</div>';
+
+    html += '<p class="sec mt">Provider simulation (time only moves when you click)</p>';
+    if (!fields.length) {
+      html += '<div class="subtle">No termination on this trace can hold a proposal.</div>';
+    }
+    fields.forEach(function (f) {
+      html += '<div class="subtle" style="margin:8px 0 4px"><strong class="mono">' + esc(f.claimed + ' @ ' + f.device) + '</strong></div>'
+        + actionButton('Provider makes progress', { type: 'PROVIDER_PROGRESS', fieldKey: f.key }, {})
+        + actionButton('Provider returns candidate', { type: 'PROVIDER_RETURNS_CANDIDATE', fieldKey: f.key }, {})
+        + actionButton('Provider returns no-match', { type: 'PROVIDER_RETURNS_NO_MATCH', fieldKey: f.key }, {})
+        + actionButton('Provider fails (temporary)', { type: 'PROVIDER_FAILS_TEMPORARY', fieldKey: f.key }, {})
+        + actionButton('Provider fails (bad response)', { type: 'PROVIDER_FAILS_BAD_RESPONSE', fieldKey: f.key }, {});
+    });
+
+    html += '<p class="sec mt">NetBox happens elsewhere</p>';
+    fields.forEach(function (f) {
+      var names = TraceReview.eligibleCandidates(state, f, null);
+      var target = names[0];
+      if (!target) { return; }
+      var suffix = ' (relabelled)';
+      var renamed = target.indexOf(suffix, target.length - suffix.length) !== -1
+        ? target.slice(0, target.length - suffix.length)
+        : target + suffix;
+      html += actionButton('Rename "' + target + '" to "' + renamed + '" on ' + f.device,
+        { type: 'RENAME_PORT', device: f.device, port: target, newName: renamed }, {});
+    });
+    if (t.conflictTarget) {
+      var c = t.conflictTarget;
+      html += actionButton('Someone cables ' + c.device + ' ' + c.port + ' to ' + c.byDevice + ' ' + c.byPort,
+        { type: 'OCCUPY_PORT', device: c.device, port: c.port, byDevice: c.byDevice, byPort: c.byPort, cableClass: c.cableClass }, {});
+    } else {
+      html += '<div class="subtle">This trace has no free port set up for the conflict case.</div>';
+    }
+
+    html += '<p class="sec mt">Preview</p>'
+      + actionButton('Close preview', { type: 'CLOSE_PREVIEW' }, {})
+      + actionButton('Reopen preview', { type: 'OPEN_PREVIEW' }, {})
+      + actionButton('Re-read NetBox for this review', { type: 'RECHECK' }, {});
+
+    html += '</div>';
+    return html;
+  }
+
+  /* ---------- render ---------- */
+
+  function render() {
+    handlers = [];
+    inputs = [];
+    var html = renderWorkspace() + renderWalkthroughs() + renderFreePlay();
+    root.innerHTML = html;
+    if (ui.focusPicker) {
+      var input = document.getElementById('picker-input');
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+      ui.focusPicker = false;
+    }
+  }
+
+  root.addEventListener('click', function (event) {
+    var target = event.target.closest('[data-h]');
+    if (!target || target.disabled) { return; }
+    var fn = handlers[Number(target.getAttribute('data-h'))];
+    if (fn) { fn(); }
+  });
+
+  root.addEventListener('input', function (event) {
+    var attr = event.target.getAttribute('data-i');
+    if (attr === null) { return; }
+    var fn = inputs[Number(attr)];
+    if (fn) { fn(event.target.value); }
+  });
+
+  render();
+}());
+</script>
