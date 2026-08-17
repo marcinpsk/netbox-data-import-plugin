@@ -16,8 +16,20 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DISTRIBUTION_NAME = "netbox-data-import"
 
 
+MARKDOWN_INSERTION_FLAG = "<!-- version list -->"
+
+
 def _pyproject():
     return tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+
+
+def _changelog_config():
+    return _pyproject()["tool"]["semantic_release"].get("changelog", {})
+
+
+def _changelog_path():
+    templates = _changelog_config().get("default_templates", {})
+    return REPOSITORY_ROOT / templates.get("changelog_file", "CHANGELOG.md")
 
 
 def _locked_project_version():
@@ -44,3 +56,14 @@ def test_the_release_writes_the_lockfile():
 
     assert "uv lock" in semantic_release["build_command"]
     assert "uv.lock" in semantic_release["assets"]
+
+
+def test_the_changelog_carries_the_insertion_flag():
+    """semantic-release defaults to update mode, which splits the changelog on this flag.
+
+    A changelog that holds content but no flag is rendered back unchanged. The release then
+    reports success and commits no changelog, which is how this file went 18 tags without one.
+    """
+    flag = _changelog_config().get("insertion_flag") or MARKDOWN_INSERTION_FLAG
+
+    assert flag in _changelog_path().read_text()
