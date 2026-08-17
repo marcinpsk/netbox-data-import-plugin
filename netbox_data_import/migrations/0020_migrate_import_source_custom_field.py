@@ -84,6 +84,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # The custom field and its data are removed, so this migration does not reverse.
-        migrations.RunPython(move_import_source_to_plugin_table, migrations.RunPython.noop),
+        # The custom field and its data are removed, so this migration does not reverse. Without a
+        # reverse callable Django refuses the rollback that would drop the new table.
+        migrations.RunPython(move_import_source_to_plugin_table),
     ]

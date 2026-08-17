@@ -67,6 +67,20 @@ class MigrateImportSourceCustomFieldTest(TestCase):
         self.assertEqual(record.extra_columns, {"jira_id": "J-42"})
         self.assertEqual(record.unassigned_ips, {"primary_ip4": "10.0.0.1/32"})
 
+    def test_truncates_a_source_id_that_exceeds_the_column(self):
+        """The column holds 200 characters, so a longer source ID is cut rather than rejected."""
+        self._seed(self.device, {"source_id": "S" * 250, "profile_id": self.profile.pk})
+
+        self._run_migration()
+
+        self.assertEqual(DeviceImportSource.objects.get(device=self.device).source_id, "S" * 200)
+
+    def test_the_migration_refuses_to_reverse(self):
+        """A rollback drops the new table and cannot restore the custom field, so Django must refuse."""
+        operation = migration_module.Migration.operations[0]
+
+        self.assertFalse(operation.reversible)
+
     def test_clears_the_custom_field_from_devices_and_racks(self):
         """No object keeps the plugin key, and the custom field itself is gone."""
         from dcim.models import Device, Rack
