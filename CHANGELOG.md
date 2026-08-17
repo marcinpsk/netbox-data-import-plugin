@@ -192,7 +192,7 @@
 
 ### Bug Fixes
 
-- **preview**: Show split button for all unlinked device rows regardle…
+- **preview**: Show split button for all unlinked device rows regardless of name separator
   ([#35](https://github.com/marcinpsk/netbox-data-import-plugin/pull/35),
   [`e4ea3ab`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e4ea3ab8c50808ea39b98f44b9d37f0361811843))
 
