@@ -107,6 +107,8 @@ describe("preview row actions", () => {
     expect(link.querySelector(".mdi-spin")).not.toBeNull();
     expect(link.classList.contains("disabled")).toBe(true);
     expect(link.getAttribute("aria-busy")).toBe("true");
+    // A screen reader reads `disabled` as styling, so the state needs its own attribute.
+    expect(link.getAttribute("aria-disabled")).toBe("true");
     // Both links start the same recalculation, so the first press latches both.
     expect(staleLink.classList.contains("disabled")).toBe(true);
 
@@ -124,5 +126,27 @@ describe("preview row actions", () => {
     expect(opened).toBe(true);
     expect(link.textContent).toContain("Recalculate Preview");
     expect(link.classList.contains("disabled")).toBe(false);
+  });
+
+  it("opens a second tab from a latched link", () => {
+    const link = document.getElementById("ndi-recalculate-preview");
+
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    const opened = link.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
+    );
+
+    expect(opened).toBe(true);
+  });
+
+  it("opens a second tab from a latched link on a middle click", () => {
+    const link = document.getElementById("ndi-recalculate-preview");
+
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    const opened = link.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, button: 1 }),
+    );
+
+    expect(opened).toBe(true);
   });
 });

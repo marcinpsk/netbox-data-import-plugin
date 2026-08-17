@@ -98,17 +98,19 @@
   document.addEventListener('click', function (event) {
     var recalculate = event.target.closest('.ndi-recalculate-preview');
     if (!recalculate) return;
+    // A modified click opens a second tab and leaves this page, and its links, as they are.
+    // It runs before the latch so a latched link still opens a second tab.
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     if (recalculate.dataset.ndiRecalculating === 'true') {
       event.preventDefault();
       return;
     }
-    // A modified click opens a second tab and leaves this page, and its links, as they are.
-    if (event.defaultPrevented || event.button !== 0) return;
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     document.querySelectorAll('.ndi-recalculate-preview').forEach(function (link) {
       link.dataset.ndiRecalculating = 'true';
       link.classList.add('disabled');
       link.setAttribute('aria-busy', 'true');
+      link.setAttribute('aria-disabled', 'true');
     });
     recalculate.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Recalculating...';
   });
