@@ -133,16 +133,14 @@ netbox-shell() {
 _netbox-test() {
   local coverage="$1"
   shift
-  local workers="${NETBOX_TEST_WORKERS:-8}"
+  local workers="${NETBOX_TEST_WORKERS:-auto}"
   local target="netbox_data_import/tests"
   local coverage_args=()
-  local parallel_args=()
+  # An explicit -n always wins over the "-n auto" in pyproject.toml addopts.
+  local parallel_args=(-n "$workers" --maxschedchunk=1)
   if [ "$#" -gt 0 ] && [[ "$1" != -* ]]; then
     target="$1"
     shift
-  fi
-  if [ "$workers" -gt 1 ]; then
-    parallel_args=(-n "$workers" --maxschedchunk=1)
   fi
   if [ "$coverage" != "yes" ]; then
     coverage_args=(--no-cov)

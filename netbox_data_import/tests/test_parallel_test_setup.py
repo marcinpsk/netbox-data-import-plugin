@@ -3,10 +3,20 @@
 """Tests for parallel test worker isolation."""
 
 import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
-from netbox_data_import.tests.parallel import isolated_redis_databases, isolated_test_database_name
+from netbox_data_import.tests.conftest import pytest_xdist_auto_num_workers
+from netbox_data_import.tests.parallel import (
+    MAX_PARALLEL_WORKERS,
+    isolated_redis_databases,
+    isolated_test_database_name,
+)
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
@@ -33,6 +43,64 @@ def test_more_than_eight_workers_is_rejected():
     """Reject workers that cannot receive a private Redis database pair."""
     with pytest.raises(ValueError, match="At most 8 pytest workers are supported"):
         isolated_redis_databases("gw8")
+
+
+@pytest.mark.parametrize(
+    ("detected_workers", "expected"),
+    [("2", 2), (str(MAX_PARALLEL_WORKERS), MAX_PARALLEL_WORKERS), ("32", MAX_PARALLEL_WORKERS)],
+)
+def test_auto_worker_count_never_exceeds_the_isolated_worker_ceiling(monkeypatch, detected_workers, expected):
+    """`-n auto` on a big machine must stop at the last worker with private Redis databases."""
+    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", detected_workers)
+
+    assert pytest_xdist_auto_num_workers(None) == expected
+    isolated_redis_databases(f"gw{expected - 1}")  # the highest worker this count starts
+
+
+def _run_netbox_test_alias(worker_value=None):
+    """Run the local test alias with pytest and the venv activation stubbed out."""
+    script = "\n".join(
+        (
+            f'source "{REPOSITORY_ROOT}/.devcontainer/scripts/load-aliases.sh"',
+            "source() { :; }",  # skip the venv activation
+            "pytest() { printf 'PYTEST %s\\n' \"$*\"; }",
+            "netbox-test",
+            'printf "STATUS %s\\n" "$?"',
+        )
+    )
+    environment = {
+        **os.environ,
+        "TEST_DB_NAME": "test_alias_contract",
+        "TEST_REDIS_HOST": "redis-alias-contract",
+    }
+    if worker_value is None:
+        environment.pop("NETBOX_TEST_WORKERS", None)
+    else:
+        environment["NETBOX_TEST_WORKERS"] = worker_value
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+
+
+def test_test_alias_sizes_the_worker_pool_to_the_machine():
+    """The local entry point must request auto workers so the conftest cap applies."""
+    result = _run_netbox_test_alias()
+
+    assert "STATUS 0" in result.stdout
+    assert "-n auto --maxschedchunk=1" in result.stdout
+
+
+def test_test_alias_passes_an_explicit_worker_count_through():
+    """An explicit count must reach pytest, where it replaces `-n auto`."""
+    result = _run_netbox_test_alias("1")
+
+    assert "STATUS 0" in result.stdout
+    assert "-n 1 --maxschedchunk=1" in result.stdout
 
 
 @pytest.mark.django_db
