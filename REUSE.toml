@@ -18,7 +18,7 @@ path = [
     "uv.lock",
     ".devcontainer/devcontainer.json",
     ".devcontainer/.env.example",
-    ".github/copilot-instructions.md",
+    "AGENTS.md",
     ".github/dependabot.yml",
     ".github/workflows/codeql.yml",
     ".github/ISSUE_TEMPLATE/**",
