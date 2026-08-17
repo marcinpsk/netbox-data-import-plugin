@@ -18,6 +18,8 @@ concurrency:
 
 jobs:
   test-netbox:
+    # Named so the check keeps the two versions only. The default name lists every matrix value.
+    name: test-netbox (${{ matrix.python-version }}, ${{ matrix.netbox-version }})
     runs-on: ubuntu-latest
 
     strategy:
