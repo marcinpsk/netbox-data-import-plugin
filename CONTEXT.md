@@ -60,6 +60,10 @@ _Avoid_: Cable row
 A reviewed change that replaces one direct LLDP-derived Cable with physical Cable segments and patch-panel pass-throughs. The resulting path terminates on the same two endpoint Devices.
 _Avoid_: Cable amendment
 
+**Logical Cable**:
+The direct NetBox Cable between a Source Trace's two endpoint terminations that stands in for the unmodeled physical path, whatever created it. Patched Path Replacement removes it.
+_Avoid_: LLDP cable
+
 **Termination Reference**:
 The source-side naming of one port within a Source Trace: device, cards, and port labels. Port class and location values corroborate it but do not identify it.
 _Avoid_: Endpoint string
