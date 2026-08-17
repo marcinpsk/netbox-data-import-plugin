@@ -24,6 +24,12 @@ function addPreviewFixture() {
     <form class="ndi-field-review-form" action="/sync-device-field/">
       <button type="submit">Ignore</button>
     </form>
+    <a href="/preview/" class="btn ndi-recalculate-preview" id="ndi-recalculate-preview">
+      <i class="mdi mdi-refresh"></i> Recalculate Preview
+    </a>
+    <div id="ndi-preview-stale" hidden>
+      <a href="/preview/" class="alert-link ndi-recalculate-preview">Recalculate Preview</a>
+    </div>
   `;
   if (!controllerLoaded) {
     window.eval(controllerSource);
@@ -88,5 +94,35 @@ describe("preview row actions", () => {
 
     expect(document.querySelector(".ndi-row-action-error")).toBeNull();
     expect(document.querySelector("button[type=submit]").textContent).toContain("Saved");
+  });
+
+  it("reports that recalculation started and ignores a second press", () => {
+    const link = document.getElementById("ndi-recalculate-preview");
+    const staleLink = document.querySelector("#ndi-preview-stale .ndi-recalculate-preview");
+
+    const first = link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+    expect(first).toBe(true);
+    expect(link.textContent).toContain("Recalculating");
+    expect(link.querySelector(".mdi-spin")).not.toBeNull();
+    expect(link.classList.contains("disabled")).toBe(true);
+    expect(link.getAttribute("aria-busy")).toBe("true");
+    // Both links start the same recalculation, so the first press latches both.
+    expect(staleLink.classList.contains("disabled")).toBe(true);
+
+    expect(link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))).toBe(false);
+    expect(staleLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))).toBe(false);
+  });
+
+  it("leaves the link alone when the press opens a second tab", () => {
+    const link = document.getElementById("ndi-recalculate-preview");
+
+    const opened = link.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
+    );
+
+    expect(opened).toBe(true);
+    expect(link.textContent).toContain("Recalculate Preview");
+    expect(link.classList.contains("disabled")).toBe(false);
   });
 });

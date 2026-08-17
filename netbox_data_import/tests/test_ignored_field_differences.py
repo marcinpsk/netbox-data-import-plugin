@@ -182,6 +182,13 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             'class="badge ndi-badge-ignored ndi-diff-toggle mt-1"',
         )
 
+    def test_preview_renders_field_differences_collapsed(self):
+        """The row collapses through `hidden`, so it holds while the page is still loading."""
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, '<tr id="diff-1" class="ndi-diff-row" hidden>')
+        self.assertContains(response, "netbox_data_import/js/preview_row_controls.js")
+
     def test_ignore_defers_preview_recalculation_for_javascript_callers(self):
         """Ignore saves immediately and marks the displayed preview as stale."""
         previous_result = self.client.session["import_result"]

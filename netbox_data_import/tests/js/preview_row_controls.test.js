@@ -1,0 +1,242 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
+
+/* Load the first-party browser asset in jsdom and drive its real delegated click
+ * handler against the row markup the preview page renders. */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { beforeEach, describe, expect, it } from "vitest";
+import Modal from "bootstrap/js/dist/modal.js";
+import TomSelect from "tom-select";
+
+const controllerSource = readFileSync(
+  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/preview_row_controls.js"),
+  "utf8",
+);
+
+let controllerLoaded = false;
+
+/* The head script runs before the table exists, exactly as it does while a large
+ * preview streams to the browser. NetBox exposes Bootstrap's Modal as a global. */
+function loadController() {
+  document.body.innerHTML = "";
+  window.Modal = Modal;
+  if (!controllerLoaded) {
+    window.eval(controllerSource);
+    controllerLoaded = true;
+  }
+}
+
+function addRows() {
+  document.body.innerHTML = `
+    <table><tbody id="previewRowsBody">
+      <tr data-action="update">
+        <td>
+          <button type="button" class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="false">
+            <i class="mdi mdi-chevron-down"></i> 2 field(s) differ
+          </button>
+        </td>
+      </tr>
+      <tr id="diff-1" class="ndi-diff-row" hidden><td>serial</td></tr>
+    </tbody></table>
+  `;
+}
+
+function clickToggle() {
+  document.querySelector(".ndi-diff-toggle").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+}
+
+/* Two source rows, one of them carrying a difference sub-table with rows of its own,
+ * plus an error row: the shape the preview table renders. */
+function addFilterRows() {
+  document.body.innerHTML = `
+    <input type="text" id="previewRowFilter">
+    <button id="previewRowFilterClear" style="display:none;">x</button>
+    <select id="previewActionFilter"><option value=""></option><option value="update">Update</option>
+      <option value="error">Error</option></select>
+    <div id="ndi-hidden-err-warn" style="display:none;">
+      <span id="ndi-hidden-err-count">0</span>
+      <a href="#" id="ndi-show-errors-link">show errors</a>
+    </div>
+    <table><tbody id="previewRowsBody">
+      <tr id="row-1" data-action="update">
+        <td>dev-a</td>
+        <td>
+          <button type="button" class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="false">
+            <i class="mdi mdi-chevron-down"></i> 1 field(s) differ
+          </button>
+        </td>
+      </tr>
+      <tr id="diff-1" class="ndi-diff-row" hidden><td>
+        <table class="ndi-diff-table">
+          <thead><tr><th>Field</th><th>NetBox</th><th>File</th></tr></thead>
+          <tbody><tr id="diff-field-1-serial"><td>serial</td><td>OLD</td><td>NEW</td></tr></tbody>
+        </table>
+      </td></tr>
+      <tr id="row-2" data-action="update"><td>dev-b</td></tr>
+      <tr id="row-3" data-action="error"><td>dev-c</td></tr>
+    </tbody></table>
+    <p id="previewNoFilterResults" style="display:none;">No rows match</p>
+  `;
+}
+
+function filterBy(text, action = "") {
+  const input = document.getElementById("previewRowFilter");
+  input.value = text;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  const select = document.getElementById("previewActionFilter");
+  select.value = action;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+beforeEach(() => {
+  loadController();
+});
+
+describe("preview row controls", () => {
+  it("collapses difference rows without the page stylesheet", () => {
+    addRows();
+
+    expect(document.getElementById("diff-1").hidden).toBe(true);
+  });
+
+  it("expands and collapses rows added after the script ran", () => {
+    addRows();
+    const diffRow = document.getElementById("diff-1");
+    const toggle = document.querySelector(".ndi-diff-toggle");
+
+    clickToggle();
+
+    expect(diffRow.hidden).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.querySelector(".mdi").classList.contains("mdi-chevron-up")).toBe(true);
+
+    clickToggle();
+
+    expect(diffRow.hidden).toBe(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.querySelector(".mdi").classList.contains("mdi-chevron-down")).toBe(true);
+  });
+
+  it("collapses one row for the filter and keeps its toggle in step", () => {
+    addRows();
+    const diffRow = document.getElementById("diff-1");
+    clickToggle();
+
+    window.ndiSetDiffExpanded(diffRow, false);
+
+    expect(diffRow.hidden).toBe(true);
+    expect(document.querySelector(".ndi-diff-toggle").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("opens a row modal without a Bootstrap instance per trigger", async () => {
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr><td>
+          <button type="button" data-ndi-modal="#conflictModal" data-row-number="4">2 conflicts</button>
+        </td></tr>
+      </tbody></table>
+      <div class="modal" id="conflictModal"><div class="modal-dialog"><div class="modal-content"></div></div></div>
+    `;
+    const modalElement = document.getElementById("conflictModal");
+    const trigger = document.querySelector("[data-ndi-modal]");
+    const shown = new Promise((resolveShown) => {
+      modalElement.addEventListener("show.bs.modal", (event) => resolveShown(event.relatedTarget));
+    });
+
+    expect(Modal.getInstance(modalElement)).toBeNull();
+
+    trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+    await expect(shown).resolves.toBe(trigger);
+    expect(modalElement.classList.contains("show")).toBe(true);
+  });
+
+  it("ignores a disabled row button and an unknown modal", () => {
+    document.body.innerHTML = `
+      <button type="button" data-ndi-modal="#syncRowModal" disabled>Sync to NetBox</button>
+      <button type="button" data-ndi-modal="#missingModal">Missing</button>
+      <div class="modal" id="syncRowModal"><div class="modal-dialog"><div class="modal-content"></div></div></div>
+    `;
+    const modalElement = document.getElementById("syncRowModal");
+
+    for (const button of document.querySelectorAll("[data-ndi-modal]")) {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
+
+    expect(modalElement.classList.contains("show")).toBe(false);
+  });
+
+  it("filters source rows and leaves the rows inside a difference sub-table alone", () => {
+    addFilterRows();
+    const subTableRow = document.querySelector("#diff-1 .ndi-diff-table tr");
+
+    filterBy("dev-b");
+
+    expect(document.getElementById("row-1").style.display).toBe("none");
+    expect(document.getElementById("row-2").style.display).toBe("");
+    expect(subTableRow.style.display).toBe("");
+    expect(document.getElementById("previewNoFilterResults").style.display).toBe("none");
+  });
+
+  it("collapses a difference row when its source row leaves the filter", () => {
+    addFilterRows();
+    document.querySelector(".ndi-diff-toggle").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-1").hidden).toBe(false);
+
+    filterBy("dev-b");
+
+    expect(document.getElementById("diff-1").hidden).toBe(true);
+    expect(document.querySelector(".ndi-diff-toggle").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("counts only source rows, so sub-table text cannot hide the empty-result notice", () => {
+    addFilterRows();
+
+    // "netbox" appears only in the difference sub-table header.
+    filterBy("netbox");
+
+    expect(document.getElementById("previewNoFilterResults").style.display).toBe("");
+  });
+
+  it("reports the error rows an action filter hides", () => {
+    addFilterRows();
+
+    filterBy("", "update");
+
+    expect(document.getElementById("row-3").style.display).toBe("none");
+    expect(document.getElementById("ndi-hidden-err-warn").style.display).toBe("");
+    expect(document.getElementById("ndi-hidden-err-count").textContent).toBe("1");
+
+    document.getElementById("ndi-show-errors-link").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(document.getElementById("row-3").style.display).toBe("");
+    expect(document.getElementById("row-1").style.display).toBe("none");
+  });
+
+  it("clears both filters from the clear button", () => {
+    addFilterRows();
+    // NetBox turns the action filter into a Tom Select control that holds its own value.
+    const actionSelect = new TomSelect(document.getElementById("previewActionFilter"), { create: false });
+    actionSelect.setValue("update");
+    document.getElementById("previewRowFilter").value = "dev-b";
+    document.getElementById("previewRowFilter").dispatchEvent(new Event("input", { bubbles: true }));
+    expect(document.getElementById("row-1").style.display).toBe("none");
+
+    document.getElementById("previewRowFilterClear").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(document.getElementById("previewRowFilter").value).toBe("");
+    expect(document.getElementById("previewActionFilter").value).toBe("");
+    expect(actionSelect.getValue()).toBe("");
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-3").style.display).toBe("");
+  });
+
+  it("ignores a toggle whose row is not in the page", () => {
+    document.body.innerHTML = `
+      <button type="button" class="ndi-diff-toggle" data-diff-target="diff-404">2 field(s) differ</button>
+    `;
+
+    expect(() => clickToggle()).not.toThrow();
+  });
+});
