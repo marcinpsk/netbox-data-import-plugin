@@ -1384,12 +1384,14 @@ class IgnoreDeviceView(PermissionRequiredMixin, View):
         """Add the specified device to the profile's ignore list."""
         from .models import IgnoredDevice
 
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
         source_id = request.POST.get("source_id")
         device_name = request.POST.get("device_name", "")
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
-        if profile_id and source_id:
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required.")
+        elif source_id:
             profile = get_object_or_404(ImportProfile, pk=profile_id)
             IgnoredDevice.objects.get_or_create(
                 profile=profile,
@@ -2827,7 +2829,10 @@ class QuickResolveManufacturerView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Save the manufacturer mapping and redirect back to preview."""
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         profile = get_object_or_404(ImportProfile, pk=profile_id)
         source_make = " ".join(request.POST.get("source_make", "").split())
         netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
@@ -2858,7 +2863,10 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         from dcim.models import DeviceType, Manufacturer
         from django.utils.text import slugify
 
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         profile = get_object_or_404(ImportProfile, pk=profile_id)
         source_make = " ".join(request.POST.get("source_make", "").split())
         source_model = " ".join(request.POST.get("source_model", "").split())
@@ -2932,7 +2940,10 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
         """Save the class→role mapping and redirect back to preview."""
         from dcim.models import RackType
 
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         profile = get_object_or_404(ImportProfile, pk=profile_id)
         source_class = request.POST.get("source_class", "").strip()
         mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore", "role", or "rack"
@@ -2996,7 +3007,10 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
         """Save the column mapping and redirect back to preview."""
         import re
 
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         profile = get_object_or_404(ImportProfile, pk=profile_id)
         source_column = request.POST.get("source_column", "").strip()
         target_field = request.POST.get("target_field", "").strip()
