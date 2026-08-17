@@ -39,12 +39,28 @@ Use one named provider configuration with these fields:
 
 | Field | Requirement | Meaning |
 | --- | --- | --- |
-| `api_root` | Required | Exact API root without a trailing slash. Use a root ending in `/api` for the documented Open WebUI API and a root ending in `/v1` for a conventional compatible provider. |
+| `api_root` | Required | Exact API root without a trailing slash. Use a root ending in `/api` for the documented Open WebUI API and a root ending in `/v1` for a conventional compatible provider. The value must pass the trust boundary below. |
 | `model` | Required | Exact provider model ID. The worker does not choose a model at run time. |
 | `credential_reference` | Required for the first Open WebUI use case | Reference resolved by the separate credential boundary. The adapter receives the secret value only for the request. |
 | `authentication` | Required | Use `bearer` initially. An unauthenticated mode can be added when an operator has a concrete local-provider use case. |
 | `response_mode` | Required | `prompt_json` by default. Allow `json_object` or `json_schema` only after an operator verifies provider and model support. |
 | `connect_timeout` and `read_timeout` | Required | Finite transport limits. These are provider-operation limits, not the lifetime of the plugin job. |
+
+### `api_root` trust boundary
+
+`api_root` names a destination the NetBox server itself calls, so an unrestricted value turns the
+inference worker into a server-side request forgery tool. Validate it the same way for a database
+row and for a `PLUGINS_CONFIG` value, because both reach the same HTTP client:
+
+- Accept only a deployment-owned origin or an origin on a deployment allowlist. An operator with
+  provider-configuration permission must not be able to reach a new origin without that list.
+- Require `https` when `authentication` is `bearer`. Allow `http` only for an origin the
+  allowlist marks as an approved local endpoint.
+- Resolve the host and reject a private, link-local, loopback, or cloud metadata destination
+  unless the allowlist approves that exact origin. Re-check after resolution, so a public name
+  that resolves to a private address is still rejected.
+- Disable redirects in the HTTP client, or revalidate every redirect target against the same
+  rules before following it. A 302 to `169.254.169.254` defeats a check that only ran once.
 
 Normalize one trailing slash from `api_root`, then call:
 
@@ -260,6 +276,7 @@ are diagnostic data because compatible providers can use different schemas.
 | 429 without a retry hint | Rate limit or quota | Use bounded backoff. Stop retrying when an OpenAI-style error code identifies a non-recoverable quota or spend condition. |
 | 500, 502, 503, or 504 | Temporary provider failure | Use bounded exponential backoff with jitter. |
 | Connection failure or timeout | Temporary transport failure | Retry according to the job policy. |
+| Successful HTTP status with `message.refusal` set, `finish_reason` `stop`, and no `message.content` | Structured-output refusal | Do not retry. Record the call as completed without a proposal, not as an invalid response. |
 | Successful HTTP status with malformed envelope, missing content, invalid JSON, unknown candidate, or non-`stop` finish reason | Invalid provider response | Do not retry automatically and create no proposal. |
 
 OpenAI documents 401 authentication failures, transient and non-transient forms of 429, and

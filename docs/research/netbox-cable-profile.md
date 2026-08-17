@@ -71,10 +71,12 @@ single-connector, single-position profile. The specification should choose one p
 Profile matters for a multi-position, trunk, breakout, or shuffle Cable. It does not represent
 the complete end-to-end Source Trace formed from several Cable segments and pass-through ports.
 
-The official Cable documentation calls the default status “Active,” while the v4.6.6 tagged
-source uses the stored value `connected` and label “Connected.” Import logic should read target
-choices from the running NetBox version rather than hard-code documentation labels.
-[Cable documentation][cable-docs] [Status choices][status-choices]
+The current stable Cable documentation calls the default status “Active,” while the v4.6.6 tagged
+source uses the stored value `connected` and label “Connected.” The documentation site publishes no
+v4.6.6 page, so `[cable-docs]` points at the current stable release and can describe a later
+version than the rest of this document. Import logic should read target choices from the running
+NetBox version rather than hard-code documentation labels.
+[Cable documentation (current stable)][cable-docs] [Status choices (v4.6.6)][status-choices]
 
 [cable-docs]: https://netbox.readthedocs.io/en/stable/models/dcim/cable/
 [cable-model]: https://github.com/netbox-community/netbox/blob/v4.6.6/netbox/dcim/models/cables.py#L182-L212
