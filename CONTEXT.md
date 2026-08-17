@@ -29,6 +29,14 @@ _Avoid_: Import run
 **Source Column**:
 A named column in a source file.
 
+**Source Adapter**:
+The profile-selected component that deterministically interprets one source file format into a Source Batch. It declares its own configuration schema and output kinds and never queries NetBox.
+_Avoid_: Parser, importer backend
+
+**Target Module**:
+The component that owns one NetBox target's Target Fields, matching, planning, and writes. It declares which adapter output kinds it consumes.
+_Avoid_: Target handler
+
 **Source Batch**:
 The typed source items and source diagnostics produced by one source adapter from one imported file. It contains no NetBox target matches or planned writes.
 _Avoid_: Parsed rows
