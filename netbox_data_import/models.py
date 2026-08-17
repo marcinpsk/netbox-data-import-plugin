@@ -150,9 +150,7 @@ class ImportProfile(NetBoxModel):
     )
     capture_extra_data = models.BooleanField(
         default=False,
-        help_text=(
-            "Store unmapped source column values in the data_import_source['extra'] custom field key on each device."
-        ),
+        help_text=("Store unmapped source column values in the import record the plugin keeps for each device."),
     )
     primary_contact_role = models.ForeignKey(
         to="tenancy.ContactRole",
@@ -646,3 +644,56 @@ class IgnoredFieldDifference(models.Model):
 
     def __str__(self):
         return f"{self.source_id}/{self.target_field} on device #{self.netbox_device_id} (ignored)"
+
+
+class DeviceImportSource(models.Model):
+    """Import provenance the plugin keeps for one Device.
+
+    Replaces the plugin-managed ``data_import_source`` custom field. The per-profile custom
+    field an operator configures (``ImportProfile.custom_field_name``) is separate and stays.
+    """
+
+    device = models.OneToOneField(
+        to="dcim.Device",
+        on_delete=models.CASCADE,
+        related_name="data_import_source",
+    )
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="device_sources",
+    )
+    source_id = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Source ID of the row that wrote this device",
+    )
+    extra_columns = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Source column values that no mapping consumes",
+    )
+    unassigned_ips = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="IP values the import could not assign to a NetBox IP field",
+    )
+
+    class Meta:
+        ordering = ["device"]
+        indexes = [models.Index(fields=["profile", "source_id"])]
+        verbose_name = "Device Import Source"
+        verbose_name_plural = "Device Import Sources"
+
+    def __str__(self):
+        return f"{self.source_id or '(no source ID)'} → Device #{self.device_id}"
+
+
+def stored_import_source(obj):
+    """Return the plugin's import record for one object, or None when it holds none."""
+    from dcim.models import Device
+
+    if not isinstance(obj, Device) or obj.pk is None:
+        return None
+    return DeviceImportSource.objects.filter(device_id=obj.pk).first()

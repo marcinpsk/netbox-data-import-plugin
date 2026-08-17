@@ -40,6 +40,7 @@ from .models import (
     ManufacturerMapping,
     SourceResolution,
     TARGET_FIELD_CHOICES,
+    stored_import_source,
     validate_contact_candidate_resolution,
 )
 from .tables import (
@@ -1762,12 +1763,12 @@ class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
 
 
 class RemoveExtraIpView(PermissionRequiredMixin, View):
-    """Remove a stored IP from extra_json['_ip'] on a device's data_import_source custom field."""
+    """Remove one stored IP from a device's import record."""
 
     permission_required = "dcim.change_device"
 
     def post(self, request):
-        """Remove an IP field from the device's data_import_source custom field."""
+        """Remove an IP field from the device's import record."""
         from dcim.models import Device
 
         device_id = request.POST.get("device_id")
@@ -1792,22 +1793,16 @@ class RemoveExtraIpView(PermissionRequiredMixin, View):
             return _safe_return()
 
         device = get_object_or_404(Device, pk=device_id)
-        import_data = device.cf.get("data_import_source")
-        import_data = import_data if isinstance(import_data, dict) else {}
-        ip_data = import_data.get("_ip")
-        ip_data = ip_data if isinstance(ip_data, dict) else {}
+        import_source = stored_import_source(device)
+        unassigned_ips = dict(import_source.unassigned_ips) if import_source is not None else {}
 
-        if ip_field in ip_data:
-            del ip_data[ip_field]
-            if ip_data:
-                import_data["_ip"] = ip_data
-            else:
-                import_data.pop("_ip", None)
-            device.custom_field_data["data_import_source"] = import_data
-            device.save(update_fields=["custom_field_data"])
-            messages.success(request, f"Removed {ip_field} from JSON storage.")
+        if ip_field in unassigned_ips:
+            del unassigned_ips[ip_field]
+            import_source.unassigned_ips = unassigned_ips
+            import_source.save(update_fields=["unassigned_ips"])
+            messages.success(request, f"Removed {ip_field} from the import record.")
         else:
-            messages.info(request, f"{ip_field} was not in JSON storage.")
+            messages.info(request, f"{ip_field} was not in the import record.")
 
         return _safe_return(device)
 

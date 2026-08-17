@@ -13,7 +13,7 @@ from django.core.validators import validate_email
 from django.db import connection, transaction
 from django.db.models import Q
 
-from .models import validate_contact_candidate_resolution
+from .models import stored_import_source, validate_contact_candidate_resolution
 from .object_permissions import ObjectPermissionDenied, enforce_saved_object_permission
 
 
@@ -128,10 +128,9 @@ class PrimaryContactResolver:
     ) -> ContactReview:
         """Return the effective Contact plan without writing database state."""
         extra_columns = {}
-        if obj is not None:
-            source_data = getattr(obj, "custom_field_data", {}).get("data_import_source", {})
-            if isinstance(source_data, dict) and isinstance(source_data.get("extra"), dict):
-                extra_columns.update(source_data["extra"])
+        import_source = stored_import_source(obj)
+        if import_source is not None and isinstance(import_source.extra_columns, dict):
+            extra_columns.update(import_source.extra_columns)
         row_extra = row.get("_extra_columns")
         if isinstance(row_extra, dict):
             extra_columns.update(row_extra)
@@ -369,18 +368,14 @@ class PrimaryContactResolver:
 
     @staticmethod
     def _remove_legacy_json(obj) -> None:
-        custom_field_data = deepcopy(getattr(obj, "custom_field_data", {}))
-        source_data = custom_field_data.get("data_import_source")
-        if not isinstance(source_data, dict):
+        """Drop the legacy primary_contact value once a native Contact assignment holds it."""
+        import_source = stored_import_source(obj)
+        if import_source is None or "primary_contact" not in import_source.extra_columns:
             return
-        extra = source_data.get("extra")
-        if not isinstance(extra, dict) or "primary_contact" not in extra:
-            return
-        extra.pop("primary_contact")
-        if not extra:
-            source_data.pop("extra", None)
-        obj.custom_field_data = custom_field_data
-        obj.save(update_fields=["custom_field_data"])
+        extra_columns = deepcopy(import_source.extra_columns)
+        extra_columns.pop("primary_contact")
+        import_source.extra_columns = extra_columns
+        import_source.save(update_fields=["extra_columns"])
 
     @staticmethod
     def lock_imports() -> None:

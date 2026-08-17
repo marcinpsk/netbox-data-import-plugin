@@ -26,6 +26,7 @@ from netbox_data_import.engine import (
 )
 from netbox_data_import.forms import ImportSetupForm
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile, SourceResolution
+from netbox_data_import.tests.helpers import set_import_source
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.views import _import_intents, _save_permission_scoped_object, _serialize_rows
 
@@ -677,27 +678,14 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
     def test_stored_source_metadata_is_used_as_identity_after_netbox_rename(self):
         from dcim.models import Device
-        from extras.models import CustomField
 
-        device_content_type = ContentType.objects.get_for_model(Device)
-        custom_field, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            custom_field.object_types.set([device_content_type])
-        elif not custom_field.object_types.filter(pk=device_content_type.pk).exists():
-            custom_field.object_types.add(device_content_type)
         existing = Device.objects.create(
             name="renamed-in-netbox",
             site=self.site,
             device_type=self.device_type,
             role=self.role,
-            custom_field_data={
-                "data_import_source": {
-                    "profile_id": self.profile.pk,
-                    "profile_name": self.profile.name,
-                    "source_id": "SRC-STABLE",
-                }
-            },
         )
+        set_import_source(existing, self.profile, "SRC-STABLE")
         rows = [self._device_row(2, "SRC-STABLE", "source-name", self.rack_a, 1)]
 
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
@@ -1281,28 +1269,15 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
     def test_stored_source_metadata_outside_active_site_is_an_error(self):
         from dcim.models import Device, Site
-        from extras.models import CustomField
 
-        content_type = ContentType.objects.get_for_model(Device)
-        custom_field, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            custom_field.object_types.set([content_type])
-        elif not custom_field.object_types.filter(pk=content_type.pk).exists():
-            custom_field.object_types.add(content_type)
         other_site = Site.objects.create(name="Metadata Identity Site", slug="metadata-identity-site")
         existing = Device.objects.create(
             name="metadata-cross-site-device",
             site=other_site,
             device_type=self.device_type,
             role=self.role,
-            custom_field_data={
-                "data_import_source": {
-                    "profile_id": self.profile.pk,
-                    "profile_name": self.profile.name,
-                    "source_id": "METADATA-CROSS-SITE",
-                }
-            },
         )
+        set_import_source(existing, self.profile, "METADATA-CROSS-SITE")
         row = self._device_row(2, "METADATA-CROSS-SITE", "metadata-source-name", self.rack_a, 1)
 
         result = run_import([row], self.profile, {"site": self.site}, dry_run=True)
@@ -1780,28 +1755,17 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
     def test_ambiguous_stored_source_metadata_blocks_import(self):
         from dcim.models import Device
-        from extras.models import CustomField
 
-        content_type = ContentType.objects.get_for_model(Device)
-        custom_field, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            custom_field.object_types.set([content_type])
-        elif not custom_field.object_types.filter(pk=content_type.pk).exists():
-            custom_field.object_types.add(content_type)
-        metadata = {
-            "data_import_source": {
-                "profile_id": self.profile.pk,
-                "profile_name": self.profile.name,
-                "source_id": "AMBIGUOUS-METADATA",
-            }
-        }
         for suffix in ("a", "b"):
-            Device.objects.create(
-                name=f"metadata-device-{suffix}",
-                site=self.site,
-                device_type=self.device_type,
-                role=self.role,
-                custom_field_data=metadata,
+            set_import_source(
+                Device.objects.create(
+                    name=f"metadata-device-{suffix}",
+                    site=self.site,
+                    device_type=self.device_type,
+                    role=self.role,
+                ),
+                self.profile,
+                "AMBIGUOUS-METADATA",
             )
         row = self._device_row(2, "AMBIGUOUS-METADATA", "renamed-source-device", self.rack_a, 1)
 
@@ -1864,7 +1828,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
         self.assertEqual(next(item for item in result.rows if item.object_type == "rack").action, "create")
         rack = Rack.objects.get(site=self.site, name="NORMALIZED-SOURCE-RACK")
-        self.assertEqual(rack.custom_field_data["data_import_source"]["source_id"], "")
+        self.assertNotIn("data_import_source", rack.custom_field_data)
 
     def test_blank_source_id_duplicate_does_not_offer_unusable_name_resolution(self):
         rows = [
@@ -3110,7 +3074,6 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
     def test_execute_rejects_each_ambiguous_strong_identity(self):
         from dcim.models import Device, Site
-        from extras.models import CustomField
 
         for suffix in ("a", "b"):
             Device.objects.create(
@@ -3128,26 +3091,16 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 asset_tag="Execute-Ambiguous-Tag" if suffix == "a" else "execute-ambiguous-tag",
             )
 
-        content_type = ContentType.objects.get_for_model(Device)
-        custom_field, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            custom_field.object_types.set([content_type])
-        elif not custom_field.object_types.filter(pk=content_type.pk).exists():
-            custom_field.object_types.add(content_type)
-        metadata = {
-            "data_import_source": {
-                "profile_id": self.profile.pk,
-                "profile_name": self.profile.name,
-                "source_id": "EXECUTE-AMBIGUOUS-METADATA",
-            }
-        }
         for suffix in ("a", "b"):
-            Device.objects.create(
-                name=f"execute-metadata-{suffix}",
-                site=self.site,
-                device_type=self.device_type,
-                role=self.role,
-                custom_field_data=metadata,
+            set_import_source(
+                Device.objects.create(
+                    name=f"execute-metadata-{suffix}",
+                    site=self.site,
+                    device_type=self.device_type,
+                    role=self.role,
+                ),
+                self.profile,
+                "EXECUTE-AMBIGUOUS-METADATA",
             )
 
         other_site = Site.objects.create(name="Execute Other Site", slug="execute-other-site")
@@ -3180,7 +3133,6 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
     def test_duplicate_names_fail_closed_on_strong_identity_conflicts(self):
         from dcim.models import Device
-        from extras.models import CustomField
 
         for suffix in ("a", "b"):
             Device.objects.create(
@@ -3198,26 +3150,16 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 asset_tag="Duplicate-Name-Tag" if suffix == "a" else "duplicate-name-tag",
             )
 
-        content_type = ContentType.objects.get_for_model(Device)
-        custom_field, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            custom_field.object_types.set([content_type])
-        elif not custom_field.object_types.filter(pk=content_type.pk).exists():
-            custom_field.object_types.add(content_type)
-        metadata = {
-            "data_import_source": {
-                "profile_id": self.profile.pk,
-                "profile_name": self.profile.name,
-                "source_id": "DUPLICATE-NAME-METADATA",
-            }
-        }
         for suffix in ("a", "b"):
-            Device.objects.create(
-                name=f"duplicate-metadata-target-{suffix}",
-                site=self.site,
-                device_type=self.device_type,
-                role=self.role,
-                custom_field_data=metadata,
+            set_import_source(
+                Device.objects.create(
+                    name=f"duplicate-metadata-target-{suffix}",
+                    site=self.site,
+                    device_type=self.device_type,
+                    role=self.role,
+                ),
+                self.profile,
+                "DUPLICATE-NAME-METADATA",
             )
         bound_device = Device.objects.create(
             name="duplicate-bound-target",

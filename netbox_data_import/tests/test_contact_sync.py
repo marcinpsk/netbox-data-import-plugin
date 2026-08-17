@@ -31,8 +31,10 @@ from netbox_data_import.models import (
     DeviceExistingMatch,
     ImportProfile,
     SourceResolution,
+    stored_import_source,
 )
 from netbox_data_import.object_permissions import ObjectPermissionDenied
+from netbox_data_import.tests.helpers import set_import_source
 
 
 LOCAL_EXAMPLE_PATH = Path(__file__).resolve().parents[3] / "libre" / "example.xlsx"
@@ -299,18 +301,16 @@ class NativeContactSyncTest(TestCase):
             site=self.site,
             device_type=self.device_type,
             role=self.device_role,
-            custom_field_data={
-                "data_import_source": {
-                    "source_id": "CONTACT-001",
-                    "profile_id": self.profile.pk,
-                    "profile_name": self.profile.name,
-                    "extra": {
-                        "depth": 750,
-                        "primary_contact": "primary.contact@example.com",
-                    },
-                }
-            },
         )
+        self._set_extra_columns({"depth": 750, "primary_contact": "primary.contact@example.com"})
+
+    def _set_extra_columns(self, extra_columns):
+        """Store the unmapped source columns the device carries from an earlier import."""
+        return set_import_source(self.device, self.profile, "CONTACT-001", extra_columns=extra_columns)
+
+    def _stored_extra_columns(self, device=None):
+        """Return the extra columns held by one device import record."""
+        return stored_import_source(device or self.device).extra_columns
 
     def _row(self, **overrides):
         """Return one valid source row for this profile."""
@@ -385,15 +385,11 @@ class NativeContactSyncTest(TestCase):
         self.assertEqual(contact.name, "primary.contact@example.com")
         self.assertEqual(assignment.priority, "primary")
         self.assertEqual(assignment.role.slug, "primary-contact")
-        self.assertEqual(
-            self.device.custom_field_data["data_import_source"]["extra"],
-            {"depth": 750},
-        )
+        self.assertEqual(self._stored_extra_columns(), {"depth": 750})
 
     def test_contact_candidates_require_a_saved_row_resolution(self):
         """Candidate values cannot silently become Contact fields."""
-        self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
-        self.device.save(update_fields=["custom_field_data"])
+        self._set_extra_columns({"depth": 750})
         row = self._row(
             _candidate_values={
                 "contact": {
@@ -453,8 +449,7 @@ class NativeContactSyncTest(TestCase):
 
     def test_review_without_contact_data_has_no_contact_plan(self):
         """A row without Contact data leaves native assignments unchanged."""
-        self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
-        self.device.save(update_fields=["custom_field_data"])
+        self._set_extra_columns({"depth": 750})
 
         review = PrimaryContactResolver.review(self.device, self._row(), self.profile)
 
@@ -534,8 +529,7 @@ class NativeContactSyncTest(TestCase):
 
     def test_saved_contact_resolution_maps_candidate_values_to_native_fields(self):
         """One saved row decision supplies Contact name, email, and phone."""
-        self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
-        self.device.save(update_fields=["custom_field_data"])
+        self._set_extra_columns({"depth": 750})
         email = "resolved.contact@example.invalid"
         phone = "+1 202-555-0100"
         SourceResolution.objects.create(
@@ -572,8 +566,7 @@ class NativeContactSyncTest(TestCase):
 
     def test_saved_no_contact_resolution_allows_a_row_without_an_assignment(self):
         """An explicit no-contact decision is replayed without creating an assignment."""
-        self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
-        self.device.save(update_fields=["custom_field_data"])
+        self._set_extra_columns({"depth": 750})
         SourceResolution.objects.create(
             profile=self.profile,
             source_id="CONTACT-001",
@@ -597,8 +590,7 @@ class NativeContactSyncTest(TestCase):
 
     def test_preview_can_replace_a_resolution_when_its_selected_source_is_blank(self):
         """A stale candidate choice remains editable from the preview row."""
-        self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
-        self.device.save(update_fields=["custom_field_data"])
+        self._set_extra_columns({"depth": 750})
         SourceResolution.objects.create(
             profile=self.profile,
             source_id="CONTACT-001",
@@ -629,8 +621,7 @@ class NativeContactSyncTest(TestCase):
 
     def test_preview_can_save_a_contact_candidate_row_resolution(self):
         """The preview offers each candidate column for every Contact field."""
-        self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
-        self.device.save(update_fields=["custom_field_data"])
+        self._set_extra_columns({"depth": 750})
         row = self._row(
             _candidate_values={
                 "contact": {
@@ -733,8 +724,7 @@ class NativeContactSyncTest(TestCase):
                 ),
             ]
         )
-        self.device.custom_field_data["data_import_source"]["extra"]["primary_contact"] = "not an email"
-        self.device.save(update_fields=["custom_field_data"])
+        self._set_extra_columns({"depth": 750, "primary_contact": "not an email"})
         first_row = self._row(
             _candidate_values={
                 "contact": {
@@ -811,7 +801,7 @@ class NativeContactSyncTest(TestCase):
         )
         self.assertEqual(assignment.contact, existing_contact)
         self.device.refresh_from_db()
-        self.assertEqual(self.device.custom_field_data["data_import_source"]["extra"], {"depth": 750})
+        self.assertEqual(self._stored_extra_columns(), {"depth": 750})
 
         preview_response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         second_result = next(row for row in preview_response.context["result"].rows if row.source_id == "CONTACT-002")
@@ -1042,8 +1032,7 @@ class NativeContactSyncTest(TestCase):
 
     def test_contact_resolution_rejects_a_source_outside_the_row_candidates(self):
         """The resolution boundary rejects source columns that the row did not provide."""
-        self.device.custom_field_data["data_import_source"]["extra"] = {"depth": 750}
-        self.device.save(update_fields=["custom_field_data"])
+        self._set_extra_columns({"depth": 750})
         row = self._row(
             _candidate_values={"contact": {"Owner": "Candidate Operator"}},
         )
@@ -1250,23 +1239,18 @@ class NativeContactSyncTest(TestCase):
         self.assertFalse(result.has_errors, [item.to_dict() for item in result.rows])
         self.device.refresh_from_db()
         self.assertTrue(Contact.objects.filter(email="explicit.contact@example.com").exists())
-        self.assertEqual(
-            self.device.custom_field_data["data_import_source"]["extra"],
-            {"depth": 750, "room": "Test Room"},
-        )
+        self.assertEqual(self._stored_extra_columns(), {"depth": 750, "room": "Test Room"})
 
     def test_sync_removes_an_empty_legacy_extra_mapping(self):
         """Migrating the last legacy value removes the empty extra mapping."""
-        self.device.custom_field_data["data_import_source"]["extra"] = {
-            "primary_contact": "primary.contact@example.com"
-        }
+        self._set_extra_columns({"primary_contact": "primary.contact@example.com"})
         self.device.save(update_fields=["custom_field_data"])
 
         result = self._sync()
 
         self.assertFalse(result.has_errors, [item.to_dict() for item in result.rows])
         self.device.refresh_from_db()
-        self.assertNotIn("extra", self.device.custom_field_data["data_import_source"])
+        self.assertEqual(self._stored_extra_columns(), {})
 
     def test_sync_can_match_primary_contacts_by_name(self):
         """A profile can treat the source contact value as a name."""
@@ -1291,10 +1275,7 @@ class NativeContactSyncTest(TestCase):
         self.assertIn("Select a primary contact role", result.rows[0].detail)
         self.assertFalse(Contact.objects.exists())
         self.device.refresh_from_db()
-        self.assertEqual(
-            self.device.custom_field_data["data_import_source"]["extra"]["primary_contact"],
-            "primary.contact@example.com",
-        )
+        self.assertEqual(self._stored_extra_columns()["primary_contact"], "primary.contact@example.com")
 
     def test_sync_requires_permission_to_create_a_contact(self):
         """Device change permission does not grant Contact creation permission."""
@@ -1481,7 +1462,7 @@ class NativeContactSyncTest(TestCase):
         assignment = ContactAssignment.objects.get(contact=contact, object_id=device.pk)
         self.assertEqual(assignment.role, self.contact_role)
         self.assertEqual(assignment.priority, "primary")
-        self.assertNotIn("extra", device.custom_field_data["data_import_source"])
+        self.assertEqual(self._stored_extra_columns(device), {})
 
 
 class ConcurrentNativeContactSyncTest(TransactionTestCase):
@@ -1520,18 +1501,15 @@ class ConcurrentNativeContactSyncTest(TransactionTestCase):
         for index in range(2):
             source_id = f"CONCURRENT-CONTACT-{index}"
             device_name = f"concurrent-contact-device-{index}"
-            Device.objects.create(
-                name=device_name,
-                site=self.site,
-                device_type=self.device_type,
-                role=self.device_role,
-                custom_field_data={
-                    "data_import_source": {
-                        "source_id": source_id,
-                        "profile_id": self.profile.pk,
-                        "profile_name": self.profile.name,
-                    }
-                },
+            set_import_source(
+                Device.objects.create(
+                    name=device_name,
+                    site=self.site,
+                    device_type=self.device_type,
+                    role=self.device_role,
+                ),
+                self.profile,
+                source_id,
             )
             self.rows.append(
                 {
@@ -1603,18 +1581,15 @@ class ConcurrentNativeContactSyncTest(TransactionTestCase):
             for row_index, email in enumerate(contact_order):
                 source_id = f"ORDERED-CONTACT-{import_index}-{row_index}"
                 device_name = f"ordered-contact-device-{import_index}-{row_index}"
-                Device.objects.create(
-                    name=device_name,
-                    site=self.site,
-                    device_type=self.device_type,
-                    role=self.device_role,
-                    custom_field_data={
-                        "data_import_source": {
-                            "source_id": source_id,
-                            "profile_id": self.profile.pk,
-                            "profile_name": self.profile.name,
-                        }
-                    },
+                set_import_source(
+                    Device.objects.create(
+                        name=device_name,
+                        site=self.site,
+                        device_type=self.device_type,
+                        role=self.device_role,
+                    ),
+                    self.profile,
+                    source_id,
                 )
                 rows.append(
                     {

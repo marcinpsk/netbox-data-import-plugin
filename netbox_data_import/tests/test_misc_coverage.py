@@ -8,6 +8,7 @@ from netbox_data_import.engine import _str_val
 from netbox_data_import.models import ImportJob, ImportProfile
 from netbox_data_import.tables import ColumnMappingTable, ImportJobTable
 from netbox_data_import.template_content import DeviceImportDataExtension
+from netbox_data_import.tests.helpers import set_import_source
 
 
 def _make_profile(name="MiscTest") -> ImportProfile:
@@ -19,7 +20,7 @@ def _make_profile(name="MiscTest") -> ImportProfile:
 
 
 class DeviceImportDataExtensionTest(TestCase):
-    """Render the Device detail card against a real Device and its real custom field."""
+    """Render the Device detail card against a real Device and its real import record."""
 
     @classmethod
     def setUpTestData(cls):
@@ -32,14 +33,20 @@ class DeviceImportDataExtensionTest(TestCase):
         )
         role = DeviceRole.objects.create(name="Card Role", slug="card-role")
         cls.device = Device.objects.create(name="card-device", site=site, device_type=device_type, role=role)
+        cls.profile = _make_profile("Card Profile")
 
-    def _render(self, import_data, **device_attrs):
-        """Return the card HTML the Device page would show for one stored import payload."""
+    def _render(self, source_id="", extra_columns=None, unassigned_ips=None, **device_attrs):
+        """Return the card HTML the Device page would show for one stored import record."""
         for name, value in device_attrs.items():
             setattr(self.device, name, value)
-        self.device.custom_field_data["data_import_source"] = import_data
-        extension = DeviceImportDataExtension({"object": self.device})
-        return extension.left_page()
+        set_import_source(
+            self.device,
+            self.profile,
+            source_id,
+            extra_columns=extra_columns,
+            unassigned_ips=unassigned_ips,
+        )
+        return DeviceImportDataExtension({"object": self.device}).left_page()
 
     def test_card_renders_in_the_left_column(self):
         """NetBox appends plugin content to a column end; this card belongs to the left one."""
@@ -57,17 +64,17 @@ class DeviceImportDataExtensionTest(TestCase):
 
     def test_renders_source_columns_and_metadata(self):
         """Extra source columns and the import metadata reach the rendered card."""
-        html = self._render({"source_id": "SRC-1", "profile_name": "Card Profile", "extra": {"jira_id": "J-42"}})
+        html = self._render("SRC-1", extra_columns={"jira_id": "J-42"})
 
         self.assertIn("Import Data", html)
         self.assertIn("jira_id", html)
         self.assertIn("J-42", html)
         self.assertIn("SRC-1", html)
-        self.assertIn("Card Profile", html)
+        self.assertIn(self.profile.name, html)
 
     def test_reports_a_stored_ip_that_netbox_does_not_hold(self):
         """An IP the import could not assign natively is listed as not assigned."""
-        html = self._render({"source_id": "SRC-3", "_ip": {"primary_ip4": "10.0.0.1/32"}})
+        html = self._render("SRC-3", unassigned_ips={"primary_ip4": "10.0.0.1/32"})
 
         self.assertIn("Primary IPv4", html)
         self.assertIn("10.0.0.1/32", html)
@@ -79,7 +86,7 @@ class DeviceImportDataExtensionTest(TestCase):
 
         address = IPAddress.objects.create(address="10.0.0.9/32")
 
-        html = self._render({"source_id": "SRC-4", "_ip": {"primary_ip4": "10.0.0.9/32"}}, primary_ip4=address)
+        html = self._render("SRC-4", unassigned_ips={"primary_ip4": "10.0.0.9/32"}, primary_ip4=address)
 
         self.assertIn("In NetBox", html)
 

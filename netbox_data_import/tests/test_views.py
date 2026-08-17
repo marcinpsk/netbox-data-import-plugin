@@ -16,8 +16,9 @@ from netbox_data_import.models import (
     ImportProfile,
     ManufacturerMapping,
     SourceResolution,
+    stored_import_source,
 )
-from netbox_data_import.tests.helpers import setup_preview_with_device_matches
+from netbox_data_import.tests.helpers import set_import_source, setup_preview_with_device_matches
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
@@ -3654,23 +3655,10 @@ class RemoveExtraIpViewTests(TestCase):
     def setUp(self):
         """Create test user and device with IP data."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from extras.models import CustomField
 
         self.user = User.objects.create_superuser("testuser_ip", "ip@example.com", "testpass")
         self.client = Client()
         self.client.login(username="testuser_ip", password="testpass")
-
-        # Create custom field if it doesn't exist
-        from django.contrib.contenttypes.models import ContentType
-        from dcim.models import Device as _Device
-
-        device_ct = ContentType.objects.get_for_model(_Device)
-        cf, created = CustomField.objects.get_or_create(
-            name="data_import_source",
-            defaults={"type": "json"},
-        )
-        if created:
-            cf.object_types.set([device_ct])
 
         # Create test device with IP data
         site = Site.objects.create(name="Test Site", slug="test-site")
@@ -3688,16 +3676,13 @@ class RemoveExtraIpViewTests(TestCase):
             device_type=device_type,
             role=role,
         )
-        self.device.custom_field_data = {
-            "data_import_source": {
-                "_ip": {
-                    "primary_ip4": "192.168.1.1/32",
-                    "oob_ip": "10.0.0.5/32",
-                },
-                "extra": {"some_field": "value"},
-            }
-        }
-        self.device.save()
+        set_import_source(
+            self.device,
+            _make_profile("RemoveExtraIpProfile"),
+            "SRC-IP",
+            extra_columns={"some_field": "value"},
+            unassigned_ips={"primary_ip4": "192.168.1.1/32", "oob_ip": "10.0.0.5/32"},
+        )
 
     def test_remove_extra_ip_removes_field(self):
         """Test that RemoveExtraIpView removes the specified IP field."""
@@ -3712,14 +3697,12 @@ class RemoveExtraIpViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)  # redirect
 
-        # Refresh device and check
-        self.device.refresh_from_db()
-        import_data = self.device.cf.get("data_import_source")
-        self.assertNotIn("primary_ip4", import_data["_ip"])
-        self.assertIn("oob_ip", import_data["_ip"])  # other field still there
+        unassigned_ips = stored_import_source(self.device).unassigned_ips
+        self.assertNotIn("primary_ip4", unassigned_ips)
+        self.assertIn("oob_ip", unassigned_ips)  # other field still there
 
-    def test_remove_extra_ip_removes_ip_key_when_empty(self):
-        """Test that _ip key is removed when last field is deleted."""
+    def test_remove_extra_ip_empties_the_ip_map_without_touching_the_record(self):
+        """Removing the last stored IP keeps the record and its other data."""
         # First remove primary_ip4
         url = reverse("plugins:netbox_data_import:remove_extra_ip")
         self.client.post(
@@ -3741,11 +3724,9 @@ class RemoveExtraIpViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
 
-        # Refresh device and check _ip key is gone
-        self.device.refresh_from_db()
-        import_data = self.device.cf.get("data_import_source")
-        self.assertNotIn("_ip", import_data)
-        self.assertIn("extra", import_data)  # other keys remain
+        import_source = stored_import_source(self.device)
+        self.assertEqual(import_source.unassigned_ips, {})
+        self.assertEqual(import_source.extra_columns, {"some_field": "value"})
 
     def test_remove_extra_ip_invalid_field(self):
         """Test that invalid ip_field is rejected."""
@@ -3760,10 +3741,7 @@ class RemoveExtraIpViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
 
-        # Check device wasn't modified
-        self.device.refresh_from_db()
-        import_data = self.device.cf.get("data_import_source")
-        self.assertEqual(len(import_data["_ip"]), 2)  # unchanged
+        self.assertEqual(len(stored_import_source(self.device).unassigned_ips), 2)  # unchanged
 
     def test_remove_extra_ip_missing_params(self):
         """Test that missing parameters are handled gracefully."""

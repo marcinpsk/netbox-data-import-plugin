@@ -18,6 +18,7 @@ from netbox_data_import.models import (
     ImportProfile,
     SourceResolution,
 )
+from netbox_data_import.tests.helpers import set_import_source
 from netbox_data_import.views import _save_or_refetch, _validate_model_instance
 
 User = get_user_model()
@@ -254,8 +255,6 @@ class RemoveExtraIpValidNextTest(TestCase):
 
     def setUp(self):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from django.contrib.contenttypes.models import ContentType
-        from extras.models import CustomField
 
         self.user = _make_superuser("vcov2_ipnext_user")
         self.client = Client()
@@ -265,15 +264,10 @@ class RemoveExtraIpValidNextTest(TestCase):
         mfg = Manufacturer.objects.create(name="IPNext2Mfg", slug="ipnext2-mfg")
         dt = DeviceType.objects.create(manufacturer=mfg, model="IPNext2Model", slug="ipnext2-model", u_height=1)
         role = DeviceRole.objects.create(name="IPNext2Role", slug="ipnext2-role", color="000000")
-        device_ct = ContentType.objects.get_for_model(Device)
-        cf, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            cf.object_types.set([device_ct])
         self.device = Device.objects.create(name="ipnext2-device", site=site, device_type=dt, role=role)
-        self.device.custom_field_data["data_import_source"] = {
-            "_ip": {"primary_ip4": "10.2.3.4/32"},
-        }
-        self.device.save()
+        set_import_source(
+            self.device, _make_profile("ipnext2-device-profile"), "SRC-1", unassigned_ips={"primary_ip4": "10.2.3.4/32"}
+        )
 
     def test_valid_next_param_redirects_to_next(self):
         """Valid same-host next param causes redirect to that URL — line 970."""
@@ -292,8 +286,6 @@ class RemoveExtraIpFieldNotInDataTest(TestCase):
 
     def setUp(self):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from django.contrib.contenttypes.models import ContentType
-        from extras.models import CustomField
 
         self.user = _make_superuser("vcov2_ipnotfound_user")
         self.client = Client()
@@ -303,23 +295,18 @@ class RemoveExtraIpFieldNotInDataTest(TestCase):
         mfg = Manufacturer.objects.create(name="IPNotFound2Mfg", slug="ipnotfound2-mfg")
         dt = DeviceType.objects.create(manufacturer=mfg, model="IPNotFound2Model", slug="ipnotfound2-model", u_height=1)
         role = DeviceRole.objects.create(name="IPNotFound2Role", slug="ipnotfound2-role", color="000000")
-        device_ct = ContentType.objects.get_for_model(Device)
-        cf, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            cf.object_types.set([device_ct])
         self.device = Device.objects.create(name="ipnotfound2-device", site=site, device_type=dt, role=role)
-        self.device.custom_field_data["data_import_source"] = {
-            "_ip": {"oob_ip": "10.3.4.5/32"},
-        }
-        self.device.save()
+        set_import_source(
+            self.device, _make_profile("ipnotfound2-device-profile"), "SRC-1", unassigned_ips={"oob_ip": "10.3.4.5/32"}
+        )
 
     def test_ip_field_not_in_data_sends_info_message(self):
-        """When ip_field not in _ip dict, messages.info is sent — line 997."""
+        """An IP the record does not hold reports an information message."""
         url = reverse("plugins:netbox_data_import:remove_extra_ip")
         resp = self.client.post(url, {"device_id": self.device.pk, "ip_field": "primary_ip4"})
         self.assertEqual(resp.status_code, 302)
         messages = list(get_messages(resp.wsgi_request))
-        self.assertTrue(any("not in JSON storage" in str(m) for m in messages))
+        self.assertTrue(any("was not in the import record" in str(m) for m in messages))
 
 
 class SyncDeviceFieldBareExceptionTest(TestCase):

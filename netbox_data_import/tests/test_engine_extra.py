@@ -7,7 +7,8 @@ import os
 from django.test import TestCase
 
 from netbox_data_import.engine import _collect_unmapped_values, _promote_extra_json_fields, _store_source_id, parse_file
-from netbox_data_import.models import ColumnMapping, ImportProfile
+from netbox_data_import.models import ColumnMapping, DeviceImportSource, ImportProfile, stored_import_source
+from netbox_data_import.tests.helpers import make_dcim_objects
 
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
@@ -120,61 +121,57 @@ class ParseFileExtraColumnsTest(TestCase):
 
 
 class StoreSourceIdExtraTest(TestCase):
-    """_store_source_id writes extra_columns to data_import_source['extra']."""
+    """_store_source_id writes the device import record."""
 
-    def _make_saved_obj(self):
-        class SavedObject:
-            custom_field_data = None
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.models import Device
 
-            def __init__(self):
-                self.custom_field_data = {}
+        site, _mfg, device_type, role = make_dcim_objects("StoreSource")
+        cls.site = site
+        cls.device = Device.objects.create(name="store-source-device", site=site, device_type=device_type, role=role)
+        cls.profile = _make_profile("StoreSourceProfile")
 
-            def save(self, **kwargs):
-                self.saved_fields = kwargs.get("update_fields")
+    def _stored(self):
+        self.device.refresh_from_db()
+        return stored_import_source(self.device)
 
-        return SavedObject()
-
-    def _make_profile_obj(self):
-        return ImportProfile(
-            name="StoreTest",
-            pk=99,
-            custom_field_name="",
-        )
-
-    def test_extra_columns_written_to_data_import_source(self):
-        obj = self._make_saved_obj()
-        profile = self._make_profile_obj()
+    def test_extra_columns_are_written_to_the_import_record(self):
         extra = {"JiraID": "JIRA-123", "Location": "DC1"}
-        _store_source_id(obj, profile, "SRC-1", extra_columns=extra)
-        stored = obj.custom_field_data.get("data_import_source", {})
-        self.assertEqual(stored.get("extra"), extra)
-        self.assertEqual(stored.get("source_id"), "SRC-1")
 
-    def test_no_extra_key_when_extra_is_none(self):
-        obj = self._make_saved_obj()
-        profile = self._make_profile_obj()
-        _store_source_id(obj, profile, "SRC-2", extra_columns=None)
-        stored = obj.custom_field_data.get("data_import_source", {})
-        self.assertNotIn("extra", stored)
+        _store_source_id(self.device, self.profile, "SRC-1", extra_columns=extra)
 
-    def test_no_extra_key_when_extra_is_empty_dict(self):
-        obj = self._make_saved_obj()
-        profile = self._make_profile_obj()
-        _store_source_id(obj, profile, "SRC-3", extra_columns={})
-        stored = obj.custom_field_data.get("data_import_source", {})
-        self.assertNotIn("extra", stored)
+        record = self._stored()
+        self.assertEqual(record.extra_columns, extra)
+        self.assertEqual(record.source_id, "SRC-1")
+        self.assertEqual(record.profile, self.profile)
 
-    def test_database_error_while_storing_source_metadata_propagates(self):
-        from django.db import IntegrityError
+    def test_record_holds_no_extra_columns_when_none_are_captured(self):
+        _store_source_id(self.device, self.profile, "SRC-2", extra_columns=None)
 
-        class FailingDevice:
-            custom_field_data = {}
+        self.assertEqual(self._stored().extra_columns, {})
 
-            def save(self, **kwargs):
-                raise IntegrityError("metadata write failed")
+    def test_second_import_replaces_the_record_of_the_same_device(self):
+        _store_source_id(self.device, self.profile, "SRC-3", extra_columns={"JiraID": "JIRA-1"})
 
-        with self.assertRaisesMessage(IntegrityError, "metadata write failed"):
-            _store_source_id(FailingDevice(), self._make_profile_obj(), "SRC-DB-ERROR")
+        _store_source_id(self.device, self.profile, "SRC-4", extra_columns={"JiraID": "JIRA-2"})
+
+        self.assertEqual(DeviceImportSource.objects.filter(device=self.device).count(), 1)
+        record = self._stored()
+        self.assertEqual(record.source_id, "SRC-4")
+        self.assertEqual(record.extra_columns, {"JiraID": "JIRA-2"})
+
+    def test_a_rack_keeps_only_the_profile_custom_field(self):
+        """The import record covers devices; a rack must not carry plugin JSON."""
+        from dcim.models import Rack
+
+        rack = Rack.objects.create(name="Store Source Rack", site=self.site, u_height=42)
+
+        _store_source_id(rack, self.profile, "SRC-RACK")
+
+        rack.refresh_from_db()
+        self.assertNotIn("data_import_source", rack.custom_field_data)
+        self.assertEqual(DeviceImportSource.objects.filter(source_id="SRC-RACK").count(), 0)
 
 
 class PromoteExtraJsonFieldsTest(TestCase):
