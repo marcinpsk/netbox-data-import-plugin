@@ -27,29 +27,59 @@
     phone: document.getElementById('contactCandidatePhoneValue'),
   };
 
+  /* NetBox enhances every plain <select> with its own Tom Select instance and does not
+   * export the library, so this picker adopts that instance instead of creating one. */
+  function picker() {
+    var instance = existingContact.tomselect;
+    if (!instance || instance.ndiContactSearch) return instance;
+    instance.ndiContactSearch = true;
+    // Deliberately uncached: a Contact created while this page is open must be findable.
+    instance.settings.load = function (query, callback) {
+      var lookupUrl = form.dataset.contactLookupUrl;
+      if (query.length < 2 || !lookupUrl) {
+        callback();
+        return;
+      }
+      var separator = lookupUrl.includes('?') ? '&' : '?';
+      fetch(lookupUrl + separator + 'q=' + encodeURIComponent(query), {
+        headers: {'Accept': 'application/json'},
+      })
+        .then(function (response) { return response.json(); })
+        .then(function (data) { callback((data.results || []).map(contactOption)); })
+        .catch(function () { callback(); });
+    };
+    instance.on('change', applyExistingContact);
+    return instance;
+  }
+
   function contactOption(contact) {
-    return {
+    var instance = existingContact.tomselect;
+    var option = {
       id: String(contact.id),
       name: contact.name || '',
       email: contact.email || '',
       phone: contact.phone || '',
-      label: [contact.name, contact.email, contact.phone].filter(Boolean).join(' · '),
     };
+    option[instance.settings.valueField] = String(contact.id);
+    option[instance.settings.labelField] = [contact.name, contact.email, contact.phone]
+      .filter(Boolean)
+      .join(' · ');
+    return option;
   }
 
   function clearSelectedContact() {
     contactId.value = '';
-    if (existingContact.tomselect && existingContact.tomselect.getValue()) {
-      existingContact.tomselect.clear(true);
-    }
+    var instance = picker();
+    if (instance && instance.getValue()) instance.clear(true);
   }
 
   function applyExistingContact(value) {
-    if (!value || !existingContact.tomselect) {
+    var instance = existingContact.tomselect;
+    if (!value || !instance) {
       contactId.value = '';
       return;
     }
-    var contact = existingContact.tomselect.options[value];
+    var contact = instance.options[value];
     if (!contact) return;
     contactId.value = String(contact.id);
     for (var fieldName in valueInputs) {
@@ -64,39 +94,13 @@
       || Boolean(resolvedFields.contact_id);
   }
 
-  if (window.TomSelect) {
-    if (existingContact.tomselect) existingContact.tomselect.destroy();
-    new window.TomSelect(existingContact, {
-      valueField: 'id',
-      labelField: 'label',
-      searchField: ['name', 'email', 'phone'],
-      plugins: ['remove_button'],
-      maxItems: 1,
-      load: function (query, callback) {
-        var lookupUrl = form.dataset.contactLookupUrl;
-        if (query.length < 2 || !lookupUrl) {
-          callback();
-          return;
-        }
-        var separator = lookupUrl.includes('?') ? '&' : '?';
-        fetch(lookupUrl + separator + 'q=' + encodeURIComponent(query), {
-          headers: {'Accept': 'application/json'},
-        })
-          .then(function (response) { return response.json(); })
-          .then(function (data) { callback((data.results || []).map(contactOption)); })
-          .catch(function () { callback(); });
-      },
-      onChange: applyExistingContact,
-    });
-  }
-
   function toggleContactFields() {
     var disabled = noContact.checked;
-    var lookupField = form.dataset.contactLookupField;
+    var instance = picker();
     existingContact.disabled = disabled;
-    if (existingContact.tomselect) {
-      if (disabled) existingContact.tomselect.disable();
-      else existingContact.tomselect.enable();
+    if (instance) {
+      if (disabled) instance.disable();
+      else instance.enable();
     }
     for (var fieldName in selects) {
       var select = selects[fieldName];
@@ -148,14 +152,15 @@
     document.getElementById('contactCandidateSourceId').value = sourceId;
     document.getElementById('contactCandidateOriginalValue').value = JSON.stringify(rowCandidates);
     contactId.value = resolvedFields.contact_id || '';
-    if (existingContact.tomselect) {
-      existingContact.tomselect.clear(true);
-      existingContact.tomselect.clearOptions();
-      if (suggestion) existingContact.tomselect.addOption(contactOption(suggestion));
+    var instance = picker();
+    if (instance) {
+      instance.clear(true);
+      instance.clearOptions();
+      if (suggestion) instance.addOption(contactOption(suggestion));
       if (suggestion && String(suggestion.id) === String(resolvedFields.contact_id || '')) {
-        existingContact.tomselect.setValue(String(suggestion.id), true);
+        instance.setValue(String(suggestion.id), true);
       }
-      existingContact.tomselect.refreshOptions(false);
+      instance.refreshOptions(false);
     }
     if (suggestionMessage) {
       suggestionMessage.classList.toggle('d-none', !suggestion);
@@ -177,8 +182,8 @@
     noContact.checked = resolvedFields.contact_resolution_applied === true
       && !hasContactSelection(resolvedFields);
     toggleContactFields();
-    if (proposeSuggestion && existingContact.tomselect) {
-      existingContact.tomselect.setValue(String(suggestion.id), true);
+    if (proposeSuggestion && instance) {
+      instance.setValue(String(suggestion.id), true);
       applyExistingContact(String(suggestion.id));
     }
   });

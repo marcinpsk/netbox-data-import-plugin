@@ -54,6 +54,18 @@ const previewFixture = `
   <script id="ndi-contact-suggestions-by-row" type="application/json">{}</script>
 `;
 
+/* NetBox enhances every plain <select> with its own Tom Select instance through
+ * initStaticSelects() and never leaves the library on `window`. */
+async function initNetBoxSelects(page) {
+  await page.addScriptTag({ content: tomSelectSource });
+  await page.evaluate(() => {
+    for (const select of document.querySelectorAll("select:not(.tomselected)")) {
+      new TomSelect(select, { create: false, maxOptions: undefined, plugins: { clear_button: {} } });
+    }
+    delete window.TomSelect;
+  });
+}
+
 async function openRow(page, rowNumber, sourceId) {
   await page.evaluate(
     ({ rowNumber: row, sourceId: source }) => {
@@ -70,12 +82,7 @@ async function openRow(page, rowNumber, sourceId) {
 
 test("contact candidate fields stay visible and synchronized in the browser", async ({ page }) => {
   await page.setContent(previewFixture);
-  await page.addScriptTag({ content: tomSelectSource });
-  await page.evaluate(() => {
-    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
-      new TomSelect(document.getElementById(id), { create: false });
-    }
-  });
+  await initNetBoxSelects(page);
   await page.addScriptTag({ content: controllerSource });
 
   await openRow(page, "first-row", "source-first");
@@ -132,12 +139,7 @@ test("contact picker searches NetBox and copies the selected Contact details", a
     });
   });
   await page.setContent(previewFixture);
-  await page.addScriptTag({ content: tomSelectSource });
-  await page.evaluate(() => {
-    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
-      new TomSelect(document.getElementById(id), { create: false });
-    }
-  });
+  await initNetBoxSelects(page);
   await page.addScriptTag({ content: controllerSource });
   await openRow(page, "first-row", "source-first");
 
@@ -162,12 +164,7 @@ test("detected NetBox Contact is proposed in the picker", async ({ page }) => {
     </script>`,
   );
   await page.setContent(fixture);
-  await page.addScriptTag({ content: tomSelectSource });
-  await page.evaluate(() => {
-    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
-      new TomSelect(document.getElementById(id), { create: false });
-    }
-  });
+  await initNetBoxSelects(page);
   await page.addScriptTag({ content: controllerSource });
 
   await openRow(page, "second-row", "source-second");
@@ -201,17 +198,12 @@ test("detected Contact can be replaced through picker search", async ({ page }) 
     </script>`,
   );
   await page.setContent(fixture);
-  await page.addScriptTag({ content: tomSelectSource });
-  await page.evaluate(() => {
-    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
-      new TomSelect(document.getElementById(id), { create: false });
-    }
-  });
+  await initNetBoxSelects(page);
   await page.addScriptTag({ content: controllerSource });
   await openRow(page, "second-row", "source-second");
 
   const picker = page.locator("#contactCandidateExisting + .ts-wrapper");
-  await picker.locator(".remove").click();
+  await picker.locator(".clear-button").click();
   await picker.locator(".ts-control input").fill("replacement");
   await expect(picker.locator(".ts-dropdown .option")).toContainText("Replacement Contact");
   await picker.locator(".ts-dropdown .option").click();
