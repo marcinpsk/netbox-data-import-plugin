@@ -459,6 +459,33 @@ class ImportPreviewViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertContains(resp, "sample_cans.xlsx")
 
+    def test_contact_literal_inputs_have_accessible_names(self):
+        """The three Contact literal inputs expose names to assistive technology."""
+        self._setup_session()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, 'aria-label="Contact name value"')
+        self.assertContains(response, 'aria-label="Email address value"')
+        self.assertContains(response, 'aria-label="Phone number value"')
+
+    def test_first_preview_get_renders_the_materialized_upload_result(self):
+        """The upload result is not calculated again on its redirect target."""
+        self._setup_session()
+        session = self.client.session
+        stored_result = session["import_result"]
+        session["import_rows"][0]["device_name"] = "changed-after-materialization"
+        session["import_preview_use_materialized_once"] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["result"].to_session_dict(), stored_result)
+        self.assertNotIn("import_preview_use_materialized_once", self.client.session)
+        self.assertContains(response, 'id="ndi-preview-revision"')
+        self.assertContains(response, "Recalculate Preview")
+
 
 class ImportPreviewViewContextTest(BaseViewTestCase):
     """Tests for ImportPreviewView device matching context."""
@@ -2218,6 +2245,22 @@ class ImportRunViewTest(IsolatedRQQueueTestMixin, BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:import_run")
         resp = self.client.post(url)
         self.assertEqual(resp.status_code, 302)
+
+    def test_run_import_rejects_a_stale_materialized_preview(self):
+        """A pending row action must be recalculated before import starts."""
+        self._setup_session()
+        session = self.client.session
+        session["import_preview_dirty"] = True
+        session.save()
+
+        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        self.assertNotIn("import_background_job_id", self.client.session)
 
 
 class ImportProfileYamlWithTransformRuleTest(BaseViewTestCase):
@@ -4024,6 +4067,31 @@ class SyncRackAndPlacementTests(TestCase):
         )
         data = resp.json()
         self.assertTrue(data["ok"], data)
+        self.device_no_loc.refresh_from_db()
+        self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
+        self.assertEqual(self.device_no_loc.position, 5)
+        self.assertEqual(self.device_no_loc.face, "front")
+
+    def test_placement_ignores_unrelated_invalid_oob_assignment(self):
+        """An existing invalid OOB pointer does not block a placement-only update."""
+        from ipam.models import IPAddress
+
+        oob_ip = IPAddress.objects.create(address="198.18.0.1/24")
+        self.device_no_loc.oob_ip = oob_ip
+        self.device_no_loc.save(update_fields=["oob_ip"])
+
+        response = self.client.post(
+            self.placement_url,
+            {
+                "device_id": self.device_no_loc.pk,
+                "rack_name": "R1",
+                "u_position": "5",
+                "face": "front",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
         self.device_no_loc.refresh_from_db()
         self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
         self.assertEqual(self.device_no_loc.position, 5)

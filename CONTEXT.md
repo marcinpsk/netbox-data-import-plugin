@@ -28,3 +28,10 @@ _Avoid_: Contact candidates, fallback columns
 **Row Resolution**:
 A saved decision that selects or derives target-field values for one source row. The import reapplies the decision when that row appears in a later file.
 _Avoid_: Override, exception
+
+**Field Difference**:
+One Target Field whose resolved Source Row value differs from the value on its matched NetBox object.
+
+**Ignored Field Difference**:
+A saved decision to preserve the NetBox value for one Field Difference while the exact Source Row value and NetBox value pair remains unchanged. If either value changes, the Target Field becomes a Field Difference again.
+_Avoid_: Ignored field

@@ -78,10 +78,21 @@ urlpatterns = [
     # Ignore / Unignore device
     path("ignore-device/", views.IgnoreDeviceView.as_view(), name="ignore_device"),
     path("unignore-device/", views.UnignoreDeviceView.as_view(), name="unignore_device"),
+    path(
+        "ignore-field-difference/",
+        views.IgnoreFieldDifferenceView.as_view(),
+        name="ignore_field_difference",
+    ),
+    path(
+        "unignore-field-difference/",
+        views.UnignoreFieldDifferenceView.as_view(),
+        name="unignore_field_difference",
+    ),
     # Quick-resolve views
     path("remove-extra-ip/", views.RemoveExtraIpView.as_view(), name="remove_extra_ip"),
     path("sync-device-field/", views.SyncDeviceFieldView.as_view(), name="sync_device_field"),
     path("sync-placement/", views.SyncPlacementView.as_view(), name="sync_placement"),
+    path("contact-lookup/", views.ContactLookupView.as_view(), name="contact_lookup"),
     # Save resolution (rerere)
     path("save-resolution/", views.SaveResolutionView.as_view(), name="save_resolution"),
     path("resolve-duplicate-name/", views.ResolveDuplicateNameView.as_view(), name="resolve_duplicate_name"),

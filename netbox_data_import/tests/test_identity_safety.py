@@ -948,6 +948,75 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertEqual(device_row.action, "error")
         self.assertEqual(device_row.extra_data.get("identity_conflict"), "derived_slug_collision")
 
+    def test_slug_collision_error_renders_the_device_type_mapping_action(self):
+        """A competing row error does not hide the Device Type remediation."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        manufacturer = Manufacturer.objects.create(name="Mapping Action Vendor", slug="mapping-action-vendor")
+        DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Switch-6505",
+            slug="mapping-action-vendor-switch-6505",
+            u_height=1,
+        )
+        Device.objects.create(
+            name="mapping-action-existing-a",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="DUPLICATE-MAPPING-ACTION",
+        )
+        Device.objects.create(
+            name="mapping-action-existing-b",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="DUPLICATE-MAPPING-ACTION",
+        )
+        profile = ImportProfile.objects.create(
+            name="Mapping Action Profile",
+            sheet_name="Data",
+            create_missing_device_types=True,
+        )
+        ClassRoleMapping.objects.create(
+            profile=profile,
+            source_class="Server",
+            creates_rack=False,
+            role_slug=self.role.slug,
+        )
+        rows = [
+            {
+                **self._device_row(2, "MAP-ACTION", "mapping-action-source", self.rack_a, 1),
+                "make": manufacturer.name,
+                "model": "Switch 6505",
+                "serial": "DUPLICATE-MAPPING-ACTION",
+            }
+        ]
+        result = run_import(rows, profile, {"site": self.site}, dry_run=True, user=self.user)
+        session = self.client.session
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "mapping-action.xlsx",
+        }
+        session["import_result"] = result.to_session_dict()
+        session["import_preview_pending"] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, "Add an explicit device type mapping.")
+        self.assertContains(response, 'data-source-make="Mapping Action Vendor"')
+        self.assertContains(response, "Map DT")
+
+        execution = run_import(rows, profile, {"site": self.site}, dry_run=False, user=self.user)
+        execution_row = next(row for row in execution.rows if row.object_type == "device")
+        self.assertEqual(execution_row.action, "error")
+        self.assertEqual(execution_row.extra_data["identity_conflict"], "derived_slug_collision")
+
     def test_update_preview_lists_every_field_that_the_writer_changes(self):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
         from tenancy.models import Tenant
@@ -1501,6 +1570,23 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
                 self.assertEqual([item.action for item in device_rows], ["error", "error"])
                 self.assertTrue(all(item.extra_data.get("identity_conflict") == conflict_kind for item in device_rows))
+
+    def test_rack_view_sorts_whole_and_half_u_positions_together(self):
+        """A half-U position stays numeric so the rack view can sort the whole group."""
+        rows = [
+            self._device_row(2, "HALF-U-A", "half-u-device-a", self.rack_a, "7.5"),
+            self._device_row(3, "HALF-U-B", "half-u-device-b", self.rack_a, 1),
+        ]
+
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [item for item in result.rows if item.object_type == "device"]
+        positions = [item.extra_data.get("u_position") for item in device_rows]
+
+        self.assertTrue(all(isinstance(value, (int, float)) for value in positions), positions)
+        self.assertEqual(
+            [item.name for item in result.rack_groups[self.rack_a.name]["devices"]],
+            ["half-u-device-b", "half-u-device-a"],
+        )
 
     def test_none_like_source_ids_are_not_persisted_as_bindings(self):
         rows = [
@@ -2452,6 +2538,56 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertTrue(DeviceExistingMatch.objects.filter(pk=denied_binding.pk).exists())
+
+    def test_unlink_review_cleanup_rolls_back_without_review_delete_permission(self):
+        from dcim.models import Device
+        from netbox_data_import.models import IgnoredFieldDifference
+
+        device = Device.objects.create(
+            name="unlink-review-permission-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        binding = DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="UNLINK-REVIEW-PERMISSION",
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+        review = IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id=binding.source_id,
+            netbox_device_id=device.pk,
+            target_field="status",
+            file_snapshot={"canonical": "offline", "display": "offline"},
+            netbox_snapshot={"canonical": "active", "display": "active"},
+        )
+        user = get_user_model().objects.create_user(username="unlink-review-permission-user", password="testpass")
+        self._grant_object_permission(
+            user,
+            "Change review cleanup profile",
+            ImportProfile,
+            ["change"],
+            {"pk": self.profile.pk},
+        )
+        self._grant_object_permission(
+            user,
+            "Delete review cleanup binding",
+            DeviceExistingMatch,
+            ["delete"],
+            {"pk": binding.pk},
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:unlink_device"),
+            {"profile_id": self.profile.pk, "source_id": binding.source_id},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(DeviceExistingMatch.objects.filter(pk=binding.pk).exists())
+        self.assertTrue(IgnoredFieldDifference.objects.filter(pk=review.pk).exists())
 
     def test_duplicate_name_resolution_update_requires_change_permission(self):
         existing = SourceResolution.objects.create(

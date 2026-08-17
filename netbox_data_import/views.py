@@ -8,7 +8,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -34,6 +34,7 @@ from .models import (
     ColumnTransformRule,
     DeviceExistingMatch,
     DeviceTypeMapping,
+    IgnoredFieldDifference,
     ImportJob,
     ImportProfile,
     ManufacturerMapping,
@@ -50,6 +51,18 @@ from .tables import (
     ImportProfileTable,
 )
 from . import engine
+from .contact_resolution import PrimaryContactResolver
+from .device_field_review import DeviceFieldReviewer
+from .object_permissions import ObjectPermissionDenied
+from .preview_row_actions import (
+    PREVIEW_DIRTY_SESSION_KEY,
+    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+    current_preview_revision,
+    load_cached_preview,
+    mark_preview_dirty,
+    pending_preview_payload,
+    record_recalculated_preview,
+)
 
 
 _IMPORT_SOURCE_ROWS_JOB_SESSION_KEY = "import_source_rows_job_id"
@@ -110,6 +123,38 @@ def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=
         if not allowed:
             transaction.set_rollback(True)
         return allowed
+
+
+def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
+    """Persist the confirmed source-to-device identity for a field review."""
+    existing_match = (
+        DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
+    )
+    if existing_match is not None and existing_match.netbox_device_id != device.pk:
+        return False, "conflict"
+    conflicting_match = (
+        DeviceExistingMatch.objects.select_for_update()
+        .filter(profile=profile, netbox_device_id=device.pk)
+        .exclude(source_id=source_id)
+        .first()
+    )
+    if conflicting_match is not None:
+        return False, "conflict"
+    if existing_match is not None and existing_match.netbox_device_id == device.pk:
+        return True, ""
+    allowed = _save_permission_scoped_object(
+        user,
+        DeviceExistingMatch,
+        {"profile": profile, "source_id": source_id},
+        {
+            "netbox_device_id": device.pk,
+            "device_name": device.name,
+            "source_asset_tag": source_asset_tag,
+        },
+    )
+    if not allowed:
+        return False, "permission"
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +827,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
 
         # Store result + raw rows + context in session for the preview/execute steps
         # Rows need JSON-safe serialization (handle datetime from Excel)
-        request.session["import_result"] = result.to_session_dict()
+        record_recalculated_preview(request.session, result)
         request.session["import_rows"] = _serialize_rows(rows)
         request.session["import_context"] = {
             "profile_id": profile.pk,
@@ -792,6 +837,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
             "filename": excel_file.name,
         }
         request.session["import_preview_pending"] = True
+        request.session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         request.session.pop("import_preview_source_job_id", None)
         request.session.pop(_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY, None)
         _clear_restored_import_job(request)
@@ -813,9 +859,14 @@ class ImportPreviewView(PermissionRequiredMixin, View):
 
     def get(self, request):
         """Render the current preview URL."""
-        return self.render_preview(request, request.get_full_path())
+        use_materialized_result = request.session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, False) is True
+        return self.render_preview(
+            request,
+            request.get_full_path(),
+            use_materialized_result=use_materialized_result,
+        )
 
-    def render_preview(self, request, preview_url):
+    def render_preview(self, request, preview_url, *, use_materialized_result=False):
         """Re-run the dry-run import and render the preview template."""
         rows = request.session.get("import_rows")
         ctx = request.session.get("import_context", {})
@@ -845,14 +896,16 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.warning(request, "The saved import target is no longer available. Start a new preview.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        context_obj = {"site": site, "location": location, "tenant": tenant}
-        # Re-apply saved resolutions so any resolution saved after the initial upload
-        # is reflected without requiring a file re-upload.
-        rows = engine.reapply_saved_resolutions(rows, profile)
-        request.session["import_rows"] = _serialize_rows(rows)
-        # Always re-run so any new mappings/matches are immediately reflected
-        result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
-        request.session["import_result"] = result.to_session_dict()
+        stored_result = request.session.get("import_result")
+        if use_materialized_result and isinstance(stored_result, dict):
+            result = engine.ImportResult.from_session_dict(stored_result)
+        else:
+            context_obj = {"site": site, "location": location, "tenant": tenant}
+            # Apply saved resolutions again so changes made after upload appear.
+            rows = engine.reapply_saved_resolutions(rows, profile)
+            request.session["import_rows"] = _serialize_rows(rows)
+            result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
+            record_recalculated_preview(request.session, result)
 
         # Build existing resolutions map for the split-name modal preview
         import json as _json
@@ -915,6 +968,11 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             for r in result.rows
             if r.extra_data.get("candidate_values")
         }
+        contact_suggestions_by_row = {
+            str(r.row_number): r.extra_data["contact_suggestion"]
+            for r in result.rows
+            if r.extra_data.get("contact_suggestion")
+        }
         extra_columns_by_row = {
             str(r.row_number): r.extra_data.get("extra_columns", {})
             for r in result.rows
@@ -958,13 +1016,16 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "unused_columns": unused_columns,
                 "target_field_choices": TARGET_FIELD_CHOICES,
                 "syncable_fields": SyncDeviceFieldView._ALLOWED_FIELDS,
+                "reviewable_fields": DeviceFieldReviewer.reviewable_fields(),
                 "device_match_source_ids": device_match_source_ids,
                 "device_match_info": device_match_info,
                 "conflicts_by_row": conflicts_by_row,
                 "candidate_values_by_row": candidate_values_by_row,
+                "contact_suggestions_by_row": contact_suggestions_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
+                "preview_revision": current_preview_revision(request.session),
             },
         )
 
@@ -1032,6 +1093,7 @@ def _discard_import_preview(request):
     for key in ("import_context", "import_result", "import_rows", "import_unused_columns"):
         request.session.pop(key, None)
     request.session["import_preview_pending"] = False
+    request.session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
     request.session.pop("import_preview_source_job_id", None)
     request.session.pop(_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY, None)
 
@@ -1136,6 +1198,9 @@ class ImportRunView(PermissionRequiredMixin, View):
         if not rows or not ctx_data:
             messages.warning(request, "No import in progress.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
+            messages.warning(request, "Recalculate and review the saved preview changes before importing.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         profile = get_object_or_404(
             ImportProfile.objects.restrict(request.user, "change"),
@@ -1359,6 +1424,343 @@ class UnignoreDeviceView(PermissionRequiredMixin, View):
         return redirect(next_url)
 
 
+def _wants_json(request) -> bool:
+    """Return whether one preview action expects a JSON response."""
+    return "application/json" in request.headers.get("Accept", "")
+
+
+def _preview_action_error(request, next_url, message, *, status=409):
+    """Return one preview-action error through JSON or the form fallback."""
+    messages.error(request, message)
+    if _wants_json(request):
+        return JsonResponse({"ok": False, "error": message}, status=status)
+    return redirect(next_url)
+
+
+def _field_review_row(request):
+    """Return the current row and target field for a review POST."""
+    preview = load_cached_preview(request)
+    if preview is None:
+        return None
+    profile, result = preview
+    try:
+        row_number = int(request.POST.get("row_number", ""))
+    except (TypeError, ValueError):
+        return None
+    target_field = request.POST.get("target_field", "").strip()
+    row = next(
+        (
+            item
+            for item in result.rows
+            if item.row_number == row_number and item.object_type == "device" and item.action in {"update", "error"}
+        ),
+        None,
+    )
+    if row is None or DeviceFieldReviewer.definition(target_field) is None:
+        return None
+    if not engine._str_val(row.source_id):
+        return None
+    return profile, result, row, target_field
+
+
+def _preview_device_action(request):
+    """Return the cached row and permitted Device for one preview action."""
+    preview = load_cached_preview(request)
+    if preview is None:
+        return None
+    _profile, result = preview
+    try:
+        row_number = int(request.POST.get("row_number", ""))
+    except (TypeError, ValueError):
+        return None
+    row = next(
+        (
+            item
+            for item in result.rows
+            if item.row_number == row_number and item.object_type == "device" and item.action in {"update", "error"}
+        ),
+        None,
+    )
+    device_id = row.extra_data.get("netbox_device_id") if row is not None else None
+    if not device_id:
+        return None
+
+    from dcim.models import Device
+
+    device = (
+        Device.objects.restrict(request.user, "change")
+        .select_related("device_type__manufacturer", "rack__location", "role", "tenant", "location")
+        .filter(pk=device_id)
+        .first()
+    )
+    if device is None:
+        return None
+    return row, device
+
+
+def _preview_field_intent(request, target_field):
+    """Return one authoritative field value after checking its NetBox baseline."""
+    action = _preview_device_action(request)
+    if action is None:
+        return None, "The active preview row is no longer available."
+    row, device = action
+    if target_field not in row.extra_data.get("field_diff", {}):
+        return None, "The selected field difference is no longer present."
+    snapshots = row.extra_data.get("field_review_snapshots", {}).get(target_field)
+    if not isinstance(snapshots, dict):
+        return None, "The selected field has no authoritative preview value."
+    current = DeviceFieldReviewer.current_snapshot(device, target_field)
+    if current is None or current.get("canonical") != snapshots.get("netbox", {}).get("canonical"):
+        return None, "The matched NetBox value changed. Recalculate the preview and try again."
+    return (row, device, snapshots.get("file", {}).get("canonical", "")), None
+
+
+def _placement_matches_preview(device, row) -> bool:
+    """Return whether placement fields still match the materialized preview."""
+    state = row.extra_data.get("_identity_state")
+    if not isinstance(state, dict):
+        return False
+    return (
+        device.rack_id == state.get("rack_id")
+        and engine._normalize_for_compare(device.position) == state.get("position", "")
+        and (device.face or "") == state.get("face", "")
+    )
+
+
+def _placement_action_intent(request):
+    """Return authoritative placement inputs for preview and direct actions."""
+    from dcim.models import Device
+
+    if request.POST.get("row_number"):
+        action = _preview_device_action(request)
+        if action is None:
+            return None, "The active preview row is no longer available.", 409
+        row, device = action
+        if not _placement_matches_preview(device, row):
+            return (
+                None,
+                "The matched NetBox placement changed. Recalculate the preview and try again.",
+                409,
+            )
+        return (
+            {
+                "row": row,
+                "device": device,
+                "rack_name": row.rack_name,
+                "u_position": row.extra_data.get("u_position", ""),
+                "face": row.extra_data.get("face", ""),
+            },
+            None,
+            None,
+        )
+
+    try:
+        device = (
+            Device.objects.restrict(request.user, "change")
+            .select_related("site", "location", "rack")
+            .get(pk=request.POST.get("device_id"))
+        )
+    except (Device.DoesNotExist, ValueError, TypeError):
+        return None, "Device not found", 200
+    return (
+        {
+            "row": None,
+            "device": device,
+            "rack_name": request.POST.get("rack_name", ""),
+            "u_position": request.POST.get("u_position", ""),
+            "face": request.POST.get("face", ""),
+        },
+        None,
+        None,
+    )
+
+
+class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
+    """Ignore one exact current field difference for a matched Device."""
+
+    permission_required = "netbox_data_import.add_ignoredfielddifference"
+
+    def post(self, request):
+        """Save current snapshots from a fresh active preview."""
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+        review = _field_review_row(request)
+        if review is None:
+            return _preview_action_error(
+                request,
+                next_url,
+                "The selected field difference is no longer current. Recalculate the preview and try again.",
+            )
+        profile, _result, row, target_field = review
+        if target_field not in row.extra_data.get("field_diff", {}):
+            return _preview_action_error(
+                request,
+                next_url,
+                "The selected field difference is no longer present. Refresh the preview.",
+            )
+        snapshots = row.extra_data.get("field_review_snapshots", {}).get(target_field)
+        device_id = row.extra_data.get("netbox_device_id")
+        if not isinstance(snapshots, dict) or not device_id:
+            return _preview_action_error(
+                request,
+                next_url,
+                "The selected field difference has no current matched device.",
+            )
+
+        from dcim.models import Device
+
+        device = Device.objects.restrict(request.user, "view").filter(pk=device_id).first()
+        if device is None:
+            return _preview_action_error(request, next_url, "The matched NetBox device is no longer available.")
+        current_snapshot = DeviceFieldReviewer.current_snapshot(device, target_field)
+        if current_snapshot is None or current_snapshot.get("canonical") != snapshots.get("netbox", {}).get(
+            "canonical"
+        ):
+            return _preview_action_error(
+                request,
+                next_url,
+                "The matched NetBox value changed. Recalculate the preview and try again.",
+            )
+        lookup = {
+            "profile": profile,
+            "source_id": row.source_id,
+            "netbox_device_id": device.pk,
+            "target_field": target_field,
+        }
+        defaults = {
+            "file_snapshot": snapshots.get("file", {}),
+            "netbox_snapshot": snapshots.get("netbox", {}),
+        }
+        try:
+            with transaction.atomic():
+                binding_allowed, binding_error = _ensure_field_review_device_match(
+                    request.user,
+                    profile,
+                    row.source_id,
+                    device,
+                    engine._str_val(row.extra_data.get("asset_tag"))[:50],
+                )
+                if not binding_allowed:
+                    message = (
+                        "Permission denied: cannot persist the source-to-device field-review match."
+                        if binding_error == "permission"
+                        else "The source row or device is already linked elsewhere."
+                    )
+                    return _preview_action_error(request, next_url, message)
+                allowed = _save_permission_scoped_object(
+                    request.user,
+                    IgnoredFieldDifference,
+                    lookup,
+                    defaults,
+                )
+                if not allowed:
+                    return _preview_action_error(
+                        request,
+                        next_url,
+                        "Permission denied: cannot create or change this field review.",
+                    )
+        except IntegrityError:
+            return _preview_action_error(
+                request,
+                next_url,
+                "The field review or device link changed while this request was being processed. Try again.",
+            )
+        messages.success(request, f"Ignored the current {target_field} difference.")
+        mark_preview_dirty(request.session)
+        if _wants_json(request):
+            return JsonResponse(
+                pending_preview_payload(
+                    row.row_number,
+                    f"Ignored the current {target_field} difference.",
+                )
+            )
+        return redirect(next_url)
+
+
+class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
+    """Remove one exact current field-difference review for a matched Device."""
+
+    permission_required = "netbox_data_import.delete_ignoredfielddifference"
+
+    def post(self, request):
+        """Delete only the review represented by the fresh active preview."""
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+        review = _field_review_row(request)
+        if review is None:
+            return _preview_action_error(
+                request,
+                next_url,
+                "The selected field review is no longer current. Recalculate the preview and try again.",
+            )
+        profile, _result, row, target_field = review
+        if target_field not in row.extra_data.get("field_ignored", {}):
+            return _preview_action_error(
+                request,
+                next_url,
+                "The selected field review is no longer current. Refresh the preview.",
+            )
+        device_id = row.extra_data.get("netbox_device_id")
+        from dcim.models import Device
+
+        device = Device.objects.restrict(request.user, "view").filter(pk=device_id).first()
+        if device is None:
+            return _preview_action_error(request, next_url, "The matched NetBox device is no longer available.")
+        try:
+            with transaction.atomic():
+                record = (
+                    IgnoredFieldDifference.objects.select_for_update()
+                    .filter(
+                        profile=profile,
+                        source_id=row.source_id,
+                        netbox_device_id=device.pk,
+                        target_field=target_field,
+                    )
+                    .first()
+                )
+                if record is None:
+                    return _preview_action_error(
+                        request,
+                        next_url,
+                        "The selected field review is no longer current. Refresh the preview.",
+                    )
+                if not request.user.has_perm("netbox_data_import.delete_ignoredfielddifference", record):
+                    return _preview_action_error(
+                        request,
+                        next_url,
+                        "Permission denied: cannot remove this field review.",
+                    )
+                binding_allowed, binding_error = _ensure_field_review_device_match(
+                    request.user,
+                    profile,
+                    row.source_id,
+                    device,
+                    engine._str_val(row.extra_data.get("asset_tag"))[:50],
+                )
+                if not binding_allowed:
+                    message = (
+                        "Permission denied: cannot persist the source-to-device field-review match."
+                        if binding_error == "permission"
+                        else "The source row or device is already linked elsewhere."
+                    )
+                    return _preview_action_error(request, next_url, message)
+                record.delete()
+        except IntegrityError:
+            return _preview_action_error(
+                request,
+                next_url,
+                "The field review or device link changed while this request was being processed. Try again.",
+            )
+        messages.success(request, f"Showing the {target_field} difference again.")
+        mark_preview_dirty(request.session)
+        if _wants_json(request):
+            return JsonResponse(
+                pending_preview_payload(
+                    row.row_number,
+                    f"Showing the {target_field} difference again.",
+                )
+            )
+        return redirect(next_url)
+
+
 class RemoveExtraIpView(PermissionRequiredMixin, View):
     """Remove a stored IP from extra_json['_ip'] on a device's data_import_source custom field."""
 
@@ -1439,6 +1841,40 @@ class _AjaxPermissionView(ConditionalLoginRequiredMixin, View):
         return super().dispatch(request, *args, **kwargs)
 
 
+class ContactLookupView(_AjaxPermissionView):
+    """Search visible NetBox Contacts for the contact-resolution picker."""
+
+    permission_required = "tenancy.view_contact"
+
+    def get(self, request):
+        """Return a small real-shape Contact result set."""
+        from django.db.models import Q
+        from django.http import JsonResponse
+        from tenancy.models import Contact
+
+        query = request.GET.get("q", "").strip()
+        if len(query) < 2:
+            return JsonResponse({"results": []})
+        contacts = (
+            Contact.objects.restrict(request.user, "view")
+            .filter(Q(name__icontains=query) | Q(email__icontains=query) | Q(phone__icontains=query))
+            .order_by("name", "email", "pk")[:20]
+        )
+        return JsonResponse(
+            {
+                "results": [
+                    {
+                        "id": contact.pk,
+                        "name": contact.name,
+                        "email": contact.email,
+                        "phone": contact.phone,
+                    }
+                    for contact in contacts
+                ]
+            }
+        )
+
+
 class SyncDeviceFieldView(_AjaxPermissionView):
     """Apply a single field value from the import file to an existing NetBox device."""
 
@@ -1447,25 +1883,30 @@ class SyncDeviceFieldView(_AjaxPermissionView):
     _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face"}
 
     def post(self, request):
-        """Apply the given field value to the specified device."""
+        """Apply one previewed field value to its matched Device."""
         from django.http import JsonResponse
 
         from dcim.models import Device
         from .engine import _STATUS_MAP
 
-        device_id = request.POST.get("device_id")
         field = request.POST.get("field", "")
-        value = request.POST.get("value", "")
 
-        # Validate field first
         if not field or field not in self._ALLOWED_FIELDS:
             return JsonResponse({"ok": False, "error": f"Field '{field}' is not syncable"})
 
-        # Look up device
-        try:
-            device = Device.objects.select_related("device_type").get(pk=device_id)
-        except (Device.DoesNotExist, ValueError, TypeError):
-            return JsonResponse({"ok": False, "error": "Device not found"})
+        is_preview_action = bool(request.POST.get("row_number"))
+        if is_preview_action:
+            intent, error = _preview_field_intent(request, field)
+            if error:
+                return JsonResponse({"ok": False, "error": error}, status=409)
+            row, device, value = intent
+        else:
+            device_id = request.POST.get("device_id")
+            value = request.POST.get("value", "")
+            try:
+                device = Device.objects.restrict(request.user, "change").select_related("device_type").get(pk=device_id)
+            except (Device.DoesNotExist, ValueError, TypeError):
+                return JsonResponse({"ok": False, "error": "Device not found"})
 
         try:
             display = self._apply_field(device, field, value, _STATUS_MAP)
@@ -1474,16 +1915,33 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         except Exception:
             logger.exception(
                 "SyncDeviceFieldView failed for device_id=%s field=%s",
-                device_id,
+                device.pk,
                 field,
             )
             return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
+        if is_preview_action:
+            mark_preview_dirty(request.session)
+            return JsonResponse(
+                pending_preview_payload(
+                    row.row_number,
+                    f"Updated {field} to {display}.",
+                )
+            )
         return JsonResponse({"ok": True, "display": display})
+
+    @staticmethod
+    def _writer_safe_text(device, label, model_field, value):
+        """Reject a value the writer would otherwise truncate away from what the preview showed."""
+        text = str(value)
+        limit = type(device)._meta.get_field(model_field).max_length
+        if len(text) > limit:
+            raise ValueError(f"The {label} is {len(text)} characters; NetBox allows {limit}.")
+        return text
 
     def _apply_field(self, device, field, value, status_map):
         if field == "device_name":
-            new_name = str(value)[:64]
+            new_name = self._writer_safe_text(device, "device name", "name", value)
             if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
                 raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
             device.name = new_name
@@ -1491,10 +1949,9 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             return new_name
 
         if field == "u_position":
-            try:
-                pos = int(value)
-            except (ValueError, TypeError):
-                raise ValueError(f"Cannot parse '{value}' as integer for u_position")
+            pos = engine._coerce_position(value)
+            if pos is None:
+                raise ValueError(f"Cannot parse '{value}' as a finite number for u_position")
             device.position = pos
             device.save(update_fields=["position"])
             return f"U{device.position}"
@@ -1512,12 +1969,12 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             return device.status
 
         if field == "serial":
-            device.serial = str(value)[:50]
+            device.serial = self._writer_safe_text(device, "serial", "serial", value)
             device.save(update_fields=["serial"])
             return device.serial
 
         if field == "asset_tag":
-            device.asset_tag = str(value)[:50] if value else None
+            device.asset_tag = self._writer_safe_text(device, "asset tag", "asset_tag", value) if value else None
             device.save(update_fields=["asset_tag"])
             return device.asset_tag
 
@@ -1571,6 +2028,19 @@ def _lookup_rack_for_device(device, value):
     return racks[0], None
 
 
+def _validate_device_placement(device) -> None:
+    """Run NetBox validation and reject only errors caused by placement fields."""
+    try:
+        device.full_clean()
+    except ValidationError as exc:
+        if not hasattr(exc, "message_dict"):
+            raise
+        placement_fields = {"rack", "location", "position", "face", "device_type", "__all__"}
+        errors = {field: messages for field, messages in exc.message_dict.items() if field in placement_fields}
+        if errors:
+            raise ValidationError(errors) from exc
+
+
 class SyncPlacementView(_AjaxPermissionView):
     """Atomically sync rack + (optional) u_position + (optional) face for a device.
 
@@ -1580,20 +2050,17 @@ class SyncPlacementView(_AjaxPermissionView):
     permission_required = "dcim.change_device"
 
     def post(self, request):
-        """Resolve rack and atomically set rack + optional position + optional face."""
+        """Apply the previewed placement to its matched Device."""
         from django.http import JsonResponse
 
-        from dcim.models import Device
-
-        device_id = request.POST.get("device_id")
-        rack_name = request.POST.get("rack_name", "")
-        u_position = request.POST.get("u_position", "")
-        face = request.POST.get("face", "")
-
-        try:
-            device = Device.objects.select_related("site", "location", "rack").get(pk=device_id)
-        except (Device.DoesNotExist, ValueError, TypeError):
-            return JsonResponse({"ok": False, "error": "Device not found"})
+        intent, error, status = _placement_action_intent(request)
+        if error:
+            return JsonResponse({"ok": False, "error": error}, status=status)
+        row = intent["row"]
+        device = intent["device"]
+        rack_name = intent["rack_name"]
+        u_position = intent["u_position"]
+        face = intent["face"]
 
         rack, err = _lookup_rack_for_device(device, rack_name)
         if err:
@@ -1603,10 +2070,12 @@ class SyncPlacementView(_AjaxPermissionView):
         device.rack = rack
 
         if u_position not in ("", None):
-            try:
-                device.position = int(u_position)
-            except (ValueError, TypeError):
-                return JsonResponse({"ok": False, "error": f"Cannot parse '{u_position}' as integer for u_position"})
+            position = engine._coerce_position(u_position)
+            if position is None:
+                return JsonResponse(
+                    {"ok": False, "error": f"Cannot parse '{u_position}' as a finite number for u_position"}
+                )
+            device.position = position
             update_fields.append("position")
 
         if face not in ("", None):
@@ -1619,7 +2088,7 @@ class SyncPlacementView(_AjaxPermissionView):
             update_fields.append("face")
 
         try:
-            device.full_clean()
+            _validate_device_placement(device)
         except ValidationError as exc:
             if hasattr(exc, "message_dict"):
                 msg = "; ".join(f"{f}: {', '.join(es)}" for f, es in exc.message_dict.items())
@@ -1627,13 +2096,13 @@ class SyncPlacementView(_AjaxPermissionView):
                 msg = "; ".join(exc.messages)
             return JsonResponse({"ok": False, "error": f"Validation failed: {msg}"}, status=400)
         except Exception:
-            logger.exception("SyncPlacementView full_clean failed for device_id=%s", device_id)
+            logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
             return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         try:
             device.save(update_fields=update_fields)
         except Exception:
-            logger.exception("SyncPlacementView save failed for device_id=%s", device_id)
+            logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
             return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         parts = [f"rack={rack.name}"]
@@ -1641,7 +2110,16 @@ class SyncPlacementView(_AjaxPermissionView):
             parts.append(f"U{device.position}")
         if "face" in update_fields:
             parts.append(device.face)
-        return JsonResponse({"ok": True, "display": ", ".join(parts)})
+        display = ", ".join(parts)
+        if row is not None:
+            mark_preview_dirty(request.session)
+            return JsonResponse(
+                pending_preview_payload(
+                    row.row_number,
+                    f"Updated placement to {display}.",
+                )
+            )
+        return JsonResponse({"ok": True, "display": display})
 
 
 # ---------------------------------------------------------------------------
@@ -1738,8 +2216,8 @@ class SaveResolutionView(_AjaxPermissionView):
     permission_required = "netbox_data_import.change_importprofile"
 
     @staticmethod
-    def _contact_candidate_values(request, profile_id, source_id):
-        """Return Contact candidates for one active preview row."""
+    def _contact_candidate_context(request, profile_id, source_id):
+        """Return Contact candidates and row state for one active preview row."""
         import_result = request.session.get("import_result") or {}
         result_rows = [
             row
@@ -1756,18 +2234,11 @@ class SaveResolutionView(_AjaxPermissionView):
         candidates = result_rows[0].get("extra_data", {}).get("candidate_values", {}).get("contact", {})
         if not isinstance(candidates, dict) or not candidates:
             raise ValidationError("The active preview row has no Contact candidate values.")
-        return {str(source_column): str(value) for source_column, value in candidates.items()}
-
-    @classmethod
-    def _validate_contact_candidate_resolution(cls, request, profile, source_id, resolved_fields):
-        """Validate and normalize a Contact candidate row resolution."""
-        candidates = cls._contact_candidate_values(request, profile.pk, source_id)
-        validate_contact_candidate_resolution(
-            resolved_fields,
-            profile.primary_contact_lookup_field,
-            candidates,
+        return (
+            {str(source_column): str(value) for source_column, value in candidates.items()},
+            source_rows[0],
+            result_rows[0],
         )
-        return candidates
 
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
@@ -1793,33 +2264,65 @@ class SaveResolutionView(_AjaxPermissionView):
                 ImportProfile.objects.restrict(request.user, "change"),
                 pk=profile_id,
             )
+            contact_context = None
             if source_column == "candidate:contact":
                 try:
-                    candidates = self._validate_contact_candidate_resolution(
-                        request,
-                        profile,
-                        source_id,
+                    candidates, source_row, result_row = self._contact_candidate_context(request, profile.pk, source_id)
+                    validate_contact_candidate_resolution(
                         resolved_fields,
+                        profile.primary_contact_lookup_field,
+                        candidates,
                     )
                 except ValidationError as exc:
                     messages.error(request, "; ".join(exc.messages))
                     return redirect(next_url)
                 original_value = json.dumps(candidates, sort_keys=True)
+                contact_context = (source_row, result_row)
             try:
-                allowed = _save_permission_scoped_object(
-                    request.user,
-                    SourceResolution,
-                    {"profile": profile, "source_id": source_id, "source_column": source_column},
-                    {
-                        "original_value": original_value or "",
-                        "resolved_fields": resolved_fields,
-                    },
-                )
+                with transaction.atomic():
+                    allowed = _save_permission_scoped_object(
+                        request.user,
+                        SourceResolution,
+                        {"profile": profile, "source_id": source_id, "source_column": source_column},
+                        {
+                            "original_value": original_value or "",
+                            "resolved_fields": resolved_fields,
+                        },
+                    )
+                    contact_updated = False
+                    if allowed and contact_context is not None:
+                        source_row, result_row = contact_context
+                        device_id = result_row.get("extra_data", {}).get("netbox_device_id")
+                        if device_id:
+                            from dcim.models import Device
+
+                            device = Device.objects.restrict(request.user, "change").filter(pk=device_id).first()
+                            if device is None:
+                                raise ObjectPermissionDenied("dcim.change_device")
+                            resolved_row = dict(source_row)
+                            resolved_row.update(resolved_fields)
+                            contact_review = PrimaryContactResolver.review(
+                                device,
+                                resolved_row,
+                                profile,
+                                request.user,
+                            )
+                            PrimaryContactResolver.apply(device, profile, contact_review, request.user)
+                            contact_updated = True
             except IntegrityError:
                 messages.error(request, "The resolution changed while this request was being processed. Try again.")
                 return redirect(next_url)
+            except ObjectPermissionDenied as exc:
+                messages.error(request, f"Permission denied: {exc}")
+                return redirect(next_url)
+            except ValidationError as exc:
+                messages.error(request, "; ".join(exc.messages))
+                return redirect(next_url)
             if allowed:
-                messages.success(request, "Resolution saved. Re-run the import to apply it.")
+                if contact_updated:
+                    messages.success(request, "Resolution saved and the linked Device Contact was updated.")
+                else:
+                    messages.success(request, "Resolution saved. Re-run the import to apply it.")
             else:
                 messages.error(request, "Permission denied: cannot create or change this resolution.")
         return redirect(next_url)
@@ -2968,7 +3471,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                 continue
 
             if device is not None and match_method == "name":
-                position = engine._coerce_int(row.get("u_position"))
+                position = engine._coerce_position(row.get("u_position"))
                 side_map, _, _ = engine._get_translation_maps()
                 face = side_map.get(engine._str_val(row.get("face")).lower())
                 if engine._device_placement_differs(
@@ -3186,14 +3689,36 @@ class UnlinkDeviceView(_AjaxPermissionView):
                 binding = (
                     DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
                 )
-                if binding is not None and request.user.has_perm(
+                dependent_reviews = list(
+                    IgnoredFieldDifference.objects.select_for_update().filter(
+                        profile=profile,
+                        source_id=source_id,
+                    )
+                )
+                if binding is not None and not request.user.has_perm(
                     "netbox_data_import.delete_deviceexistingmatch",
                     binding,
                 ):
-                    binding.delete()
-                    messages.success(request, f"Unlinked source '{source_id}'.")
-                elif binding is not None:
                     messages.error(request, "Permission denied: cannot delete this device link.")
+                elif any(
+                    not request.user.has_perm("netbox_data_import.delete_ignoredfielddifference", review)
+                    for review in dependent_reviews
+                ):
+                    messages.error(request, "Permission denied: cannot remove the dependent field reviews.")
+                else:
+                    if dependent_reviews:
+                        IgnoredFieldDifference.objects.filter(
+                            pk__in=[review.pk for review in dependent_reviews]
+                        ).delete()
+                    if binding is not None:
+                        binding.delete()
+                    if dependent_reviews:
+                        messages.success(
+                            request,
+                            f"Unlinked source '{source_id}' and removed {len(dependent_reviews)} field review(s).",
+                        )
+                    elif binding is not None:
+                        messages.success(request, f"Unlinked source '{source_id}'.")
 
         return redirect(next_url)
 
