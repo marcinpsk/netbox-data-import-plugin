@@ -1557,7 +1557,7 @@ def _placement_action_intent(request):
     try:
         device = (
             Device.objects.restrict(request.user, "change")
-            .select_related("site", "location", "rack")
+            .select_related("site", "location", "rack", "device_type")
             .get(pk=request.POST.get("device_id"))
         )
     except (Device.DoesNotExist, ValueError, TypeError):
@@ -1952,7 +1952,11 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             pos = engine._coerce_position(value)
             if pos is None:
                 raise ValueError(f"Cannot parse '{value}' as a finite number for u_position")
+            zero_u_type = _zero_u_device_type(device)
+            if zero_u_type:
+                raise ValueError(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
             device.position = pos
+            self._reject_invalid_placement(device)
             device.save(update_fields=["position"])
             return f"U{device.position}"
 
@@ -1983,16 +1987,26 @@ class SyncDeviceFieldView(_AjaxPermissionView):
                 raise ValueError(
                     "Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement."
                 )
-            v = str(value).strip().lower()
-            _FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
-            mapped = _FACE_MAP.get(v)
+            zero_u_type = _zero_u_device_type(device)
+            if zero_u_type:
+                raise ValueError(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
+            mapped = _FACE_MAP.get(str(value).strip().lower())
             if mapped is None:
                 raise ValueError(f"Unknown face value '{value}' — expected 'front' or 'rear'")
             device.face = mapped
+            self._reject_invalid_placement(device)
             device.save(update_fields=["face"])
             return device.face
 
         raise ValueError(f"Field '{field}' is not syncable")
+
+    @staticmethod
+    def _reject_invalid_placement(device) -> None:
+        """Reject a placement value NetBox would refuse, before it reaches an unvalidated save."""
+        try:
+            _validate_device_placement(device)
+        except ValidationError as exc:
+            raise ValueError(_placement_error_text(exc)) from exc
 
 
 def _lookup_rack_for_device(device, value):
@@ -2041,6 +2055,64 @@ def _validate_device_placement(device) -> None:
             raise ValidationError(errors) from exc
 
 
+_FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
+
+
+def _placement_error_text(exc) -> str:
+    """Return one readable line for a placement ValidationError."""
+    if hasattr(exc, "message_dict"):
+        return "; ".join(f"{name}: {', '.join(messages)}" for name, messages in exc.message_dict.items())
+    return "; ".join(exc.messages)
+
+
+def _zero_u_device_type(device) -> str:
+    """Return the device type label when it is zero-U, which takes no position or face."""
+    device_type = device.device_type
+    if device_type is not None and device_type.u_height == 0:
+        return str(device_type)
+    return ""
+
+
+def _set_rack_placement(device, u_position, face, zero_u_type):
+    """Set the rack position and face on *device*.
+
+    Returns the written field names, the field names a zero-U device type cannot take,
+    and one error message for a value the writer cannot accept.
+    """
+    update_fields = []
+    skipped = []
+
+    if zero_u_type:
+        # Clear a stored position the way the import writer does, so the device stays valid.
+        if device.position is not None:
+            device.position = None
+            update_fields.append("position")
+        if device.face:
+            device.face = None
+            update_fields.append("face")
+        if u_position not in ("", None):
+            skipped.append("position")
+        if face not in ("", None):
+            skipped.append("face")
+        return update_fields, skipped, None
+
+    if u_position not in ("", None):
+        position = engine._coerce_position(u_position)
+        if position is None:
+            return update_fields, skipped, f"Cannot parse '{u_position}' as a finite number for u_position"
+        device.position = position
+        update_fields.append("position")
+
+    if face not in ("", None):
+        mapped = _FACE_MAP.get(str(face).strip().lower())
+        if mapped is None:
+            return update_fields, skipped, f"Unknown face value '{face}' — expected 'front' or 'rear'"
+        device.face = mapped
+        update_fields.append("face")
+
+    return update_fields, skipped, None
+
+
 class SyncPlacementView(_AjaxPermissionView):
     """Atomically sync rack + (optional) u_position + (optional) face for a device.
 
@@ -2066,35 +2138,18 @@ class SyncPlacementView(_AjaxPermissionView):
         if err:
             return JsonResponse({"ok": False, "error": err})
 
-        update_fields = ["rack"]
         device.rack = rack
-
-        if u_position not in ("", None):
-            position = engine._coerce_position(u_position)
-            if position is None:
-                return JsonResponse(
-                    {"ok": False, "error": f"Cannot parse '{u_position}' as a finite number for u_position"}
-                )
-            device.position = position
-            update_fields.append("position")
-
-        if face not in ("", None):
-            v = str(face).strip().lower()
-            _FACE_MAP = {"front": "front", "rear": "rear", "0": "front", "1": "rear"}
-            mapped = _FACE_MAP.get(v)
-            if mapped is None:
-                return JsonResponse({"ok": False, "error": f"Unknown face value '{face}' — expected 'front' or 'rear'"})
-            device.face = mapped
-            update_fields.append("face")
+        # NetBox rejects a rack position on a zero-U device type, so sync the rack alone.
+        zero_u_type = _zero_u_device_type(device)
+        placement_fields, skipped, error = _set_rack_placement(device, u_position, face, zero_u_type)
+        if error:
+            return JsonResponse({"ok": False, "error": error})
+        update_fields = ["rack", *placement_fields]
 
         try:
             _validate_device_placement(device)
         except ValidationError as exc:
-            if hasattr(exc, "message_dict"):
-                msg = "; ".join(f"{f}: {', '.join(es)}" for f, es in exc.message_dict.items())
-            else:
-                msg = "; ".join(exc.messages)
-            return JsonResponse({"ok": False, "error": f"Validation failed: {msg}"}, status=400)
+            return JsonResponse({"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400)
         except Exception:
             logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
             return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
@@ -2106,11 +2161,13 @@ class SyncPlacementView(_AjaxPermissionView):
             return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         parts = [f"rack={rack.name}"]
-        if "position" in update_fields:
+        if "position" in update_fields and device.position is not None:
             parts.append(f"U{device.position}")
-        if "face" in update_fields:
+        if "face" in update_fields and device.face:
             parts.append(device.face)
         display = ", ".join(parts)
+        if skipped:
+            display += f" (0U device type {zero_u_type} takes no {' or '.join(skipped)})"
         if row is not None:
             mark_preview_dirty(request.session)
             return JsonResponse(

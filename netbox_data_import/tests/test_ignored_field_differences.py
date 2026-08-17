@@ -462,6 +462,38 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.assertTrue(session["import_preview_dirty"])
         self.assertEqual(session["import_result"], previous_result)
 
+    def test_placement_sync_skips_the_position_of_a_zero_u_matched_device(self):
+        """A matched zero-U device takes the rack alone: NetBox allows it no rack position."""
+        from dcim.models import DeviceType
+
+        zero_u_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer,
+            model="360-imV-CNTRLR",
+            slug="360-imv-cntrlr",
+            u_height=0,
+        )
+        self.device.device_type = zero_u_type
+        self.device.rack = None
+        self.device.position = None
+        self.device.face = ""
+        self.device.save(update_fields=["device_type", "rack", "position", "face"])
+        self._save_rows(self.rows)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            self._json_action(row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"], payload)
+        self.assertIn("360-imV-CNTRLR", payload["message"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.rack_id, self.rack.pk)
+        self.assertIsNone(self.device.position)
+        self.assertFalse(self.device.face)
+
     def test_field_sync_uses_cached_intent_and_defers_recalculation(self):
         """Field sync writes the previewed value instead of posted client data."""
         previous_result = self.client.session["import_result"]
