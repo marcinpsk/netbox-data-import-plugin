@@ -89,5 +89,8 @@ See [`docs/agents/domain.md`](docs/agents/domain.md).
 - Use `NetBoxModel`, `NetBoxModelViewSet`, `NetBoxModelForm`, and similar. Never raw Django/DRF.
 - Commits follow Conventional Commits format (enforced by a pre-commit hook).
 - Never add a `Co-authored-by` trailer to commit messages.
-- Migrations are generated artifacts. Change a model, then run
-  `netbox-manage makemigrations netbox_data_import`. Do not hand-edit a migration.
+- Schema migrations are generated artifacts. Change a model, then run
+  `netbox-manage makemigrations netbox_data_import`. Do not hand-edit a generated migration.
+- A data migration is written by hand, because `makemigrations` generates no `RunPython`. Start it
+  with `netbox-manage makemigrations netbox_data_import --empty`. Give it no reverse callable when
+  the change cannot be undone, so Django refuses the rollback instead of losing data.

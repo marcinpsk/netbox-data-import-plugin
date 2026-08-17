@@ -100,6 +100,9 @@ def test_a_bare_pytest_run_caps_the_auto_worker_pool():
         check=False,
     )
 
+    # `--ignore` leaves nothing to collect, so pytest exits 5. Any other status means the run broke
+    # before the cap could apply, and the `created:` line alone would still pass the check below.
+    assert result.returncode in (0, 5), f"exit {result.returncode}\n{result.stdout[-3000:]}"
     created = re.search(r"created: (\d+)/\d+ workers", result.stdout)
     assert created is not None, result.stdout[-3000:]
     # A small runner detects fewer workers than the cap, which is already correct.

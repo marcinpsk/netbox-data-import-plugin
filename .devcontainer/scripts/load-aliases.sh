@@ -237,7 +237,7 @@ dev-help() {
   echo ""
   echo "🛠️  Development Tools:"
   echo "  netbox-shell        : Open NetBox Django shell"
-  echo "  netbox-test         : Run plugin tests (8 workers, no coverage)"
+  echo "  netbox-test         : Run plugin tests (auto workers, capped at 8, no coverage)"
   echo "  netbox-test-coverage: Run plugin tests with coverage"
   echo "  netbox-manage       : Run Django management commands"
   echo "  plugin-install      : Reinstall plugin in development mode"
