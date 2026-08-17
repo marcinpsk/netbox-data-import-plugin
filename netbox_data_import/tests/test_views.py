@@ -3760,6 +3760,58 @@ class RemoveExtraIpViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
 
 
+class RemoveExtraIpViewObjectPermissionTests(TestCase):
+    """`dcim.change_device` can be granted for some devices only, so the view must apply that scope."""
+
+    def setUp(self):
+        """Give one user change access to a single device, and an import record to two devices."""
+        from django.contrib.contenttypes.models import ContentType
+
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from users.models import ObjectPermission
+
+        site = Site.objects.create(name="Scoped Site", slug="scoped-site")
+        manufacturer = Manufacturer.objects.create(name="Scoped Mfg", slug="scoped-mfg")
+        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="Scoped Model", slug="scoped-model")
+        role = DeviceRole.objects.create(name="Scoped Role", slug="scoped-role")
+        profile = _make_profile("RemoveExtraIpScopeProfile")
+
+        self.permitted = Device.objects.create(name="permitted-device", site=site, device_type=device_type, role=role)
+        self.forbidden = Device.objects.create(name="forbidden-device", site=site, device_type=device_type, role=role)
+        for device in (self.permitted, self.forbidden):
+            set_import_source(device, profile, f"SRC-{device.name}", unassigned_ips={"primary_ip4": "192.0.2.1/32"})
+
+        self.user = User.objects.create_user("scoped_ip_user", "scoped@example.com", "testpass")
+        permission = ObjectPermission.objects.create(
+            name="Change one device", actions=["change"], constraints={"name": "permitted-device"}
+        )
+        permission.object_types.add(ContentType.objects.get_for_model(Device))
+        permission.users.add(self.user)
+
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def test_a_device_outside_the_change_scope_keeps_its_import_record(self):
+        """The model-level permission alone must not open every device's import record."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:remove_extra_ip"),
+            {"device_id": self.forbidden.pk, "ip_field": "primary_ip4"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(stored_import_source(self.forbidden).unassigned_ips, {"primary_ip4": "192.0.2.1/32"})
+
+    def test_a_device_inside_the_change_scope_still_loses_the_ip(self):
+        """The scope check must not block the devices the permission does cover."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:remove_extra_ip"),
+            {"device_id": self.permitted.pk, "ip_field": "primary_ip4"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(stored_import_source(self.permitted).unassigned_ips, {})
+
+
 class SyncDeviceFieldViewTests(TestCase):
     """Tests for SyncDeviceFieldView."""
 

@@ -1794,7 +1794,7 @@ class RemoveExtraIpView(PermissionRequiredMixin, View):
             messages.error(request, f"Invalid ip_field: {ip_field}")
             return _safe_return()
 
-        device = get_object_or_404(Device, pk=device_id)
+        device = get_object_or_404(Device.objects.restrict(request.user, "change"), pk=device_id)
         import_source = stored_import_source(device)
         unassigned_ips = dict(import_source.unassigned_ips) if import_source is not None else {}
 

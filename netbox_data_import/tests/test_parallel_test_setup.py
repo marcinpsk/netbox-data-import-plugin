@@ -109,6 +109,40 @@ def test_a_bare_pytest_run_caps_the_auto_worker_pool():
     assert 0 < int(created.group(1)) <= MAX_PARALLEL_WORKERS
 
 
+def test_an_explicit_worker_count_above_the_ceiling_is_rejected():
+    """`-n 9` never reaches `pytest_xdist_auto_num_workers`, which xdist calls only for auto counts.
+
+    Without a second check the run starts `gw8`, and that worker fails in the isolation helper during
+    collection, after the databases of the other workers already exist.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
+    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
+    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-n",
+            str(MAX_PARALLEL_WORKERS + 1),
+            "--no-cov",
+            "-p",
+            "no:cacheprovider",
+            "--ignore=netbox_data_import",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+
+    # 4 is pytest's usage-error status. It must refuse the run instead of collecting and failing later.
+    assert result.returncode == 4, f"exit {result.returncode}\n{(result.stdout + result.stderr)[-3000:]}"
+    assert f"at most {MAX_PARALLEL_WORKERS} pytest workers" in result.stdout + result.stderr
+
+
 def _run_netbox_test_alias(worker_value=None):
     """Run the local test alias with pytest and the venv activation stubbed out."""
     script = "\n".join(
