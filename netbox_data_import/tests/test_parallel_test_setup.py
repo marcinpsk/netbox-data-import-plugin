@@ -3,12 +3,14 @@
 """Tests for parallel test worker isolation."""
 
 import os
+import re
 import subprocess
+import sys
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 import pytest
 
-from netbox_data_import.tests.conftest import pytest_xdist_auto_num_workers
 from netbox_data_import.tests.parallel import (
     MAX_PARALLEL_WORKERS,
     isolated_redis_databases,
@@ -17,6 +19,14 @@ from netbox_data_import.tests.parallel import (
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _root_conftest():
+    """Load the root conftest by path: it is not importable as a package module."""
+    spec = spec_from_file_location("netbox_data_import_root_conftest", REPOSITORY_ROOT / "conftest.py")
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
@@ -53,8 +63,47 @@ def test_auto_worker_count_never_exceeds_the_isolated_worker_ceiling(monkeypatch
     """`-n auto` on a big machine must stop at the last worker with private Redis databases."""
     monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", detected_workers)
 
-    assert pytest_xdist_auto_num_workers(None) == expected
+    assert _root_conftest().pytest_xdist_auto_num_workers(None) == expected
     isolated_redis_databases(f"gw{expected - 1}")  # the highest worker this count starts
+
+
+def test_a_bare_pytest_run_caps_the_auto_worker_pool():
+    """The cap must reach an invocation that names no test path, which the addopts `-n auto` targets.
+
+    pytest loads `netbox_data_import/tests/conftest.py` only during collection, after the workers
+    start, so a hook placed there would leave this run uncapped.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
+    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
+    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
+
+    result = subprocess.run(
+        # No path argument, so `-n auto` resolves against the root conftest alone. Collecting the
+        # plugin tests is not needed to start the workers, and skipping it keeps this run short.
+        # `no:cacheprovider` keeps this run off the .pytest_cache the outer run is using.
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-n",
+            "auto",
+            "--no-cov",
+            "-v",
+            "-p",
+            "no:cacheprovider",
+            "--ignore=netbox_data_import",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+
+    created = re.search(r"created: (\d+)/\d+ workers", result.stdout)
+    assert created is not None, result.stdout[-3000:]
+    # A small runner detects fewer workers than the cap, which is already correct.
+    assert 0 < int(created.group(1)) <= MAX_PARALLEL_WORKERS
 
 
 def _run_netbox_test_alias(worker_value=None):
