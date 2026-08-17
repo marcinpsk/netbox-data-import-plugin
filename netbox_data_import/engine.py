@@ -1043,10 +1043,12 @@ def _device_rack_identity_label(device):
 
 
 def placement_sync_is_noop(device, rack_name, position, face) -> bool:
-    """Return whether one placement sync would leave *device* unchanged.
+    """Return whether the placement quick action would write nothing to *device*.
 
-    Mirrors the placement writer: it always sets the rack, sets position and face only when the
-    source supplies them, and clears both for a zero-U device type.
+    Mirrors `views._set_rack_placement`: it always sets the rack, sets position and face only when
+    the source supplies them, and clears both for a zero-U device type. A full import writes the
+    position unconditionally, so it can still clear a position this row omits. The two are not the
+    same question, which is why this one never claims that the placement matches.
     """
     device_type = getattr(device, "device_type", None)
     if device_type is not None and device_type.u_height == 0:
@@ -2716,7 +2718,7 @@ def _preview_device_row(  # noqa: C901
                     # Only set when a placement sync has nothing to write, so an older preview
                     # that predates this key keeps offering the action.
                     **(
-                        {"placement_matches": True}
+                        {"placement_sync_writes_nothing": True}
                         if placement_sync_is_noop(matched_device, rack_name, position, device_face)
                         else {}
                     ),

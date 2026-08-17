@@ -186,7 +186,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         """The action stays available while a placement sync would write something."""
         response, row = self._preview_device_row()
 
-        self.assertNotIn("placement_matches", row.extra_data)
+        self.assertNotIn("placement_sync_writes_nothing", row.extra_data)
         self.assertContains(response, "ndi-sync-placement-btn")
         self.assertContains(response, "btn-outline-success ndi-sync-placement-btn")
 
@@ -198,9 +198,25 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
 
         response, row = self._preview_device_row()
 
-        self.assertTrue(row.extra_data["placement_matches"])
-        self.assertContains(response, "Placement already matches this row")
+        self.assertTrue(row.extra_data["placement_sync_writes_nothing"])
+        self.assertContains(response, "This row sets no placement value NetBox does not already hold")
         self.assertNotContains(response, "ndi-sync-placement-btn")
+
+    def test_preview_does_not_call_an_omitted_position_a_matching_placement(self):
+        """The import clears a position the row omits, so the greyed button must not claim a match."""
+        rows = [{**self.rows[0], "u_position": ""}]
+        self._save_rows(rows)
+
+        response, row = self._preview_device_row()
+
+        self.assertTrue(row.extra_data["placement_sync_writes_nothing"])
+        self.assertNotContains(response, "Placement already matches")
+        self.assertEqual(row.extra_data["field_diff"]["u_position"], {"netbox": "5", "file": ""})
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.position)
 
     def test_preview_renders_field_differences_collapsed(self):
         """The row collapses through `hidden`, so it holds while the page is still loading."""

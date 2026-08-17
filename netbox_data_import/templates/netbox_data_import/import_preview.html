@@ -726,12 +726,12 @@
                 <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
                   {% if row.rack_name %}
                   <div class="mb-2">
-                    {# Grey and inert when the placement already matches: green means it writes something #}
+                    {# Grey and inert when this action writes nothing: green means it writes something #}
                     <button type="button"
-                            class="btn btn-xs {% if row.extra_data.placement_matches %}btn-outline-secondary{% else %}btn-outline-success ndi-sync-placement-btn{% endif %}"
-                            {% if row.extra_data.placement_matches %}
+                            class="btn btn-xs {% if row.extra_data.placement_sync_writes_nothing %}btn-outline-secondary{% else %}btn-outline-success ndi-sync-placement-btn{% endif %}"
+                            {% if row.extra_data.placement_sync_writes_nothing %}
                               disabled
-                              title="Placement already matches this row"
+                              title="This row sets no placement value NetBox does not already hold. A full import can still clear a position this row leaves empty."
                             {% else %}
                               data-action-url="{% url 'plugins:netbox_data_import:sync_placement' %}"
                               data-row-id="{{ row.row_number }}"
