@@ -196,16 +196,19 @@ class ImportProfile(NetBoxModel):
         adapter = self.adapter
         if adapter is None:
             raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
-        if self.pk is None:
+        # Decide from the persisted row: an unsaved instance can carry a pk, so a set pk is no proof
+        # the profile exists, and branching on it would skip both rules below.
+        stored = (
+            type(self).objects.filter(pk=self.pk).values_list("source_adapter", flat=True).first()
+            if self.pk is not None
+            else None
+        )
+        if stored is None:
             # A creation rule only: the adapter is immutable, so a stored profile keeps validating
             # once the release that implements its Target Module ships.
             validate_adapter_target_module(self.source_adapter)
-        else:
-            stored = type(self).objects.filter(pk=self.pk).values_list("source_adapter", flat=True).first()
-            if stored is not None and stored != self.source_adapter:
-                raise ValidationError(
-                    {"source_adapter": "The source adapter cannot change after the profile is created."}
-                )
+        elif stored != self.source_adapter:
+            raise ValidationError({"source_adapter": "The source adapter cannot change after the profile is created."})
         self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
 
 

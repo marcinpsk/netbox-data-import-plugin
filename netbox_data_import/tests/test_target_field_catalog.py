@@ -26,6 +26,14 @@ from netbox_data_import.models import ColumnMapping, ColumnTransformRule, Import
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
 
+API = "plugins-api:netbox_data_import-api"
+
+
+def _api_url(route, *args):
+    """Return a plugin REST URL from its router route name, so a path change cannot silently pass."""
+    return reverse(f"{API}:{route}", args=args)
+
+
 # The keys the plugin accepted before the cutover. The catalog must accept exactly these.
 LEGACY_TARGET_FIELDS = [
     "rack_name",
@@ -303,7 +311,7 @@ class ImportProfileApiTest(TestCase):
 
     def _post(self, payload):
         return self.client.post(
-            "/api/plugins/data-import/profiles/",
+            _api_url("importprofile-list"),
             data=json.dumps(payload),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
@@ -324,7 +332,7 @@ class ImportProfileApiTest(TestCase):
         """The adapter selection is immutable."""
         profile = ImportProfile.objects.create(name="API Immutable", adapter_config={})
         response = self.client.patch(
-            f"/api/plugins/data-import/profiles/{profile.pk}/",
+            _api_url("importprofile-detail", profile.pk),
             data=json.dumps({"source_adapter": "trace_workbook"}),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
@@ -335,7 +343,7 @@ class ImportProfileApiTest(TestCase):
         """REST resolves the target key through the catalog."""
         profile = ImportProfile.objects.create(name="API Trace", source_adapter="trace_workbook", adapter_config={})
         response = self.client.post(
-            "/api/plugins/data-import/column-mappings/",
+            _api_url("columnmapping-list"),
             data=json.dumps({"profile": profile.pk, "source_column": "Name", "target_field": "device_name"}),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
@@ -395,7 +403,7 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         """A REST-created profile stores the same document a form-created profile stores."""
         self.client.force_login(_superuser())
         response = self.client.post(
-            "/api/plugins/data-import/profiles/",
+            _api_url("importprofile-list"),
             data=json.dumps({"name": "REST No Config"}),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
@@ -492,7 +500,7 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         for invalid in ([], "", 0, False):
             with self.subTest(invalid=invalid):
                 response = self.client.post(
-                    "/api/plugins/data-import/profiles/",
+                    _api_url("importprofile-list"),
                     data=json.dumps({"name": f"Bad Config {invalid!r}", "adapter_config": invalid}),
                     content_type="application/json",
                     HTTP_ACCEPT="application/json",
@@ -503,7 +511,7 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         """The REST policy endpoints enforce the same applicability rule the models enforce."""
         self.client.force_login(_superuser())
         response = self.client.post(
-            "/api/plugins/data-import/class-role-mappings/",
+            _api_url("classrolemapping-list"),
             data=json.dumps({"profile": self.trace.pk, "source_class": "Server", "role_slug": "server"}),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
@@ -566,7 +574,7 @@ class AdapterRuntimeSupportTest(TestCase):
         """The REST create path shares the model rule instead of restating it."""
         self.client.force_login(_superuser())
         response = self.client.post(
-            "/api/plugins/data-import/profiles/",
+            _api_url("importprofile-list"),
             data=json.dumps({"name": "REST Trace", "source_adapter": "trace_workbook"}),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
@@ -598,6 +606,17 @@ class AdapterRuntimeSupportTest(TestCase):
         with self.assertRaises(ValueError):
             _apply_profile_yaml_data({"profile": {"name": "YAML Trace", "source_adapter": "trace_workbook"}})
         self.assertFalse(ImportProfile.objects.filter(name="YAML Trace").exists())
+
+    def test_an_unsaved_profile_with_a_preset_pk_is_still_a_creation(self):
+        """A set pk is not proof the profile exists, so the rules must read the persisted row."""
+        profile = ImportProfile(pk=999999, name="Preset PK Trace", source_adapter="trace_workbook", adapter_config={})
+        with self.assertRaises(ValidationError) as caught:
+            profile.full_clean()
+        self.assertIn("source_adapter", caught.exception.message_dict)
+
+    def test_an_unsaved_profile_with_a_preset_pk_and_a_runnable_adapter_validates(self):
+        """The creation rule must not reject an adapter this release can run."""
+        ImportProfile(pk=999998, name="Preset PK Flat", source_adapter="flat_workbook", adapter_config={}).full_clean()
 
     def test_an_existing_profile_without_a_target_module_still_validates(self):
         """The gate is a creation rule, so it never strands a profile a later release can run."""
