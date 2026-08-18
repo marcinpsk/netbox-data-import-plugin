@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# This file replaces the organization UI settings rather than merging with them, so every
+# setting that matters has to be stated here.
 reviews:
-  poem: false
+  profile: assertive
+  poem: true
 
   auto_review:
-    # A stacked pull request targets another working branch. Only the default branch is
-    # reviewed without this, so the whole stack goes unreviewed.
+    # Review a pull request whatever it targets. A stack targets working branches, and only
+    # the default branch is reviewed without this.
     base_branches:
       - ".*"
 
-  # Generated files carry no review value and spend the review budget on the free plan.
+  # Generated files carry no review value, and reviews are rate limited.
   path_filters:
     - "!CHANGELOG.md"
     - "!uv.lock"
