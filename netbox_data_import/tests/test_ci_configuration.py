@@ -82,7 +82,10 @@ class ReleaseWorkflowTest(TestCase):
 
     def test_the_release_job_ignores_its_own_release_commit(self):
         """A token pushes the release commit, so the push starts this workflow again."""
-        self.assertIn("chore(release):", self._jobs()["semantic-release"]["if"])
+        self.assertIn(
+            "!startsWith(github.event.head_commit.message, 'chore(release):')",
+            self._jobs()["semantic-release"]["if"],
+        )
 
     def test_the_release_job_runs_one_at_a_time(self):
         """Two merges close together must not race two releases onto the same tag."""
@@ -110,7 +113,7 @@ class WorkflowAuditTest(TestCase):
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "lint-format.yaml"
         steps = yaml.safe_load(workflow.read_text())["jobs"]["format-and-lint"]["steps"]
 
-        self.assertTrue(any("zizmor" in str(step.get("run", "")) for step in steps))
+        self.assertTrue(any("pre-commit run --all-files zizmor" in str(step.get("run", "")) for step in steps))
 
 
 class StackedPullRequestTest(TestCase):
