@@ -201,6 +201,22 @@ class ImportExecutionReservationTest(TransactionTestCase):
         self.assertEqual(execution.outcome, ExecutionOutcome.PENDING)
         self.assertEqual(execution.selected_units, ["unit:1", "unit:2"])
 
+    def test_a_reservation_without_a_profile_is_refused(self):
+        """The partial unique index cannot hold: PostgreSQL treats two NULL profiles as distinct."""
+        fields = _reservation(self.profile, self.document, self.actor)
+        fields["profile"] = None
+        with self.assertRaises(ValueError):
+            ImportExecution.reserve(**fields)
+        self.assertEqual(ImportExecution.objects.count(), 0)
+
+    def test_a_reservation_missing_the_profile_entirely_is_refused(self):
+        """Omitting the key must raise the same reservation error, not a KeyError."""
+        fields = _reservation(self.profile, self.document, self.actor)
+        fields.pop("profile")
+        with self.assertRaises(ValueError):
+            ImportExecution.reserve(**fields)
+        self.assertEqual(ImportExecution.objects.count(), 0)
+
     def test_a_duplicate_submission_returns_the_existing_pending_row(self):
         """A duplicate HTTP submission or job delivery never starts a second write."""
         first, _ = ImportExecution.reserve(**_reservation(self.profile, self.document, self.actor))

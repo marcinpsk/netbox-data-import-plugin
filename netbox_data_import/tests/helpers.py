@@ -156,6 +156,24 @@ def set_import_source(device, profile, source_id="", extra_columns=None, unassig
     return record
 
 
+def user_with_object_permission(username, model, *, granted, password="testpass", actions=("view",)):
+    """Create a user and, when *granted*, the ObjectPermission that opens *model*.
+
+    NetBox runs only ObjectPermissionBackend, so a Django ``user_permissions`` row grants nothing.
+    An ObjectPermission is how an operator actually issues the permission.
+    """
+    from core.models import ObjectType
+    from django.contrib.auth import get_user_model
+    from users.models import ObjectPermission
+
+    user = get_user_model().objects.create_user(username=username, password=password)
+    if granted:
+        permission = ObjectPermission.objects.create(name=f"{username} {model.__name__}", actions=list(actions))
+        permission.users.add(user)
+        permission.object_types.add(ObjectType.objects.get_for_model(model))
+    return user
+
+
 def wait_until_a_lock_is_blocked(test, timeout=10):
     """Block until another backend is waiting for a lock this connection holds."""
     from django.db import connection

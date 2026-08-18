@@ -501,22 +501,13 @@ class ImportExecutionAPITest(BaseAPITestCase):
 
     def _regular_client(self, username, *, granted):
         """Return a client for a non-superuser, optionally holding view_importexecution."""
-        from core.models import ObjectType
-        from django.contrib.auth import get_user_model
         from rest_framework.test import APIClient
-        from users.models import ObjectPermission
 
         from netbox_data_import.models import ImportExecution
+        from netbox_data_import.tests.helpers import user_with_object_permission
 
-        user = get_user_model().objects.create_user(username=username, password=username)
-        if granted:
-            # NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants
-            # nothing. An ObjectPermission is how an operator actually issues this permission.
-            permission = ObjectPermission.objects.create(name=f"{username} view executions", actions=["view"])
-            permission.users.add(user)
-            permission.object_types.add(ObjectType.objects.get_for_model(ImportExecution))
         client = APIClient()
-        client.force_authenticate(user=user)
+        client.force_authenticate(user=user_with_object_permission(username, ImportExecution, granted=granted))
         return client
 
     def test_a_regular_user_holding_the_view_permission_is_allowed(self):

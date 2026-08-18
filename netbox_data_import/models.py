@@ -600,6 +600,9 @@ class ImportExecution(models.Model):
             raise RuntimeError("The Import Execution reservation must commit before the target transaction opens.")
         if not fields.get("idempotency_key"):
             raise ValueError("An Import Execution reservation requires an idempotency key.")
+        # PostgreSQL treats two NULL profiles as distinct, so the partial unique index cannot hold.
+        if not fields.get("profile"):
+            raise ValueError("An Import Execution reservation requires an Import Profile.")
         existing = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
         if existing is not None:
             return existing, False

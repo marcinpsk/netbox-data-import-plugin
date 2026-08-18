@@ -80,6 +80,16 @@ def _plain(value: Any, label: str) -> Any:
         raise PlanInvalid(f"{label} must be JSON-serializable plan data: {exc}") from exc
 
 
+def _elements(value, kind, label: str) -> tuple:
+    """Return *value* as a tuple, rejecting any element that is not an instance of *kind*."""
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise PlanInvalid(f"{label} must be a list or tuple of {kind.__name__} objects.")
+    for item in value:
+        if not isinstance(item, kind):
+            raise PlanInvalid(f"{label} must hold {kind.__name__} objects, not {type(item).__name__}.")
+    return tuple(value)
+
+
 def _identities(value, label: str) -> tuple[str, ...]:
     """Return *value* as a tuple of identity strings.
 
@@ -212,8 +222,10 @@ class SynchronizationUnit:
             raise PlanInvalid("A Synchronization Unit needs a stable identity.")
         if self.disposition not in Disposition.ALL:
             raise PlanInvalid(f"Unknown disposition '{self.disposition}'.")
-        object.__setattr__(self, "changes", tuple(self.changes))
-        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        object.__setattr__(self, "changes", _elements(self.changes, PlannedChange, "Synchronization Unit changes"))
+        object.__setattr__(
+            self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Synchronization Unit diagnostics")
+        )
         object.__setattr__(self, "display", _plain(self.display, "Synchronization Unit display"))
 
     def __hash__(self):
@@ -272,8 +284,8 @@ class ImportPlan:
 
     def __post_init__(self):
         """Detach the planning context from planning state."""
-        object.__setattr__(self, "units", tuple(self.units))
-        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        object.__setattr__(self, "units", _elements(self.units, SynchronizationUnit, "Import Plan units"))
+        object.__setattr__(self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Import Plan diagnostics"))
         object.__setattr__(self, "planning_context", _plain(self.planning_context, "Planning context"))
         counts = Counter(unit.identity for unit in self.units)
         duplicates = sorted(identity for identity, count in counts.items() if count > 1)
