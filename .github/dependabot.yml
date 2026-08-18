@@ -6,6 +6,8 @@
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
 version: 2
+
+# The cooldown waits out the window in which a compromised release is usually pulled.
 updates:
   - package-ecosystem: "uv" # See documentation for possible values
     directory: "/" # Location of package manifests
@@ -14,6 +16,8 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "github-actions" # See documentation for possible values
     directory: "/" # Location of package manifests
@@ -26,6 +30,8 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "devcontainers" # See documentation for possible values
     directory: "/.devcontainer" # Location of devcontainer.json
@@ -34,6 +40,8 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "docker-compose" # See documentation for possible values
     directory: "/.devcontainer" # Location of docker-compose.yml
@@ -42,3 +50,5 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    cooldown:
+      default-days: 7
