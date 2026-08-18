@@ -46,6 +46,8 @@ class TargetModule:
     key: str
     label: str
     consumes: frozenset[str]
+    # A declared module the release does not implement yet cannot make its adapters selectable.
+    implemented: bool
 
 
 TARGET_MODULES: tuple[TargetModule, ...] = (
@@ -53,16 +55,19 @@ TARGET_MODULES: tuple[TargetModule, ...] = (
         key=TargetModuleKey.DEVICE,
         label="Device",
         consumes=frozenset({OutputKind.DEVICE_SOURCE_ROW}),
+        implemented=True,
     ),
     TargetModule(
         key=TargetModuleKey.RACK,
         label="Rack",
         consumes=frozenset({OutputKind.RACK_SOURCE_ROW}),
+        implemented=True,
     ),
     TargetModule(
         key=TargetModuleKey.CABLE,
         label="Cable",
         consumes=frozenset({OutputKind.SOURCE_TRACE}),
+        implemented=False,
     ),
 )
 
@@ -270,6 +275,11 @@ def consuming_modules(output_kinds: frozenset[str]) -> tuple[TargetModule, ...]:
     return tuple(module for module in TARGET_MODULES if module.consumes & output_kinds)
 
 
+def has_implemented_module(output_kinds: frozenset[str]) -> bool:
+    """Return True when a Target Module this release implements consumes any of *output_kinds*."""
+    return any(module.implemented for module in consuming_modules(output_kinds))
+
+
 __all__ = (
     "CANDIDATE_TARGET_PREFIX",
     "CATALOG",
@@ -285,6 +295,7 @@ __all__ = (
     "TargetModuleKey",
     "ValueKind",
     "consuming_modules",
+    "has_implemented_module",
     "policy_section",
     "target_module",
 )

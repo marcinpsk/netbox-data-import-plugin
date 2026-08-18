@@ -46,7 +46,7 @@ class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
             "name,description,source_adapter",
             "Standard Imported Profile 1,Imported 1,flat_workbook",
             "Standard Imported Profile 2,Imported 2,flat_workbook",
-            "Standard Imported Profile 3,Imported 3,trace_workbook",
+            "Standard Imported Profile 3,Imported 3,flat_workbook",
         )
         cls.csv_update_data = (
             "id,name,description",
@@ -87,8 +87,8 @@ class ImportProfileAPIViewTestCase(APIViewTestCases.APIViewTestCase):
             },
             {
                 "name": "Standard API Created 3",
-                "source_adapter": "trace_workbook",
-                "adapter_config": {},
+                "source_adapter": "flat_workbook",
+                "adapter_config": {**flat_defaults, "capture_extra_data": True},
             },
         ]
         cls.bulk_update_data = {

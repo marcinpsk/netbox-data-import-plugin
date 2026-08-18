@@ -7,7 +7,7 @@ from dcim.models import Site, Location
 from tenancy.models import Tenant
 from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
 from utilities.forms.fields import DynamicModelChoiceField
-from .adapters import get_adapter
+from .adapters import get_adapter, selectable_adapter_choices
 from .catalog import CATALOG
 from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
 
@@ -56,6 +56,8 @@ class ImportProfileForm(NetBoxModelForm):
             return
         if self.instance.pk:
             self.fields["source_adapter"].disabled = True
+        else:
+            self.fields["source_adapter"].choices = selectable_adapter_choices()
         self._config_form_class = adapter.config_form_class()
         stored = self.instance.adapter_config or {}
         for name, field in self._config_form_class.base_fields.items():

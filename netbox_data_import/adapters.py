@@ -3,16 +3,17 @@
 """Source Adapter registry.
 
 The registry is a static in-plugin mapping from a stable adapter key to the adapter class. Forms,
-REST, GraphQL, and YAML derive their choices from it. There is no third-party extension point.
+REST, GraphQL, and YAML derive their choices from it. There is no third-party extension point. An
+adapter is offered as a choice only once the catalog declares a Target Module that consumes it.
 
 An adapter declares source interpretation only, so this module imports no NetBox model and no Target
-Module. The configuration form is imported lazily because it validates references at the NetBox
-boundary.
+Module implementation. The configuration form is imported lazily because it validates references at
+the NetBox boundary.
 """
 
 from __future__ import annotations
 
-from .catalog import OutputKind
+from .catalog import OutputKind, has_implemented_module
 
 
 class UnknownSourceAdapter(Exception):
@@ -79,6 +80,11 @@ def adapter_choices():
     return [(adapter.key, adapter.label) for adapter in ADAPTERS]
 
 
+def selectable_adapter_choices():
+    """Return choice pairs for the adapters a Target Module in this release can consume."""
+    return [(adapter.key, adapter.label) for adapter in ADAPTERS if has_implemented_module(adapter.output_kinds)]
+
+
 def output_kinds_for(key: str) -> frozenset[str]:
     """Return the output kinds the adapter registered under *key* emits."""
     adapter = get_adapter(key)
@@ -95,4 +101,5 @@ __all__ = (
     "adapter_choices",
     "get_adapter",
     "output_kinds_for",
+    "selectable_adapter_choices",
 )

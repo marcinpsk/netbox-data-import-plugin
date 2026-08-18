@@ -53,6 +53,9 @@ its adapter configuration. The flat workbook adapter declares the sheet name, th
 the custom field name, the update and create switches, the extra-data switch, the primary contact
 role and lookup field, and the preview view mode. The trace workbook adapter declares no settings.
 
+Only the flat workbook adapter is selectable today. An adapter becomes selectable when a Target
+Module that consumes its output ships, so the plugin never offers a source format it cannot import.
+
 An object reference inside the adapter configuration uses a natural key, never a database id. The
 primary contact role is referenced by its name, so a profile exported as YAML imports into a
 different NetBox instance.

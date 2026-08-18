@@ -12,11 +12,19 @@ from .adapters import (
     get_adapter,
     output_kinds_for,
 )
-from .catalog import CATALOG, policy_section
+from .catalog import CATALOG, has_implemented_module, policy_section
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
 CONTACT_RESOLUTION_KEYS = CONTACT_RESOLUTION_REQUIRED_KEYS | frozenset({"contact_field_values", "contact_id"})
+
+
+def validate_adapter_target_module(adapter_key):
+    """Reject a Source Adapter whose Target Module this release does not implement yet."""
+    if not has_implemented_module(output_kinds_for(adapter_key)):
+        raise ValidationError(
+            {"source_adapter": f"This release cannot import from the '{adapter_key}' source adapter yet."}
+        )
 
 
 def validate_section_applicability(profile, section_key):
@@ -188,7 +196,11 @@ class ImportProfile(NetBoxModel):
         adapter = self.adapter
         if adapter is None:
             raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
-        if self.pk is not None:
+        if self.pk is None:
+            # A creation rule only: the adapter is immutable, so a stored profile keeps validating
+            # once the release that implements its Target Module ships.
+            validate_adapter_target_module(self.source_adapter)
+        else:
             stored = type(self).objects.filter(pk=self.pk).values_list("source_adapter", flat=True).first()
             if stored is not None and stored != self.source_adapter:
                 raise ValidationError(

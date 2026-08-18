@@ -3,7 +3,9 @@
 """The target-field catalog, the Source Adapter registry, and the Import Profile cutover."""
 
 import json
+import os
 
+from dcim.models import Site
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.urls import reverse
@@ -15,11 +17,14 @@ from netbox_data_import.adapters import (
     TraceWorkbookAdapter,
     UnknownSourceAdapter,
     get_adapter,
+    selectable_adapter_choices,
 )
 from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
 from netbox_data_import.catalog import CATALOG, POLICY_SECTIONS, OutputKind, TargetModuleKey
 from netbox_data_import.forms import ColumnMappingForm, ColumnTransformRuleForm, ImportProfileForm
 from netbox_data_import.models import ColumnMapping, ColumnTransformRule, ImportProfile
+
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
 
 # The keys the plugin accepted before the cutover. The catalog must accept exactly these.
 LEGACY_TARGET_FIELDS = [
@@ -97,11 +102,11 @@ class SourceAdapterRegistryTest(TestCase):
         self.assertIs(get_adapter("flat_workbook"), FlatWorkbookAdapter)
         self.assertIsNone(get_adapter("nope"))
 
-    def test_the_form_offers_exactly_the_registered_adapters(self):
-        """The profile form derives its choices from the registry."""
+    def test_the_form_offers_exactly_the_selectable_registered_adapters(self):
+        """The profile form derives its choices from the registry, minus the unrunnable adapters."""
         form = ImportProfileForm()
         offered = [key for key, _label in form.fields["source_adapter"].choices if key]
-        self.assertEqual(offered, [a.key for a in ADAPTERS])
+        self.assertEqual(offered, [key for key, _label in selectable_adapter_choices()])
 
     def test_the_trace_adapter_declares_no_configuration(self):
         """The trace workbook's sheet names are fixed by the Source Trace model."""
@@ -518,7 +523,7 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         csv_data = f"id,name,source_adapter\n{self.flat.pk},{self.flat.name},trace_workbook\n"
         response = self.client.post(
             reverse("plugins:netbox_data_import:importprofile_bulk_import"),
-            {"data": csv_data, "format": "csv"},
+            {"data": csv_data, "format": "csv", "csv_delimiter": "auto"},
         )
         self.assertEqual(response.status_code, 200, "a rejected import re-renders the form")
         self.flat.refresh_from_db()
@@ -533,3 +538,86 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         )
         self.assertFalse(form.is_valid())
         self.assertIn("source_adapter", form.errors)
+
+
+class AdapterRuntimeSupportTest(TestCase):
+    """An adapter is selectable only when this release implements a Target Module that consumes it."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.site = Site.objects.create(name="Runtime Site", slug="runtime-site")
+        # The Cable Target Module does not exist yet, so a trace profile is only reachable this way.
+        cls.trace = ImportProfile.objects.create(
+            name="Runtime Trace", source_adapter="trace_workbook", adapter_config={}
+        )
+
+    def test_the_profile_form_offers_only_adapters_this_release_can_run(self):
+        """The operator never sees a source format the plugin cannot import."""
+        offered = {key for key, _label in ImportProfileForm().fields["source_adapter"].choices if key}
+        self.assertEqual(offered, {"flat_workbook"})
+
+    def test_the_profile_form_rejects_an_adapter_without_a_target_module(self):
+        """Choice filtering alone is presentation, so the form must also reject the value."""
+        form = ImportProfileForm(data={"name": "Form Trace", "source_adapter": "trace_workbook"})
+        self.assertFalse(form.is_valid())
+        self.assertIn("source_adapter", form.errors)
+
+    def test_rest_rejects_creating_a_profile_without_a_target_module(self):
+        """The REST create path shares the model rule instead of restating it."""
+        self.client.force_login(_superuser())
+        response = self.client.post(
+            "/api/plugins/data-import/profiles/",
+            data=json.dumps({"name": "REST Trace", "source_adapter": "trace_workbook"}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertFalse(ImportProfile.objects.filter(name="REST Trace").exists())
+
+    def test_bulk_csv_import_rejects_creating_a_profile_without_a_target_module(self):
+        """Drive the real bulk-import view: a CSV row cannot create an unrunnable profile."""
+        self.client.force_login(_superuser())
+        self._bulk_import("CSV Flat", "flat_workbook")
+        self.assertTrue(ImportProfile.objects.filter(name="CSV Flat").exists(), "the control row imports")
+
+        response = self._bulk_import("CSV Trace", "trace_workbook")
+        self.assertEqual(response.status_code, 200, "a rejected import re-renders the form")
+        self.assertFalse(ImportProfile.objects.filter(name="CSV Trace").exists())
+
+    def _bulk_import(self, name, adapter_key):
+        """POST one profile row through the real bulk-import view."""
+        return self.client.post(
+            reverse("plugins:netbox_data_import:importprofile_bulk_import"),
+            {"data": f"name,source_adapter\n{name},{adapter_key}\n", "format": "csv", "csv_delimiter": "auto"},
+        )
+
+    def test_yaml_import_rejects_creating_a_profile_without_a_target_module(self):
+        """The hierarchical YAML path validates through the same model rule."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaises(ValueError):
+            _apply_profile_yaml_data({"profile": {"name": "YAML Trace", "source_adapter": "trace_workbook"}})
+        self.assertFalse(ImportProfile.objects.filter(name="YAML Trace").exists())
+
+    def test_an_existing_profile_without_a_target_module_still_validates(self):
+        """The gate is a creation rule, so it never strands a profile a later release can run."""
+        self.trace.full_clean()
+
+    def test_the_wizard_reports_an_unrunnable_adapter_instead_of_crashing(self):
+        """A profile the engine cannot consume must fail as a parse error, not an AttributeError."""
+        self.client.force_login(_superuser())
+        with open(FIXTURE_PATH, "rb") as handle:
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:import_setup"),
+                {"profile": self.trace.pk, "site": self.site.pk, "excel_file": handle},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("trace_workbook", response.content.decode())
+
+    def test_parse_file_refuses_an_adapter_the_engine_does_not_consume(self):
+        """The engine states what it consumes rather than reading a setting the adapter lacks."""
+        from netbox_data_import import engine
+
+        with open(FIXTURE_PATH, "rb") as handle:
+            with self.assertRaises(engine.ParseError):
+                engine.parse_file(handle, self.trace)

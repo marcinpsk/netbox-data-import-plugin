@@ -27,7 +27,7 @@ import openpyxl
 
 from .contact_resolution import ContactResolutionRequired, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
-from .catalog import CANDIDATE_TARGET_PREFIX
+from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
 from .models import DeviceImportSource, ImportProfile
 from .object_permissions import (
     ObjectPermissionDenied as _ObjectPermissionDenied,
@@ -518,6 +518,9 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
 
     Raises ParseError if the file or sheet is invalid.
     """
+    if not has_implemented_module(profile.output_kinds):
+        raise ParseError(f"This release has no Target Module for the '{profile.source_adapter}' source adapter.")
+
     try:
         content = file_obj.read()
         wb = openpyxl.load_workbook(BytesIO(content), data_only=True)

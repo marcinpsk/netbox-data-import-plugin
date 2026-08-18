@@ -19,6 +19,7 @@ from ..models import (
     ColumnTransformRule,
     SourceResolution,
     ImportJob,
+    validate_adapter_target_module,
     validate_contact_candidate_resolution,
     validate_section_applicability,
 )
@@ -85,6 +86,11 @@ class ImportProfileSerializer(NetBoxModelSerializer):
         adapter = get_adapter(adapter_key)
         if adapter is None:
             raise serializers.ValidationError({"source_adapter": f"Unknown source adapter '{adapter_key}'."})
+        if instance is None:
+            try:
+                validate_adapter_target_module(adapter_key)
+            except ValidationError as exc:
+                raise serializers.ValidationError(exc.message_dict) from exc
         # Normalize unconditionally: this serializer never calls Model.full_clean, so an absent key
         # would otherwise persist {} while the form path persists the full mapping.
         raw_config = attrs.get("adapter_config", getattr(instance, "adapter_config", None))
