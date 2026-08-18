@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -154,6 +155,10 @@ class PlannedChange:
         """Detach the mappings from planning state and reject anything a plan may not carry."""
         if not self.identity:
             raise PlanInvalid("A Planned Change needs a stable identity.")
+        for name in ("target_module", "operation"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise PlanInvalid(f"A Planned Change needs a non-empty {name.replace('_', ' ')}.")
         object.__setattr__(self, "dependencies", _identities(self.dependencies, "Planned Change dependencies"))
         object.__setattr__(self, "payload", _plain(self.payload, "Planned Change payload"))
         object.__setattr__(self, "preconditions", _plain(self.preconditions, "Planned Change preconditions"))
@@ -270,8 +275,8 @@ class ImportPlan:
         object.__setattr__(self, "units", tuple(self.units))
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         object.__setattr__(self, "planning_context", _plain(self.planning_context, "Planning context"))
-        identities = [unit.identity for unit in self.units]
-        duplicates = sorted({identity for identity in identities if identities.count(identity) > 1})
+        counts = Counter(unit.identity for unit in self.units)
+        duplicates = sorted(identity for identity, count in counts.items() if count > 1)
         if duplicates:
             raise PlanInvalid(f"Synchronization Unit identities must be unique: {', '.join(duplicates)}.")
 

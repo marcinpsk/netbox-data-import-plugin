@@ -499,6 +499,40 @@ class ImportExecutionAPITest(BaseAPITestCase):
         self.assertEqual(data["count"], 1)
         self.assertEqual(data["results"][0]["input_filename"], "file-p1.xlsx")
 
+    def _regular_client(self, username, *, granted):
+        """Return a client for a non-superuser, optionally holding view_importexecution."""
+        from core.models import ObjectType
+        from django.contrib.auth import get_user_model
+        from rest_framework.test import APIClient
+        from users.models import ObjectPermission
+
+        from netbox_data_import.models import ImportExecution
+
+        user = get_user_model().objects.create_user(username=username, password=username)
+        if granted:
+            # NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants
+            # nothing. An ObjectPermission is how an operator actually issues this permission.
+            permission = ObjectPermission.objects.create(name=f"{username} view executions", actions=["view"])
+            permission.users.add(user)
+            permission.object_types.add(ObjectType.objects.get_for_model(ImportExecution))
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def test_a_regular_user_holding_the_view_permission_is_allowed(self):
+        """A superuser bypasses the check, so the permission needs a non-superuser to prove it."""
+        resp = self._regular_client("api_exec_granted", granted=True).get(
+            "/api/plugins/data-import/executions/", HTTP_ACCEPT="application/json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_a_regular_user_without_the_view_permission_is_denied(self):
+        """The rename means an old view_importjob grant no longer opens this endpoint."""
+        resp = self._regular_client("api_exec_denied", granted=False).get(
+            "/api/plugins/data-import/executions/", HTTP_ACCEPT="application/json"
+        )
+        self.assertEqual(resp.status_code, 403, resp.content)
+
 
 class PolicySerializerNetBoxBaseTest(BaseAPITestCase):
     """The policy endpoints carry the NetBox identity fields and keep refusing a duplicate with 400."""

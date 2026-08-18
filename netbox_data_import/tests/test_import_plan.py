@@ -77,6 +77,16 @@ class PlanStructureTest(SimpleTestCase):
         payload["nested"]["face"] = "rear"
         self.assertEqual(change.payload, {"name": "sw-1", "nested": {"face": "front"}})
 
+    def test_an_empty_target_module_or_operation_is_rejected(self):
+        """Both are fingerprint inputs and both are required, so an empty value must fail early."""
+        for field in ("target_module", "operation"):
+            for value in ("", None, 7):
+                with self.subTest(field=field, value=value):
+                    fields = {"target_module": "device", "operation": "create"}
+                    fields[field] = value
+                    with self.assertRaises(PlanInvalid):
+                        PlannedChange(identity="device:1", payload={}, **fields)
+
     def test_an_unknown_disposition_is_rejected(self):
         """Section 4.2 fixes the disposition vocabulary."""
         with self.assertRaises(PlanInvalid):
@@ -290,6 +300,13 @@ class PlanBoundaryTest(SimpleTestCase):
         """The affected identities are a fingerprint input, so they must be plan data."""
         with self.assertRaises(PlanInvalid):
             Diagnostic(code="device.name_conflict", severity=Severity.ERROR, identities=(object(),))
+
+    def test_duplicate_detection_holds_at_workbook_scale(self):
+        """One unit exists per reviewable source row, so the scan must not be quadratic."""
+        units = tuple(_unit(identity=f"row:{index}") for index in range(3000))
+        self.assertEqual(len(_plan(units=units).units), 3000)
+        with self.assertRaises(PlanInvalid):
+            _plan(units=units + (_unit(identity="row:2999"),))
 
     def test_duplicate_unit_identities_are_rejected(self):
         """Selection resolves a unit by identity, so two units cannot share one."""

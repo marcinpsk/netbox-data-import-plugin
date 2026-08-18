@@ -1457,12 +1457,12 @@ class ImportResultsView(PermissionRequiredMixin, View):
 
 
 # ---------------------------------------------------------------------------
-# Import Job history
+# Import Execution history
 # ---------------------------------------------------------------------------
 
 
 class ImportExecutionListView(PermissionRequiredMixin, generic.ObjectListView):
-    """List all past import jobs for audit / history."""
+    """List every past Import Execution, including the retained legacy rows."""
 
     queryset = ImportExecution.objects.select_related("profile").all()
     table = ImportExecutionTable
@@ -1470,7 +1470,7 @@ class ImportExecutionListView(PermissionRequiredMixin, generic.ObjectListView):
     permission_required = "netbox_data_import.view_importexecution"
 
     def get_required_permission(self):
-        """Return the permission string required to view the import job list."""
+        """Answer NetBox's own permission hook, which it checks separately from permission_required."""
         return "netbox_data_import.view_importexecution"
 
 
