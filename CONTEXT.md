@@ -11,8 +11,35 @@ This context translates source-file rows into reviewed NetBox changes. Import pr
 **Import Profile**:
 A reusable description of one source-file format and its NetBox synchronization policy.
 
+**Import Plan**:
+The reviewable set of NetBox changes and no-ops derived from one source file and the current NetBox state. Preview and execution use the same accepted plan.
+
+**Synchronization Unit**:
+The smallest independently reviewable and executable part of an Import Plan. It can originate from one source row or one complete Source Trace, and all its changes commit together.
+_Avoid_: Executable row
+
+**Planned Change**:
+One target-specific NetBox mutation within a Synchronization Unit. It has a stable identity and records the target state that must remain unchanged before execution.
+_Avoid_: Row action
+
+**Import Execution**:
+An audited attempt to apply selected Synchronization Units from an accepted Import Plan as one transaction.
+_Avoid_: Import run
+
 **Source Column**:
 A named column in a source file.
+
+**Source Adapter**:
+The profile-selected component that deterministically interprets one source file format into a Source Batch. It declares its own configuration schema and output kinds and never queries NetBox.
+_Avoid_: Parser, importer backend
+
+**Target Module**:
+The component that owns one NetBox target's Target Fields, matching, planning, and writes. It declares which adapter output kinds it consumes.
+_Avoid_: Target handler
+
+**Source Batch**:
+The typed source items and source diagnostics produced by one source adapter from one imported file. It contains no NetBox target matches or planned writes.
+_Avoid_: Parsed rows
 
 **Target Field**:
 A semantic NetBox value that the import can resolve or synchronize, including a field nested within a NetBox object such as a Contact email address.
@@ -28,6 +55,54 @@ _Avoid_: Contact candidates, fallback columns
 **Row Resolution**:
 A saved decision that selects or derives target-field values for one source row. The import reapplies the decision when that row appears in a later file.
 _Avoid_: Override, exception
+
+**Candidate Snapshot**:
+The frozen list of eligible NetBox candidates supplied to the Inference Backend in one proposal request, identified by opaque candidate ids. A proposal is fresh only while it still equals the current eligible set.
+
+**Inference Backend**:
+The configured AI inference endpoint (API root, model, credential reference) that answers proposal requests. It only suggests; it has no authority over NetBox.
+_Avoid_: Provider, AI provider (NetBox core uses Provider for circuit carriers)
+
+**Resolution Proposal**:
+An unaccepted suggestion of Target Field values. It has no authority to change NetBox; accepted values become a Row Resolution.
+_Avoid_: AI answer, automatic resolution
+
+**Source Trace**:
+An end-to-end connectivity path described by a source report. It can confirm an existing direct physical Cable or provide intermediate patching details; it is not a single NetBox object.
+_Avoid_: Cable row
+
+**Patched Path Replacement**:
+A reviewed change that replaces one direct LLDP-derived Cable with physical Cable segments and patch-panel pass-throughs. The resulting path terminates on the same two endpoint Devices.
+_Avoid_: Cable amendment
+
+**Logical Cable**:
+The direct NetBox Cable between a Source Trace's two endpoint terminations that stands in for the unmodeled physical path, whatever created it. Patched Path Replacement removes it.
+_Avoid_: LLDP cable
+
+**Termination Reference**:
+The source-side naming of one port within a Source Trace: device, cards, and port labels. Port class and location values corroborate it but do not identify it.
+_Avoid_: Endpoint string
+
+**Segment Evidence**:
+One source-claimed physical cable between two Termination References, carrying one CableClass label.
+_Avoid_: Hop row
+
+**Pass-Through Claim**:
+The implied continuation through one device between two consecutive Segment Evidence entries. Entry and exit can name the same port.
+_Avoid_: Panel mapping
+
+**Endpoint Summary**:
+The From and To statement of a Source Trace's two endpoint Termination References without path detail. It corroborates path evidence and is the fallback when no path evidence exists.
+_Avoid_: From/To header
+
+**CableClass**:
+The source label for one cable's kind. It maps to Cable Type and Cable Profile only through Import Profile policy.
+
+**Cable Type**:
+The fixed NetBox Cable value that describes the physical medium or classification of one Cable segment.
+
+**Cable Profile**:
+The fixed NetBox Cable value that describes connector and lane topology within one Cable. It does not define reusable Cable creation defaults and cannot be created by the importer.
 
 **Field Difference**:
 One Target Field whose resolved Source Row value differs from the value on its matched NetBox object.

@@ -18,6 +18,8 @@ concurrency:
 
 jobs:
   test-netbox:
+    # Named so the check keeps the two versions only. The default name lists every matrix value.
+    name: test-netbox (${{ matrix.python-version }}, ${{ matrix.netbox-version }})
     runs-on: ubuntu-latest
 
     strategy:
@@ -25,10 +27,13 @@ jobs:
       max-parallel: 4
       matrix:
         include:
+          # `coverage` marks the one leg that publishes the report. It keeps the later steps off the
+          # NetBox version, which they used to repeat and would silently stop matching after a bump.
           - python-version: "3.12"
-            netbox-version: "v4.6.7"
+            netbox-version: "v4.6.8"
+            coverage: true
           - python-version: "3.14"
-            netbox-version: "v4.6.7"
+            netbox-version: "v4.6.8"
 
     services:
       redis:
@@ -125,14 +130,14 @@ jobs:
         run: pytest -n 4 --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
 
       - name: Generate coverage report
-        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.6.7'
+        if: matrix.coverage
         working-directory: netbox-data-import-plugin
         run: |
           coverage json -o ../coverage-report/coverage.json
           coverage html -d ../coverage-report/htmlcov
 
       - name: Upload coverage report
-        if: matrix.python-version == '3.12' && matrix.netbox-version == 'v4.6.7'
+        if: matrix.coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage-report

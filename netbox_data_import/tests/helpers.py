@@ -88,3 +88,19 @@ def setup_preview_with_device_matches(client, profile):
     }
     session.save()
     return site, device1, device2, device_rows
+
+
+def set_import_source(device, profile, source_id="", extra_columns=None, unassigned_ips=None):
+    """Store the import record the engine writes for one device."""
+    from netbox_data_import.models import DeviceImportSource
+
+    record, _ = DeviceImportSource.objects.update_or_create(
+        device=device,
+        defaults={
+            "profile": profile,
+            "source_id": source_id,
+            "extra_columns": extra_columns or {},
+            "unassigned_ips": unassigned_ips or {},
+        },
+    )
+    return record

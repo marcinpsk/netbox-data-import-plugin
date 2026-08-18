@@ -5,7 +5,7 @@
  * Tom Select instances, as the page does. */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import TomSelect from "tom-select";
 
 const controllerPath = resolve(
@@ -64,9 +64,16 @@ function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/" } 
     <script id="ndi-contact-suggestions-by-row" type="application/json">${JSON.stringify(contactSuggestions)}</script>
   `;
   window.EXISTING_RESOLUTIONS = resolutions;
-  window.TomSelect = TomSelect;
-  for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
-    new TomSelect(document.getElementById(id), { create: false });
+  /* NetBox enhances every plain <select> itself and never exposes TomSelect on
+   * `window`, so the fixture initializes the selects the same way its
+   * initStaticSelects() does. */
+  for (const id of [
+    "contactCandidateExisting",
+    "contactCandidateName",
+    "contactCandidateEmail",
+    "contactCandidatePhone",
+  ]) {
+    new TomSelect(document.getElementById(id), { create: false, maxOptions: undefined });
   }
   window.eval(controllerSource);
 }
@@ -257,6 +264,34 @@ describe("contact candidate modal", () => {
     expect(document.getElementById("contactCandidateNameValue").value).toBe("Existing First Contact");
     expect(document.getElementById("contactCandidateEmailValue").value).toBe("first@example.invalid");
     expect(document.getElementById("contactCandidatePhoneValue").value).toBe("+1 202-555-0103");
+  });
+
+  it("finds Contacts created after the page loaded through the lookup endpoint", async () => {
+    addPreviewFixture();
+    const requested = [];
+    window.fetch = (url) => {
+      requested.push(url);
+      return Promise.resolve({
+        json: () =>
+          Promise.resolve({
+            results: [{ id: 77, name: "Brand New Contact", email: "brand.new@example.invalid", phone: "" }],
+          }),
+      });
+    };
+    openRow("second-row", "source-second");
+
+    const existing = document.getElementById("contactCandidateExisting");
+    existing.tomselect.control_input.value = "brand";
+    existing.tomselect.control_input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitUntil(() => Boolean(existing.tomselect.options["77"]));
+
+    expect(requested).toEqual(["/contact-lookup/?q=brand"]);
+    expect(widgetOptionTexts(existing)).toEqual(["Brand New Contact · brand.new@example.invalid"]);
+
+    existing.tomselect.setValue("77");
+    expect(document.getElementById("contactCandidateContactId").value).toBe("77");
+    expect(document.getElementById("contactCandidateNameValue").value).toBe("Brand New Contact");
+    expect(document.getElementById("contactCandidateEmailValue").value).toBe("brand.new@example.invalid");
   });
 
   it("submits no Contact after an existing Contact was selected", () => {

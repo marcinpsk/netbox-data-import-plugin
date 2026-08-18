@@ -92,6 +92,29 @@
     postAction(form.action, new FormData(form), button, 'Updating...', false);
   }, true);
 
+  /* Recalculation reloads the whole preview and can take a while, so the page reports that it
+   * was pressed and refuses a second press until the new page arrives. The page holds more
+   * than one link to the same recalculation, so pressing one latches them all. */
+  document.addEventListener('click', function (event) {
+    var recalculate = event.target.closest('.ndi-recalculate-preview');
+    if (!recalculate) return;
+    // A modified click opens a second tab and leaves this page, and its links, as they are.
+    // It runs before the latch so a latched link still opens a second tab.
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (recalculate.dataset.ndiRecalculating === 'true') {
+      event.preventDefault();
+      return;
+    }
+    document.querySelectorAll('.ndi-recalculate-preview').forEach(function (link) {
+      link.dataset.ndiRecalculating = 'true';
+      link.classList.add('disabled');
+      link.setAttribute('aria-busy', 'true');
+      link.setAttribute('aria-disabled', 'true');
+    });
+    recalculate.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Recalculating...';
+  });
+
   document.addEventListener('click', function (event) {
     var placement = event.target.closest('.ndi-sync-placement-btn');
     var field = event.target.closest('.ndi-sync-btn');

@@ -1928,15 +1928,15 @@ class StoreSourceIdTest(TestCase):
         self.assertEqual(self.device.custom_field_data.get("cans_id"), "SSI-001")
 
     def test_store_source_id_no_custom_field_name(self):
-        """_store_source_id without custom_field_name still writes data_import_source."""
+        """_store_source_id without custom_field_name still writes the import record."""
         from netbox_data_import.engine import _store_source_id
+        from netbox_data_import.models import stored_import_source
 
         self.profile.custom_field_name = ""
         self.profile.save()
         _store_source_id(self.device, self.profile, "SSI-002")
         self.device.refresh_from_db()
-        dis = self.device.custom_field_data.get("data_import_source", {})
-        self.assertEqual(dis.get("source_id"), "SSI-002")
+        self.assertEqual(stored_import_source(self.device).source_id, "SSI-002")
 
 
 class PreviewMatchedBySerialTest(TestCase):

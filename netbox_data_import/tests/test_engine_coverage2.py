@@ -20,7 +20,8 @@ from netbox_data_import.engine import (
     reapply_saved_resolutions,
     run_import,
 )
-from netbox_data_import.models import ClassRoleMapping, ImportProfile, SourceResolution
+from netbox_data_import.models import ClassRoleMapping, ImportProfile, SourceResolution, stored_import_source
+from netbox_data_import.tests.helpers import set_import_source
 
 User = get_user_model()
 
@@ -617,8 +618,6 @@ class WriteDeviceRowTenantAndIPJsonTest(TestCase):
 
     def setUp(self):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from django.contrib.contenttypes.models import ContentType
-        from extras.models import CustomField
 
         self.site = Site.objects.create(name="TenantIP2-Site", slug="tenant-ip2-site")
         # Use slugs matching what slugify(name) produces so engine's get_or_create finds them.
@@ -631,10 +630,6 @@ class WriteDeviceRowTenantAndIPJsonTest(TestCase):
         ClassRoleMapping.objects.create(
             profile=self.profile, source_class="Server", creates_rack=False, role_slug="tenant-ip2-role"
         )
-        device_ct = ContentType.objects.get_for_model(Device)
-        cf, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            cf.object_types.set([device_ct])
 
         self.device = Device.objects.create(
             name="tenant-ip2-device-01",
@@ -643,8 +638,7 @@ class WriteDeviceRowTenantAndIPJsonTest(TestCase):
             role=self.role,
             serial="TIP2-SN",
         )
-        self.device.custom_field_data["data_import_source"] = {"source_id": "TIP2-001"}
-        self.device.save()
+        set_import_source(self.device, self.profile, "TIP2-001")
 
     def test_update_sets_tenant_and_stores_ip_in_json_when_no_interface(self):
         """Update path stores IP in JSON when device has no interface — lines 990, 994-996."""
@@ -671,19 +665,15 @@ class WriteDeviceRowTenantAndIPJsonTest(TestCase):
         run_import(rows, self.profile, {"site": self.site, "tenant": tenant}, dry_run=False)
         self.device.refresh_from_db()
         self.assertEqual(self.device.tenant, tenant)
-        import_data = self.device.cf.get("data_import_source") or {}
-        ip_data = import_data.get("_ip") or {}
-        self.assertIn("primary_ip4", ip_data)
-        self.assertEqual(ip_data["primary_ip4"], "10.1.2.4/32")
+        unassigned_ips = stored_import_source(self.device).unassigned_ips
+        self.assertEqual(unassigned_ips["primary_ip4"], "10.1.2.4/32")
 
 
 class NewDeviceIPStoredInJSONTest(TestCase):
     """Tests for _write_device_row new device path — line 1040: IP stored in JSON."""
 
     def setUp(self):
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from django.contrib.contenttypes.models import ContentType
-        from extras.models import CustomField
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
 
         self.site = Site.objects.create(name="NewDevIP2-Site", slug="new-dev-ip2-site")
         # Use slugs matching what slugify(name) produces so engine's get_or_create finds them.
@@ -696,13 +686,9 @@ class NewDeviceIPStoredInJSONTest(TestCase):
         ClassRoleMapping.objects.create(
             profile=self.profile, source_class="Server", creates_rack=False, role_slug="new-dev-ip2-role"
         )
-        device_ct = ContentType.objects.get_for_model(Device)
-        cf, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            cf.object_types.set([device_ct])
 
     def test_new_device_ip_stored_in_json(self):
-        """New device with IP fields stores the IP in data_import_source._ip — line 1040."""
+        """A new device with an IP that has no interface keeps it in the import record."""
         from dcim.models import Device
 
         rows = [
@@ -725,10 +711,8 @@ class NewDeviceIPStoredInJSONTest(TestCase):
         run_import(rows, self.profile, {"site": self.site}, dry_run=False)
         device = Device.objects.filter(site=self.site, name="new-dev-ip2-device-01").first()
         self.assertIsNotNone(device)
-        import_data = device.cf.get("data_import_source") or {}
-        ip_data = import_data.get("_ip") or {}
-        self.assertIn("primary_ip4", ip_data)
-        self.assertEqual(ip_data["primary_ip4"], "192.168.99.2/32")
+        unassigned_ips = stored_import_source(device).unassigned_ips
+        self.assertEqual(unassigned_ips["primary_ip4"], "192.168.99.2/32")
 
 
 class AssignIPToDeviceTest(TestCase):
@@ -832,31 +816,23 @@ class Pass3UnparseableIPTest(TestCase):
 
 
 class StoreSourceIdWithIPDataTest(TestCase):
-    """Tests for _store_source_id — line 1339: ip_data causes data['_ip'] to be set."""
+    """_store_source_id keeps an IP the import could not assign natively."""
 
     def setUp(self):
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from django.contrib.contenttypes.models import ContentType
-        from extras.models import CustomField
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
 
         self.site = Site.objects.create(name="StoreIP2Site", slug="store-ip2-site")
         mfg = Manufacturer.objects.create(name="StoreIP2Mfg", slug="store-ip2-mfg")
         self.dt = DeviceType.objects.create(manufacturer=mfg, model="StoreIP2Model", slug="store-ip2-model", u_height=1)
         self.role = DeviceRole.objects.create(name="StoreIP2Role", slug="store-ip2-role", color="000000")
         self.profile = _make_profile("StoreIP2Profile")
-        device_ct = ContentType.objects.get_for_model(Device)
-        cf, created = CustomField.objects.get_or_create(name="data_import_source", defaults={"type": "json"})
-        if created:
-            cf.object_types.set([device_ct])
 
     def test_ip_data_stored_under_underscore_ip_key(self):
-        """_store_source_id stores ip_data as _ip in data_import_source — line 1339."""
+        """The unassigned IP reaches the device import record."""
         from dcim.models import Device
 
         device = Device.objects.create(name="store-ip2-device-01", site=self.site, device_type=self.dt, role=self.role)
         ip_data = {"primary_ip4": "192.168.5.2/32"}
         _store_source_id(device, self.profile, "SIP2-001", None, ip_data=ip_data)
         device.refresh_from_db()
-        import_data = device.cf.get("data_import_source") or {}
-        self.assertIn("_ip", import_data)
-        self.assertEqual(import_data["_ip"], ip_data)
+        self.assertEqual(stored_import_source(device).unassigned_ips, ip_data)

@@ -21,14 +21,17 @@ const fixture = `
   <input id="ndi-preview-revision" value="preview-revision">
   <div id="ndi-preview-stale" hidden>
     Saved changes are pending. Recalculate the preview before import.
-    <a href="/plugins/data-import/import/preview/">Recalculate Preview</a>
+    <a href="/plugins/data-import/import/preview/" class="ndi-recalculate-preview">Recalculate Preview</a>
   </div>
+  <a href="/plugins/data-import/import/preview/" class="btn ndi-recalculate-preview"
+     id="ndi-recalculate-preview">Recalculate Preview</a>
   <button id="ndi-run-import" type="submit">Run Import</button>
   <table><tbody>
     <tr id="row-1"><td>
       <button class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="true">Fields differ</button>
     </td></tr>
-    <tr id="diff-1" class="ndi-diff-row show"><td>
+    <!-- the field-difference row in its expanded state; the toggle has its own spec -->
+    <tr id="diff-1" class="ndi-diff-row"><td>
       <form class="ndi-field-review-form" action="/ignore-field-difference/" method="post">
         <input name="row_number" value="1">
         <input name="target_field" value="u_position">
@@ -68,7 +71,7 @@ test("Ignore saves without recalculating and marks the preview stale", async ({ 
 
   expect(requestCount).toBe(1);
   expect(requestBody).toContain("preview-revision");
-  await expect(page.locator("#diff-1")).toHaveClass(/show/);
+  await expect(page.locator("#diff-1")).toBeVisible();
   await expect(page.locator("#ndi-preview-stale")).toBeVisible();
   await expect(page.locator("#ndi-run-import")).toBeDisabled();
 });
@@ -92,7 +95,7 @@ test("placement sync defers field-detail refresh", async ({ page }) => {
   await button.click();
 
   await expect(button).toContainText("Saved");
-  await expect(page.locator("#diff-1")).toHaveClass(/show/);
+  await expect(page.locator("#diff-1")).toBeVisible();
   await expect(page.locator("#ndi-preview-stale")).toBeVisible();
   await expect(page.locator("#ndi-run-import")).toBeDisabled();
 });

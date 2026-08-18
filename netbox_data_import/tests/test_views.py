@@ -16,8 +16,9 @@ from netbox_data_import.models import (
     ImportProfile,
     ManufacturerMapping,
     SourceResolution,
+    stored_import_source,
 )
-from netbox_data_import.tests.helpers import setup_preview_with_device_matches
+from netbox_data_import.tests.helpers import set_import_source, setup_preview_with_device_matches
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
@@ -3654,23 +3655,10 @@ class RemoveExtraIpViewTests(TestCase):
     def setUp(self):
         """Create test user and device with IP data."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-        from extras.models import CustomField
 
         self.user = User.objects.create_superuser("testuser_ip", "ip@example.com", "testpass")
         self.client = Client()
         self.client.login(username="testuser_ip", password="testpass")
-
-        # Create custom field if it doesn't exist
-        from django.contrib.contenttypes.models import ContentType
-        from dcim.models import Device as _Device
-
-        device_ct = ContentType.objects.get_for_model(_Device)
-        cf, created = CustomField.objects.get_or_create(
-            name="data_import_source",
-            defaults={"type": "json"},
-        )
-        if created:
-            cf.object_types.set([device_ct])
 
         # Create test device with IP data
         site = Site.objects.create(name="Test Site", slug="test-site")
@@ -3688,16 +3676,13 @@ class RemoveExtraIpViewTests(TestCase):
             device_type=device_type,
             role=role,
         )
-        self.device.custom_field_data = {
-            "data_import_source": {
-                "_ip": {
-                    "primary_ip4": "192.168.1.1/32",
-                    "oob_ip": "10.0.0.5/32",
-                },
-                "extra": {"some_field": "value"},
-            }
-        }
-        self.device.save()
+        set_import_source(
+            self.device,
+            _make_profile("RemoveExtraIpProfile"),
+            "SRC-IP",
+            extra_columns={"some_field": "value"},
+            unassigned_ips={"primary_ip4": "192.168.1.1/32", "oob_ip": "10.0.0.5/32"},
+        )
 
     def test_remove_extra_ip_removes_field(self):
         """Test that RemoveExtraIpView removes the specified IP field."""
@@ -3712,14 +3697,12 @@ class RemoveExtraIpViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)  # redirect
 
-        # Refresh device and check
-        self.device.refresh_from_db()
-        import_data = self.device.cf.get("data_import_source")
-        self.assertNotIn("primary_ip4", import_data["_ip"])
-        self.assertIn("oob_ip", import_data["_ip"])  # other field still there
+        unassigned_ips = stored_import_source(self.device).unassigned_ips
+        self.assertNotIn("primary_ip4", unassigned_ips)
+        self.assertIn("oob_ip", unassigned_ips)  # other field still there
 
-    def test_remove_extra_ip_removes_ip_key_when_empty(self):
-        """Test that _ip key is removed when last field is deleted."""
+    def test_remove_extra_ip_empties_the_ip_map_without_touching_the_record(self):
+        """Removing the last stored IP keeps the record and its other data."""
         # First remove primary_ip4
         url = reverse("plugins:netbox_data_import:remove_extra_ip")
         self.client.post(
@@ -3741,11 +3724,9 @@ class RemoveExtraIpViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
 
-        # Refresh device and check _ip key is gone
-        self.device.refresh_from_db()
-        import_data = self.device.cf.get("data_import_source")
-        self.assertNotIn("_ip", import_data)
-        self.assertIn("extra", import_data)  # other keys remain
+        import_source = stored_import_source(self.device)
+        self.assertEqual(import_source.unassigned_ips, {})
+        self.assertEqual(import_source.extra_columns, {"some_field": "value"})
 
     def test_remove_extra_ip_invalid_field(self):
         """Test that invalid ip_field is rejected."""
@@ -3760,10 +3741,7 @@ class RemoveExtraIpViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
 
-        # Check device wasn't modified
-        self.device.refresh_from_db()
-        import_data = self.device.cf.get("data_import_source")
-        self.assertEqual(len(import_data["_ip"]), 2)  # unchanged
+        self.assertEqual(len(stored_import_source(self.device).unassigned_ips), 2)  # unchanged
 
     def test_remove_extra_ip_missing_params(self):
         """Test that missing parameters are handled gracefully."""
@@ -3782,12 +3760,64 @@ class RemoveExtraIpViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
 
 
+class RemoveExtraIpViewObjectPermissionTests(TestCase):
+    """`dcim.change_device` can be granted for some devices only, so the view must apply that scope."""
+
+    def setUp(self):
+        """Give one user change access to a single device, and an import record to two devices."""
+        from django.contrib.contenttypes.models import ContentType
+
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from users.models import ObjectPermission
+
+        site = Site.objects.create(name="Scoped Site", slug="scoped-site")
+        manufacturer = Manufacturer.objects.create(name="Scoped Mfg", slug="scoped-mfg")
+        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="Scoped Model", slug="scoped-model")
+        role = DeviceRole.objects.create(name="Scoped Role", slug="scoped-role")
+        profile = _make_profile("RemoveExtraIpScopeProfile")
+
+        self.permitted = Device.objects.create(name="permitted-device", site=site, device_type=device_type, role=role)
+        self.forbidden = Device.objects.create(name="forbidden-device", site=site, device_type=device_type, role=role)
+        for device in (self.permitted, self.forbidden):
+            set_import_source(device, profile, f"SRC-{device.name}", unassigned_ips={"primary_ip4": "192.0.2.1/32"})
+
+        self.user = User.objects.create_user("scoped_ip_user", "scoped@example.com", "testpass")
+        permission = ObjectPermission.objects.create(
+            name="Change one device", actions=["change"], constraints={"name": "permitted-device"}
+        )
+        permission.object_types.add(ContentType.objects.get_for_model(Device))
+        permission.users.add(self.user)
+
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def test_a_device_outside_the_change_scope_keeps_its_import_record(self):
+        """The model-level permission alone must not open every device's import record."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:remove_extra_ip"),
+            {"device_id": self.forbidden.pk, "ip_field": "primary_ip4"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(stored_import_source(self.forbidden).unassigned_ips, {"primary_ip4": "192.0.2.1/32"})
+
+    def test_a_device_inside_the_change_scope_still_loses_the_ip(self):
+        """The scope check must not block the devices the permission does cover."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:remove_extra_ip"),
+            {"device_id": self.permitted.pk, "ip_field": "primary_ip4"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(stored_import_source(self.permitted).unassigned_ips, {})
+
+
 class SyncDeviceFieldViewTests(TestCase):
     """Tests for SyncDeviceFieldView."""
 
     def setUp(self):
         """Create test user and device."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 
         self.user = User.objects.create_superuser("testuser_sync", "sync@example.com", "testpass")
         self.client = Client()
@@ -3799,7 +3829,16 @@ class SyncDeviceFieldViewTests(TestCase):
             manufacturer=manufacturer, model="Model Sync", slug="model-sync", u_height=1
         )
         role = DeviceRole.objects.create(name="Role Sync", slug="role-sync")
-        self.device = Device.objects.create(name="sync-device", site=site, device_type=device_type, role=role)
+        # NetBox accepts a rack position only on a device that already has a rack and a face.
+        self.rack = Rack.objects.create(name="Rack Sync", site=site, u_height=42)
+        self.device = Device.objects.create(
+            name="sync-device",
+            site=site,
+            device_type=device_type,
+            role=role,
+            rack=self.rack,
+            face="front",
+        )
         self.url = reverse("plugins:netbox_data_import:sync_device_field")
 
     def test_sync_serial(self):
@@ -3840,6 +3879,20 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertEqual(data["display"], "U5")
         self.device.refresh_from_db()
         self.assertEqual(self.device.position, 5)
+
+    def test_sync_u_position_rejected_without_a_rack(self):
+        """NetBox refuses a rack position on a device with no rack, so the sync refuses it too."""
+        self.device.rack = None
+        self.device.face = None
+        self.device.save(update_fields=["rack", "face"])
+
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_position", "value": "5"})
+
+        data = response.json()
+        self.assertFalse(data["ok"], data)
+        self.assertIn("rack", data["error"].lower())
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.position)
 
     def test_sync_status(self):
         """Set status to active via SyncDeviceFieldView."""
@@ -3952,11 +4005,18 @@ class SyncRackAndPlacementTests(TestCase):
         Rack.objects.create(name="DUP", site=self.amb_site, u_height=42)
         Rack.objects.create(name="DUP", site=self.amb_site, u_height=42)
 
+        self.zero_u_type = DeviceType.objects.create(
+            manufacturer=mfg, model="360-imV-CNTRLR", slug="360-imv-cntrlr", u_height=0
+        )
+
         self.device_no_loc = Device.objects.create(name="dev-noloc", site=self.site, device_type=dt, role=role)
         self.device_with_loc = Device.objects.create(
             name="dev-withloc", site=self.site, location=self.location, device_type=dt, role=role
         )
         self.device_amb = Device.objects.create(name="dev-amb", site=self.amb_site, device_type=dt, role=role)
+        self.device_zero_u = Device.objects.create(
+            name="dev-zerou", site=self.site, device_type=self.zero_u_type, role=role
+        )
 
         self.field_url = reverse("plugins:netbox_data_import:sync_device_field")
         self.placement_url = reverse("plugins:netbox_data_import:sync_placement")
@@ -4071,6 +4131,93 @@ class SyncRackAndPlacementTests(TestCase):
         self.assertEqual(self.device_no_loc.rack_id, self.rack_no_loc.pk)
         self.assertEqual(self.device_no_loc.position, 5)
         self.assertEqual(self.device_no_loc.face, "front")
+
+    def test_placement_sets_rack_only_for_zero_u_device_type(self):
+        """A zero-U device type takes the rack and reports the skipped position and face."""
+        response = self.client.post(
+            self.placement_url,
+            {
+                "device_id": self.device_zero_u.pk,
+                "rack_name": "R1",
+                "u_position": "5",
+                "face": "front",
+            },
+        )
+
+        data = response.json()
+        self.assertTrue(data["ok"], data)
+        self.assertIn("360-imV-CNTRLR", data["display"])
+        self.assertIn("0U", data["display"])
+        self.device_zero_u.refresh_from_db()
+        self.assertEqual(self.device_zero_u.rack_id, self.rack_no_loc.pk)
+        self.assertIsNone(self.device_zero_u.position)
+        self.assertFalse(self.device_zero_u.face)
+
+    def test_placement_clears_a_stored_position_a_zero_u_device_cannot_hold(self):
+        """Placement sync repairs a zero-U device that still holds a rack position."""
+        self.device_zero_u.rack = self.rack_no_loc
+        self.device_zero_u.position = 5
+        self.device_zero_u.face = "front"
+        self.device_zero_u.save(update_fields=["rack", "position", "face"])
+
+        response = self.client.post(
+            self.placement_url,
+            {"device_id": self.device_zero_u.pk, "rack_name": "R1", "u_position": "5", "face": "front"},
+        )
+
+        data = response.json()
+        self.assertTrue(data["ok"], data)
+        self.device_zero_u.refresh_from_db()
+        self.assertIsNone(self.device_zero_u.position)
+        self.assertFalse(self.device_zero_u.face)
+
+    def test_u_position_field_sync_rejected_for_zero_u_device_type(self):
+        """A zero-U device type cannot take a rack position through single-field sync."""
+        self.device_zero_u.rack = self.rack_no_loc
+        self.device_zero_u.save(update_fields=["rack"])
+
+        response = self.client.post(
+            self.field_url,
+            {"device_id": self.device_zero_u.pk, "field": "u_position", "value": "5"},
+        )
+
+        data = response.json()
+        self.assertFalse(data["ok"], data)
+        self.assertIn("360-imV-CNTRLR", data["error"])
+        self.device_zero_u.refresh_from_db()
+        self.assertIsNone(self.device_zero_u.position)
+
+    def test_face_field_sync_rejected_for_zero_u_device_type(self):
+        """A zero-U device type cannot take a rack face through single-field sync."""
+        self.device_zero_u.rack = self.rack_no_loc
+        self.device_zero_u.save(update_fields=["rack"])
+
+        response = self.client.post(
+            self.field_url,
+            {"device_id": self.device_zero_u.pk, "field": "face", "value": "front"},
+        )
+
+        data = response.json()
+        self.assertFalse(data["ok"], data)
+        self.assertIn("360-imV-CNTRLR", data["error"])
+        self.device_zero_u.refresh_from_db()
+        self.assertFalse(self.device_zero_u.face)
+
+    def test_u_position_field_sync_rejects_a_position_the_rack_cannot_hold(self):
+        """Single-field position sync runs the same NetBox validation as placement sync."""
+        self.device_no_loc.rack = self.rack_no_loc
+        self.device_no_loc.face = "front"
+        self.device_no_loc.save(update_fields=["rack", "face"])
+
+        response = self.client.post(
+            self.field_url,
+            {"device_id": self.device_no_loc.pk, "field": "u_position", "value": "99"},
+        )
+
+        data = response.json()
+        self.assertFalse(data["ok"], data)
+        self.device_no_loc.refresh_from_db()
+        self.assertIsNone(self.device_no_loc.position)
 
     def test_placement_ignores_unrelated_invalid_oob_assignment(self):
         """An existing invalid OOB pointer does not block a placement-only update."""

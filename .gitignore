@@ -65,3 +65,4 @@ docs/superpowers/
 
 # Brainstorm session files
 .superpowers/
+.playwright-mcp/

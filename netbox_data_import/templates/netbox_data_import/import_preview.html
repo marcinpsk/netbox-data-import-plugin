@@ -36,16 +36,16 @@
   [data-bs-theme="dark"] .ndi-badge-ignored { background-color: #4b5563 !important; border: 1px solid #6b7280 !important; }
   /* Generic unused-column badges need a tinted background to read in dark mode */
   [data-bs-theme="dark"] .ndi-badge-generic { background-color: #374151 !important; color: #e5e7eb !important; border-color: #4b5563 !important; }
-  /* Field diff sub-table */
+  /* Field diff sub-table. The collapsed state is the `hidden` attribute, not a rule here,
+     so a row cannot render expanded while this stylesheet is missing. */
   .ndi-diff-toggle { cursor: pointer; border: none; }
   .ndi-diff-toggle:hover { opacity: 0.85; }
-  .ndi-diff-row { display: none; }
-  .ndi-diff-row.show { display: table-row; }
   .ndi-diff-table { font-size: 0.82rem; margin-bottom: 0; }
   .ndi-diff-synced { text-decoration: line-through; color: var(--tblr-secondary); }
   .ndi-diff-badge { background-color: #f59e0b !important; color: #000 !important; }
   [data-bs-theme="dark"] .ndi-diff-badge { background-color: #fbbf24 !important; color: #000 !important; }
 </style>
+<script src="{% static 'netbox_data_import/js/preview_row_controls.js' %}"></script>
 {% endblock %}
 
 {% block content %}
@@ -127,7 +127,7 @@
           </form>
           {% endif %}
 
-          <a href="{{ preview_url }}" class="btn btn-outline-primary" id="ndi-recalculate-preview">
+          <a href="{{ preview_url }}" class="btn btn-outline-primary ndi-recalculate-preview" id="ndi-recalculate-preview">
             <i class="mdi mdi-refresh"></i> Recalculate Preview
           </a>
 
@@ -154,7 +154,7 @@
         <div id="ndi-preview-stale" class="alert alert-info mt-3 mb-0" hidden>
           <i class="mdi mdi-content-save-check"></i>
           Saved changes are pending. Recalculate the preview before import.
-          <a href="{{ preview_url }}" class="alert-link ms-1">Recalculate Preview</a>
+          <a href="{{ preview_url }}" class="alert-link ms-1 ndi-recalculate-preview">Recalculate Preview</a>
         </div>
 
         {% if result.counts.errors %}
@@ -231,7 +231,7 @@
               <td class="text-end" style="white-space:nowrap;">
                 {% if row.object_type == 'device_type' and profile_id %}
                   <button type="button" class="btn btn-sm btn-outline-warning"
-                          data-bs-toggle="modal" data-bs-target="#deviceTypeMappingModal"
+                          data-ndi-modal="#deviceTypeMappingModal"
                           data-source-make="{{ row.extra_data.source_make }}"
                           data-source-model="{{ row.extra_data.source_model }}"
                           data-mfg-slug="{{ row.extra_data.mfg_slug }}"
@@ -242,7 +242,7 @@
                   </button>
                 {% elif row.object_type == 'manufacturer' and profile_id %}
                   <button type="button" class="btn btn-sm btn-outline-warning"
-                          data-bs-toggle="modal" data-bs-target="#manufacturerMappingModal"
+                          data-ndi-modal="#manufacturerMappingModal"
                           data-source-make="{{ row.name }}"
                           data-profile-id="{{ profile_id }}">
                     <i class="mdi mdi-link-variant"></i> Map
@@ -472,7 +472,7 @@
                     </button>
                   </form>
                   <button type="button" class="btn btn-sm btn-outline-warning ms-1"
-                          data-bs-toggle="modal" data-bs-target="#manufacturerMappingModal"
+                          data-ndi-modal="#manufacturerMappingModal"
                           data-source-make="{{ row.name }}"
                           data-profile-id="{{ profile_id }}"
                           title="Map this source manufacturer name to an existing NetBox manufacturer">
@@ -482,7 +482,7 @@
                 {% elif row.object_type == 'device_type' and row.action in 'create,error' and profile_id %}
                   {# Device type: map to existing OR create now (both open same modal) #}
                   <button type="button" class="btn btn-sm btn-outline-warning"
-                          data-bs-toggle="modal" data-bs-target="#deviceTypeMappingModal"
+                          data-ndi-modal="#deviceTypeMappingModal"
                           data-source-make="{{ row.extra_data.source_make}}"
                           data-source-model="{{ row.extra_data.source_model}}"
                           data-mfg-slug="{{ row.extra_data.mfg_slug}}"
@@ -508,7 +508,7 @@
                 {% elif row.object_type == 'rack' and profile_id and row.extra_data.source_class %}
                   {# Rack row — allow reconfiguring the class mapping (e.g. to set rack type) #}
                   <button type="button" class="btn btn-sm btn-outline-secondary"
-                          data-bs-toggle="modal" data-bs-target="#classMappingModal"
+                          data-ndi-modal="#classMappingModal"
                           data-source-class="{{ row.extra_data.source_class }}"
                           data-profile-id="{{ profile_id }}"
                           data-initial-action="rack"
@@ -550,7 +550,7 @@
                   {% endif %}
                   {% if row.extra_data.source_class %}
                   <button type="button" class="btn btn-sm btn-outline-warning"
-                          data-bs-toggle="modal" data-bs-target="#classMappingModal"
+                          data-ndi-modal="#classMappingModal"
                           data-source-class="{{ row.extra_data.source_class}}"
                           data-profile-id="{{ profile_id }}"
                           title="Configure how to handle devices with class '{{ row.extra_data.source_class }}'">
@@ -559,7 +559,7 @@
                   {% endif %}
                   {# Link to existing device #}
                   <button type="button" class="btn btn-sm btn-outline-info ms-1"
-                          data-bs-toggle="modal" data-bs-target="#deviceMatchModal"
+                          data-ndi-modal="#deviceMatchModal"
                           data-source-id="{{ row.source_id}}"
                           data-source-name="{{ row.name}}"
                           data-source-serial="{{ row.extra_data.source_serial|default:''}}"
@@ -583,7 +583,7 @@
                 {% elif row.action == 'create' and row.object_type == 'device' and row.source_id and profile_id %}
                   {# Device will be created — allow linking to existing device instead #}
                   <button type="button" class="btn btn-sm btn-outline-info"
-                          data-bs-toggle="modal" data-bs-target="#deviceMatchModal"
+                          data-ndi-modal="#deviceMatchModal"
                           data-source-id="{{ row.source_id}}"
                           data-source-name="{{ row.name}}"
                           data-source-serial="{{ row.extra_data.source_serial|default:''}}"
@@ -627,7 +627,7 @@
                 {# Split button: show on all unlinked device rows regardless of separator format #}
                 {% if row.object_type == 'device' and row.source_id and profile_id and row.action != 'update' and row.action != 'skip' and row.action != 'ignore' %}
                   <button type="button" class="btn btn-sm btn-outline-info ms-1"
-                          data-bs-toggle="modal" data-bs-target="#splitNameModal"
+                          data-ndi-modal="#splitNameModal"
                           data-source-id="{{ row.source_id}}"
                           data-source-column="device_name"
                           data-original-value="{{ row.name}}"
@@ -639,7 +639,7 @@
                 {# Map DT button: show on all device rows with source make/model (create, update, error) #}
                 {% if row.object_type == 'device' and row.extra_data.source_make and profile_id %}
                   <button type="button" class="btn btn-sm btn-outline-secondary ms-1"
-                          data-bs-toggle="modal" data-bs-target="#deviceTypeMappingModal"
+                          data-ndi-modal="#deviceTypeMappingModal"
                           data-source-make="{{ row.extra_data.source_make }}"
                           data-source-model="{{ row.extra_data.source_model }}"
                           data-mfg-slug="{{ row.extra_data.mfg_slug|default:'' }}"
@@ -666,8 +666,7 @@
                 {% if row.object_type == 'device' and row.extra_data.candidate_values.contact and profile_id %}
                 <button type="button"
                         class="btn btn-sm btn-outline-warning ms-1"
-                        data-bs-toggle="modal"
-                        data-bs-target="#contactCandidateModal"
+                        data-ndi-modal="#contactCandidateModal"
                         data-row-number="{{ row.row_number }}"
                         data-source-id="{{ row.source_id }}"
                         title="Choose which candidate values supply this row's Contact fields">
@@ -679,8 +678,7 @@
                 {% if row.extra_data.conflicts %}
                 <button type="button"
                       class="badge text-bg-warning ms-1 border-0 ndi-conflict-badge"
-                      data-bs-toggle="modal"
-                      data-bs-target="#conflictModal"
+                      data-ndi-modal="#conflictModal"
                       data-row-number="{{ row.row_number }}"
                       data-source-id="{{ row.source_id }}"
                       aria-label="Show conflicts for row {{ row.row_number }}"
@@ -696,8 +694,7 @@
                           disabled
                           title="Resolve all conflicts before syncing"
                         {% else %}
-                          data-bs-toggle="modal"
-                          data-bs-target="#syncRowModal"
+                          data-ndi-modal="#syncRowModal"
                           title="Create this {{ row.object_type }} in NetBox now"
                         {% endif %}
                         data-row-number="{{ row.row_number }}"
@@ -724,15 +721,22 @@
             </tr>
             {% if row.extra_data.netbox_device_id %}
             {% if row.extra_data.field_diff or row.extra_data.field_ignored %}
-            <tr id="diff-{{ row.row_number }}" class="ndi-diff-row">
+            <tr id="diff-{{ row.row_number }}" class="ndi-diff-row" hidden>
               <td colspan="7" class="p-0 border-top-0">
                 <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
                   {% if row.rack_name %}
                   <div class="mb-2">
-                    <button type="button" class="btn btn-xs btn-outline-success ndi-sync-placement-btn"
-                            data-action-url="{% url 'plugins:netbox_data_import:sync_placement' %}"
-                            data-row-id="{{ row.row_number }}"
-                            title="Set rack{% if row.extra_data.u_position %}, position{% endif %}{% if row.extra_data.face %}, face{% endif %} atomically">
+                    {# Grey and inert when this action writes nothing: green means it writes something #}
+                    <button type="button"
+                            class="btn btn-xs {% if row.extra_data.placement_sync_writes_nothing %}btn-outline-secondary{% else %}btn-outline-success ndi-sync-placement-btn{% endif %}"
+                            {% if row.extra_data.placement_sync_writes_nothing %}
+                              disabled
+                              title="This row sets no placement value NetBox does not already hold. A full import can still clear a position this row leaves empty."
+                            {% else %}
+                              data-action-url="{% url 'plugins:netbox_data_import:sync_placement' %}"
+                              data-row-id="{{ row.row_number }}"
+                              title="Set rack{% if row.extra_data.u_position %}, position{% endif %}{% if row.extra_data.face %}, face{% endif %} atomically"
+                            {% endif %}>
                       <i class="mdi mdi-package-variant"></i> Sync placement
                     </button>
                     <span class="text-muted small ms-2">rack=<strong>{{ row.rack_name }}</strong>{% if row.extra_data.u_position %}, U{{ row.extra_data.u_position }}{% endif %}{% if row.extra_data.face %}, {{ row.extra_data.face }}{% endif %}</span>
@@ -1016,65 +1020,6 @@
 {{ extra_columns_by_row|json_script:"ndi-extra-columns-by-row" }}
 {{ split_field_values_by_source_id|json_script:"ndi-split-field-values" }}
 <script>
-// ── Row filter ──────────────────────────────────────────────────────────────
-(function() {
-  function applyFilters() {
-    var text = (document.getElementById('previewRowFilter')?.value || '').toLowerCase().trim();
-    var action = (document.getElementById('previewActionFilter')?.value || '').toLowerCase();
-    var clearBtn = document.getElementById('previewRowFilterClear');
-    if (clearBtn) clearBtn.style.display = (text || action) ? '' : 'none';
-
-    var rows = document.querySelectorAll('#previewRowsBody tr');
-    var shown = 0;
-    rows.forEach(function(tr) {
-      var rowText = tr.textContent.toLowerCase();
-      var rowAction = (tr.dataset.action || '').toLowerCase();
-      var textMatch = !text || rowText.includes(text);
-      var actionMatch = !action || rowAction === action;
-      var visible = textMatch && actionMatch;
-      tr.style.display = visible ? '' : 'none';
-      if (visible) shown++;
-    });
-
-    var noResults = document.getElementById('previewNoFilterResults');
-    if (noResults) noResults.style.display = shown === 0 ? '' : 'none';
-
-    // Warn if any error rows are hidden by the filter
-    var hiddenErrors = Array.from(document.querySelectorAll('#previewRowsBody tr[data-action="error"]'))
-      .filter(function(tr) { return tr.style.display === 'none'; }).length;
-    var warn = document.getElementById('ndi-hidden-err-warn');
-    if (warn) {
-      warn.style.display = hiddenErrors > 0 ? '' : 'none';
-      var cnt = document.getElementById('ndi-hidden-err-count');
-      if (cnt) cnt.textContent = hiddenErrors;
-    }
-  }
-
-  document.addEventListener('DOMContentLoaded', function() {
-    var filterInput = document.getElementById('previewRowFilter');
-    var actionSelect = document.getElementById('previewActionFilter');
-    var clearBtn = document.getElementById('previewRowFilterClear');
-    var showErrorsLink = document.getElementById('ndi-show-errors-link');
-    if (filterInput) {
-      filterInput.addEventListener('input', applyFilters);
-      filterInput.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') { filterInput.value = ''; applyFilters(); }
-      });
-    }
-    if (actionSelect) actionSelect.addEventListener('change', applyFilters);
-    if (clearBtn) clearBtn.addEventListener('click', function() {
-      if (filterInput) filterInput.value = '';
-      if (actionSelect) actionSelect.value = '';
-      applyFilters();
-    });
-    if (showErrorsLink) showErrorsLink.addEventListener('click', function(e) {
-      e.preventDefault();
-      if (filterInput) filterInput.value = '';
-      if (actionSelect) actionSelect.value = 'error';
-      applyFilters();
-    });
-  });
-})();
 var TARGET_FIELDS = [
   ['', '— ignore —'],
   ['device_name', 'Device name'],
@@ -1107,12 +1052,24 @@ var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : 
 var splitFieldValuesEl = document.getElementById('ndi-split-field-values');
 var SPLIT_FIELD_VALUES = splitFieldValuesEl ? JSON.parse(splitFieldValuesEl.textContent) : {};
 
-// Modal event listeners (Bootstrap 5 pattern — no global bootstrap var needed)
-document.addEventListener('DOMContentLoaded', function() {
+/* Modal wiring delegates from `document` and binds once. A row action can swap #page-content
+   through HTMX, which replaces every modal element and never fires DOMContentLoaded again. */
+(function() {
+  if (window.ndiPreviewModalsBound) return;
+  window.ndiPreviewModalsBound = true;
+
+  function onModalShow(modalId, populate) {
+    document.addEventListener('show.bs.modal', function(event) {
+      // No trigger means no row to read: leave the form empty and let the server refuse it.
+      if (event.target.id !== modalId || !event.relatedTarget) return;
+      populate(event);
+    });
+  }
 
   // Highlight the conflicting row when a "Jump to row N" link is clicked.
-  document.querySelectorAll('.ndi-jump-to-row').forEach(function(link) {
-    link.addEventListener('click', function(e) {
+  document.addEventListener('click', function(e) {
+    var link = e.target.closest('.ndi-jump-to-row');
+    if (link) {
       var targetRow = link.dataset.targetRow;
       var el = document.getElementById('row-' + targetRow);
       if (el) {
@@ -1121,10 +1078,10 @@ document.addEventListener('DOMContentLoaded', function() {
         el.classList.add('ndi-jump-flash');
         setTimeout(function() { el.classList.remove('ndi-jump-flash'); }, 2000);
       }
-    });
+    }
   });
 
-  document.getElementById('splitNameModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('splitNameModal', function(event) {
     var btn = event.relatedTarget;
     var sourceId = btn.dataset.sourceId;
     var sourceColumn = btn.dataset.sourceColumn;
@@ -1146,7 +1103,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   });
 
-  document.getElementById('deviceTypeMappingModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('deviceTypeMappingModal', function(event) {
     var btn = event.relatedTarget;
     document.getElementById('dtm_source_make').value = btn.dataset.sourceMake || '';
     document.getElementById('dtm_source_model').value = btn.dataset.sourceModel || '';
@@ -1161,7 +1118,7 @@ document.addEventListener('DOMContentLoaded', function() {
     _dtmSetMapped(false);
   });
 
-  document.getElementById('classMappingModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('classMappingModal', function(event) {
     var btn = event.relatedTarget;
     var sourceClass = btn.dataset.sourceClass || '';
     document.getElementById('cm_source_class').value = sourceClass;
@@ -1200,7 +1157,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   });
 
-  document.getElementById('manufacturerMappingModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('manufacturerMappingModal', function(event) {
     var btn = event.relatedTarget;
     document.getElementById('mm_source_make').value = btn.dataset.sourceMake || '';
     document.getElementById('mm_profile_id').value = btn.dataset.profileId || '';
@@ -1213,7 +1170,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setTimeout(mmSearch, 200);
   });
 
-  document.getElementById('deviceMatchModal').addEventListener('show.bs.modal', function(event) {
+  onModalShow('deviceMatchModal', function(event) {
     var btn = event.relatedTarget;
     var sourceName = btn.dataset.sourceName || '';
     var sourceId = btn.dataset.sourceId || '';
@@ -1243,7 +1200,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setTimeout(dmSearch, 200);
   });
 
-});
+}());
 
 function reSplit(fileResolvedFields) {
   fileResolvedFields = fileResolvedFields || {};
@@ -2252,7 +2209,7 @@ function unlinkFromModal(btn) {
             <label class="form-label fw-semibold" for="ndi_qmap_extra_key">Key name in extra JSON</label>
             <input type="text" id="ndi_qmap_extra_key" class="form-control" placeholder="e.g. jira_id" pattern="[a-zA-Z0-9_-]{1,50}" oninput="this.setCustomValidity('')">
             <div class="form-text text-muted">
-              Stored in <code>data_import_source["extra"]["&lt;key&gt;"]</code>. Use letters, digits, <code>_</code>, or <code>-</code>.
+              Stored in the device import record under this key. Use letters, digits, <code>_</code>, or <code>-</code>.
             </div>
           </div>
         </div>
@@ -2333,26 +2290,6 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
     });
   }
 }());
-</script>
-
-<script>
-// Toggle diff sub-table visibility
-document.addEventListener('click', function(e) {
-  const toggle = e.target.closest('.ndi-diff-toggle');
-  if (!toggle) return;
-  const targetId = toggle.dataset.diffTarget;
-  const row = document.getElementById(targetId);
-  if (!row) return;
-  row.classList.toggle('show');
-  const expanded = row.classList.contains('show');
-  toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-  const icon = toggle.querySelector('.mdi');
-  if (icon) {
-    icon.classList.toggle('mdi-chevron-down');
-    icon.classList.toggle('mdi-chevron-up');
-  }
-});
-
 </script>
 
 {# ===== Per-row sync confirmation modal ===== #}
@@ -2635,6 +2572,10 @@ document.addEventListener('click', function(e) {
       body.appendChild(section);
     }
   });
+
+  // Bound once: an HTMX swap re-runs this script, and a second listener would post twice.
+  if (window.ndiConflictResolveBound) return;
+  window.ndiConflictResolveBound = true;
 
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('.ndi-conflict-resolve-btn');

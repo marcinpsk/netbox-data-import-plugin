@@ -43,9 +43,10 @@ database number on the shared Redis service does not isolate one task from anoth
 
 Start a temporary Redis container on the devcontainer network. Pass its container name as
 `TEST_REDIS_HOST`. Set `TEST_DB_NAME` to a unique name that starts with `test_`. The `netbox-test`
-and `netbox-test-coverage` helpers use eight pytest workers by default. Each worker gets a private
-PostgreSQL database and private Redis task and cache databases. Set `NETBOX_TEST_WORKERS=1` for a
-serial run.
+and `netbox-test-coverage` helpers size the pytest worker pool to the machine (`-n auto`) and cap it
+at eight workers. Each worker gets a private PostgreSQL database and private Redis task and cache
+databases. Set `NETBOX_TEST_WORKERS` to pin the count: `1` runs one worker, `0` runs the suite in
+one process.
 
 ```bash
 TEST_DB_NAME=test_unique_task TEST_REDIS_HOST=redis-sidecar-task netbox-test
@@ -88,5 +89,8 @@ See [`docs/agents/domain.md`](docs/agents/domain.md).
 - Use `NetBoxModel`, `NetBoxModelViewSet`, `NetBoxModelForm`, and similar. Never raw Django/DRF.
 - Commits follow Conventional Commits format (enforced by a pre-commit hook).
 - Never add a `Co-authored-by` trailer to commit messages.
-- Migrations are generated artifacts. Change a model, then run
-  `netbox-manage makemigrations netbox_data_import`. Do not hand-edit a migration.
+- Schema migrations are generated artifacts. Change a model, then run
+  `netbox-manage makemigrations netbox_data_import`. Do not hand-edit a generated migration.
+- A data migration is written by hand, because `makemigrations` generates no `RunPython`. Start it
+  with `netbox-manage makemigrations netbox_data_import --empty`. Give it no reverse callable when
+  the change cannot be undone, so Django refuses the rollback instead of losing data.

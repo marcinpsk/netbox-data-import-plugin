@@ -27,7 +27,7 @@ import openpyxl
 
 from .contact_resolution import ContactResolutionRequired, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
-from .models import CANDIDATE_TARGET_PREFIX, ImportProfile
+from .models import CANDIDATE_TARGET_PREFIX, DeviceImportSource, ImportProfile
 from .object_permissions import (
     ObjectPermissionDenied as _ObjectPermissionDenied,
     enforce_saved_object_permission as _enforce_saved_object_permission,
@@ -1042,6 +1042,29 @@ def _device_rack_identity_label(device):
     return _rack_identity_label(device.rack.name, device.rack.location)
 
 
+def placement_sync_is_noop(device, rack_name, position, face) -> bool:
+    """Return whether the placement quick action would write nothing to *device*.
+
+    Mirrors `views._set_rack_placement`: it always sets the rack, sets position and face only when
+    the source supplies them, and clears both for a zero-U device type. A full import writes the
+    position unconditionally, so it can still clear a position this row omits. The two are not the
+    same question, which is why this one never claims that the placement matches.
+    """
+    device_type = getattr(device, "device_type", None)
+    if device_type is not None and device_type.u_height == 0:
+        if device.position is not None or device.face:
+            return False
+        position = face = None
+    device_rack_name = device.rack.name if device.rack_id else ""
+    if _identity_text(device_rack_name) != _identity_text(rack_name):
+        return False
+    if position is not None and _normalize_for_compare(device.position) != _normalize_for_compare(position):
+        return False
+    if face and (device.face or "") != face:
+        return False
+    return True
+
+
 def _device_placement_differs(device, source_location_id, rack_name, position, face):
     """Return whether a source placement differs from a NetBox device placement."""
     device_rack_name = device.rack.name if device.rack_id else ""
@@ -1471,8 +1494,8 @@ def _find_existing_device(  # noqa: C901
     if matched_device is None and source_id:
         source_matches = list(
             devices.filter(
-                custom_field_data__data_import_source__profile_id=profile.pk,
-                custom_field_data__data_import_source__source_id=source_id,
+                data_import_source__profile=profile,
+                data_import_source__source_id=source_id,
             )[:2]
         )
         if len(source_matches) == 1:
@@ -2692,6 +2715,13 @@ def _preview_device_row(  # noqa: C901
                     "netbox_rack_name": matched_device.rack.name if matched_device.rack_id else "",
                     "netbox_position": _normalize_for_compare(matched_device.position),
                     "netbox_face": matched_device.face or "",
+                    # Only set when a placement sync has nothing to write, so an older preview
+                    # that predates this key keeps offering the action.
+                    **(
+                        {"placement_sync_writes_nothing": True}
+                        if placement_sync_is_noop(matched_device, rack_name, position, device_face)
+                        else {}
+                    ),
                 }
                 if matched_device is not None
                 else {}
@@ -4012,32 +4042,28 @@ def _build_candidate_source_columns(profile: ImportProfile) -> dict[str, frozens
 def _store_source_id(
     obj, profile: ImportProfile, source_id: str, extra_columns: dict | None = None, ip_data: dict | None = None
 ):
-    """Store source ID in the configured custom field and in the plugin's JSON metadata field."""
-    changed = False
+    """Store the source ID in the profile's custom field and the plugin's import record.
 
+    The import record covers Devices. A Rack keeps only the operator-configured custom field.
+    """
     # Per-profile custom field (e.g. cans_id → plain string)
     if profile.custom_field_name and source_id:
         try:
             obj.custom_field_data[profile.custom_field_name] = source_id
-            changed = True
+            obj.save(update_fields=["custom_field_data"])
         except (AttributeError, KeyError):  # pragma: no cover
             logger.warning("Failed to set custom field '%s' on %s", profile.custom_field_name, obj)
 
-    # Plugin-managed JSON field: data_import_source
-    try:
-        data = {
-            "source_id": source_id or "",
-            "profile_id": profile.pk,
-            "profile_name": profile.name,
-        }
-        if extra_columns:
-            data["extra"] = extra_columns
-        if ip_data:
-            data["_ip"] = ip_data
-        obj.custom_field_data["data_import_source"] = data
-        changed = True
-    except (AttributeError, KeyError):  # pragma: no cover
-        logger.warning("Failed to set data_import_source on %s", obj)
+    from dcim.models import Device
 
-    if changed:
-        obj.save(update_fields=["custom_field_data"])
+    if not isinstance(obj, Device):
+        return
+    DeviceImportSource.objects.update_or_create(
+        device=obj,
+        defaults={
+            "profile": profile,
+            "source_id": source_id or "",
+            "extra_columns": extra_columns or {},
+            "unassigned_ips": ip_data or {},
+        },
+    )

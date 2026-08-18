@@ -182,6 +182,49 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             'class="badge ndi-badge-ignored ndi-diff-toggle mt-1"',
         )
 
+    def test_preview_offers_placement_sync_while_the_placement_differs(self):
+        """The action stays available while a placement sync would write something."""
+        response, row = self._preview_device_row()
+
+        self.assertNotIn("placement_sync_writes_nothing", row.extra_data)
+        self.assertContains(response, "ndi-sync-placement-btn")
+        self.assertContains(response, "btn-outline-success ndi-sync-placement-btn")
+
+    def test_preview_greys_out_a_placement_sync_that_would_write_nothing(self):
+        """A matched placement keeps the button visible but inert, not green."""
+        self.device.position = 7
+        self.device.serial = "SERIAL-DIFFERS-SO-THE-ROW-STILL-EXPANDS"
+        self.device.save(update_fields=["position", "serial"])
+
+        response, row = self._preview_device_row()
+
+        self.assertTrue(row.extra_data["placement_sync_writes_nothing"])
+        self.assertContains(response, "This row sets no placement value NetBox does not already hold")
+        self.assertNotContains(response, "ndi-sync-placement-btn")
+
+    def test_preview_does_not_call_an_omitted_position_a_matching_placement(self):
+        """The import clears a position the row omits, so the greyed button must not claim a match."""
+        rows = [{**self.rows[0], "u_position": ""}]
+        self._save_rows(rows)
+
+        response, row = self._preview_device_row()
+
+        self.assertTrue(row.extra_data["placement_sync_writes_nothing"])
+        self.assertNotContains(response, "Placement already matches")
+        self.assertEqual(row.extra_data["field_diff"]["u_position"], {"netbox": "5", "file": ""})
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.position)
+
+    def test_preview_renders_field_differences_collapsed(self):
+        """The row collapses through `hidden`, so it holds while the page is still loading."""
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, '<tr id="diff-1" class="ndi-diff-row" hidden>')
+        self.assertContains(response, "netbox_data_import/js/preview_row_controls.js")
+
     def test_ignore_defers_preview_recalculation_for_javascript_callers(self):
         """Ignore saves immediately and marks the displayed preview as stale."""
         previous_result = self.client.session["import_result"]
@@ -461,6 +504,38 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         session = self.client.session
         self.assertTrue(session["import_preview_dirty"])
         self.assertEqual(session["import_result"], previous_result)
+
+    def test_placement_sync_skips_the_position_of_a_zero_u_matched_device(self):
+        """A matched zero-U device takes the rack alone: NetBox allows it no rack position."""
+        from dcim.models import DeviceType
+
+        zero_u_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer,
+            model="360-imV-CNTRLR",
+            slug="360-imv-cntrlr",
+            u_height=0,
+        )
+        self.device.device_type = zero_u_type
+        self.device.rack = None
+        self.device.position = None
+        self.device.face = ""
+        self.device.save(update_fields=["device_type", "rack", "position", "face"])
+        self._save_rows(self.rows)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            self._json_action(row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"], payload)
+        self.assertIn("360-imV-CNTRLR", payload["message"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.rack_id, self.rack.pk)
+        self.assertIsNone(self.device.position)
+        self.assertFalse(self.device.face)
 
     def test_field_sync_uses_cached_intent_and_defers_recalculation(self):
         """Field sync writes the previewed value instead of posted client data."""

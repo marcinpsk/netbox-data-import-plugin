@@ -133,16 +133,14 @@ netbox-shell() {
 _netbox-test() {
   local coverage="$1"
   shift
-  local workers="${NETBOX_TEST_WORKERS:-8}"
+  local workers="${NETBOX_TEST_WORKERS:-auto}"
   local target="netbox_data_import/tests"
   local coverage_args=()
-  local parallel_args=()
+  # An explicit -n always wins over the "-n auto" in pyproject.toml addopts.
+  local parallel_args=(-n "$workers" --maxschedchunk=1)
   if [ "$#" -gt 0 ] && [[ "$1" != -* ]]; then
     target="$1"
     shift
-  fi
-  if [ "$workers" -gt 1 ]; then
-    parallel_args=(-n "$workers" --maxschedchunk=1)
   fi
   if [ "$coverage" != "yes" ]; then
     coverage_args=(--no-cov)
@@ -239,7 +237,7 @@ dev-help() {
   echo ""
   echo "🛠️  Development Tools:"
   echo "  netbox-shell        : Open NetBox Django shell"
-  echo "  netbox-test         : Run plugin tests (8 workers, no coverage)"
+  echo "  netbox-test         : Run plugin tests (auto workers, capped at 8, no coverage)"
   echo "  netbox-test-coverage: Run plugin tests with coverage"
   echo "  netbox-manage       : Run Django management commands"
   echo "  plugin-install      : Reinstall plugin in development mode"

@@ -42,8 +42,8 @@
               <input type="hidden" name="ip_field" value="{{ field }}">
               <input type="hidden" name="next" value="{{ request.path }}">
               <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1"
-                      title="Remove {{ info.label }} from JSON storage"
-                      onclick="return confirm('Remove {{ info.label|escapejs }} from JSON storage?')">
+                      title="Remove {{ info.label }} from the import record"
+                      onclick="return confirm('Remove {{ info.label|escapejs }} from the import record?')">
                 <i class="mdi mdi-delete-outline"></i>
               </button>
             </form>
@@ -91,18 +91,16 @@
           <div class="accordion-body px-0 pb-0">
             <table class="table table-sm mb-0">
               <tbody>
-                {% if import_data.source_id %}
+                {% if import_source.source_id %}
                 <tr>
                   <td class="text-muted">Source ID</td>
-                  <td>{{ import_data.source_id }}</td>
+                  <td>{{ import_source.source_id }}</td>
                 </tr>
                 {% endif %}
-                {% if import_data.profile_name %}
                 <tr>
                   <td class="text-muted">Profile</td>
-                  <td>{{ import_data.profile_name }}</td>
+                  <td><a href="{{ import_source.profile.get_absolute_url }}">{{ import_source.profile.name }}</a></td>
                 </tr>
-                {% endif %}
               </tbody>
             </table>
           </div>
