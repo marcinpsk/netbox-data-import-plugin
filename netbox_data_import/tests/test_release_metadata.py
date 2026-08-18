@@ -50,15 +50,17 @@ def test_the_lockfile_records_the_released_version():
     assert _locked_project_version() == _pyproject()["project"]["version"]
 
 
-def test_the_release_writes_the_lockfile_from_the_cache():
+def test_the_release_rewrites_the_lockfile():
     """semantic-release must regenerate and commit uv.lock, or the check above fails after a release.
 
-    `--offline` is part of the contract, not a detail. Without it the release resolves against the
-    index again, so a version bump can carry a dependency change nobody reviewed.
+    The version bump makes uv.lock stale, so `uv lock` re-resolves. `uv sync` caches wheels and not
+    index metadata, so `--offline` has nothing to resolve against and fails the release.
     """
     semantic_release = _pyproject()["tool"]["semantic_release"]
+    build_command = semantic_release["build_command"]
 
-    assert "uv lock --offline" in semantic_release["build_command"]
+    assert "uv lock" in build_command
+    assert "--offline" not in build_command
     assert "uv.lock" in semantic_release["assets"]
 
 
