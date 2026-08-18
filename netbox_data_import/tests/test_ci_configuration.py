@@ -111,3 +111,19 @@ class WorkflowAuditTest(TestCase):
         steps = yaml.safe_load(workflow.read_text())["jobs"]["format-and-lint"]["steps"]
 
         self.assertTrue(any("zizmor" in str(step.get("run", "")) for step in steps))
+
+
+class StackedPullRequestTest(TestCase):
+    """A pull request that targets a working branch must still run the gating checks."""
+
+    GATING_WORKFLOWS = ["test.yaml", "codeql.yml", "js-test.yaml", "lint-format.yaml"]
+
+    def test_the_gating_workflows_accept_any_base_branch(self):
+        """A stack targets working branches, so a base-branch filter leaves it untested."""
+        for name in self.GATING_WORKFLOWS:
+            with self.subTest(workflow=name):
+                workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / name
+                parsed = yaml.safe_load(workflow.read_text())
+                triggers = parsed.get("on", parsed.get(True))
+
+                self.assertNotIn("branches", triggers["pull_request"] or {})
