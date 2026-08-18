@@ -87,6 +87,38 @@ class EveryRowCarriesADetailRowTest(ImportPreviewViewTest):
         self.assertEqual(detail_rows, source_rows)
 
 
+class DetailRowIdsAreUniqueTest(ImportPreviewViewTest):
+    """Row numbers repeat across object types, so the detail row cannot be keyed on them."""
+
+    def test_no_detail_row_id_is_rendered_twice(self):
+        """A shared id makes setDiffExpanded flip a second row's toggle state."""
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        html = response.content.decode()
+        ids = re.findall(r'<tr id="(diff-[^"]+)" class="ndi-diff-row"', html)
+        self.assertTrue(ids, "the preview must render detail rows")
+        self.assertEqual(sorted(ids), sorted(set(ids)), "detail row ids must be unique per render")
+
+    def test_every_diff_toggle_points_at_an_existing_detail_row(self):
+        """A toggle whose target is missing silently does nothing."""
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        html = response.content.decode()
+        detail_ids = set(re.findall(r'<tr id="(diff-[^"]+)" class="ndi-diff-row"', html))
+        targets = set(re.findall(r'data-diff-target="(diff-[^"]+)"', html))
+        self.assertLessEqual(targets, detail_ids)
+
+    def test_every_source_row_is_reachable_by_keyboard(self):
+        """The row is the toggle, so a keyboard-only operator needs a seat on it."""
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        html = response.content.decode()
+        rows = re.findall(r'<tr id="row-\d+" data-action="[^"]*"\s+([^>]*)>', html)
+        self.assertTrue(rows, "the preview must render source rows")
+        self.assertTrue(all('tabindex="0"' in attrs for attrs in rows), rows[:2])
+        self.assertTrue(all("aria-expanded=" in attrs for attrs in rows), rows[:2])
+
+
 class PluginScriptsAreVersionedTest(ImportPreviewViewTest):
     """A browser must not keep running the previous release's script after an upgrade."""
 

@@ -368,7 +368,9 @@
           </thead>
           <tbody id="previewRowsBody">
             {% for row in result.rows %}
-            <tr id="row-{{ row.row_number }}" data-action="{{ row.action }}" class="
+            <tr id="row-{{ row.row_number }}" data-action="{{ row.action }}"
+                tabindex="0" role="button" aria-expanded="false"
+                aria-controls="diff-{{ forloop.counter }}" class="
               {% if row.action == 'create' and row.object_type == 'device' %}table-success
               {% elif row.action == 'create' and row.object_type == 'rack' %}table-success
               {% elif row.action == 'create' %}table-warning
@@ -439,8 +441,8 @@
                   {% with diff=row.extra_data.field_diff %}
                   <br>
                   <button type="button" class="badge ndi-diff-badge ndi-diff-toggle mt-1"
-                          data-diff-target="diff-{{ row.row_number }}"
-                          aria-controls="diff-{{ row.row_number }}"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
                           aria-expanded="false"
                           title="Click to see field differences">
                     <i class="mdi mdi-chevron-down"></i> {{ diff|length }} field(s) differ
@@ -451,8 +453,8 @@
                   {% with ignored=row.extra_data.field_ignored %}
                   <br>
                   <button type="button" class="badge ndi-badge-ignored ndi-diff-toggle mt-1"
-                          data-diff-target="diff-{{ row.row_number }}"
-                          aria-controls="diff-{{ row.row_number }}"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
                           aria-expanded="false"
                           title="Click to see ignored field differences">
                     <i class="mdi mdi-eye-off"></i> {{ ignored|length }} field(s) ignored
@@ -734,7 +736,7 @@
               </td>
             </tr>
             {# Every row carries a detail row so a click always answers, even with nothing to act on. #}
-            <tr id="diff-{{ row.row_number }}" class="ndi-diff-row" hidden>
+            <tr id="diff-{{ forloop.counter }}" class="ndi-diff-row" hidden>
               <td colspan="7" class="p-0 border-top-0">
                 <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
                   {% if not row.extra_data.netbox_device_id %}
@@ -777,7 +779,7 @@
                     </thead>
                     <tbody>
                       {% for field_name, vals in row.extra_data.field_diff.items %}
-                      <tr id="diff-field-{{ row.row_number }}-{{ field_name }}">
+                      <tr id="diff-field-{{ forloop.parentloop.counter }}-{{ field_name }}">
                         <td class="text-muted">
                           {{ field_name }}
                           {% if field_name in row.extra_data.field_informational %}

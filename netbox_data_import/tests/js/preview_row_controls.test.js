@@ -278,6 +278,28 @@ describe("clicking a source row", () => {
     expect(details[1].hidden).toBe(false);
   });
 
+  it("changes only the clicked row's toggle state", () => {
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr id="row-3" data-action="create" aria-expanded="false">
+          <td><button type="button" class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="false"></button></td>
+        </tr>
+        <tr id="diff-1" class="ndi-diff-row" hidden><td>first detail</td></tr>
+        <tr id="row-3" data-action="error" aria-expanded="false">
+          <td><button type="button" class="ndi-diff-toggle" data-diff-target="diff-2" aria-expanded="false"></button></td>
+        </tr>
+        <tr id="diff-2" class="ndi-diff-row" hidden><td>second detail</td></tr>
+      </tbody></table>
+    `;
+    const rows = document.querySelectorAll("#previewRowsBody > tr[data-action]");
+    rows[1].querySelector("td").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    const toggles = document.querySelectorAll(".ndi-diff-toggle");
+    expect(document.getElementById("diff-1").hidden).toBe(true);
+    expect(document.getElementById("diff-2").hidden).toBe(false);
+    expect(toggles[0].getAttribute("aria-expanded")).toBe("false");
+    expect(toggles[1].getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("collapses again on a second click", () => {
     const row = document.getElementById("row-7");
     row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -297,5 +319,64 @@ describe("clicking a source row", () => {
       .querySelector("#row-7 a")
       .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     expect(document.getElementById("diff-7").hidden).toBe(true);
+  });
+});
+
+/* The script now ships inside the swapped content, so an htmx boost evaluates it again on every
+ * navigation. Document listeners outlive the swap, so a second evaluation must not double them. */
+describe("evaluating the controller twice", () => {
+  beforeEach(() => {
+    loadController();
+    window.eval(controllerSource);
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr id="row-9" data-action="update" tabindex="0">
+          <td>pw-server-09</td>
+        </tr>
+        <tr id="diff-9" class="ndi-diff-row" hidden><td>detail</td></tr>
+      </tbody></table>
+    `;
+  });
+
+  it("toggles a detail row once per click, not twice", () => {
+    document.getElementById("row-9").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-9").hidden).toBe(false);
+  });
+});
+
+/* A keyboard-only operator has to reach the same detail rows. */
+describe("keyboard activation", () => {
+  beforeEach(() => {
+    loadController();
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr id="row-11" data-action="update" tabindex="0">
+          <td>pw-server-11</td>
+          <td><button type="button" class="ndi-sync-btn">Sync</button></td>
+        </tr>
+        <tr id="diff-11" class="ndi-diff-row" hidden><td>detail</td></tr>
+      </tbody></table>
+    `;
+  });
+
+  function press(key, target) {
+    (target || document.getElementById("row-11")).dispatchEvent(
+      new window.KeyboardEvent("keydown", { key, bubbles: true }),
+    );
+  }
+
+  it("expands the detail row on Enter", () => {
+    press("Enter");
+    expect(document.getElementById("diff-11").hidden).toBe(false);
+  });
+
+  it("expands the detail row on Space", () => {
+    press(" ");
+    expect(document.getElementById("diff-11").hidden).toBe(false);
+  });
+
+  it("leaves the detail row alone for a key pressed on a control inside the row", () => {
+    press("Enter", document.querySelector("#row-11 .ndi-sync-btn"));
+    expect(document.getElementById("diff-11").hidden).toBe(true);
   });
 });

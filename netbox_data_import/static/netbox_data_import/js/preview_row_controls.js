@@ -9,6 +9,11 @@
  * constructs one Bootstrap Modal per trigger at load, which costs seconds of blocked main
  * thread on a preview with thousands of rows. */
 (function () {
+  // The script ships inside the swapped content, so an htmx boost evaluates it again on every
+  // navigation. Document listeners outlive the swap, so a second evaluation would double them.
+  if (window.ndiPreviewRowControls) return;
+  window.ndiPreviewRowControls = true;
+
   function setDiffExpanded(diffRow, expanded) {
     if (!diffRow) return;
     diffRow.hidden = !expanded;
@@ -34,10 +39,10 @@
 
   /* The whole source row toggles its own detail row, so a row with nothing actionable still
    * answers a click. Controls inside the row keep their own behavior. */
-  document.addEventListener('click', function (event) {
-    if (event.target.closest('.ndi-diff-toggle')) return;
-    if (event.target.closest('button, a, input, select, textarea, label, [data-ndi-modal]')) return;
-    var row = event.target.closest('#previewRowsBody > tr[data-action]');
+  function toggleRow(target) {
+    if (target.closest('.ndi-diff-toggle')) return;
+    if (target.closest('button, a, input, select, textarea, label, [data-ndi-modal]')) return;
+    var row = target.closest('#previewRowsBody > tr[data-action]');
     if (!row) return;
     // The detail row always follows its source row. Row ids repeat across object types, so
     // getElementById would resolve the wrong one.
@@ -45,6 +50,18 @@
     if (!diffRow || !diffRow.classList.contains('ndi-diff-row')) return;
     setDiffExpanded(diffRow, diffRow.hidden);
     row.setAttribute('aria-expanded', diffRow.hidden ? 'false' : 'true');
+  }
+
+  document.addEventListener('click', function (event) {
+    toggleRow(event.target);
+  });
+
+  // A row carries tabindex, so Enter and Space have to reach the same detail row.
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    if (!event.target.matches('#previewRowsBody > tr[data-action]')) return;
+    event.preventDefault();
+    toggleRow(event.target);
   });
 
   document.addEventListener('click', function (event) {
