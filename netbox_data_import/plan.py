@@ -58,8 +58,12 @@ class Severity:
 
 
 def canonical_json(value: Any) -> str:
-    """Return the canonical serialization used for every fingerprint."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """Return the canonical serialization used for every fingerprint.
+
+    ``allow_nan`` stays off: NaN and Infinity are not JSON, PostgreSQL rejects them in a JSONField,
+    and NaN never equals itself, which would make two identical shared changes look conflicting.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
 def fingerprint_of(value: Any) -> str:
@@ -73,6 +77,19 @@ def _plain(value: Any, label: str) -> Any:
         return json.loads(canonical_json(value))
     except (TypeError, ValueError) as exc:
         raise PlanInvalid(f"{label} must be JSON-serializable plan data: {exc}") from exc
+
+
+def _identities(value, label: str) -> tuple[str, ...]:
+    """Return *value* as a tuple of identity strings.
+
+    A bare string is refused because tuple("rack:1") would silently become six identities.
+    """
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise PlanInvalid(f"{label} must be a list or tuple of identity strings.")
+    for item in value:
+        if not isinstance(item, str):
+            raise PlanInvalid(f"{label} must hold identity strings, not {type(item).__name__}.")
+    return tuple(value)
 
 
 @dataclass(frozen=True)
@@ -90,8 +107,12 @@ class Diagnostic:
             raise PlanInvalid(f"Diagnostic code '{self.code}' must use the '<domain>.<condition>' form.")
         if self.severity not in Severity.ALL:
             raise PlanInvalid(f"Unknown diagnostic severity '{self.severity}'.")
-        object.__setattr__(self, "identities", tuple(self.identities))
+        object.__setattr__(self, "identities", _identities(self.identities, "Diagnostic identities"))
         object.__setattr__(self, "display", _plain(self.display, "Diagnostic display"))
+
+    def __hash__(self):
+        """Hash over the serialized form, which mirrors the generated equality."""
+        return hash(canonical_json(self.to_dict()))
 
     @property
     def fingerprint_data(self):
@@ -104,7 +125,7 @@ class Diagnostic:
             "code": self.code,
             "severity": self.severity,
             "identities": list(self.identities),
-            "display": self.display,
+            "display": dict(self.display),
         }
 
     @classmethod
@@ -133,9 +154,13 @@ class PlannedChange:
         """Detach the mappings from planning state and reject anything a plan may not carry."""
         if not self.identity:
             raise PlanInvalid("A Planned Change needs a stable identity.")
-        object.__setattr__(self, "dependencies", tuple(self.dependencies))
+        object.__setattr__(self, "dependencies", _identities(self.dependencies, "Planned Change dependencies"))
         object.__setattr__(self, "payload", _plain(self.payload, "Planned Change payload"))
         object.__setattr__(self, "preconditions", _plain(self.preconditions, "Planned Change preconditions"))
+
+    def __hash__(self):
+        """Hash over the serialized form, which mirrors the generated equality."""
+        return hash(canonical_json(self.to_dict()))
 
     @property
     def fingerprint_data(self):
@@ -150,8 +175,8 @@ class PlannedChange:
         }
 
     def to_dict(self) -> dict:
-        """Return the serialized form, which is exactly the fingerprint data."""
-        return self.fingerprint_data
+        """Return a detached copy of the serialized form, which is exactly the fingerprint data."""
+        return json.loads(canonical_json(self.fingerprint_data))
 
     @classmethod
     def from_dict(cls, data: dict) -> PlannedChange:
@@ -186,6 +211,10 @@ class SynchronizationUnit:
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         object.__setattr__(self, "display", _plain(self.display, "Synchronization Unit display"))
 
+    def __hash__(self):
+        """Hash over the serialized form, which mirrors the generated equality."""
+        return hash(canonical_json(self.to_dict()))
+
     @property
     def fingerprint_data(self):
         """Return the decision inputs, which exclude the display wording."""
@@ -208,7 +237,7 @@ class SynchronizationUnit:
             "disposition": self.disposition,
             "changes": [change.to_dict() for change in self.changes],
             "diagnostics": [diagnostic.to_dict() for diagnostic in self.diagnostics],
-            "display": self.display,
+            "display": dict(self.display),
         }
 
     @classmethod
@@ -241,6 +270,14 @@ class ImportPlan:
         object.__setattr__(self, "units", tuple(self.units))
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         object.__setattr__(self, "planning_context", _plain(self.planning_context, "Planning context"))
+        identities = [unit.identity for unit in self.units]
+        duplicates = sorted({identity for identity in identities if identities.count(identity) > 1})
+        if duplicates:
+            raise PlanInvalid(f"Synchronization Unit identities must be unique: {', '.join(duplicates)}.")
+
+    def __hash__(self):
+        """Hash over the serialized form, which mirrors the generated equality."""
+        return hash(canonical_json(self.to_dict()))
 
     @property
     def fingerprint_data(self):
@@ -276,33 +313,56 @@ class ImportPlan:
             "source_fingerprint": self.source_fingerprint,
             "profile_fingerprint": self.profile_fingerprint,
             "actor": self.actor,
-            "planning_context": self.planning_context,
+            "planning_context": dict(self.planning_context),
             "revision": self.revision,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> ImportPlan:
-        """Rebuild a plan, rejecting a schema version this release does not execute."""
+        """Rebuild a plan, rejecting a schema version this release does not execute.
+
+        Every other malformed payload also raises a PlanError, so one caller-side ``except PlanError``
+        covers a corrupted session entry or job payload (section 4.8).
+        """
         version = data.get("schema_version")
         if version != SCHEMA_VERSION:
             raise PlanSchemaMismatch(f"Import Plan schema version {version} is not version {SCHEMA_VERSION}.")
-        return cls(
-            units=tuple(SynchronizationUnit.from_dict(item) for item in data.get("units", ())),
-            diagnostics=tuple(Diagnostic.from_dict(item) for item in data.get("diagnostics", ())),
-            source_fingerprint=data.get("source_fingerprint", ""),
-            profile_fingerprint=data.get("profile_fingerprint", ""),
-            actor=data.get("actor", ""),
-            planning_context=data.get("planning_context", {}),
-            revision=data.get("revision", 1),
-            schema_version=version,
-        )
+        try:
+            return cls(
+                units=tuple(SynchronizationUnit.from_dict(item) for item in data["units"]),
+                diagnostics=tuple(Diagnostic.from_dict(item) for item in data["diagnostics"]),
+                source_fingerprint=data.get("source_fingerprint", ""),
+                profile_fingerprint=data.get("profile_fingerprint", ""),
+                actor=data.get("actor", ""),
+                planning_context=data.get("planning_context", {}),
+                revision=data.get("revision", 1),
+                schema_version=version,
+            )
+        except PlanError:
+            raise
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise PlanInvalid(f"The serialized Import Plan is malformed: {exc!r}") from exc
 
 
-def merge_changes(units) -> tuple[PlannedChange, ...]:
+def executable_units(units) -> tuple[SynchronizationUnit, ...]:
+    """Return only the actionable units.
+
+    Section 4.6: blocked, invalid, excluded, and no-op units never enter an execution transaction.
+    """
+    return tuple(unit for unit in units if unit.disposition == Disposition.ACTIONABLE)
+
+
+def merge_changes(units, *, reconciled=()) -> tuple[PlannedChange, ...]:
     """Merge the changes of *units* into one deterministic acyclic execution order.
 
     Identical identities are shared and execute once. A conflicting payload or precondition, a
     dangling dependency, and a cycle each make the plan invalid (section 4.4).
+
+    *reconciled* holds the identities a previous execution already applied. They satisfy a
+    dependency without being merged in, which is what section 4.5 means by a dependency that is
+    already reconciled. Passing an identity here never adds work to the selection.
+
+    This merges whatever units it is given. Filter with ``executable_units`` before executing.
     """
     merged: dict[str, PlannedChange] = {}
     order: list[str] = []
@@ -317,11 +377,13 @@ def merge_changes(units) -> tuple[PlannedChange, ...]:
                     f"Planned Change '{change.identity}' appears with conflicting content, so the plan cannot share it."
                 )
 
+    already_applied = frozenset(reconciled)
     for identity, change in merged.items():
         for dependency in change.dependencies:
-            if dependency not in merged:
+            if dependency not in merged and dependency not in already_applied:
                 raise PlanInvalid(
-                    f"Planned Change '{identity}' depends on '{dependency}', which the plan does not contain."
+                    f"Planned Change '{identity}' depends on '{dependency}', "
+                    "which the selection neither contains nor has reconciled."
                 )
 
     return _topological_order(merged, order)
@@ -341,7 +403,9 @@ def _topological_order(merged: dict, order: list[str]) -> tuple[PlannedChange, .
             cycle = " -> ".join(path[path.index(identity) :] + (identity,))
             raise PlanInvalid(f"The Planned Change dependencies form a cycle: {cycle}.")
         state[identity] = 1
-        for dependency in sorted(merged[identity].dependencies, key=lambda dep: position[dep]):
+        for dependency in sorted(
+            (dep for dep in merged[identity].dependencies if dep in merged), key=lambda dep: position[dep]
+        ):
             visit(dependency, path + (identity,))
         state[identity] = 2
         result.append(merged[identity])
@@ -363,6 +427,7 @@ __all__ = (
     "Severity",
     "SynchronizationUnit",
     "canonical_json",
+    "executable_units",
     "fingerprint_of",
     "merge_changes",
 )

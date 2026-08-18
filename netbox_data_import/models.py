@@ -386,7 +386,11 @@ class SourceDocument(models.Model):
 
     RETENTION = timedelta(days=30)
 
-    profile = models.ForeignKey(ImportProfile, on_delete=models.CASCADE, related_name="source_documents")
+    # An execution's input is permanent audit input, so deleting the profile orphans the row rather
+    # than cascading into the protecting reference. Retention then reclaims an unreferenced orphan.
+    profile = models.ForeignKey(
+        ImportProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name="source_documents"
+    )
     content = models.BinaryField()
     content_fingerprint = models.CharField(max_length=64)
     filename = models.CharField(max_length=255, blank=True)
@@ -487,7 +491,8 @@ class ImportExecution(models.Model):
     outcome = models.CharField(max_length=16, choices=ExecutionOutcome.CHOICES, null=True, blank=True)
     applied_changes = models.JSONField(null=True, blank=True)
     failure_detail = models.JSONField(null=True, blank=True)
-    # Deleting the Job nulls the reference, so the row records job-backing separately (section 9.2).
+    # Set by link_job, never at reservation time: the reservation commits before the Job exists
+    # (section 4.7), and deleting the Job later nulls the reference this flag outlives.
     job_backed = models.BooleanField(default=False)
     job = models.OneToOneField(
         "core.Job", on_delete=models.SET_NULL, null=True, blank=True, related_name="import_execution"
@@ -523,14 +528,26 @@ class ImportExecution(models.Model):
         """
         if transaction.get_connection().in_atomic_block:
             raise RuntimeError("The Import Execution reservation must commit before the target transaction opens.")
+        if not fields.get("idempotency_key"):
+            raise ValueError("An Import Execution reservation requires an idempotency key.")
         existing = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
         if existing is not None:
             return existing, False
         try:
             return cls.objects.create(outcome=ExecutionOutcome.PENDING, **fields), True
         except IntegrityError:
-            # A concurrent request won the reservation, so its row is the one both callers observe.
-            return cls.for_idempotency(fields["profile"], fields["idempotency_key"]), False
+            # Only a lost race for this key is recoverable; any other constraint failure must surface.
+            winner = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
+            if winner is None:
+                raise
+            return winner, False
+
+    def link_job(self, job):
+        """Record the native Job that runs this execution, after the reservation has committed."""
+        self.job = job
+        self.job_backed = True
+        self.save(update_fields=["job", "job_backed"])
+        return self
 
     @classmethod
     def for_idempotency(cls, profile, idempotency_key):
@@ -545,17 +562,25 @@ class ImportExecution(models.Model):
         if self.outcome != ExecutionOutcome.PENDING:
             return self
         if self.job_backed:
+            # The Job decides once it exists; a deleted Job leaves no way to finish the attempt.
             job = Job.objects.filter(pk=self.job_id).first() if self.job_id else None
             live = job is not None and job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES
         else:
+            # Either a synchronous attempt or a background one still between reserving and enqueuing.
             live = self.created > (now or timezone.now()) - self.SYNCHRONOUS_BOUND
         if live:
             return self
         self.mark_failed(reason=FailureReason.ABANDONED)
         return self
 
+    def _refuse_a_second_outcome(self):
+        """Reject a transition away from a terminal row, which would destroy audit evidence."""
+        if self.outcome in (ExecutionOutcome.SUCCEEDED, ExecutionOutcome.FAILED):
+            raise ValueError(f"Import Execution {self.pk} already finished as '{self.outcome}'.")
+
     def mark_succeeded(self, *, applied_changes):
         """Record the applied identities and the deleted-object snapshot."""
+        self._refuse_a_second_outcome()
         self.outcome = ExecutionOutcome.SUCCEEDED
         self.applied_changes = applied_changes
         self.failure_detail = None
@@ -563,6 +588,7 @@ class ImportExecution(models.Model):
 
     def mark_failed(self, *, reason, failed_change=None, rolled_back=(), not_attempted=()):
         """Record what failed, what rolled back, and what was never attempted."""
+        self._refuse_a_second_outcome()
         self.outcome = ExecutionOutcome.FAILED
         self.applied_changes = None
         self.failure_detail = {
