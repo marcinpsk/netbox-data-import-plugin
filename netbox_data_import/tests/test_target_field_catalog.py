@@ -9,7 +9,13 @@ from django.test import TestCase
 from django.urls import reverse
 from tenancy.models import ContactRole
 
-from netbox_data_import.adapters import ADAPTERS, FlatWorkbookAdapter, TraceWorkbookAdapter, get_adapter
+from netbox_data_import.adapters import (
+    ADAPTERS,
+    FlatWorkbookAdapter,
+    TraceWorkbookAdapter,
+    UnknownSourceAdapter,
+    get_adapter,
+)
 from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
 from netbox_data_import.catalog import CATALOG, POLICY_SECTIONS, OutputKind, TargetModuleKey
 from netbox_data_import.forms import ColumnMappingForm, ColumnTransformRuleForm, ImportProfileForm
@@ -167,12 +173,15 @@ class ImportProfileAdapterTest(TestCase):
             profile.adapter_settings.not_a_setting
 
     def test_a_dangling_role_resolves_to_none(self):
-        """A renamed or deleted Contact Role no longer resolves."""
+        """A renamed or deleted Contact Role no longer resolves.
+
+        The resolution is cached for the profile instance, so a later read reloads the profile.
+        """
         role = ContactRole.objects.create(name="Temporary", slug="temporary")
         profile = ImportProfile.objects.create(name="Dangling", adapter_config={"primary_contact_role": "Temporary"})
-        self.assertEqual(profile.resolve_primary_contact_role(), role)
+        self.assertEqual(profile.resolved_primary_contact_role, role)
         role.delete()
-        self.assertIsNone(profile.resolve_primary_contact_role())
+        self.assertIsNone(ImportProfile.objects.get(pk=profile.pk).resolved_primary_contact_role)
 
 
 class PolicyApplicabilityTest(TestCase):
@@ -365,3 +374,138 @@ def _superuser():
 
     User = get_user_model()
     return User.objects.create_superuser(username="catalog-admin", password="catalog-admin")
+
+
+class ReviewFindingRegressionTest(TestCase):
+    """Regressions for the findings raised on the T1 review."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.flat = ImportProfile.objects.create(name="Finding Flat", adapter_config={})
+        cls.trace = ImportProfile.objects.create(
+            name="Finding Trace", source_adapter="trace_workbook", adapter_config={}
+        )
+
+    def test_rest_normalizes_an_absent_adapter_config(self):
+        """A REST-created profile stores the same document a form-created profile stores."""
+        self.client.force_login(_superuser())
+        response = self.client.post(
+            "/api/plugins/data-import/profiles/",
+            data=json.dumps({"name": "REST No Config"}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        profile = ImportProfile.objects.get(name="REST No Config")
+        self.assertEqual(profile.adapter_config, FlatWorkbookConfigForm.validate_config({}))
+
+    def test_the_resolved_contact_role_is_memoized_per_profile(self):
+        """Planning reads the role once per profile instance, not once per row."""
+        ContactRole.objects.create(name="Cached Owner", slug="cached-owner")
+        profile = ImportProfile.objects.create(
+            name="Cached Role", adapter_config={"primary_contact_role": "Cached Owner"}
+        )
+        with self.assertNumQueries(1):
+            first = profile.resolved_primary_contact_role
+            second = profile.resolved_primary_contact_role
+        self.assertIsNotNone(first)
+        self.assertIs(first, second)
+
+    def test_changing_the_configured_role_invalidates_the_memo(self):
+        """A mutated profile instance must not keep returning the previous role."""
+        ContactRole.objects.create(name="First Owner", slug="first-owner")
+        replacement = ContactRole.objects.create(name="Second Owner", slug="second-owner")
+        profile = ImportProfile.objects.create(
+            name="Remapped Role", adapter_config={"primary_contact_role": "First Owner"}
+        )
+        self.assertEqual(profile.resolved_primary_contact_role.name, "First Owner")
+        profile.adapter_config["primary_contact_role"] = "Second Owner"
+        self.assertEqual(profile.resolved_primary_contact_role, replacement)
+
+    def test_a_non_numeric_profile_id_does_not_raise(self):
+        """A hidden field carries raw POST text, so the lookup must not crash the request."""
+        form = ColumnMappingForm(data={"profile": "abc", "source_column": "Name", "target_field": "device_name"})
+        self.assertFalse(form.is_valid())
+
+    def test_a_stored_family_target_stays_editable(self):
+        """A row saved with an extra_json target must re-save through its form."""
+        mapping = ColumnMapping.objects.create(
+            profile=self.flat, source_column="Jira", target_field="extra_json:jira_id"
+        )
+        form = ColumnMappingForm(instance=mapping, initial={"profile": self.flat})
+        self.assertIn("extra_json:jira_id", [key for key, _label in form.fields["target_field"].choices])
+        bound = ColumnMappingForm(
+            instance=mapping,
+            data={"profile": self.flat.pk, "source_column": "Jira", "target_field": "extra_json:jira_id"},
+        )
+        self.assertTrue(bound.is_valid(), bound.errors)
+
+    def test_a_stored_family_group_target_stays_editable(self):
+        """The same holds for a transform rule group target."""
+        rule = ColumnTransformRule.objects.create(
+            profile=self.flat,
+            source_column="Name",
+            pattern=r"^(\w+)$",
+            group_1_target="extra_json:jira_id",
+        )
+        form = ColumnTransformRuleForm(instance=rule, initial={"profile": self.flat})
+        self.assertIn("extra_json:jira_id", [key for key, _label in form.fields["group_1_target"].choices])
+
+    def test_a_transform_rule_is_rejected_on_an_inapplicable_profile(self):
+        """ColumnTransformRule must run the shared applicability check too."""
+        rule = ColumnTransformRule(profile=self.trace, source_column="Name", pattern=r"^(\w+)$")
+        with self.assertRaises(ValidationError):
+            rule.full_clean()
+
+    def test_the_profile_list_renders_the_adapter_label(self):
+        """The list and the detail page must agree on how the adapter reads."""
+        from netbox_data_import.tables import ImportProfileTable
+
+        table = ImportProfileTable(ImportProfile.objects.filter(pk=self.flat.pk))
+        rendered = table.rows[0].get_cell("source_adapter")
+        self.assertIn("Flat workbook", str(rendered))
+
+    def test_an_unregistered_adapter_reports_its_key(self):
+        """A profile stamped with an adapter this release no longer registers fails legibly."""
+        ImportProfile.objects.filter(pk=self.flat.pk).update(source_adapter="retired_adapter")
+        profile = ImportProfile.objects.get(pk=self.flat.pk)
+        with self.assertRaisesMessage(UnknownSourceAdapter, "retired_adapter"):
+            profile.adapter_settings.preview_view_mode
+
+    def test_the_import_wizard_rejects_a_profile_with_an_unregistered_adapter(self):
+        """The stale profile fails at the form boundary instead of reaching the preview."""
+        from netbox_data_import.forms import ImportSetupForm
+
+        ImportProfile.objects.filter(pk=self.flat.pk).update(source_adapter="retired_adapter")
+        form = ImportSetupForm(data={"profile": self.flat.pk})
+        self.assertFalse(form.is_valid())
+        self.assertIn("retired_adapter", " ".join(form.errors["profile"]))
+
+    def test_yaml_import_rejects_an_adapter_change(self):
+        """The bulk YAML path must keep the adapter immutable."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaisesMessage(ValueError, "source adapter"):
+            _apply_profile_yaml_data({"profile": {"name": self.flat.name, "source_adapter": "trace_workbook"}})
+
+    def test_bulk_csv_import_rejects_an_adapter_change_end_to_end(self):
+        """Drive the real bulk-import view: an id row cannot repoint an existing profile."""
+        self.client.force_login(_superuser())
+        csv_data = f"id,name,source_adapter\n{self.flat.pk},{self.flat.name},trace_workbook\n"
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:importprofile_bulk_import"),
+            {"data": csv_data, "format": "csv"},
+        )
+        self.assertEqual(response.status_code, 200, "a rejected import re-renders the form")
+        self.flat.refresh_from_db()
+        self.assertEqual(self.flat.source_adapter, "flat_workbook")
+
+    def test_csv_import_rejects_an_adapter_change(self):
+        """The flat CSV import path must keep the adapter immutable."""
+        from netbox_data_import.forms import ImportProfileImportForm
+
+        form = ImportProfileImportForm(
+            data={"name": self.flat.name, "source_adapter": "trace_workbook"}, instance=self.flat
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("source_adapter", form.errors)

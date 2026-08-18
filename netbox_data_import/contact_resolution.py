@@ -247,7 +247,7 @@ class PrimaryContactResolver:
         role_name = profile.adapter_settings.primary_contact_role
         if not role_name:
             raise ValidationError({"primary_contact": "Select a primary contact role on the import profile."})
-        role = profile.resolve_primary_contact_role()
+        role = profile.resolved_primary_contact_role
         if role is None:
             raise ValidationError(
                 {

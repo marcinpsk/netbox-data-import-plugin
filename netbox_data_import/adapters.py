@@ -15,6 +15,10 @@ from __future__ import annotations
 from .catalog import OutputKind
 
 
+class UnknownSourceAdapter(Exception):
+    """A profile names a Source Adapter key this release does not register."""
+
+
 class SourceAdapter:
     """Base class for a Source Adapter declaration."""
 
@@ -87,6 +91,7 @@ __all__ = (
     "FlatWorkbookAdapter",
     "SourceAdapter",
     "TraceWorkbookAdapter",
+    "UnknownSourceAdapter",
     "adapter_choices",
     "get_adapter",
     "output_kinds_for",

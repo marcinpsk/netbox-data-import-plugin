@@ -5,7 +5,13 @@ from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
-from .adapters import DEFAULT_ADAPTER_KEY, adapter_choices, get_adapter, output_kinds_for
+from .adapters import (
+    DEFAULT_ADAPTER_KEY,
+    UnknownSourceAdapter,
+    adapter_choices,
+    get_adapter,
+    output_kinds_for,
+)
 from .catalog import CATALOG, policy_section
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
@@ -138,7 +144,7 @@ class ImportProfile(NetBoxModel):
     @property
     def adapter_settings(self):
         """Return attribute access over ``adapter_config`` backed by the adapter's declared defaults."""
-        return AdapterSettings(self.adapter, self.adapter_config)
+        return AdapterSettings(self.adapter, self.adapter_config, self.source_adapter)
 
     @property
     def adapter_config_display(self):
@@ -158,14 +164,24 @@ class ImportProfile(NetBoxModel):
             rows.append((field.label or pretty_name(name), value))
         return rows
 
-    def resolve_primary_contact_role(self):
-        """Return the referenced Contact Role object, or None when unset or dangling."""
+    @property
+    def resolved_primary_contact_role(self):
+        """Return the referenced Contact Role object, or None when unset or dangling.
+
+        Planning reads this once per row, so the lookup is memoized against the configured name. A
+        plain instance cache would keep returning the old role after ``adapter_config`` changes.
+        """
         name = self.adapter_settings.primary_contact_role
         if not name:
             return None
+        cached = self.__dict__.get("_primary_contact_role_cache")
+        if cached is not None and cached[0] == name:
+            return cached[1]
         from tenancy.models import ContactRole
 
-        return ContactRole.objects.filter(name=name).first()
+        role = ContactRole.objects.filter(name=name).first()
+        self.__dict__["_primary_contact_role_cache"] = (name, role)
+        return role
 
     def clean(self):
         """Reject an adapter change after creation and validate the adapter configuration."""
@@ -185,12 +201,16 @@ class ImportProfile(NetBoxModel):
 class AdapterSettings:
     """Read one adapter setting, falling back to the adapter form's declared default."""
 
-    def __init__(self, adapter, config):
-        self._fields = adapter.config_form_class().base_fields if adapter is not None else {}
+    def __init__(self, adapter, config, adapter_key):
+        self._adapter_key = adapter_key
+        self._fields = adapter.config_form_class().base_fields if adapter is not None else None
         self._config = config if isinstance(config, dict) else {}
 
     def __getattr__(self, name):
         fields = object.__getattribute__(self, "_fields")
+        if fields is None:
+            key = object.__getattribute__(self, "_adapter_key")
+            raise UnknownSourceAdapter(f"This release does not register the source adapter '{key}'.")
         if name not in fields:
             raise AttributeError(f"'{name}' is not a setting of this profile's source adapter")
         config = object.__getattribute__(self, "_config")
@@ -234,7 +254,7 @@ class ColumnMapping(PolicySectionModel):
 
     def clean(self):
         """Resolve the target field through the catalog and reject an inapplicable row."""
-        validate_section_applicability(self, "column_mappings")
+        super().clean()
         value = self.target_field or ""
         if not CATALOG.is_valid(value, output_kinds=self.profile.output_kinds if self.profile_id else None):
             raise ValidationError({"target_field": CATALOG.invalid_key_message(value)})
@@ -483,6 +503,8 @@ class ColumnTransformRule(PolicySectionModel):
         import re
 
         from django.core.exceptions import ValidationError
+
+        super().clean()
 
         try:
             compiled = re.compile(self.pattern)

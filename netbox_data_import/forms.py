@@ -20,10 +20,21 @@ def _profile_output_kinds(form):
     if not profile:
         return None
     if not isinstance(profile, ImportProfile):
-        profile = ImportProfile.objects.filter(pk=profile).first()
+        # A hidden field carries raw POST text, so a non-numeric value must not reach the query.
+        try:
+            profile = ImportProfile.objects.filter(pk=int(profile)).first()
+        except (TypeError, ValueError):
+            return None
         if profile is None:
             return None
     return profile.output_kinds
+
+
+def _with_stored_target(choices, stored):
+    """Keep a stored key-family target selectable, so an existing row can be re-saved."""
+    if not stored or stored in {key for key, _label in choices}:
+        return choices
+    return [*choices, (stored, CATALOG.display(stored))]
 
 
 class ImportProfileForm(NetBoxModelForm):
@@ -108,7 +119,8 @@ class ColumnMappingForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["target_field"].choices = CATALOG.choices(output_kinds=_profile_output_kinds(self))
+        choices = CATALOG.choices(output_kinds=_profile_output_kinds(self))
+        self.fields["target_field"].choices = _with_stored_target(choices, self.instance.target_field)
 
 
 class ClassRoleMappingForm(forms.ModelForm):
@@ -164,7 +176,8 @@ class ColumnTransformRuleForm(forms.ModelForm):
         # A capture group yields text, so the candidate targets are not offered.
         choices = CATALOG.choices(output_kinds=_profile_output_kinds(self), allow_candidates=False)
         for name in ("group_1_target", "group_2_target"):
-            self.fields[name].choices = [("", "---------"), *choices]
+            stored = getattr(self.instance, name, "")
+            self.fields[name].choices = [("", "---------"), *_with_stored_target(choices, stored)]
 
 
 class ImportSetupForm(forms.Form):
@@ -206,6 +219,16 @@ class ImportSetupForm(forms.Form):
         self.fields["site"].queryset = Site.objects.restrict(user, "view")
         self.fields["location"].queryset = Location.objects.restrict(user, "view")
         self.fields["tenant"].queryset = Tenant.objects.restrict(user, "view")
+
+    def clean_profile(self):
+        """Reject a profile whose stored Source Adapter this release no longer registers."""
+        profile = self.cleaned_data["profile"]
+        if profile.adapter is None:
+            raise forms.ValidationError(
+                f"This profile uses the source adapter '{profile.source_adapter}', "
+                "which this release does not register."
+            )
+        return profile
 
     def clean_excel_file(self):
         """Reject files that exceed the maximum upload size."""

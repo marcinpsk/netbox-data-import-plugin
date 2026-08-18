@@ -24,7 +24,7 @@ class ImportProfileModelTest(TestCase):
         self.assertEqual(profile.adapter_settings.sheet_name, "Data")
         self.assertTrue(profile.adapter_settings.update_existing)
         self.assertTrue(profile.adapter_settings.create_missing_device_types)
-        self.assertIsNone(profile.resolve_primary_contact_role())
+        self.assertIsNone(profile.resolved_primary_contact_role)
         self.assertEqual(profile.adapter_settings.primary_contact_lookup_field, "email")
 
     def test_profile_name_unique(self):

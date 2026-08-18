@@ -70,11 +70,13 @@ class ImportProfileSerializer(NetBoxModelSerializer):
         adapter = get_adapter(adapter_key)
         if adapter is None:
             raise serializers.ValidationError({"source_adapter": f"Unknown source adapter '{adapter_key}'."})
-        if "adapter_config" in attrs:
-            try:
-                attrs["adapter_config"] = adapter.config_form_class().validate_config(attrs["adapter_config"])
-            except ValidationError as exc:
-                raise serializers.ValidationError({"adapter_config": exc.messages}) from exc
+        # Normalize unconditionally: this serializer never calls Model.full_clean, so an absent key
+        # would otherwise persist {} while the form path persists the full mapping.
+        raw_config = attrs.get("adapter_config", getattr(instance, "adapter_config", None))
+        try:
+            attrs["adapter_config"] = adapter.config_form_class().validate_config(raw_config)
+        except ValidationError as exc:
+            raise serializers.ValidationError({"adapter_config": exc.messages}) from exc
         return attrs
 
 

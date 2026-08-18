@@ -86,7 +86,7 @@ class ImportProfileAPITest(BaseAPITestCase):
 
         self.assertEqual(response.status_code, 201, response.content)
         profile = ImportProfile.objects.get(name="API Contact Profile")
-        self.assertEqual(profile.resolve_primary_contact_role(), role)
+        self.assertEqual(profile.resolved_primary_contact_role, role)
         self.assertEqual(profile.adapter_settings.primary_contact_lookup_field, "name")
 
 

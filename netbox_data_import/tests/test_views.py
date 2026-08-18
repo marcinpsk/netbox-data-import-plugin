@@ -1159,7 +1159,7 @@ manufacturer_mappings:
 
         self.assertIn(response.status_code, [200, 302])
         profile = ImportProfile.objects.get(name="ImportedContactProfile")
-        self.assertEqual(profile.resolve_primary_contact_role(), role)
+        self.assertEqual(profile.resolved_primary_contact_role, role)
         self.assertEqual(profile.adapter_settings.primary_contact_lookup_field, "name")
 
     def test_yaml_import_can_clear_the_primary_contact_role(self):
@@ -1176,7 +1176,7 @@ manufacturer_mappings:
         _apply_profile_yaml_data({"profile": {"name": profile.name, "adapter_config": {"primary_contact_role": None}}})
 
         profile.refresh_from_db()
-        self.assertIsNone(profile.resolve_primary_contact_role())
+        self.assertIsNone(profile.resolved_primary_contact_role)
 
     def test_yaml_import_rejects_an_unknown_primary_contact_role(self):
         """A dangling Contact Role natural key fails at the adapter form boundary."""

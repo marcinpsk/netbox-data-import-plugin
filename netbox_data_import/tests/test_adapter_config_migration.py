@@ -102,10 +102,11 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
 
     def test_the_data_step_carries_data_operations_only(self):
         """The middle step never touches the schema."""
-        from django.db.migrations.operations.base import Operation
         from importlib import import_module
 
+        from django.db.migrations import RunPython
+
         migration = import_module(f"{APP}.migrations.{DATA_STEP}").Migration
+        self.assertTrue(migration.operations)
         for operation in migration.operations:
-            self.assertIsInstance(operation, Operation)
-            self.assertFalse(operation.reduces_to_sql, operation)
+            self.assertIsInstance(operation, RunPython)
