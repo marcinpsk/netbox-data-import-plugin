@@ -74,6 +74,48 @@ class QuickAddColumnMappingViewTest(TestCase):
             ColumnMapping.objects.filter(profile=self.profile, source_column="JiraID", target_field="serial").exists()
         )
 
+    def test_an_overlength_target_field_is_refused(self):
+        """CATALOG.is_valid accepts any name after a family prefix, but the column is 100 chars."""
+        resp = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "JiraID",
+                "target_field": "extra_json:" + ("x" * 200),
+            },
+        )
+        self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
+        self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, source_column="JiraID").exists())
+
+    def test_an_overlength_source_column_is_refused(self):
+        """The source column is read straight from the request and the column is 200 chars."""
+        resp = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "J" * 300,
+                "target_field": "serial",
+            },
+        )
+        self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
+        self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, target_field="serial").exists())
+
+    def test_a_refused_mapping_does_not_delete_the_displaced_row(self):
+        """The delete runs before the create, so an invalid write must not strand the profile."""
+        ColumnMapping.objects.create(profile=self.profile, source_column="OldCol", target_field="asset_tag")
+        self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "N" * 300,
+                "target_field": "asset_tag",
+            },
+        )
+        self.assertTrue(
+            ColumnMapping.objects.filter(profile=self.profile, source_column="OldCol").exists(),
+            "an invalid replacement must leave the existing mapping in place",
+        )
+
     def test_keeps_existing_direct_mapping_for_another_target(self):
         """One source column can provide more than one direct target."""
         ColumnMapping.objects.create(profile=self.profile, source_column="JiraID", target_field="asset_tag")

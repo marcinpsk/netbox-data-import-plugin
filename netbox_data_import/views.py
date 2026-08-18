@@ -2986,6 +2986,17 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
             messages.error(request, "Valid source column and target field are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
+        # The catalog accepts any non-empty name after a family prefix, so it cannot bound length.
+        # Validate before the displaced row is deleted: an invalid write must strand nothing.
+        try:
+            _validate_model_instance(
+                ColumnMapping(profile=profile, source_column=source_column, target_field=target_field),
+                f"column mapping '{source_column}' -> {target_field}",
+            )
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
         if target_field.startswith("candidate:"):
             _, created = ColumnMapping.objects.get_or_create(
                 profile=profile,
