@@ -32,6 +32,21 @@
     setDiffExpanded(diffRow, diffRow.hidden);
   });
 
+  /* The whole source row toggles its own detail row, so a row with nothing actionable still
+   * answers a click. Controls inside the row keep their own behavior. */
+  document.addEventListener('click', function (event) {
+    if (event.target.closest('.ndi-diff-toggle')) return;
+    if (event.target.closest('button, a, input, select, textarea, label, [data-ndi-modal]')) return;
+    var row = event.target.closest('#previewRowsBody > tr[data-action]');
+    if (!row) return;
+    // The detail row always follows its source row. Row ids repeat across object types, so
+    // getElementById would resolve the wrong one.
+    var diffRow = row.nextElementSibling;
+    if (!diffRow || !diffRow.classList.contains('ndi-diff-row')) return;
+    setDiffExpanded(diffRow, diffRow.hidden);
+    row.setAttribute('aria-expanded', diffRow.hidden ? 'false' : 'true');
+  });
+
   document.addEventListener('click', function (event) {
     var trigger = event.target.closest('[data-ndi-modal]');
     if (!trigger || trigger.disabled) return;

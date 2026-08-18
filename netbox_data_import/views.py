@@ -29,6 +29,7 @@ from .forms import (
     ImportSetupForm,
 )
 from .catalog import CATALOG
+from . import __version__ as _plugin_version
 from .models import (
     ClassRoleMapping,
     ColumnMapping,
@@ -1000,6 +1001,10 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                     {ord("<"): "\\u003C", ord(">"): "\\u003E", ord("&"): "\\u0026"}
                 ),
                 "existing_resolutions": existing_resolutions,
+                "plugin_version": _plugin_version,
+                "resolved_contact_source_ids": [
+                    source_id for source_id, columns in existing_resolutions.items() if "candidate:contact" in columns
+                ],
                 "can_create_role": request.user.has_perm("dcim.add_devicerole"),
                 "unused_columns": unused_columns,
                 "target_field_choices": CATALOG.choices(output_kinds=profile.output_kinds),

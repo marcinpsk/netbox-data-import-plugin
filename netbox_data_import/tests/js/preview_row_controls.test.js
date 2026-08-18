@@ -240,3 +240,62 @@ describe("preview row controls", () => {
     expect(() => clickToggle()).not.toThrow();
   });
 });
+
+/* Every row expands on a click, so a row with nothing actionable still responds. */
+describe("clicking a source row", () => {
+  function addRowWithoutAToggle() {
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr id="row-7" data-action="create">
+          <td>pw-server-01</td>
+          <td><button type="button" class="ndi-sync-btn">Sync</button> <a href="/x">link</a></td>
+        </tr>
+        <tr id="diff-7" class="ndi-diff-row" hidden><td>nothing to review</td></tr>
+        <tr id="row-7" data-action="error">
+          <td>duplicate row number</td>
+        </tr>
+        <tr id="diff-7" class="ndi-diff-row" hidden><td>the second detail row</td></tr>
+      </tbody></table>
+    `;
+  }
+
+  beforeEach(() => {
+    loadController();
+    addRowWithoutAToggle();
+  });
+
+  it("expands the detail row even when the row renders no toggle badge", () => {
+    document.getElementById("row-7").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-7").hidden).toBe(false);
+  });
+
+  it("expands the detail row that follows the clicked row, not the first matching id", () => {
+    // Row numbers repeat across object types, so the page really does carry duplicate ids.
+    const rows = document.querySelectorAll("#previewRowsBody > tr[data-action]");
+    rows[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    const details = document.querySelectorAll("#previewRowsBody > tr.ndi-diff-row");
+    expect(details[0].hidden).toBe(true);
+    expect(details[1].hidden).toBe(false);
+  });
+
+  it("collapses again on a second click", () => {
+    const row = document.getElementById("row-7");
+    row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-7").hidden).toBe(true);
+  });
+
+  it("leaves the detail row alone when a control inside the row is clicked", () => {
+    document
+      .querySelector("#row-7 .ndi-sync-btn")
+      .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-7").hidden).toBe(true);
+  });
+
+  it("leaves the detail row alone when a link inside the row is clicked", () => {
+    document
+      .querySelector("#row-7 a")
+      .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-7").hidden).toBe(true);
+  });
+});

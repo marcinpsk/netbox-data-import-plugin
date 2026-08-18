@@ -5,7 +5,8 @@
 
 {% block title %}Import Preview{% endblock %}
 
-{% block head %}
+{% block content %}
+{# htmx boost swaps the body and discards the response head, so these render here. #}
 <style>
   /* Badge colors using Tabler CSS variables (NetBox uses --tblr-* not --bs-*) */
   .ndi-badge-create  { background-color: var(--tblr-success) !important; color: #fff !important; }
@@ -38,6 +39,10 @@
   [data-bs-theme="dark"] .ndi-badge-generic { background-color: #374151 !important; color: #e5e7eb !important; border-color: #4b5563 !important; }
   /* Field diff sub-table. The collapsed state is the `hidden` attribute, not a rule here,
      so a row cannot render expanded while this stylesheet is missing. */
+  /* Every source row toggles its own detail row, so it has to look clickable. */
+  #previewRowsBody > tr[data-action] { cursor: pointer; }
+  #previewRowsBody > tr[data-action]:hover > td { background-color: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.03)); }
+  .ndi-contact-resolved { --tblr-btn-color: var(--tblr-success); }
   .ndi-diff-toggle { cursor: pointer; border: none; }
   .ndi-diff-toggle:hover { opacity: 0.85; }
   .ndi-diff-table { font-size: 0.82rem; margin-bottom: 0; }
@@ -45,10 +50,7 @@
   .ndi-diff-badge { background-color: #f59e0b !important; color: #000 !important; }
   [data-bs-theme="dark"] .ndi-diff-badge { background-color: #fbbf24 !important; color: #000 !important; }
 </style>
-<script src="{% static 'netbox_data_import/js/preview_row_controls.js' %}"></script>
-{% endblock %}
-
-{% block content %}
+<script src="{% static 'netbox_data_import/js/preview_row_controls.js' %}?v={{ plugin_version }}"></script>
 <input type="hidden" id="ndi-preview-revision" value="{{ preview_revision }}">
 <div class="row">
   <div class="col">
@@ -664,6 +666,17 @@
                 {% endif %}
 
                 {% if row.object_type == 'device' and row.extra_data.candidate_values.contact and profile_id %}
+                {# A resolved row reads as answered: the operator needs to see which rows are left. #}
+                {% if row.source_id|stringformat:"s" in resolved_contact_source_ids %}
+                <button type="button"
+                        class="btn btn-sm btn-outline-success ms-1 ndi-contact-resolved"
+                        data-ndi-modal="#contactCandidateModal"
+                        data-row-number="{{ row.row_number }}"
+                        data-source-id="{{ row.source_id }}"
+                        title="This row's Contact fields are resolved. Open to review or change them.">
+                  <i class="mdi mdi-account-check"></i> Contact resolved
+                </button>
+                {% else %}
                 <button type="button"
                         class="btn btn-sm btn-outline-warning ms-1"
                         data-ndi-modal="#contactCandidateModal"
@@ -672,6 +685,7 @@
                         title="Choose which candidate values supply this row's Contact fields">
                   <i class="mdi mdi-account-question"></i> Resolve contact fields
                 </button>
+                {% endif %}
                 {% endif %}
 
                 {# Conflict badge: shown when two source columns disagree on the same target field #}
@@ -719,11 +733,20 @@
 
               </td>
             </tr>
-            {% if row.extra_data.netbox_device_id %}
-            {% if row.extra_data.field_diff or row.extra_data.field_ignored %}
+            {# Every row carries a detail row so a click always answers, even with nothing to act on. #}
             <tr id="diff-{{ row.row_number }}" class="ndi-diff-row" hidden>
               <td colspan="7" class="p-0 border-top-0">
                 <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
+                  {% if not row.extra_data.netbox_device_id %}
+                  <div class="text-muted small">
+                    This row creates a new object, so there is nothing to compare against NetBox.
+                  </div>
+                  {% elif not row.rack_name and not row.extra_data.field_diff and not row.extra_data.field_ignored %}
+                  <div class="text-muted small">
+                    This row matches NetBox. There is no field difference and no placement to apply.
+                  </div>
+                  {% endif %}
+                  {% if row.extra_data.netbox_device_id %}
                   {% if row.rack_name %}
                   <div class="mb-2">
                     {# Grey and inert when this action writes nothing: green means it writes something #}
@@ -742,6 +765,7 @@
                     <span class="text-muted small ms-2">rack=<strong>{{ row.rack_name }}</strong>{% if row.extra_data.u_position %}, U{{ row.extra_data.u_position }}{% endif %}{% if row.extra_data.face %}, {{ row.extra_data.face }}{% endif %}</span>
                   </div>
                   {% endif %}
+                  {% if row.extra_data.field_diff or row.extra_data.field_ignored %}
                   <table class="table table-sm table-borderless ndi-diff-table mb-0">
                     <thead>
                       <tr class="text-muted">
@@ -811,11 +835,11 @@
                       {% endfor %}
                     </tbody>
                   </table>
+                  {% endif %}
+                  {% endif %}
                 </div>
               </td>
             </tr>
-            {% endif %}
-            {% endif %}
             {% empty %}
             <tr><td colspan="7" class="text-center text-muted">No rows found in file.</td></tr>
             {% endfor %}
@@ -2500,8 +2524,8 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
   });
 }());
 </script>
-<script src="{% static 'netbox_data_import/js/contact_candidate_modal.js' %}"></script>
-<script src="{% static 'netbox_data_import/js/preview_row_actions.js' %}"></script>
+<script src="{% static 'netbox_data_import/js/contact_candidate_modal.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/preview_row_actions.js' %}?v={{ plugin_version }}"></script>
 <script>
 (function () {
   var CONFLICTS_BY_ROW = JSON.parse(
