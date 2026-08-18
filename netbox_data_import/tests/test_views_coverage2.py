@@ -252,6 +252,35 @@ class ImportExecutionListViewPermissionTest(TestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
+    def _regular_client(self, username, *, granted):
+        """Return a logged-in non-superuser, optionally holding view_importexecution."""
+        from core.models import ObjectType
+        from django.contrib.auth import get_user_model
+        from users.models import ObjectPermission
+
+        from netbox_data_import.models import ImportExecution
+
+        user = get_user_model().objects.create_user(username=username, password="testpass")
+        if granted:
+            # NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants
+            # nothing. An ObjectPermission is how an operator actually issues this permission.
+            permission = ObjectPermission.objects.create(name=f"{username} view executions", actions=["view"])
+            permission.users.add(user)
+            permission.object_types.add(ObjectType.objects.get_for_model(ImportExecution))
+        client = Client()
+        client.login(username=username, password="testpass")
+        return client
+
+    def test_a_regular_user_holding_the_view_permission_reaches_the_history(self):
+        """A superuser bypasses the check, so the permission needs a non-superuser to prove it."""
+        url = reverse("plugins:netbox_data_import:importexecution_list")
+        self.assertEqual(self._regular_client("vcov2_exec_granted", granted=True).get(url).status_code, 200)
+
+    def test_a_regular_user_without_the_view_permission_is_denied(self):
+        """The rename means an old view_importjob grant no longer opens the history page."""
+        url = reverse("plugins:netbox_data_import:importexecution_list")
+        self.assertIn(self._regular_client("vcov2_exec_denied", granted=False).get(url).status_code, (302, 403))
+
 
 class RemoveExtraIpValidNextTest(TestCase):
     """Tests for RemoveExtraIpView._safe_return — line 970: valid next param causes redirect."""

@@ -154,6 +154,18 @@ class SourceDocumentRetentionTest(TestCase):
         self.assertEqual(SourceDocument.purge_unreferenced(), 1)
         self.assertFalse(SourceDocument.objects.filter(pk=orphan.pk).exists())
 
+    def test_the_retention_query_does_not_load_the_stored_bytes(self):
+        """A protecting reverse relation blocks fast deletion, so the collector would load content."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._age(_document(self.profile, content=b"a" * 4096), 31)
+        with CaptureQueriesContext(connection) as captured:
+            SourceDocument.purge_unreferenced()
+        selects = [q["sql"] for q in captured.captured_queries if q["sql"].lstrip().upper().startswith("SELECT")]
+        self.assertTrue(selects, "the collector must read the rows it deletes")
+        self.assertFalse([sql for sql in selects if '."content"' in sql], selects)
+
     def test_a_referenced_document_cannot_be_deleted_directly(self):
         """The database enforces the audit rule, not only the housekeeping query."""
         referenced = _document(self.profile)
@@ -416,6 +428,24 @@ class PendingRecoveryTest(TestCase):
         failed.refresh_from_db()
         self.assertEqual(failed.failure_detail["reason"], FailureReason.ABANDONED)
 
+    def test_a_concurrent_transition_cannot_overwrite_a_committed_outcome(self):
+        """Two instances both read pending, so the database must arbitrate the single transition."""
+        first = self._pending("concurrent-key")
+        second = ImportExecution.objects.get(pk=first.pk)
+        first.mark_succeeded(applied_changes={"changes": ["device:1"], "deleted": []})
+        with self.assertRaises(ValueError):
+            second.mark_failed(reason="precondition")
+        stored = ImportExecution.objects.get(pk=first.pk)
+        self.assertEqual(stored.outcome, ExecutionOutcome.SUCCEEDED)
+        self.assertEqual(stored.applied_changes["changes"], ["device:1"])
+
+    def test_reconciliation_yields_to_a_worker_that_finished_the_row(self):
+        """A worker may finish the row between the reconciling read and its transition."""
+        stale = self._pending("reconcile-race-key", age=timedelta(minutes=11))
+        ImportExecution.objects.get(pk=stale.pk).mark_succeeded(applied_changes={"changes": [], "deleted": []})
+        self.assertEqual(stale.reconcile_pending().outcome, ExecutionOutcome.SUCCEEDED)
+        self.assertEqual(ImportExecution.objects.get(pk=stale.pk).outcome, ExecutionOutcome.SUCCEEDED)
+
     def test_a_rolled_back_reconciliation_self_heals_on_the_next_read(self):
         """The transition is recomputed on every read, so losing it to a rollback costs nothing."""
         execution = self._pending("rollback-key", age=timedelta(minutes=11))
@@ -486,6 +516,24 @@ class SourceDocumentRetentionJobTest(TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr[-2000:])
         self.assertEqual(completed.stdout.strip().splitlines()[-1], str(60 * 24), completed.stderr[-2000:])
+
+    def test_the_job_run_method_applies_the_retention_rules(self):
+        """The scheduled entry point is run(), so it must reach the retention rules."""
+        import uuid
+
+        from netbox_data_import.jobs import SourceDocumentRetentionJob
+
+        stale = _document(self.profile, filename="run-stale.xlsx", content=b"run stale bytes")
+        SourceDocument.objects.filter(pk=stale.pk).update(created=timezone.now() - timedelta(days=31))
+        job = Job.objects.create(
+            object_type=ContentType.objects.get_for_model(ImportProfile),
+            object_id=self.profile.pk,
+            name="Data Import source document retention",
+            status=JobStatusChoices.STATUS_RUNNING,
+            job_id=uuid.uuid4(),
+        )
+        self.assertEqual(SourceDocumentRetentionJob(job).run(), 1)
+        self.assertFalse(SourceDocument.objects.filter(pk=stale.pk).exists())
 
     def test_running_it_reclaims_only_the_unreferenced_stale_documents(self):
         """One run applies both retention rules against the real database."""

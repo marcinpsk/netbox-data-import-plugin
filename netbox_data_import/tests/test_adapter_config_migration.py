@@ -51,15 +51,16 @@ def _rewind_to_before_the_squash():
     return _migrate(BEFORE, fake=True)
 
 
-def _latest():
-    """Return the newest migration of the plugin app.
+def _restore_every_leaf():
+    """Migrate the plugin app forward to every leaf of its migration graph.
 
-    tearDown restores this rather than AFTER: a later migration would otherwise leave the worker
-    database short of its newest tables for every test that follows.
+    tearDown restores these rather than AFTER: a later migration would otherwise leave the worker
+    database short of its newest tables for every test that follows. A merge can leave two leaves,
+    so the executor gets all of them instead of one name picked by sort order.
     """
     executor = MigrationExecutor(connection)
     executor.loader.build_graph()
-    return max(name for app, name in executor.loader.graph.leaf_nodes(APP))
+    executor.migrate(list(executor.loader.graph.leaf_nodes(APP)))
 
 
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
@@ -69,7 +70,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         super().setUp()
         # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
         # skips tearDown. Register before walking down, so a rewound worker always recovers.
-        self.addCleanup(lambda: _migrate(_latest()))
+        self.addCleanup(_restore_every_leaf)
         _rewind_to_before_the_squash()
 
     def test_it_moves_every_column_and_repairs_blank_required_settings(self):

@@ -432,7 +432,9 @@ class SourceDocument(models.Model):
         it and the protecting foreign key backs that up.
         """
         cutoff = (now or timezone.now()) - cls.RETENTION
-        stale = cls.objects.filter(import_executions__isnull=True, created__lt=cutoff)
+        # The protecting reverse relation blocks fast deletion, so the collector reads each row.
+        # Deferring the stored bytes keeps one purge from loading every workbook into memory.
+        stale = cls.objects.filter(import_executions__isnull=True, created__lt=cutoff).defer("content")
         return stale.delete()[0]
 
 
@@ -570,34 +572,43 @@ class ImportExecution(models.Model):
             live = self.created > (now or timezone.now()) - self.SYNCHRONOUS_BOUND
         if live:
             return self
-        self.mark_failed(reason=FailureReason.ABANDONED)
+        try:
+            self.mark_failed(reason=FailureReason.ABANDONED)
+        except ValueError:
+            # A worker finished the row between this read and the transition; its outcome wins.
+            pass
         return self
 
-    def _refuse_a_second_outcome(self):
-        """Reject a transition away from a terminal row, which would destroy audit evidence."""
-        if self.outcome in (ExecutionOutcome.SUCCEEDED, ExecutionOutcome.FAILED):
+    def _finish(self, **values):
+        """Transition this row out of pending exactly once, with the database as the arbiter.
+
+        Two instances can both hold a pending copy, so an in-memory check would let the second
+        write overwrite a committed outcome and destroy the audit evidence.
+        """
+        updated = type(self).objects.filter(pk=self.pk, outcome=ExecutionOutcome.PENDING).update(**values)
+        if not updated:
+            self.refresh_from_db()
             raise ValueError(f"Import Execution {self.pk} already finished as '{self.outcome}'.")
+        for name, value in values.items():
+            setattr(self, name, value)
+        return self
 
     def mark_succeeded(self, *, applied_changes):
         """Record the applied identities and the deleted-object snapshot."""
-        self._refuse_a_second_outcome()
-        self.outcome = ExecutionOutcome.SUCCEEDED
-        self.applied_changes = applied_changes
-        self.failure_detail = None
-        self.save(update_fields=["outcome", "applied_changes", "failure_detail"])
+        return self._finish(outcome=ExecutionOutcome.SUCCEEDED, applied_changes=applied_changes, failure_detail=None)
 
     def mark_failed(self, *, reason, failed_change=None, rolled_back=(), not_attempted=()):
         """Record what failed, what rolled back, and what was never attempted."""
-        self._refuse_a_second_outcome()
-        self.outcome = ExecutionOutcome.FAILED
-        self.applied_changes = None
-        self.failure_detail = {
-            "failed_change": failed_change,
-            "rolled_back": list(rolled_back),
-            "not_attempted": list(not_attempted),
-            "reason": reason,
-        }
-        self.save(update_fields=["outcome", "applied_changes", "failure_detail"])
+        return self._finish(
+            outcome=ExecutionOutcome.FAILED,
+            applied_changes=None,
+            failure_detail={
+                "failed_change": failed_change,
+                "rolled_back": list(rolled_back),
+                "not_attempted": list(not_attempted),
+                "reason": reason,
+            },
+        )
 
 
 class DeviceTypeMapping(PolicySectionModel):
