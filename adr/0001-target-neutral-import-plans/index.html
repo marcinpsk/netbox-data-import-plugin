@@ -1,0 +1,645 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/adr/0001-target-neutral-import-plans/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Use target-neutral Import Plans - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#use-target-neutral-import-plans" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Use target-neutral Import Plans
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#interfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interfaces
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#import-plan-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Import Plan model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dependencies-and-selection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dependencies and selection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#preview-and-execution-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Preview and execution safety
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Examples
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rejected-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rejected options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#consequences" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Consequences
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="use-target-neutral-import-plans">Use target-neutral Import Plans</h1>
+<p>The import runtime currently treats Device and Rack rows as its universal model. Preview and execution share one <code>run_import()</code> function through a <code>dry_run</code> flag. Result rows also carry presentation data and execution-safety state. This structure cannot represent one Source Trace that plans several dependent Cable changes, and it makes views and jobs depend on private engine details.</p>
+<p>Replace the internal runtime with one target-neutral Import Engine. Preserve the existing user workflow, outer engine seam, and NetBox Job adapter. Do not preserve the current Python signatures or Device-specific passes.</p>
+<h2 id="interfaces">Interfaces</h2>
+<p>The runtime has these conceptual interfaces:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>SourceAdapter.interpret(...) -&gt; SourceBatch
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>ImportEngine.plan(...) -&gt; ImportPlan
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>ImportEngine.execute(..., accepted_plan, selection) -&gt; ImportExecution
+</code></pre></div>
+<p>A source adapter performs deterministic source interpretation only. It returns typed source items and source diagnostics. It does not query NetBox, enforce target permissions, match target objects, or plan writes.</p>
+<p>The Import Engine coordinates planning and execution. Device, Rack, Cable, and future target modules plan against the complete relevant Source Batch. Each target module owns its target-specific matching, ORM queries, permissions, preconditions, locking, and writes. The target module applies one Planned Change at a time. It does not commit transactions, enqueue work, or call another target module.</p>
+<p>The coordinator owns dependency ordering, semantic plan comparison, transaction scope, rollback, idempotency, audit completion, and progress. Views and jobs use only the Import Engine interface. They do not calculate safety intents or call target modules and private engine helpers.</p>
+<p>A separate Review Workspace module consumes Import Plans. It validates explicit review commands, persists decisions through their owning domain models, and asks the Import Engine for a new plan. Review commands never edit an Import Plan.</p>
+<h2 id="import-plan-model">Import Plan model</h2>
+<p>An Import Plan is a serializable derived artifact. It contains no live ORM objects, lazy querysets, callables, HTML, template fragments, or untyped metadata bags.</p>
+<p>An Import Plan contains Synchronization Units. A Synchronization Unit is the smallest independently reviewable and executable part of the plan. It contains zero or more typed Planned Changes that commit together. A flat Device or Rack source row usually produces one unit. One complete Source Trace produces one unit even when the source uses several workbook rows and the target requires several Cable changes.</p>
+<p>Each unit has one disposition:</p>
+<ul>
+<li><code>actionable</code>: it contains changes that can execute.</li>
+<li><code>no-op</code>: current NetBox state already matches the desired state.</li>
+<li><code>blocked</code>: it needs an operator decision or an unmet dependency.</li>
+<li><code>invalid</code>: source or target state violates a planning invariant.</li>
+<li><code>excluded</code>: synchronization policy intentionally omits it.</li>
+</ul>
+<p>Diagnostics are separate structured values with <code>info</code>, <code>warning</code>, or <code>error</code> severity. Planned Changes record a stable identity, a target-specific serialized payload, explicit dependencies, and all target-state preconditions that can affect the planned result.</p>
+<p>The plan revision, Synchronization Unit identities, and Planned Change identities have different roles. Unit and change identities remain stable across replanning while they represent the same synchronization purpose. They do not rely on list positions, display names, or workbook row numbers alone.</p>
+<p>The plan and each unit have canonical fingerprints. Fingerprints include the schema version, stable identities, target payloads, dependencies, preconditions, dispositions, structured diagnostic codes, source fingerprint, Import Profile configuration, actor, and planning context. They exclude timestamps, URLs, translated text, and display-only wording.</p>
+<p>Planning is side-effect free and deterministic. Equivalent source content, Import Profile, actor, planning context, and visible NetBox state produce the same canonical plan identities, ordering, and fingerprints.</p>
+<h2 id="dependencies-and-selection">Dependencies and selection</h2>
+<p>The coordinator merges Planned Changes into one directed acyclic graph. Target modules declare dependencies by stable Planned Change identity. The coordinator rejects missing references and cycles. It executes independent changes in a deterministic order.</p>
+<p>Identical changes with the same identity are shared and execute once. The same identity with different payloads or preconditions makes the plan invalid.</p>
+<p>Target-owned supporting changes remain inside their Synchronization Unit. A dependency on another Synchronization Unit must already be reconciled or be included explicitly. Selective synchronization never expands silently. The review workspace can offer a visible <code>Sync with dependencies</code> selection for operator confirmation.</p>
+<h2 id="preview-and-execution-safety">Preview and execution safety</h2>
+<p>Preview presents an accepted Import Plan. Execution regenerates the current plan from the same source and configuration before it writes.</p>
+<p>Selective execution compares the accepted unit and its explicit dependency closure with the equivalent current units. A change in an unrelated unit does not block a safe selection. A source, Import Profile, actor, or planning-context change invalidates every selection. The complete preview regenerates after each selective execution.</p>
+<p>Final execution applies all currently actionable remaining units in one transaction. Each selective execution also uses one transaction. Blocked, invalid, excluded, and no-op units do not enter an execution transaction.</p>
+<p>Inside the transaction, each target module resolves and locks its referenced NetBox objects and rechecks its opaque preconditions before writing. Any stale state, permission failure, validation error, or database error rolls back the complete selected transaction.</p>
+<p>An accepted plan belongs to the operator who generated it. A background job executes as that operator and rechecks current permissions. Another operator must generate and accept a new plan.</p>
+<p>Every execution request has an idempotency key. A duplicate HTTP submission or duplicate job delivery returns the existing Import Execution. Concurrent requests remain subject to target locks and plan preconditions.</p>
+<p>Every selective and final execution creates an Import Execution audit record. A successful audit result commits atomically with its NetBox changes. On failure, NetBox changes roll back before the attempt is marked failed. Failure results identify the failed Planned Change, rolled-back changes, and dependent changes that were not attempted. The native NetBox Job references the Import Execution.</p>
+<p>Progress counts selected Synchronization Units and Planned Changes. It does not count adapter-specific source rows or target-module ORM operations.</p>
+<p>Serialized Import Plans carry an explicit schema version. An incompatible active preview or queued job fails before writes and requires replanning. Historical Import Executions remain audit records. The runtime does not migrate old executable plans or keep compatibility executors.</p>
+<p>The Import Plan contract is storage-neutral. An active preview can store it in the session, and a background job can receive the accepted serialized plan. A durable review-session model is justified only if the review-workspace design proves that resumable plans require one.</p>
+<h2 id="examples">Examples</h2>
+<p>A Device source item can produce this Synchronization Unit:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>Synchronization Unit: one source Device
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>  Planned Change: ensure Manufacturer
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>  Planned Change: ensure Device Type
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    depends on Manufacturer
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>  Planned Change: create or update Device
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    depends on Device Type
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>Cross-unit dependency: Rack Synchronization Unit, when the source file must create it
+</code></pre></div>
+<p>A Source Trace can produce this Synchronization Unit:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>Synchronization Unit: one complete Source Trace
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>  Preconditions:
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    endpoint identities
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    current direct Cable
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    termination occupancy
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    pass-through mappings
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>  Planned Change: remove the LLDP-derived logical Cable
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>  Planned Changes: create or reuse the physical Cable segments
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    ordered by their termination dependencies
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>  Result: the physical path terminates on the same two endpoint Devices
+</code></pre></div>
+<p>If the current direct Cable already represents the complete physical Source Trace, the Source Trace unit is a no-op. The Patched Path Replacement decision defines exact Cable matching and reuse rules separately.</p>
+<h2 id="rejected-options">Rejected options</h2>
+<ul>
+<li>Do not add another fixed Cable pass to the existing Rack and Device pass sequence. It would leave profiles, results, review, and safety tied to Device rows.</li>
+<li>Do not use a universal CRUD dictionary. Target-specific payloads and behavior belong to typed target modules.</li>
+<li>Do not keep <code>run_import(..., dry_run=...)</code> as the permanent planning and execution interface.</li>
+<li>Do not make presentation rows or session dictionaries the execution-safety contract.</li>
+<li>Do not split target planning and execution into separate public module hierarchies. One target module owns both sides so its target knowledge cannot drift.</li>
+<li>Do not retain a compatibility facade or a second runtime path after cutover.</li>
+</ul>
+<h2 id="consequences">Consequences</h2>
+<p>The replacement moves existing Device and Rack behavior behind target modules, moves flat workbook parsing behind a source adapter, and updates preview, selective synchronization, final synchronization, background jobs, and review actions in one completed cutover. It removes fixed passes, <code>RowResult</code>, view-owned safety helpers, and calls to private engine behavior.</p>
+<p>Tests use the new interfaces as their surface. End-to-end tests cover upload through real database outcomes. Import Engine and target-module integration tests use the real NetBox ORM. Source adapters use representative workbook fixtures. Tests for obsolete private helpers are deleted after their behavior is covered through the new interface.</p>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

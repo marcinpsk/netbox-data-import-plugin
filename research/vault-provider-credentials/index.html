@@ -1,0 +1,910 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/research/vault-provider-credentials/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Vault-backed inference provider credentials - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#vault-backed-inference-provider-credentials" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Vault-backed inference provider credentials
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#conclusion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conclusion
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#current-repository-constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current repository constraints
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#recommended-configuration-split" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recommended configuration split
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Recommended configuration split">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#provider-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Provider configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#vault-client-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Vault client configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credential-provider-seam" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credential-provider seam
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication-and-token-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication and token lifecycle
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Authentication and token lifecycle">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#recommended-baseline-vault-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recommended baseline: Vault Proxy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#direct-vault-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Direct Vault access
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rotation-and-caching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rotation and caching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#permissions-and-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Permissions and audit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure behavior
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#threat-considerations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Threat considerations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#unresolved-operator-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unresolved operator decisions
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="vault-backed-inference-provider-credentials">Vault-backed inference provider credentials</h1>
+<p>Research date: 2026-08-17
+NetBox baseline: v4.6.6</p>
+<h2 id="conclusion">Conclusion</h2>
+<p>Store only a <strong>credential reference</strong> in provider configuration. Resolve its current value in
+the background worker immediately before an inference request. Do not put the value in a model,
+form, serializer, profile export, session, job argument, proposal, result, or log.</p>
+<p>Use a small credential-provider seam between inference configuration and the HTTP adapter. The
+first implementation should support Vault KV v2. It should use Vault Proxy auto-auth when the
+deployment can provide it. Vault Proxy manages machine authentication and token renewal without
+giving the plugin an AppRole SecretID or a long-lived Vault token. HashiCorp recommends a
+platform auth method when one is available. It recommends AppRole only when a trusted platform
+auth method is not available. <a href="https://developer.hashicorp.com/vault/docs/auth">Vault auth methods</a> <a href="https://developer.hashicorp.com/vault/docs/auth/approle/approle-pattern">AppRole best practices</a></p>
+<p>Do not integrate with a NetBox secret-provider API. NetBox core removed its secret functionality
+in version 3.0, and NetBox 4.6 has no plugin credential-provider interface. Its plugin API exposes
+ordinary required and default settings through <code>PLUGINS_CONFIG</code>. <a href="https://netbox.readthedocs.io/en/stable/release-notes/version-3.0/#breaking-changes">NetBox 3.0 release notes</a>
+<a href="https://netbox.readthedocs.io/en/stable/plugins/development/#pluginconfig">NetBox plugin configuration</a> <a href="https://github.com/netbox-community/netbox/blob/v4.6.6/netbox/netbox/plugins/__init__.py#L39-L79">NetBox 4.6 PluginConfig source</a></p>
+<p>The older <code>netbox-vault-secrets</code> plugin is not a server-side credential service. Its browser
+JavaScript connects directly to Vault, and its repository describes the project as work in
+progress. It cannot supply a secret to a NetBox RQ worker. <a href="https://github.com/ffddorf/netbox-vault-secrets">netbox-vault-secrets</a>
+The maintained <code>netbox-secrets</code> plugin stores encrypted values in NetBox. It supports NetBox 4.6,
+but it is not backed by Vault. <a href="https://github.com/Onemind-Services-LLC/netbox-secrets">netbox-secrets</a></p>
+<h2 id="current-repository-constraints">Current repository constraints</h2>
+<p>The current code has three persistence paths that must remain outside the secret-value flow:</p>
+<ul>
+<li><code>ImportProfile</code> is a <code>NetBoxModel</code>, and the REST serializer exposes its configuration.</li>
+<li><code>ExportProfileYamlView</code> exports profile fields and mappings.</li>
+<li><code>ImportJobRunner.enqueue()</code> serializes job arguments. The runner also persists status and
+  results in the native Job data and in <code>ImportJob</code> history.</li>
+</ul>
+<p>These paths appear in <code>netbox_data_import/models.py</code>, <code>netbox_data_import/api/serializers.py</code>,
+<code>netbox_data_import/views.py</code>, and <code>netbox_data_import/jobs.py</code>. The inference job must therefore
+receive a provider configuration ID or stable key. It must resolve the credential itself. The
+request-handling process must not resolve a secret and pass it to RQ.</p>
+<p><code>NetBoxDataImportConfig</code> does not currently declare plugin settings. NetBox supports
+<code>default_settings</code>, <code>required_settings</code>, and <code>get_plugin_config()</code> for deployment configuration.
+This is suitable for a non-secret file fallback and for Vault client connection settings. It is
+not a secret store. <a href="https://netbox.readthedocs.io/en/stable/plugins/development/#pluginconfig">NetBox plugin configuration</a></p>
+<h2 id="recommended-configuration-split">Recommended configuration split</h2>
+<h3 id="provider-configuration">Provider configuration</h3>
+<p>The database is authoritative when a provider row exists. A <code>PLUGINS_CONFIG</code> entry with the same
+stable provider key is a whole-provider fallback only when no database row exists. Do not merge
+the two sources field by field. This rule prevents a partial database row from silently inheriting
+an unexpected endpoint or credential reference from a deployment file.</p>
+<p>Both sources can contain ordinary provider data:</p>
+<ul>
+<li>stable provider key and display name</li>
+<li>inference adapter type</li>
+<li>API base URL</li>
+<li>model name</li>
+<li>request timeout and other transport policy</li>
+<li>enabled state</li>
+<li>credential reference</li>
+</ul>
+<p>The reference is configuration metadata, not the API key. A Vault KV v2 reference needs this
+logical shape:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vault_kv_v2</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nt">mount</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;kv-mount-name&gt;</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;provider-secret-path&gt;</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;api-key-field&gt;</span>
+</code></pre></div>
+<p>Do not accept a Vault server URL, namespace, token, AppRole RoleID, AppRole SecretID, or TLS
+verification override in this per-provider reference. Keep connection and machine identity data
+in deployment configuration. This stops a database editor from turning credential resolution
+into an arbitrary network request.</p>
+<p>KV v2 retains versions and returns the latest version when no version is specified. An unpinned
+reference therefore follows API-key rotation without a database update. The Vault API uses a
+mount, secret path, and optional version as separate concepts. <a href="https://developer.hashicorp.com/vault/docs/secrets/kv/kv-v2">Vault KV v2</a>
+<a href="https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2#read-secret-version">Vault KV v2 read API</a></p>
+<h3 id="vault-client-configuration">Vault client configuration</h3>
+<p>Keep the following deployment-owned values outside the database:</p>
+<ul>
+<li>Vault Proxy address or Vault server address</li>
+<li>optional Vault Enterprise namespace</li>
+<li>trusted CA bundle path and client certificate paths, if used</li>
+<li>connection and read timeouts</li>
+<li>authentication mode</li>
+</ul>
+<p>Use end-to-end TLS and certificate verification for a remote Vault connection. HashiCorp says to
+always use TLS in production. A loopback or private Unix-socket-style trust boundary to a local
+Vault Proxy can be deployment-specific, but the remote Proxy-to-Vault connection still needs TLS.
+<a href="https://developer.hashicorp.com/vault/docs/concepts/production-hardening">Vault production hardening</a></p>
+<p>Do not add a <code>skip_tls_verify</code> provider option. A custom CA bundle is the safe solution for a
+private CA.</p>
+<h2 id="credential-provider-seam">Credential-provider seam</h2>
+<p>The inference subsystem should depend on one interface with these responsibilities:</p>
+<ol>
+<li>Validate a typed credential reference.</li>
+<li>Resolve it through the selected backend.</li>
+<li>Return secret material for the lifetime of one outbound request.</li>
+<li>Classify failures without including response bodies or credential values.</li>
+</ol>
+<p>A narrow conceptual interface is sufficient:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>CredentialProvider.resolve(reference) -&gt; credential context
+</code></pre></div>
+<p>The inference transport opens the context, constructs the authorization header, sends one
+request, and then releases all references to the returned value. Python cannot guarantee memory
+zeroing for strings. The implementation must therefore minimize lifetime and copies instead of
+claiming secure erasure.</p>
+<p>The Vault implementation should:</p>
+<ul>
+<li>support KV v2 only at first</li>
+<li>read one named field from one configured path</li>
+<li>reject missing, empty, or non-string values</li>
+<li>omit the secret from all exception text</li>
+<li>use an allowlisted Vault address from deployment configuration</li>
+<li>send no source trace, device, contact, or operator data to Vault</li>
+</ul>
+<p>Use the maintained <code>hvac</code> library if the implementation needs a Python Vault client. Its current
+API exposes an explicit KV v2 <code>read_secret_version()</code> operation. Do not reproduce Vault auth,
+namespace, and response-shape logic with ad hoc HTTP calls. <a href="https://github.com/hvac/hvac">hvac</a> <a href="https://python-hvac.org/en/stable/usage/secrets_engines/kv.html">hvac KV v2</a></p>
+<p>The seam must not expose Vault concepts to the OpenAI-compatible inference adapter. This permits
+a later credential backend without changing proposal or inference logic.</p>
+<h2 id="authentication-and-token-lifecycle">Authentication and token lifecycle</h2>
+<h3 id="recommended-baseline-vault-proxy">Recommended baseline: Vault Proxy</h3>
+<p>Run a Vault Proxy dedicated to the inference worker, near every process group that executes
+inference jobs. Configure auto-auth for the deployment platform and force the Proxy to use its
+auto-auth token. The worker then calls the Vault API through the Proxy without possessing the
+token. Vault Proxy is the current HashiCorp component for API proxy workflows. The older Vault
+Agent API proxy is deprecated. <a href="https://developer.hashicorp.com/vault/docs/agent-and-proxy/proxy">Vault Proxy</a>
+<a href="https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent/apiproxy">Vault Agent API proxy deprecation</a></p>
+<p>The Proxy must not be shared with another application while auto-auth is forced. A forced
+auto-auth token replaces the caller's own token, so Vault sees one identity for every client and
+cannot apply a per-application policy or attribute an audit entry. If a shared Proxy is
+unavoidable, do not force auto-auth on it: give each client its own token and let the Proxy pass
+it through.</p>
+<p>Enable the Proxy listener's <code>require_request_header</code> option and send <code>X-Vault-Request: true</code>.
+HashiCorp documents this as an additional protection against server-side request forgery.
+<a href="https://developer.hashicorp.com/vault/docs/agent-and-proxy/proxy">Vault Proxy</a></p>
+<p>Let Vault Proxy renew the machine token. Do not authenticate to Vault for every inference
+request. HashiCorp states that repeated authentication is expensive and recommends reusing and
+renewing a token. <a href="https://developer.hashicorp.com/vault/docs/auth/approle/approle-pattern">AppRole best practices</a></p>
+<h3 id="direct-vault-access">Direct Vault access</h3>
+<p>Direct access is a valid deployment variant, but it makes the plugin responsible for auth login,
+token renewal, and reauthentication. Prefer a platform machine identity. If the deployment has no
+platform method, AppRole is the fallback. Its SecretID must arrive through a deployment secret
+delivery mechanism and must never enter plugin configuration or a database row.</p>
+<p>Do not make direct AppRole support part of the first implementation unless an operator cannot
+deploy Vault Proxy. It adds a second secret that must be protected before the plugin can retrieve
+the inference API key.</p>
+<h2 id="rotation-and-caching">Rotation and caching</h2>
+<ul>
+<li>Resolve the latest KV v2 value in the worker at inference-request time.</li>
+<li>Do not cache API-key values in plugin code for the first implementation.</li>
+<li>Resolve once per outbound inference attempt, not once per row preview.</li>
+<li>Do not persist the resolved version or value in a Resolution Proposal.</li>
+<li>Let Vault Proxy manage auth token and lease caching.</li>
+</ul>
+<p>Vault Proxy static-secret caching for KV v1 and KV v2 requires Vault Enterprise. Community Vault
+deployments must tolerate a KV read for each outbound inference attempt or add a later, explicitly
+bounded in-process cache. <a href="https://developer.hashicorp.com/vault/docs/agent-and-proxy/proxy/caching/static-secret-caching">Vault Proxy static secret caching</a></p>
+<p>Key rotation takes effect on the next resolution. An already running HTTP request continues with
+the value it received. An inference <code>401</code> can invalidate a future cache, but the system must not
+silently replay a possibly accepted inference request. The inference job owns retry and
+idempotency policy.</p>
+<h2 id="permissions-and-audit">Permissions and audit</h2>
+<p>Give the NetBox worker identity only <code>read</code> capability on the exact KV v2 data path or a narrow
+provider path prefix. Do not grant <code>list</code>, <code>create</code>, <code>update</code>, <code>delete</code>, metadata administration,
+or access to unrelated secrets. Vault policies deny access by default. <a href="https://developer.hashicorp.com/vault/docs/concepts/policies">Vault policies</a></p>
+<p>The Ask AI action must enforce its own NetBox permission before it queues work. The Vault token
+represents the NetBox service, not the operator. A user must not be able to use the credential
+resolver as a general secret-reading endpoint.</p>
+<p>Enable Vault audit devices. Vault records API requests and responses, and hashes most string
+values with HMAC-SHA256 by default. Keep hashing enabled for sensitive fields. Do not log Vault
+response dictionaries in the plugin, even at debug level. <a href="https://developer.hashicorp.com/vault/docs/audit">Vault audit devices</a></p>
+<p>Plugin audit and job state can record:</p>
+<ul>
+<li>provider configuration ID</li>
+<li>proposal job ID</li>
+<li>credential backend name</li>
+<li>resolution outcome category</li>
+<li>request start and completion times</li>
+</ul>
+<p>They must not record the secret value, authorization header, Vault token, Vault response body,
+or inference request headers. Treat the Vault path and field as restricted configuration metadata.</p>
+<h2 id="failure-behavior">Failure behavior</h2>
+<p>Credential failures must affect only the Resolution Proposal request. Device, rack, Cable, and
+Source Trace preview and import workflows must remain available.</p>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Classification</th>
+<th>Required behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vault is unreachable, sealed, or times out</td>
+<td>Retryable infrastructure failure</td>
+<td>Keep the target unresolved. Record a redacted failure. Retry only under the inference job policy.</td>
+</tr>
+<tr>
+<td>Vault returns <code>401</code> or <code>403</code></td>
+<td>Deployment or policy failure</td>
+<td>Fail closed. Do not try another credential source. Ask an operator to repair auth or policy.</td>
+</tr>
+<tr>
+<td>Secret path or field is absent</td>
+<td>Invalid credential reference</td>
+<td>Fail closed. Identify the provider configuration, not the secret path, in user-visible output.</td>
+</tr>
+<tr>
+<td>Secret value is empty or has the wrong type</td>
+<td>Invalid secret material</td>
+<td>Fail closed. Never send an inference request.</td>
+</tr>
+<tr>
+<td>Inference endpoint rejects the key</td>
+<td>Provider authentication failure</td>
+<td>Keep the proposal unresolved. Do not expose the endpoint response body without redaction.</td>
+</tr>
+<tr>
+<td>Vault rotates during an inference request</td>
+<td>No mid-request action</td>
+<td>The next attempt resolves the latest value. Do not replay the current request automatically.</td>
+</tr>
+</tbody>
+</table>
+<p>Validate configuration shape at application startup, but do not require Vault to be available at
+startup. A mandatory startup read would make all NetBox functionality depend on Vault. Provide an
+explicit administrator-only connection test. The test resolves the configured reference and
+reports only success or a redacted failure category.</p>
+<h2 id="threat-considerations">Threat considerations</h2>
+<ul>
+<li><strong>Secret persistence:</strong> The highest local risk is accidental serialization through RQ, native
+  Job data, <code>ImportJob</code>, sessions, profile YAML, API serializers, or proposal state. Resolve only
+  in the worker and pass only a provider ID through those boundaries.</li>
+<li><strong>Log disclosure:</strong> HTTP client exceptions and debug logging can include headers or response
+  bodies. Use a redacting transport boundary and controlled error types.</li>
+<li><strong>SSRF and reference abuse:</strong> Keep the Vault address deployment-owned. Validate mount, path,
+  and field syntax. Do not offer a general Vault browser or arbitrary URL fetch.</li>
+<li><strong>Excess privilege:</strong> Use one read-only policy for the smallest useful provider path. Do not use
+  a root or administrator token.</li>
+<li><strong>Worker compromise:</strong> A compromised inference worker can use its live service identity to read
+  allowed secrets. Separate the inference queue and process identity later if the deployment
+  needs a smaller blast radius.</li>
+<li><strong>Stale fallback:</strong> Never use a previously resolved value, a raw file value, or an environment
+  API key when Vault fails unless the operator explicitly selects a different credential backend.</li>
+<li><strong>TLS interception:</strong> Trust an explicit CA bundle. Do not disable certificate verification.</li>
+</ul>
+<h2 id="unresolved-operator-decisions">Unresolved operator decisions</h2>
+<ol>
+<li>Can each NetBox worker deployment run a local Vault Proxy, or must the plugin connect directly?</li>
+<li>Which platform auth method is available to Vault Proxy? If none is available, how will an
+   AppRole SecretID be delivered and rotated?</li>
+<li>Which Vault namespace, KV v2 mount, path convention, and field name will operators use?</li>
+<li>Will the web process also reach Vault for an administrator connection test, or will that test
+   run as a background job on the inference worker?</li>
+<li>Does the deployment use Vault Enterprise static-secret caching? This affects request volume,
+   not the credential-provider interface.</li>
+<li>Which NetBox permission controls provider configuration and the administrator connection test?</li>
+<li>Should provider credential references be visible to all users who can view provider
+   configuration, or only to users who can change it?</li>
+<li>What are the required Vault and inference timeouts, retry limits, and proposal failure retention
+   periods?</li>
+</ol>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,4115 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/spec/target-neutral-import-architecture/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Target-neutral import architecture - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#target-neutral-import-architecture" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Target-neutral import architecture
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-domain-model-and-terminology" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Domain model and terminology
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-runtime-module-boundaries-and-dependency-direction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Runtime module boundaries and dependency direction
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Runtime module boundaries and dependency direction">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-runtime-interfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Runtime interfaces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-dependency-direction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Dependency direction
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#23-responsibilities" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.3 Responsibilities
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#24-what-views-and-jobs-may-call" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.4 What views and jobs may call
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-source-adapter-and-import-profile-contracts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Source Adapter and Import Profile contracts
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Source Adapter and Import Profile contracts">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#31-registry-and-selection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1 Registry and selection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#32-adapter-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.2 Adapter configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#33-natural-key-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.3 Natural-key references
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#34-output-kinds-and-target-field-catalog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.4 Output kinds and target-field catalog
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#35-policy-applicability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.5 Policy applicability
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#36-cableclass-mappings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.6 CableClass mappings
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-target-neutral-plan-safety-review-and-execution-contracts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Target-neutral plan, safety, review, and execution contracts
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. Target-neutral plan, safety, review, and execution contracts">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-import-plan-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 Import Plan structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-dispositions-and-diagnostics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Dispositions and diagnostics
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43-identities-and-fingerprints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 Identities and fingerprints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44-dependency-graph" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 Dependency graph
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#45-selective-synchronization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.5 Selective synchronization
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#46-transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.6 Transactions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#47-ownership-idempotency-and-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.7 Ownership, idempotency, and audit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#48-schema-versioning-and-storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.8 Schema versioning and storage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-canonical-source-trace-and-provenance-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Canonical Source Trace and provenance model
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Canonical Source Trace and provenance model">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-evidence-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 Evidence structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#52-identity-and-content-fingerprint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 Identity and content fingerprint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#53-sheet-combination" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.3 Sheet combination
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#54-duplicate-collapse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.4 Duplicate collapse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#55-endpoint-summary-fallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.5 Endpoint Summary fallback
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#56-validation-taxonomy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.6 Validation taxonomy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#57-binding-and-provenance-persistence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.7 Binding and provenance persistence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#58-fixture-corpus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.8 Fixture corpus
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-patched-path-replacement-planning-and-transaction-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Patched Path Replacement planning and transaction behavior
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Patched Path Replacement planning and transaction behavior">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-port-resolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 Port resolution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#62-portmapping-verification-and-same-port-continuation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 PortMapping verification and same-port continuation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#63-comparison-and-the-no-op" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.3 Comparison and the no-op
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#64-the-replacement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.4 The replacement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#65-preconditions-and-rollback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.5 Preconditions and rollback
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#66-permissions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.6 Permissions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#67-planning-diagnostics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.7 Planning diagnostics
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-resolution-proposal-persistence-jobs-permissions-staleness-and-acceptance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Resolution Proposal persistence, jobs, permissions, staleness, and acceptance
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="7. Resolution Proposal persistence, jobs, permissions, staleness, and acceptance">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#71-binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.1 Binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#72-states-and-the-operator-decision" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.2 States and the operator decision
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#73-immutable-content" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.3 Immutable content
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#74-staleness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.4 Staleness
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#75-jobs-and-failures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.5 Jobs and failures
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#76-permissions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.6 Permissions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#77-acceptance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.7 Acceptance
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#78-inference-backend-request-and-response-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.8 Inference Backend request and response contract
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#79-generality" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.9 Generality
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-inference-backend-and-credential-boundaries" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Inference Backend and credential boundaries
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="8. Inference Backend and credential boundaries">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#81-three-layer-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 Three-layer boundary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#82-inference-backend-configuration-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 Inference Backend configuration model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#821-plugin-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2.1 Plugin settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#83-api_root-trust-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 api_root trust boundary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#84-rejected-backend-capabilities" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 Rejected backend capabilities
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#85-credential-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.5 Credential boundary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#86-secrets-never-persist" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.6 Secrets never persist
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-database-changes-and-migration-ownership" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Database changes and migration ownership
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9. Database changes and migration ownership">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#91-new-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.1 New models
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#92-changed-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2 Changed models
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#93-unchanged-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.3 Unchanged models
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-netbox-ui-rest-graphql-yaml-job-and-audit-impacts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. NetBox UI, REST, GraphQL, YAML, job, and audit impacts
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="10. NetBox UI, REST, GraphQL, YAML, job, and audit impacts">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#101-import-profile-ui" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.1 Import Profile UI
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#102-review-workspace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.2 Review Workspace
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#103-rest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.3 REST
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#104-graphql" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.4 GraphQL
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#105-yaml-profile-export-and-import" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.5 YAML profile export and import
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#106-jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.6 Jobs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#107-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.7 Audit
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-cutover-plan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. Cutover plan
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="11. Cutover plan">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#111-removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11.1 Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#112-preserved" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11.2 Preserved
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#113-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11.3 Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#12-end-to-end-and-integration-test-strategy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12. End-to-end and integration test strategy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="12. End-to-end and integration test strategy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#121-value-order" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12.1 Value order
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#122-mocks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12.2 Mocks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#123-source-adapter-corpus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12.3 Source Adapter corpus
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#124-new-seam-rule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12.4 New-seam rule
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#125-execution-conventions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12.5 Execution conventions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#126-required-coverage-per-area" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12.6 Required coverage per area
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#13-security-failure-observability-and-rollback-behavior" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13. Security, failure, observability, and rollback behavior
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="13. Security, failure, observability, and rollback behavior">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#131-permissions-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.1 Permissions summary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#132-prompt-injection-stance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.2 Prompt-injection stance
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#133-typed-failure-taxonomy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.3 Typed failure taxonomy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#134-audit-records" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.4 Audit records
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#135-rollback-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.5 Rollback summary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#136-observability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13.6 Observability
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#14-sequenced-implementation-tickets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14. Sequenced implementation tickets
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="14. Sequenced implementation tickets">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#t1-target-field-catalog-adapter-registry-and-import-profile-cutover" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T1. Target-field catalog, adapter registry, and Import Profile cutover
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t2-import-engine-core-with-device-and-rack-target-modules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T2. Import Engine core with Device and Rack Target Modules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t3-trace-source-adapter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T3. Trace Source Adapter
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t4-trace-decision-models-and-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T4. Trace decision models and policy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t5-cable-target-module-with-patched-path-replacement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T5. Cable Target Module with Patched Path Replacement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t6-trace-review-workspace-ui" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T6. Trace Review Workspace UI
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t7-inference-backend-configuration-and-credential-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T7. Inference Backend configuration and credential boundary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t8-resolution-proposal-model-job-and-acceptance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T8. Resolution Proposal model, job, and acceptance
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t9-ask-ai-ui-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T9. Ask AI UI integration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t10-rest-graphql-and-yaml-surface-completion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T10. REST, GraphQL, and YAML surface completion
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#t11-hardening-and-end-to-end-pass" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        T11. Hardening and end-to-end pass
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ticket-dependency-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ticket dependency summary
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#15-out-of-scope-and-future-fog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15. Out of scope and future fog
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="target-neutral-import-architecture">Target-neutral import architecture</h1>
+<p>This specification defines the buildable architecture for a target-neutral import runtime. It
+replaces the Device-centred internal runtime with one Import Engine, one Source Adapter contract,
+and typed Target Modules. It proves the architecture with Cable and Source Trace support.</p>
+<p>Every decision here is already recorded. The rationale lives in the referenced decision records and
+closed issues. This document states the normative contract only.</p>
+<p>Normative sources: ADR 0001 (target-neutral Import Plans), ADR 0002 (Source Trace identity),
+ADR 0003 (adapter-owned Import Profile configuration), issues #81, #82, #83, #84, #85, #86, and the
+research notes <code>netbox-cable-profile.md</code>, <code>openai-compatible-provider-contract.md</code>, and
+<code>vault-provider-credentials.md</code>. The two file names that contain "provider" are historical citations
+and keep their published names.</p>
+<p>Where an input is silent on a detail an implementer must know, this document chooses the smallest
+consistent option and marks it "(spec default)".</p>
+<h2 id="1-domain-model-and-terminology">1. Domain model and terminology</h2>
+<p><code>CONTEXT.md</code> is the single glossary. Use its terms with its exact capitalization in code,
+identifiers, UI strings, diagnostics, and documentation. Do not introduce a synonym for a term that
+already exists, and do not use any term listed under <code>_Avoid_</code>.</p>
+<p>The runtime uses these terms:</p>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Runtime role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Import Profile</td>
+<td>Selects one Source Adapter and carries its configuration and target policy.</td>
+</tr>
+<tr>
+<td>Source Adapter</td>
+<td>Interprets one source file format into a Source Batch.</td>
+</tr>
+<tr>
+<td>Source Batch</td>
+<td>The typed source items and source diagnostics from one file.</td>
+</tr>
+<tr>
+<td>Target Module</td>
+<td>Owns one NetBox target's Target Fields, matching, planning, and writes.</td>
+</tr>
+<tr>
+<td>Target Field</td>
+<td>A semantic NetBox value the import can resolve or synchronize.</td>
+</tr>
+<tr>
+<td>Import Plan</td>
+<td>The reviewable derived artifact for one source file and the current NetBox state.</td>
+</tr>
+<tr>
+<td>Synchronization Unit</td>
+<td>The smallest independently reviewable and executable part of a plan.</td>
+</tr>
+<tr>
+<td>Planned Change</td>
+<td>One target-specific mutation inside a Synchronization Unit.</td>
+</tr>
+<tr>
+<td>Import Execution</td>
+<td>One audited attempt to apply selected units as one transaction.</td>
+</tr>
+<tr>
+<td>Row Resolution</td>
+<td>A saved operator decision that supplies Target Field values.</td>
+</tr>
+<tr>
+<td>Resolution Proposal</td>
+<td>An unaccepted suggestion of Target Field values.</td>
+</tr>
+<tr>
+<td>Candidate Snapshot</td>
+<td>The frozen eligible-candidate list sent in one proposal request.</td>
+</tr>
+<tr>
+<td>Inference Backend</td>
+<td>The configured component that answers one proposal request.</td>
+</tr>
+<tr>
+<td>Source Trace</td>
+<td>Source evidence for one end-to-end connectivity path.</td>
+</tr>
+<tr>
+<td>Termination Reference</td>
+<td>The source-side naming of one port inside a Source Trace.</td>
+</tr>
+<tr>
+<td>Segment Evidence</td>
+<td>One source-claimed physical cable between two Termination References.</td>
+</tr>
+<tr>
+<td>Pass-Through Claim</td>
+<td>The implied continuation through one device between two segments.</td>
+</tr>
+<tr>
+<td>Endpoint Summary</td>
+<td>The From and To statement of the two endpoint Termination References.</td>
+</tr>
+<tr>
+<td>CableClass</td>
+<td>The source label for one cable's kind.</td>
+</tr>
+<tr>
+<td>Cable Type, Cable Profile</td>
+<td>The fixed NetBox Cable choices a CableClass maps to.</td>
+</tr>
+<tr>
+<td>Logical Cable</td>
+<td>The direct Cable between the two endpoint terminations.</td>
+</tr>
+<tr>
+<td>Patched Path Replacement</td>
+<td>The reviewed change that replaces a Logical Cable with segments.</td>
+</tr>
+<tr>
+<td>Direct Mapping, Candidate Mapping</td>
+<td>Import Profile column rules.</td>
+</tr>
+<tr>
+<td>Field Difference, Ignored Field Difference</td>
+<td>Device review decisions.</td>
+</tr>
+</tbody>
+</table>
+<p>Two identifiers are distinct and must not be conflated. A Target Field key names a semantic value in
+the target-field catalog. A field key names one bound instance of a Target Field for one source item,
+and is what a Row Resolution and a Resolution Proposal bind to.</p>
+<p>The component that answers a proposal request is always called an Inference Backend, never a bare
+"Provider". NetBox core already defines <code>circuits.Provider</code> as the circuit carrier, so an unqualified
+"Provider" collides with an existing NetBox concept. The glossary records Inference Backend with
+<em>Avoid</em>: Provider. Its UI label is "AI backend". Its transport component is the backend adapter. Its
+configuration, metadata, and failures are Inference Backend configuration, backend metadata, and
+backend failures. The operator-facing action keeps the name "Ask AI".</p>
+<h2 id="2-runtime-module-boundaries-and-dependency-direction">2. Runtime module boundaries and dependency direction</h2>
+<h3 id="21-runtime-interfaces">2.1 Runtime interfaces</h3>
+<p>The runtime keeps the seam from ADR 0001 and fixes its call shapes.</p>
+<p><code>source_document</code> is a reference to a stored uploaded workbook: its id plus its content fingerprint.
+The bytes live in the <code>SourceDocument</code> model (section 9.1), so preview, replanning, a background
+execution, and an audit read all see the same input. Passing a reference instead of the bytes keeps
+the plan serializable and keeps job payloads small.</p>
+<p><code>planning_context</code> carries the actor together with the other planning inputs that the plan fingerprint
+covers. The explicit <code>actor</code> parameter is that same identity, passed separately so permission checks
+and <code>netbox_reader</code> can bind to it.</p>
+<p><code>netbox_reader</code> is the read-only target-state accessor a Target Module uses while planning. It is
+scoped to the actor's permissions: it returns only objects that actor may view, so planning cannot
+leak target state the operator cannot see.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>SourceAdapter.interpret(source_document, adapter_config) -&gt; SourceBatch
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>  errors: adapter configuration validation failure, unreadable source document
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>ImportEngine.plan(profile, source_document, actor, planning_context) -&gt; ImportPlan
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>  errors: adapter configuration validation failure, unreadable source document,
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>          stale source document, permission failure
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>ImportEngine.execute(profile, source_document, accepted_plan, selection,
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>                     idempotency_key, actor) -&gt; ImportExecution
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>  errors: plan schema version mismatch, stale plan, stale source document,
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>          selection validation failure, permission failure, precondition failure
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>TargetModule.plan(source_batch, profile, catalog, netbox_reader)
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    -&gt; list of Synchronization Units
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>  errors: policy validation failure, permission failure
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>TargetModule.apply(planned_change, execution_context) -&gt; applied result
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>  errors: stale precondition, permission failure, target validation failure
+</code></pre></div>
+<p>Three failures are distinct. The coordinator raises a stale-source-document error when the referenced
+<code>SourceDocument</code> no longer exists, and the operator must upload the file again. It raises a stale-plan
+error before the transaction opens when the regenerated plan no longer matches the accepted selection.
+A Target Module raises a precondition failure inside the transaction when a recheck fails.</p>
+<h3 id="22-dependency-direction">2.2 Dependency direction</h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>views, jobs
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    -&gt; ImportEngine, ReviewWorkspace          (public seam)
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>ReviewWorkspace
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    -&gt; ImportEngine, domain models
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>ImportEngine
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    -&gt; SourceAdapter registry, TargetModule registry, target-field catalog, plan model
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>TargetModule
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    -&gt; NetBox ORM, target-field catalog, Import Profile policy models, plan model
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>SourceAdapter
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    -&gt; source parsing libraries, target-field catalog (keys only)
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>InferenceBackend adapter
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>    -&gt; HTTP transport only
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>CredentialBackend
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    -&gt; Vault client only
+</code></pre></div>
+<p>No arrow points backwards. A Source Adapter never imports a Target Module, NetBox models, or the
+Import Engine. A Target Module never imports a Source Adapter implementation; it consumes typed
+source items by output kind. A backend adapter never imports NetBox models, Candidate Snapshot
+models, Resolution Proposal models, or job models.</p>
+<h3 id="23-responsibilities">2.3 Responsibilities</h3>
+<p><strong>Source Adapter.</strong> Deterministic source interpretation only. It returns typed source items and
+source diagnostics. It never queries NetBox, enforces target permissions, matches target objects, or
+plans writes.</p>
+<p><strong>Target Module.</strong> It owns target-specific matching, ORM queries, permission checks, preconditions,
+locking, and writes. It plans against the complete relevant Source Batch. It applies one Planned
+Change at a time. It never commits a transaction, enqueues work, or calls another Target Module.</p>
+<p><strong>Import Engine coordinator.</strong> It owns dependency ordering, the merged directed acyclic graph,
+semantic plan comparison, transaction scope, rollback, idempotency, audit completion, and progress.</p>
+<p><strong>Review Workspace.</strong> It consumes Import Plans. It validates explicit review commands, persists
+decisions through their owning domain models, and asks the Import Engine for a new plan. A review
+command never edits an Import Plan.</p>
+<h3 id="24-what-views-and-jobs-may-call">2.4 What views and jobs may call</h3>
+<table>
+<thead>
+<tr>
+<th>Caller</th>
+<th>Allowed</th>
+<th>Forbidden</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Views</td>
+<td><code>ImportEngine.plan</code>, <code>ImportEngine.execute</code>, Review Workspace commands, domain model reads</td>
+<td>Target Modules, Source Adapters, private engine helpers, safety-intent calculation</td>
+</tr>
+<tr>
+<td>Jobs</td>
+<td><code>ImportEngine.execute</code>, the inference proposal service</td>
+<td>Target Modules, plan mutation, safety recalculation</td>
+</tr>
+<tr>
+<td>Templates</td>
+<td>The serialized Import Plan and view-supplied presentation data</td>
+<td>ORM traversal into planning state</td>
+</tr>
+</tbody>
+</table>
+<h2 id="3-source-adapter-and-import-profile-contracts">3. Source Adapter and Import Profile contracts</h2>
+<h3 id="31-registry-and-selection">3.1 Registry and selection</h3>
+<p>The Source Adapter registry is a static in-plugin mapping from a stable adapter key to the adapter
+class. Forms, REST, GraphQL, and YAML derive their choices from the registry. This delivery has no
+third-party extension point.</p>
+<p><code>ImportProfile.source_adapter</code> is required and immutable after creation. A different source format
+requires a new Import Profile. Every policy row's applicability is therefore stable for the profile's
+lifetime.</p>
+<p>Adapter keys in this delivery: <code>flat_workbook</code> and <code>trace_workbook</code> (spec default).</p>
+<h3 id="32-adapter-configuration">3.2 Adapter configuration</h3>
+<p>Scalar adapter settings live in one <code>adapter_config</code> JSON field. The selected adapter declares a
+Django form that validates the field at the boundary. Unknown keys are rejected.</p>
+<p>The <code>flat_workbook</code> adapter form carries the current device-format settings: sheet name, source-ID
+column, custom-field name, update-existing, create-missing-device-types, capture-extra-data, primary
+contact role, primary contact lookup field, and preview view mode.</p>
+<p>The <code>trace_workbook</code> adapter declares an empty configuration. Its sheet names are fixed by the Source
+Trace model (#84).</p>
+<h3 id="33-natural-key-references">3.3 Natural-key references</h3>
+<p>An object reference inside <code>adapter_config</code> uses a natural key, never a database id. Today the only
+reference is the primary contact role, referenced by its name (spec default). The adapter form
+validates the reference at the boundary. Planning validates it again. A dangling reference blocks the
+affected Synchronization Units with a diagnostic and does not fail the batch. This replaces
+database-level PROTECT and keeps YAML profile export portable between NetBox instances.</p>
+<h3 id="34-output-kinds-and-target-field-catalog">3.4 Output kinds and target-field catalog</h3>
+<p>Each Source Adapter declares its output kinds. Each Target Module declares which output kinds it
+consumes and which Target Fields it owns.</p>
+<table>
+<thead>
+<tr>
+<th>Adapter</th>
+<th>Output kinds</th>
+<th>Consuming Target Modules</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>flat_workbook</code></td>
+<td>Device source row, Rack source row</td>
+<td>Device, Rack</td>
+</tr>
+<tr>
+<td><code>trace_workbook</code></td>
+<td>Source Trace</td>
+<td>Cable</td>
+</tr>
+</tbody>
+</table>
+<p>The target-field catalog is one static registry. Each entry declares a key, a label, a value kind,
+the owning Target Module, and the adapter output kinds that can supply it.</p>
+<p>A profile's valid Target Fields and policy sections are derived, never listed locally: adapter output
+kinds, then consuming Target Modules, then their Target Fields and policy sections.</p>
+<p>The catalog holds two entry shapes: static entries with a fixed key, and declared key families with a
+prefix and a validator. A key family covers a Target Field whose exact key is data, not a fixed
+choice. The Device Target Module declares the <code>extra_json</code> family: the key is <code>extra_json:</code> plus a
+name, and its validator requires a non-empty name after the prefix. Every surface resolves a family
+key through the catalog validator, so no surface reimplements the prefix rule.</p>
+<p>These surfaces consume the catalog and keep no local field list: <code>ColumnMapping</code> and
+<code>ColumnTransformRule</code> validation, all profile forms, REST serializers, GraphQL types, YAML import and
+export, the Review Workspace, and execution. <code>ColumnMapping</code> and <code>ColumnTransformRule</code> validation
+moves to the catalog and accepts exactly the same values it accepts today: the static keys plus a
+non-empty <code>extra_json:</code> name, with <code>ColumnTransformRule</code> still excluding the candidate-target keys.
+The current hand-rolled per-section YAML handling is replaced by catalog-derived serialization in the
+cutover.</p>
+<h3 id="35-policy-applicability">3.5 Policy applicability</h3>
+<p>Every policy section declares the adapter output and target it applies to. The profile UI shows only
+applicable sections. Validation rejects an inapplicable row.</p>
+<table>
+<thead>
+<tr>
+<th>Section</th>
+<th>Classification</th>
+<th>Adapter</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ColumnMapping, ColumnTransformRule, <code>adapter_config</code> source keys</td>
+<td>Source-format fact</td>
+<td><code>flat_workbook</code></td>
+</tr>
+<tr>
+<td>ClassRoleMapping, DeviceTypeMapping, ManufacturerMapping, IgnoredDevice</td>
+<td>Device and Rack target policy</td>
+<td><code>flat_workbook</code></td>
+</tr>
+<tr>
+<td>update-existing, create-missing-device-types, capture-extra-data, primary-contact settings, preview view mode</td>
+<td>Device and Rack target policy stored in <code>adapter_config</code></td>
+<td><code>flat_workbook</code></td>
+</tr>
+<tr>
+<td>CableClass mappings</td>
+<td>Cable target policy</td>
+<td><code>trace_workbook</code></td>
+</tr>
+<tr>
+<td>SourceResolution, DeviceExistingMatch, IgnoredFieldDifference</td>
+<td>Decision persistence scoped to the flat adapter output</td>
+<td><code>flat_workbook</code></td>
+</tr>
+<tr>
+<td><code>TerminationResolution</code></td>
+<td>Decision persistence scoped to the trace adapter output</td>
+<td><code>trace_workbook</code></td>
+</tr>
+</tbody>
+</table>
+<p>No model moves beyond the <code>adapter_config</code> change. Sections stay in their own tables.</p>
+<h3 id="36-cableclass-mappings">3.6 CableClass mappings</h3>
+<p>One row exists per (Import Profile, CableClass value). It has two independent dimensions: Cable Type
+and Cable Profile. Each dimension is tri-state:</p>
+<ul>
+<li>unresolved: not yet decided.</li>
+<li>an explicit runtime NetBox choice.</li>
+<li>explicitly none: a plain cable with no value for that dimension.</li>
+</ul>
+<p>Values validate against the running NetBox instance's choices, never a hardcoded list. An unresolved
+dimension blocks the unit. A stored value the running instance no longer offers also blocks, with a
+distinct stale-mapping diagnostic, until the operator remaps it. The plugin never creates a Cable
+Profile: Cable Profile is a fixed NetBox choice, not a creatable object.</p>
+<p><strong>Cable Profile cardinality.</strong> A Patched Path Replacement creates Cables with one termination per
+side, so the Cable Profile dimension accepts only a Cable Profile whose connector topology is
+compatible with one termination per side: the single and duplex family as reported by the running
+NetBox instance. The mapping form offers only compatible choices. Trunk, breakout, and shuffle
+profiles are out of scope for segment creation in this delivery (section 15).</p>
+<p>Two block conditions are distinct and carry distinct diagnostic codes (section 6.7):</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Diagnostic code</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>The stored Cable Type or Cable Profile value is no longer offered by the running instance</td>
+<td><code>cable.cableclass_stale_mapping</code></td>
+</tr>
+<tr>
+<td>The stored Cable Profile is still offered but is incompatible with one termination per side</td>
+<td><code>cable.profile_incompatible</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="4-target-neutral-plan-safety-review-and-execution-contracts">4. Target-neutral plan, safety, review, and execution contracts</h2>
+<p>This section restates ADR 0001 as the normative runtime contract.</p>
+<h3 id="41-import-plan-structure">4.1 Import Plan structure</h3>
+<p>An Import Plan is a serializable derived artifact. It contains no live ORM objects, lazy querysets,
+callables, HTML, template fragments, or untyped metadata bags.</p>
+<p>An Import Plan contains Synchronization Units. A Synchronization Unit is the smallest independently
+reviewable and executable part of the plan. It contains zero or more typed Planned Changes that
+commit together. A flat Device or Rack source row usually produces one unit. One complete Source
+Trace produces one unit even when the source uses several workbook rows and the target requires
+several Cable changes.</p>
+<h3 id="42-dispositions-and-diagnostics">4.2 Dispositions and diagnostics</h3>
+<table>
+<thead>
+<tr>
+<th>Disposition</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>actionable</code></td>
+<td>The unit contains changes that can execute.</td>
+</tr>
+<tr>
+<td><code>no-op</code></td>
+<td>Current NetBox state already matches the desired state.</td>
+</tr>
+<tr>
+<td><code>blocked</code></td>
+<td>The unit needs an operator decision or an unmet dependency.</td>
+</tr>
+<tr>
+<td><code>invalid</code></td>
+<td>Source or target state violates a planning invariant.</td>
+</tr>
+<tr>
+<td><code>excluded</code></td>
+<td>Synchronization policy intentionally omits the unit.</td>
+</tr>
+</tbody>
+</table>
+<p>A unit has exactly one disposition. Diagnostics are separate structured values with <code>info</code>,
+<code>warning</code>, or <code>error</code> severity. A diagnostic carries a stable structured code, the severity, the
+affected identities, and display data. Diagnostic codes use a dotted lowercase namespace of the form
+<code>&lt;domain&gt;.&lt;condition&gt;</code> (spec default).</p>
+<p><code>excluded</code> is reserved for operator-configured policy. An unsupported source construct is <code>invalid</code>,
+never <code>excluded</code>.</p>
+<h3 id="43-identities-and-fingerprints">4.3 Identities and fingerprints</h3>
+<p>Planned Changes record a stable identity, a target-specific serialized payload, explicit
+dependencies, and all target-state preconditions that can affect the planned result.</p>
+<p>Unit and change identities remain stable across replanning while they represent the same
+synchronization purpose. They never rely on list positions, display names, or workbook row numbers
+alone. The plan revision is a separate value from the identities.</p>
+<p>The plan and each unit carry a canonical fingerprint. A fingerprint is the SHA-256 digest of a
+canonical serialization (spec default for the algorithm; ADR 0002 already fixes SHA-256 for the
+Source Trace content fingerprint, and one algorithm keeps the runtime consistent).</p>
+<p>A fingerprint includes the schema version, the stable unit and change identities, the target payloads,
+the dependencies, the preconditions, the dispositions, the structured diagnostic codes, the source
+fingerprint, the Import Profile configuration, the actor, and the planning context. It excludes
+timestamps, URLs, translated text, display-only wording, and the plan revision.</p>
+<p>Planning is side-effect free and deterministic. Equivalent source content, Import Profile, actor,
+planning context, and visible NetBox state produce the same canonical plan identities, ordering, and
+fingerprints.</p>
+<h3 id="44-dependency-graph">4.4 Dependency graph</h3>
+<p>The coordinator merges Planned Changes into one directed acyclic graph. Target Modules declare
+dependencies by stable Planned Change identity. The coordinator rejects a missing reference and
+rejects a cycle. It executes independent changes in a deterministic order.</p>
+<p>Identical changes with the same identity are shared and execute once. The same identity with
+different payloads or preconditions makes the plan invalid.</p>
+<h3 id="45-selective-synchronization">4.5 Selective synchronization</h3>
+<p>Target-owned supporting changes stay inside their Synchronization Unit. A dependency on another
+Synchronization Unit must already be reconciled or be included explicitly. Selective synchronization
+never expands silently. The Review Workspace offers a visible <code>Sync with dependencies</code> selection for
+operator confirmation.</p>
+<p>Preview presents an accepted Import Plan. Execution regenerates the current plan from the same source
+and configuration before it writes. Selective execution compares the accepted unit and its explicit
+dependency closure with the equivalent current units. A change in an unrelated unit does not block a
+safe selection. A change of source, Import Profile, actor, or planning context invalidates every
+selection. The complete preview regenerates after each selective execution.</p>
+<h3 id="46-transactions">4.6 Transactions</h3>
+<p>One outer database transaction covers one complete execution request. Final execution applies all
+currently actionable remaining units in that one transaction. Each selective execution also uses one
+transaction for its whole selection. No unit commits independently. Blocked, invalid, excluded, and
+no-op units never enter an execution transaction.</p>
+<p>Inside the transaction, each Target Module resolves and locks its referenced NetBox objects and
+rechecks its opaque preconditions before writing. Any stale state, permission failure, validation
+error, or database error rolls back the complete selected transaction.</p>
+<h3 id="47-ownership-idempotency-and-audit">4.7 Ownership, idempotency, and audit</h3>
+<p>An accepted plan belongs to the operator who generated it. A background job executes as that operator
+and rechecks current permissions. Another operator must generate and accept a new plan.</p>
+<p>Every execution request carries an idempotency key. The Review Workspace generates one key per submit
+action (spec default: a UUID minted when the workspace renders the submit control). The request first
+inserts an <code>ImportExecution</code> row with outcome <code>pending</code> and commits that insert, which reserves the
+unique (Import Profile, idempotency key). A duplicate HTTP submission or duplicate job delivery
+therefore returns the existing row in any outcome, including while the first attempt is still running.
+The target transaction opens after the reservation commits. Concurrent requests remain subject to
+target locks and plan preconditions.</p>
+<p>A <code>pending</code> row stores its native NetBox Job reference, so a crashed attempt cannot strand it. At the
+next read, a <code>pending</code> row whose linked Job is terminal or missing transitions to <code>failed</code> with typed
+reason <code>abandoned</code>. Duplicate delivery of that idempotency key still returns the existing row, now
+failed and abandoned. A new operator submission mints a new key, so no key is ever permanently
+consumed and the operator is never locked out of retrying.</p>
+<p>Every selective and final execution creates an <code>ImportExecution</code> audit record (section 9.2). The
+successful audit result and the applied-changes field commit atomically with the NetBox changes. On
+failure, NetBox changes roll back before the row is marked failed. A failure result identifies the
+failed Planned Change, the rolled-back changes, and the dependent changes that were not attempted. The
+native NetBox Job links one-to-one to its <code>ImportExecution</code> row.</p>
+<p>Progress counts selected Synchronization Units and Planned Changes. It never counts adapter-specific
+source rows or Target Module ORM operations.</p>
+<h3 id="48-schema-versioning-and-storage">4.8 Schema versioning and storage</h3>
+<p>A serialized Import Plan carries an explicit schema version. The first version is <code>1</code> (spec default).
+An incompatible active preview or queued job fails before writes and requires replanning. Historical
+Import Executions remain audit records. The runtime never migrates an old executable plan and never
+keeps a compatibility executor.</p>
+<p>The Import Plan contract is storage-neutral. This delivery stores the active preview plan in the
+session and passes the accepted serialized plan to the background job (spec default, permitted by ADR
+0001). No durable review-session model is added, because the review-workspace prototype (#83) did not
+prove that resumable plans require one.</p>
+<h2 id="5-canonical-source-trace-and-provenance-model">5. Canonical Source Trace and provenance model</h2>
+<h3 id="51-evidence-structure">5.1 Evidence structure</h3>
+<p>A Source Trace is input evidence for one end-to-end path. It is not a NetBox object, and it does not
+correspond to one Cable. It carries:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>SourceTrace
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>  Endpoint Summary: From Termination Reference, To Termination Reference, original direction
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>  Ordered path evidence: [Segment Evidence(left, CableClass label, right), ...]
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>  Pass-Through Claims: [(device, cards, entry port, exit port), ...]
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>  Corroboration per termination: PortClass, UPos, Rack, Location
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>  Provenance: workbook fingerprint, sheet, block ordinal, row range,
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>              per-sheet export timestamp, original From/To text and direction
+</code></pre></div>
+<p>A Termination Reference is identified by its device, cards, and port labels. Normalization reuses the
+plugin's existing source-identity convention: trim, collapse whitespace, casefold. Original spellings
+stay in the evidence for display. The source Device column names the panel.</p>
+<p>The cards label is part of Termination Reference identity, part of review display, and context for the
+operator and the Inference Backend. Deterministic matching never uses it: port resolution uses only
+the unique exact port-name match on the resolved Device (section 6.1). This supersedes the phrasing in
+issue #84 that said the cards label narrows port matching, and follows the rule set in issue #86.</p>
+<p>Corroboration values support validation and review display. They never identify anything.</p>
+<h3 id="52-identity-and-content-fingerprint">5.2 Identity and content fingerprint</h3>
+<p>Per ADR 0002:</p>
+<ul>
+<li><strong>Trace identity</strong>: the unordered pair of endpoint Termination References. Its canonical form is the
+  JSON serialization of the two normalized termination triples, sorted lexicographically:
+  <code>[["device","cards","port"],["device","cards","port"]]</code>. JSON is unambiguous by construction, so a
+  label that contains a separator character cannot collide with another identity. This canonical JSON
+  form is the stored key and the Synchronization Unit identity. It is stable across direction flips,
+  re-exports, and patching changes.</li>
+<li><strong>Display form</strong>: <code>device|cards|port &lt;&gt; device|cards|port</code>, derived from the canonical form for
+  review and diagnostics. It is never a key, never stored as an identity, and never compared.</li>
+</ul>
+<p>Storing the canonical JSON form instead of the readable string follows issue #84 as amended for the
+spec (#78): the readable string keeps its role, but only as the display form.
+- <strong>Content fingerprint</strong>: the SHA-256 digest of the canonical-orientation serialization of the
+  Segment Evidence entries (identity triples, PortClass labels, CableClass label) and the Pass-Through
+  Claims. Canonical orientation starts at the endpoint whose key sorts first. A reversed statement
+  swaps sides and reverses the list before serializing. Corroboration values, timestamps, block
+  positions, and Trace List data are excluded, so a device move or a re-export does not churn the
+  fingerprint.</p>
+<p>From and To direction is provenance and display data only. Reversing the path does not change
+topology identity.</p>
+<h3 id="53-sheet-combination">5.3 Sheet combination</h3>
+<ul>
+<li>Blocks pair across sheets by exact From/To line text. A repeated block uses the ordinal as the
+  tiebreak.</li>
+<li><code>Trace From To</code> path rows are authoritative.</li>
+<li>A non-empty <code>Trace List</code> block corroborates. The ordered device-label sequence must match the visit
+  sequence. Consecutive duplicate device rows are tolerated. The final device may be omitted when the
+  trace ends at a rear port. Each listed port must match the entry or exit port of that visit. The
+  <code>Cable</code> column is ignored: it is per-block, not per-segment. Any mismatch is a contradiction error
+  on that trace.</li>
+<li>An empty <code>Trace List</code> block corroborates nothing.</li>
+<li>A <code>Trace List</code> block with data but no <code>Trace From To</code> partner becomes an Endpoint Summary fallback
+  trace. Its visit rows are unordered corroboration, not Segment Evidence.</li>
+</ul>
+<p>Sheet names are fixed in this delivery. Each sheet's export timestamp is provenance only and is never
+cross-validated.</p>
+<h3 id="54-duplicate-collapse">5.4 Duplicate collapse</h3>
+<p>Occurrences with identical evidence collapse silently into one Source Trace whose provenance lists
+every occurrence. Comparison happens after canonical orientation, so a reversed re-statement also
+matches. The same identity with differing evidence produces one invalid Source Trace with a
+duplicate-conflict error naming the block locations.</p>
+<h3 id="55-endpoint-summary-fallback">5.5 Endpoint Summary fallback</h3>
+<p>A Source Trace with endpoint evidence but no path rows is valid evidence. Both endpoints resolve.
+When a direct physical Cable already joins exactly these two terminations, the unit is a no-op.
+Otherwise the unit is blocked with an endpoint-evidence-only diagnostic. It never plans changes.</p>
+<h3 id="56-validation-taxonomy">5.6 Validation taxonomy</h3>
+<p>The owner column states which component detects the condition. A Source Adapter condition depends on
+source structure only. A Cable Target Module condition depends on NetBox state (resolved Device,
+existing Cables, PortMapping rows) and cannot be detected during source interpretation.</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Diagnostic code</th>
+<th>Disposition</th>
+<th>Owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Workbook contains neither recognized sheet</td>
+<td><code>trace.no_recognized_sheet</code></td>
+<td>Batch-level error, no units</td>
+<td>Source Adapter</td>
+</tr>
+<tr>
+<td>Incomplete block (From without To, missing header row, unparseable Segment Evidence row)</td>
+<td><code>trace.incomplete_block</code></td>
+<td><code>invalid</code></td>
+<td>Source Adapter</td>
+</tr>
+<tr>
+<td>Non-linear or discontinuous path (broken continuity, duplicated or branching rows, first or last termination contradicting the From/To lines)</td>
+<td><code>trace.non_linear_path</code></td>
+<td><code>invalid</code></td>
+<td>Source Adapter</td>
+</tr>
+<tr>
+<td><code>Trace List</code> contradicts the path rows</td>
+<td><code>trace.corroboration_mismatch</code></td>
+<td><code>invalid</code></td>
+<td>Source Adapter</td>
+</tr>
+<tr>
+<td>Same identity stated with differing evidence</td>
+<td><code>trace.duplicate_conflict</code></td>
+<td><code>invalid</code></td>
+<td>Source Adapter</td>
+</tr>
+<tr>
+<td>Pass-Through Claim whose entry or exit carries an interface-kind PortClass</td>
+<td><code>trace.pass_through_at_interface</code></td>
+<td><code>invalid</code></td>
+<td>Source Adapter</td>
+</tr>
+<tr>
+<td>Same termination claimed by different traces, or same segment pair with different CableClass</td>
+<td><code>trace.cross_trace_conflict</code></td>
+<td><code>invalid</code> on every involved trace</td>
+<td>Source Adapter</td>
+</tr>
+<tr>
+<td>A PortClass value outside the adapter's fixed vocabulary</td>
+<td><code>trace.unknown_port_class</code></td>
+<td><code>invalid</code></td>
+<td>Source Adapter</td>
+</tr>
+<tr>
+<td>The resolved object is not an Interface, FrontPort, or RearPort</td>
+<td><code>cable.unsupported_termination_kind</code></td>
+<td><code>invalid</code></td>
+<td>Cable Target Module</td>
+</tr>
+<tr>
+<td>Ambiguous or missing Device, panels included</td>
+<td><code>trace.device_unresolved</code></td>
+<td><code>blocked</code></td>
+<td>Cable Target Module</td>
+</tr>
+<tr>
+<td>Endpoint evidence only and no matching direct Cable</td>
+<td><code>trace.endpoint_evidence_only</code></td>
+<td><code>blocked</code></td>
+<td>Cable Target Module</td>
+</tr>
+</tbody>
+</table>
+<p>Diagnostic code strings are spec defaults; the conditions, dispositions, and owners are normative.</p>
+<p>The Source Adapter emits its rows as source diagnostics on the Source Batch without querying NetBox.
+The Cable Target Module emits its rows during planning.</p>
+<p>An invalid trace does not stop the batch. The rest of the Source Batch continues.</p>
+<p>Pass-Through Claim validation in the adapter checks continuity only: consecutive rows share device and
+cards. The adapter records the claimed entry and exit pair verbatim. Same-port continuation is legal
+evidence, including a trunk and a patch recorded on one rear port. Whether NetBox's front-to-rear
+mapping can realize it is planning-time work (section 6).</p>
+<p>An identical shared segment across traces (same termination pair, same CableClass) is allowed. It
+dedupes at Planned Change identity per ADR 0001. The cross-trace occupancy check counts claims from
+distinct traces only. A termination repeated inside one trace is either the legal same-port
+continuation or part of an already-invalid structure.</p>
+<h3 id="57-binding-and-provenance-persistence">5.7 Binding and provenance persistence</h3>
+<p>One complete Source Trace produces one Synchronization Unit. The unit identity is the trace identity.</p>
+<p>After execution, provenance persists in one plugin table, in the same style as the existing per-Device
+provenance table. Each row records the Import Profile, the Cable, the trace identity, the segment
+index, the original From/To text and direction, the workbook provenance, and the source export
+timestamp. There is no trace-level database record.</p>
+<p>Cardinality is one row per (Cable, Import Profile, trace identity), enforced by a unique constraint on
+that triple. The Cable reference is a plain foreign key, not a one-to-one relation. When two Source
+Traces claim an identical shared segment, ADR 0001 shares one Planned Change and creates one Cable,
+and that Cable carries one provenance row per contributing Source Trace. This follows issue #84 as
+amended for the spec (#78): the per-created-Cable wording predates the shared-segment case that
+issue #86 and ADR 0001 identity sharing introduce.</p>
+<p>The removed Logical Cable is recorded by the <code>ImportExecution</code> deleted-object snapshot (section 9.2),
+not by a provenance row.</p>
+<h3 id="58-fixture-corpus">5.8 Fixture corpus</h3>
+<p>The committed redacted structural fixtures are the trace adapter's test corpus. Redaction rewrote only
+the workbook string table, so every structural artifact survives: block order, duplicated blocks,
+blank-row layout, empty-string cells, and sheet dimensions.</p>
+<table>
+<thead>
+<tr>
+<th>Fixture</th>
+<th>Expected result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Copper trace workbook</td>
+<td>20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, all 10 valid with 3 Segment Evidence entries each, empty <code>Trace List</code> corroborates nothing</td>
+</tr>
+<tr>
+<td>Fiber trace workbook</td>
+<td>20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, 8 valid with 4 to 9 segments, 4 ending at a rear port, every <code>Trace List</code> corroboration passing, 1 <code>trace.non_linear_path</code>, 1 <code>trace.pass_through_at_interface</code>, and one accepted legal same-rear-port continuation inside a valid trace</td>
+</tr>
+<tr>
+<td>Both</td>
+<td>Zero shared terminations and zero CableClass conflicts between distinct traces</td>
+</tr>
+</tbody>
+</table>
+<h2 id="6-patched-path-replacement-planning-and-transaction-behavior">6. Patched Path Replacement planning and transaction behavior</h2>
+<p>The Cable Target Module requires NetBox 4.6 or later, because it verifies pass-throughs against the
+PortMapping model. The plugin's minimum NetBox version is 4.6.0 for this feature and for the plugin as
+a whole.</p>
+<h3 id="61-port-resolution">6.1 Port resolution</h3>
+<p>Each Termination Reference resolves inside its resolved Device. Endpoint Device resolution uses the
+existing explicit matching approach and runs before port resolution begins.</p>
+<p>The adapter's fixed PortClass vocabulary claims the termination kind:</p>
+<table>
+<thead>
+<tr>
+<th>PortClass</th>
+<th>Claimed NetBox termination</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NIC, Switch Port, Port</td>
+<td>Interface</td>
+</tr>
+<tr>
+<td>Position Front, Fiber Pair Front</td>
+<td>FrontPort</td>
+</tr>
+<tr>
+<td>Punch-Down, Fiber Pair Back</td>
+<td>RearPort</td>
+</tr>
+</tbody>
+</table>
+<p>A PortClass value outside this vocabulary is a source-structure error the Source Adapter reports as
+<code>trace.unknown_port_class</code>, so it never reaches planning. A resolved object whose real type is not an
+Interface, FrontPort, or RearPort is a target-state error the Cable Target Module reports as
+<code>cable.unsupported_termination_kind</code>.</p>
+<p>Candidates are all terminations of the claimed kind on the resolved Device. Deterministic matching
+requires a unique normalized exact port-name match. Anything else leaves the Target Field unresolved:
+the unit is blocked, and manual searchable selection resolves it. The optional Resolution Proposal
+flow (section 7) assists the same selection. The cards label is identity, display, and context for the
+operator and the Inference Backend. Deterministic matching never uses it.</p>
+<p>A termination resolved by the exact-name rule shows the <code>automatically resolved</code> badge state. A
+termination resolved by an operator or by an accepted proposal shows <code>manually resolved</code> or
+<code>accepted</code>.</p>
+<h3 id="62-portmapping-verification-and-same-port-continuation">6.2 PortMapping verification and same-port continuation</h3>
+<p>Pass-through verification uses the NetBox PortMapping model. A mapping row must link the resolved
+FrontPort and the resolved RearPort. A contradicted claim makes the unit invalid with a diagnostic
+naming both ports and the actual mappings. The fix is a NetBox panel-model correction or a
+re-resolution, then a replan.</p>
+<p>Same-port continuation substitutes the mapped peer port for the second cable end. With exactly one
+distinct mapped peer, the planner substitutes automatically and records the substitution in the plan.
+With several mapped peers, the unit is blocked and manual selection offers exactly the mapped peers.
+The rule is symmetric for rear-to-front and front-to-rear, because both directions can fan out under
+PortMapping.</p>
+<p>A mapped-peer choice is a second field-key role, distinct from resolving the Termination Reference
+itself. Its field key is the original termination field key plus the role marker <code>mapped_peer</code>. The
+default role marker for termination resolution is <code>termination</code>. Both roles write a
+<code>TerminationResolution</code> row that stores the selected object type, the selected object id, and the
+display name at selection time. One termination can therefore carry one row for its own resolution and
+one row for its mapped-peer choice, and the two never overwrite each other.</p>
+<p>The planner asserts as an invariant that the resulting path's outer terminations belong to the two
+resolved endpoint Devices.</p>
+<h3 id="63-comparison-and-the-no-op">6.3 Comparison and the no-op</h3>
+<p>Comparison is direction independent. A desired segment is an unordered termination pair. An existing
+Cable satisfies it exactly when its two termination sets are precisely that pair, one termination per
+side. A multi-termination Cable touching any desired port never matches; it is a conflict.</p>
+<p>Attribute drift on a matched Cable (type, profile, status, label) surfaces as an <code>info</code> diagnostic. It
+is not updated in this delivery.</p>
+<p><strong>Segment precedence.</strong> A direct Cable whose termination sets exactly match a desired segment is a
+proven physical segment. It is never classified as the Logical Cable, and it is never deleted. The
+planner classifies every existing Cable against the desired segment set before it looks for a Logical
+Cable.</p>
+<p>The Logical Cable is the current direct endpoint-to-endpoint Cable that matches no desired segment,
+regardless of what created it. Its description and tags appear in review. There is no
+provenance-marker gate.</p>
+<p>The precedence rule decides the single-segment trace. When the trace claims exactly one segment
+between the two endpoints, an existing direct Cable matches that desired segment, so it is a proven
+physical segment and the unit is a no-op. Nothing is deleted and nothing is recreated.</p>
+<p>The unit is a no-op exactly when every desired segment is satisfied by a proven existing Cable and no
+Logical Cable remains to delete. Any partial state is actionable and reuses the proven segments. When
+no direct Cable exists between the endpoints, the unit is still actionable as a creation-only
+replacement, and the removal step is absent.</p>
+<h3 id="64-the-replacement">6.4 The replacement</h3>
+<p>One outer database transaction covers one complete execution request, selective or final (ADR 0001,
+section 4.6). Units apply in dependency order inside that transaction. No unit commits independently,
+and no unit opens a nested transaction that can commit on its own. Any failure in any selected unit
+rolls back the complete selected transaction. This corrects the per-unit transaction phrasing used in
+the text of issue #86: a Source Trace unit is the smallest reviewable and selectable part, not a
+separate commit boundary.</p>
+<p>Ordering inside the unit:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>Synchronization Unit: one complete Source Trace
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>  Planned Change 1: delete the Logical Cable            (present only when one exists)
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>  Planned Change 2..n: create or reuse each physical Cable segment
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>     each creation depends on change 1 when it exists
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>     creations follow canonical segment order
+</code></pre></div>
+<p>Deletion scope: the only Cable a Patched Path Replacement ever deletes is the one direct
+endpoint-to-endpoint Logical Cable. Any other cable occupying a desired termination makes the unit
+blocked. The operator clears it in NetBox and replans. The plugin never deletes or edits a third-party
+cable.</p>
+<p>Creation policy for a new segment:</p>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Status</td>
+<td><code>connected</code></td>
+</tr>
+<tr>
+<td>Type</td>
+<td>From the Import Profile CableClass mapping</td>
+</tr>
+<tr>
+<td>Profile</td>
+<td>From the Import Profile CableClass mapping</td>
+</tr>
+<tr>
+<td>Termination connector and position data</td>
+<td>None written</td>
+</tr>
+<tr>
+<td>Label, description, tenant</td>
+<td>Empty</td>
+</tr>
+<tr>
+<td>Color</td>
+<td>NetBox default</td>
+</tr>
+</tbody>
+</table>
+<p>An unmapped CableClass blocks the unit. Provenance lives only in the plugin's per-Cable provenance
+table, so nothing duplicates or drifts.</p>
+<p>CablePath is never created or mutated. The plugin writes Cables and reads PortMapping rows. NetBox
+derives the paths.</p>
+<h3 id="65-preconditions-and-rollback">6.5 Preconditions and rollback</h3>
+<p>Preconditions recorded per unit:</p>
+<ul>
+<li>The Logical Cable's id and terminations, or its recorded absence.</li>
+<li>Each reused Cable's id and termination sets.</li>
+<li>Emptiness of every termination that receives a new cable end, evaluated net of the unit's own
+  deletion.</li>
+<li>The PortMapping row ids the path relies on.</li>
+<li>The resolved termination ids.</li>
+</ul>
+<p>Execution rechecks every precondition inside the transaction. Any mismatch rolls back the complete
+selected transaction and requires a replan. This makes every topology change after preview a detected
+stale state.</p>
+<h3 id="66-permissions">6.6 Permissions</h3>
+<p>Planning marks the unit blocked with a diagnostic when the operator lacks rights to delete the Logical
+Cable, add cables, or view the involved devices and ports. Execution rechecks the same permissions
+inside the transaction as the accepted plan's operator.</p>
+<h3 id="67-planning-diagnostics">6.7 Planning diagnostics</h3>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Diagnostic code</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No unique exact name match for a Termination Reference</td>
+<td><code>cable.termination_unresolved</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>The resolved object is not an Interface, FrontPort, or RearPort</td>
+<td><code>cable.unsupported_termination_kind</code></td>
+<td><code>invalid</code></td>
+</tr>
+<tr>
+<td>PortMapping contradicts a Pass-Through Claim</td>
+<td><code>cable.pass_through_not_mapped</code></td>
+<td><code>invalid</code></td>
+</tr>
+<tr>
+<td>Several mapped peers for a same-port continuation</td>
+<td><code>cable.ambiguous_mapped_peer</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A foreign Cable occupies a desired termination</td>
+<td><code>cable.termination_occupied</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A multi-termination Cable touches a desired port</td>
+<td><code>cable.multi_termination_conflict</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A CableClass dimension is unresolved</td>
+<td><code>cable.cableclass_unmapped</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A stored Cable Type or Cable Profile value is no longer offered by the running instance</td>
+<td><code>cable.cableclass_stale_mapping</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A stored Cable Profile is offered but is incompatible with one termination per side</td>
+<td><code>cable.profile_incompatible</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>The operator lacks a required Cable or view permission</td>
+<td><code>cable.permission_denied</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A dangling natural-key reference in <code>adapter_config</code></td>
+<td><code>profile.dangling_reference</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>Attribute drift on a reused Cable</td>
+<td><code>cable.attribute_drift</code></td>
+<td><code>info</code> diagnostic, disposition unchanged</td>
+</tr>
+</tbody>
+</table>
+<p>Diagnostic code strings are spec defaults; the conditions and dispositions are normative.</p>
+<h2 id="7-resolution-proposal-persistence-jobs-permissions-staleness-and-acceptance">7. Resolution Proposal persistence, jobs, permissions, staleness, and acceptance</h2>
+<h3 id="71-binding">7.1 Binding</h3>
+<p>A Resolution Proposal binds to (Import Profile, task type, target-module-defined field key). Binding
+is plan-independent, so a proposal survives preview close and replanning.</p>
+<p>The first task type is <code>select_termination</code>. Its field key is the normalized termination identity
+triple plus the claimed kind plus the role marker. Its canonical form is the JSON serialization of
+those values, matching the trace identity rule in section 5.2:
+<code>{"cards":&lt;cards&gt;,"device":&lt;device&gt;,"kind":&lt;kind&gt;,"port":&lt;port&gt;,"role":"termination"}</code>, with members
+sorted by name (spec default for the member order). The stored key is this canonical JSON form. A
+pipe-separated string is a display form only and is never a key.</p>
+<table>
+<thead>
+<tr>
+<th>Role marker</th>
+<th>Meaning</th>
+<th>Written by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>termination</code></td>
+<td>Resolve the Termination Reference to a NetBox termination</td>
+<td>Manual selection or an accepted proposal</td>
+</tr>
+<tr>
+<td><code>mapped_peer</code></td>
+<td>Choose among the mapped peers for a same-port continuation (section 6.2)</td>
+<td>Manual selection</td>
+</tr>
+</tbody>
+</table>
+<p>At most one active (non-terminal) proposal exists per bound key. A proposal can be requested only for
+a currently-unresolved field. Proposals are requested for the <code>termination</code> role in this delivery.</p>
+<h3 id="72-states-and-the-operator-decision">7.2 States and the operator decision</h3>
+<p>The status enum has exactly five values, and it is immutable once terminal:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>queued -&gt; running -&gt; completed
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>queued -&gt; cancelled
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>running -&gt; cancelled
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>queued|running -&gt; failed
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>terminal statuses: completed, failed, cancelled
+</code></pre></div>
+<p>All other transitions are forbidden. A retry is always a new proposal row.</p>
+<p>Acceptance and rejection are not statuses. The operator decision is a separate one-shot set of fields
+on the same row: <code>decision</code> (<code>accepted</code> or <code>rejected</code>), the deciding operator, the decision time, and
+the link to the written <code>TerminationResolution</code>. The decision fields are null until an operator
+decides, they can be set exactly once, and setting them never changes the status. A row whose status
+is <code>completed</code> and whose <code>decision</code> is null is the only row an operator can accept or reject.</p>
+<h3 id="73-immutable-content">7.3 Immutable content</h3>
+<p>Frozen at request time: the source evidence for the bound field, the resolved Device object type and
+id, the prompt version, the response schema version, the Candidate Snapshot, the requesting operator,
+and the timestamps. A Candidate Snapshot entry carries an opaque candidate id, the NetBox object type
+and id, and the display name at snapshot time.</p>
+<p>The row is created when the request is made, so it is also the attempt record. It exists before any
+Inference Backend call and survives every outcome.</p>
+<p>Completion adds the outcome (<code>candidate</code> or <code>no_match</code>), the selected candidate reference, the
+required explanation, backend metadata (model, request and response ids, finish reason, per-attempt
+records, and which configuration source supplied the Inference Backend), and the raw response text for
+diagnostics. Failure adds the typed failure reason and the raw response text when one was received.</p>
+<p>Status <code>completed</code> requires a valid response object. Outcome <code>no_match</code> requires a valid JSON no-match
+object with its own explanation, which the operator reads to understand why the evidence did not
+distinguish the candidates. A refusal or an empty-content completion carries no such explanation, so it
+is not <code>no_match</code>: it sets status <code>failed</code> with typed reason <code>backend_refusal</code> and retains the raw
+response for diagnostics.</p>
+<h3 id="74-staleness">7.4 Staleness</h3>
+<p>Staleness is not a stored status. It is computed at read time by comparing the Candidate Snapshot and
+the frozen resolved Device reference against current state. It is revalidated inside the acceptance
+transaction. There are no change-signal listeners and no background sweeper.</p>
+<table>
+<thead>
+<tr>
+<th>Trigger</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>The resolved Device differs from the frozen resolved Device reference</td>
+<td>The proposal reads as stale</td>
+</tr>
+<tr>
+<td>The eligible candidate set changed</td>
+<td>The proposal reads as stale</td>
+</tr>
+<tr>
+<td>An Import Profile change that affects resolution</td>
+<td>Surfaces through the candidate comparison</td>
+</tr>
+<tr>
+<td>The source value changed</td>
+<td>A different field key, so the old proposal no longer applies</td>
+</tr>
+<tr>
+<td>The plan changed</td>
+<td>Irrelevant, because binding is plan-independent</td>
+</tr>
+</tbody>
+</table>
+<h3 id="75-jobs-and-failures">7.5 Jobs and failures</h3>
+<p>The job receives the Resolution Proposal id and the stable Inference Backend key, which is the
+backend's unique name. It never receives a database id for the backend and never receives a secret.
+The worker resolves the key itself: it reads the database row with that key first, and falls back to
+the <code>inference_backend</code> plugin setting with the same <code>name</code> only when no database row exists. The
+worker records which source it used in backend metadata, so an operator can tell a database-configured
+run from a file-configured run.</p>
+<p>The job issues one Inference Backend request at a time through the existing NetBox job system. Vault
+credentials resolve in the worker.</p>
+<p>Transient typed failures (rate limit, temporary backend failure, timeout, credential infrastructure
+failure) retry automatically at most twice with backoff inside the same proposal, then fail.
+Non-transient failures (backend authentication failure, invalid configuration, malformed response,
+unknown candidate id, wrong finish reason, credential denial, invalid credential reference, invalid
+secret material) fail immediately with the typed reason stored.</p>
+<p>Operators can cancel a queued or running proposal. A late response to a cancelled or superseded
+request is discarded and never overwrites the terminal row. Closing the preview changes nothing;
+results appear in the next preview. After a failure, the operator re-requests manually.</p>
+<h3 id="76-permissions">7.6 Permissions</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Request a proposal</td>
+<td>Preview access to the Import Profile, including view rights on the resolved Device</td>
+</tr>
+<tr>
+<td>View proposals</td>
+<td>Import Profile view access</td>
+</tr>
+<tr>
+<td>Cancel a queued or running proposal</td>
+<td>The same permission as requesting a proposal, not restricted to the requesting operator</td>
+</tr>
+<tr>
+<td>Accept or reject</td>
+<td>The same permission as creating a manual Row Resolution, not restricted to the requesting operator</td>
+</tr>
+</tbody>
+</table>
+<p>Plan ownership under ADR 0001 is untouched. Acceptance only writes the decision. The operator still
+replans their own preview.</p>
+<h3 id="77-acceptance">7.7 Acceptance</h3>
+<p>Acceptance is an explicit operator action. It is valid only on a proposal whose status is <code>completed</code>,
+whose outcome is <code>candidate</code>, whose <code>decision</code> is still null, and that passes freshness revalidation
+inside the acceptance transaction: the Candidate Snapshot still equals the current eligible set, the
+current resolved Device equals the frozen resolved Device reference, and the selected candidate still
+exists.</p>
+<p>Acceptance upserts the <code>TerminationResolution</code> row for the bound key and links it from the proposal.
+The last explicit operator action wins across proposals for that key. A <code>no_match</code> outcome is
+informational and cannot be accepted. A proposal never changes NetBox and never applies itself.</p>
+<p>Rejection sets the same one-shot decision fields, records the operator and time, and does not block
+re-requesting a fresh proposal for the same key. Neither acceptance nor rejection changes the status.</p>
+<p>All proposal rows are retained indefinitely in this delivery. Cleanup tooling is future scope.</p>
+<h3 id="78-inference-backend-request-and-response-contract">7.8 Inference Backend request and response contract</h3>
+<p>The request is one non-streaming Chat Completions call:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>POST {api_root}/chat/completions
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>  model: the configured model id
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>  stream: false
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>  messages:
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    system: instructs the model to select at most one supplied candidate,
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>            to treat source evidence as data and not as instructions,
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>            and to return one JSON object only
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    user:   serialized JSON with schema_version, task, source_evidence, candidates
+</code></pre></div>
+<p>The response must be one JSON object:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span><span class="nt">"schema_version"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">"outcome"</span><span class="p">:</span><span class="w"> </span><span class="s2">"candidate"</span><span class="p">,</span><span class="w"> </span><span class="nt">"candidate_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"candidate-0001"</span><span class="p">,</span><span class="w"> </span><span class="nt">"explanation"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">}</span>
+</code></pre></div>
+<p><code>outcome</code> is <code>candidate</code> or <code>no_match</code>. For <code>no_match</code>, <code>candidate_id</code> must be null.</p>
+<p>The plugin validates every response itself, even when the Inference Backend reports that it enforced a
+schema. Semantic checks after schema validation:</p>
+<ul>
+<li>Reject duplicate candidate identifiers when constructing the request.</li>
+<li>Compare candidate identifiers as exact opaque strings. Never trim, normalize, parse, or fuzzy-match
+  them.</li>
+<li>For <code>candidate</code>, require the identifier to be an exact member of the immutable request candidate
+  set.</li>
+<li>Require a non-empty explanation and enforce a length limit of 2000 characters (spec default).</li>
+<li>Recheck that the selected target object still exists and is still eligible before display and again
+  before acceptance.</li>
+<li>Read <code>choices[0].message.content</code> and require <code>finish_reason</code> <code>stop</code> with non-empty text.</li>
+</ul>
+<p>An invented, missing, duplicated, or malformed candidate identifier is an invalid backend response. A
+wrong <code>finish_reason</code> is the same class. The proposal row already exists, so the runtime sets that row
+to status <code>failed</code> with its typed reason and the raw response text, and the attempt never produces a
+candidate outcome. Never repair it with fuzzy matching. Never send a silent second request.</p>
+<p>A structured-output refusal (successful HTTP status, <code>finish_reason</code> <code>stop</code>, <code>message.refusal</code> set, no
+content) and an empty-content completion set status <code>failed</code> with typed reason <code>backend_refusal</code> and
+retain the raw response. Neither is <code>no_match</code>: <code>no_match</code> requires a valid JSON no-match object with
+its explanation. Neither is retried automatically, and neither is classified as an invalid response.</p>
+<p>Opaque candidate ids are generated per request as zero-padded sequential strings of the form
+<code>candidate-0001</code> (spec default).</p>
+<h3 id="79-generality">7.9 Generality</h3>
+<p>The lifecycle is target-field-generic from day one. Each row carries a task type, the
+target-module-defined field key, and a generic Candidate Snapshot. Contact assistance later adds a new
+task type, key shape, and candidate retrieval with zero lifecycle changes. Nothing Contact-specific is
+implemented now.</p>
+<h2 id="8-inference-backend-and-credential-boundaries">8. Inference Backend and credential boundaries</h2>
+<h3 id="81-three-layer-boundary">8.1 Three-layer boundary</h3>
+<ol>
+<li><strong>Application service.</strong> It creates the Resolution Proposal row and owns its immutable request
+   content: the source evidence, the resolved Device reference, the Candidate Snapshot, the prompt
+   version, and the strict response schema. It parses the returned content, validates it against the
+   request snapshot, and decides only the outcome recorded on the existing row.</li>
+<li><strong>Backend adapter.</strong> It converts one request into one non-streaming Chat Completions call. It owns
+   authentication, HTTP transport, response-envelope parsing, timeout reporting, and backend error
+   classification. It imports no NetBox, candidate, proposal, or job models.</li>
+<li><strong>Asynchronous job service.</strong> It owns state transitions, scheduling, retries, cancellation, and
+   operator-visible progress.</li>
+</ol>
+<p>The row-exists-first lifecycle decided in issue #82 supersedes the create-on-success phrasing of the
+research note: the row is created at request time, so no layer ever decides whether a proposal can be
+stored. The research note's "completed call without a proposal" maps to a failed Resolution Proposal
+row with typed reason <code>backend_refusal</code>, not to an absent row.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>InferenceBackend.complete(InferenceRequest) -&gt; InferenceCompletion
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>  raises: typed backend error (transport failure, timeout, authentication failure,
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>          rate limit, invalid configuration, malformed envelope)
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>InferenceRequest:  system_instruction, user_payload_json, requested_response_mode
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>InferenceCompletion: content_text (optional), is_refusal, finish_reason,
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>                     backend_request_id, backend_response_id, backend_model
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>  is_refusal is derived by the adapter: finish_reason `stop` with empty content,
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>  or with a refusal payload instead of content. Any other finish_reason, or a
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>  malformed envelope, raises a typed backend error rather than returning a completion.
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>CredentialBackend.resolve(reference) -&gt; credential context
+</code></pre></div>
+<p>A returned <code>InferenceCompletion</code> therefore means the call reached the backend and the envelope parsed.
+The application service then records <code>backend_refusal</code> when <code>is_refusal</code> is set, and otherwise
+validates <code>content_text</code>.</p>
+<h3 id="82-inference-backend-configuration-model">8.2 Inference Backend configuration model</h3>
+<p>A plugin-level model holds named Inference Backend rows with at most one enabled row; the enabled row is the active backend. Its UI label is
+"AI backend". Import Profiles do not select an Inference Backend in this delivery.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Requirement</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Backend key</td>
+<td>Required</td>
+<td>The unique name of the Inference Backend, and the only identifier a job payload carries</td>
+</tr>
+<tr>
+<td>Display name</td>
+<td>Required</td>
+<td>Operator-facing label</td>
+</tr>
+<tr>
+<td>Adapter type</td>
+<td>Required</td>
+<td><code>openai_compatible</code> in this delivery (spec default key)</td>
+</tr>
+<tr>
+<td><code>api_root</code></td>
+<td>Required</td>
+<td>Exact API root without a trailing slash. The client appends <code>/chat/completions</code> or <code>/models</code>. It never adds <code>/v1</code>.</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>Required</td>
+<td>Exact backend model id. The worker never chooses a model at run time.</td>
+</tr>
+<tr>
+<td><code>authentication</code></td>
+<td>Required</td>
+<td><code>bearer</code> in this delivery</td>
+</tr>
+<tr>
+<td><code>response_mode</code></td>
+<td>Required</td>
+<td><code>prompt_json</code> by default. <code>json_object</code> and <code>json_schema</code> are allowed only after an operator verifies the exact backend and model.</td>
+</tr>
+<tr>
+<td><code>credential_reference</code></td>
+<td>Required</td>
+<td>A typed Vault KV v2 reference</td>
+</tr>
+<tr>
+<td><code>connect_timeout</code>, <code>read_timeout</code></td>
+<td>Required</td>
+<td>Finite transport limits. Defaults: 5 seconds and 60 seconds (spec default).</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td>Required</td>
+<td>Whether Ask AI may use this row</td>
+</tr>
+</tbody>
+</table>
+<p>The active Inference Backend is the enabled database row. The <code>inference_backend</code> plugin setting is
+the whole-backend fallback, and it acts as the active backend only when no enabled database row
+exists. The two sources are never merged field by field. The worker resolves the active backend at run
+time and records the source it used in backend metadata.</p>
+<h3 id="821-plugin-settings">8.2.1 Plugin settings</h3>
+<p>All three settings live under the plugin's <code>PLUGINS_CONFIG</code> entry.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Shape</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>inference_backend_origin_allowlist</code></td>
+<td>A list of exact origin strings, each with scheme, host, and port, for example <code>https://backend.example.invalid:443</code>. No wildcards, no path component, no bare host.</td>
+</tr>
+<tr>
+<td><code>inference_backend</code></td>
+<td>The file-backed fallback: one mapping holding exactly the <code>InferenceBackend</code> row fields minus the backend key and <code>enabled</code>, namely <code>display_name</code>, <code>adapter_type</code>, <code>api_root</code>, <code>model</code>, <code>authentication</code>, <code>response_mode</code>, <code>credential_reference</code>, <code>connect_timeout</code>, and <code>read_timeout</code>. Its backend key is the fixed value <code>file-fallback</code>.</td>
+</tr>
+<tr>
+<td><code>vault</code></td>
+<td>A mapping with <code>address</code> (Vault Proxy or Vault server address), <code>auth_method</code>, <code>namespace</code> (optional, Vault Enterprise only), <code>ca_bundle</code> (optional path), <code>connect_timeout</code>, and <code>read_timeout</code>.</td>
+</tr>
+</tbody>
+</table>
+<p><code>vault.auth_method</code> has exactly two permitted values:</p>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>proxy</code></td>
+<td>Default. The worker calls Vault through a Vault Proxy that holds an auto-auth token. The plugin stores and handles no Vault credential.</td>
+</tr>
+<tr>
+<td><code>token</code></td>
+<td>The worker reads a Vault token from a deployment environment variable. The token is never stored in the database, in a plugin setting value, or in any plugin-managed file.</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>vault</code> mapping never contains a KV v2 mount. The mount belongs to the credential reference (section 8.5), whether that
+reference lives on the Inference Backend row or in the file fallback, so one deployment can serve references on different mounts
+without a settings change. It also never contains a token value, an AppRole RoleID, an AppRole
+SecretID, or a TLS verification override.</p>
+<p><strong>Validation split.</strong> Configuration shape validates at application startup and fails fast: the setting
+names, the field set of <code>inference_backend</code>, the <code>api_root</code> trust boundary (section 8.3), the
+allowlist entry format, and the permitted <code>vault.auth_method</code> values. Credential resolution and
+network liveness never run at startup; they fail at request time in the worker, with the typed reasons
+in section 13.3. A malformed <code>inference_backend</code> mapping is an <code>invalid_configuration</code> failure, never
+a silent fallback to a different backend.</p>
+<h3 id="83-api_root-trust-boundary">8.3 <code>api_root</code> trust boundary</h3>
+<p><code>api_root</code> names a destination the NetBox server itself calls. Validate it identically for a database
+row and for an <code>inference_backend</code> setting value:</p>
+<ul>
+<li>Accept only a deployment-owned origin or an origin on a deployment allowlist. The allowlist is a
+  plugin setting named <code>inference_backend_origin_allowlist</code> (spec default).</li>
+<li>Require <code>https</code> when <code>authentication</code> is <code>bearer</code>. Allow <code>http</code> only for an origin the allowlist
+  marks as an approved local endpoint.</li>
+<li>Resolve the host and reject a private, link-local, loopback, or cloud metadata destination unless
+  the allowlist approves that exact origin. Recheck after resolution.</li>
+<li>Disable redirects in the HTTP client, or revalidate every redirect target against the same rules
+  before following it.</li>
+</ul>
+<p>Model discovery is optional and is a configuration convenience only. The operator must always be able
+to enter the exact model id. A failed model-list request does not prove that Chat Completions is
+unavailable.</p>
+<h3 id="84-rejected-backend-capabilities">8.4 Rejected backend capabilities</h3>
+<p>The first adapter rejects: the Responses API, streaming, tools and tool calls, backend-side chat
+persistence, files, retrieval, web search, memory, backend-specific functions, multiple choices,
+multimodal input or output, automatic fallback between response modes, and automatic model selection.</p>
+<h3 id="85-credential-boundary">8.5 Credential boundary</h3>
+<p>Inference Backend configuration stores only a credential reference. The reference has this shape:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="nt">backend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vault_kv_v2</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="nt">mount</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;kv-mount-name&gt;</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;backend-secret-path&gt;</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;api-key-field&gt;</span>
+</code></pre></div>
+<p>The KV v2 mount lives here and only here. The reference never accepts a Vault server URL, namespace,
+token, AppRole RoleID, AppRole SecretID, or TLS verification override. Connection and machine identity
+data stay in the deployment-owned <code>vault</code> setting (section 8.2.1).</p>
+<p>The credential backend seam has four responsibilities: validate a typed reference, resolve it through
+the selected credential backend, return secret material for the lifetime of one outbound request, and
+classify failures without including response bodies or credential values.</p>
+<p>The Vault implementation supports KV v2 only, reads one named field from one configured path, rejects
+a missing, empty, or non-string value, and omits the secret from all exception text. It sends no
+Source Trace, device, contact, or operator data to Vault.</p>
+<p>Vault Proxy auto-auth is the recommended deployment baseline. The worker calls the Vault API through
+the Proxy without possessing the token. Direct Vault access is a valid deployment variant, but this
+delivery does not implement direct AppRole login.</p>
+<p>Resolution happens in the inference worker, once per outbound inference attempt. The plugin caches no
+API-key value. Key rotation takes effect on the next resolution. An already running HTTP request
+continues with the value it received. The system never silently replays a possibly accepted inference
+request.</p>
+<h3 id="86-secrets-never-persist">8.6 Secrets never persist</h3>
+<p>The resolved secret value never enters a model, form, serializer, profile YAML export, session, job
+argument, Resolution Proposal, <code>ImportExecution</code> row, or log.</p>
+<p>The typed credential reference is different from a secret value. It lives in exactly one authoritative
+place: the enabled <code>InferenceBackend</code> row, or the <code>inference_backend</code> file fallback when no enabled
+row exists. It is restricted configuration metadata, never copied elsewhere.</p>
+<p>The inference job receives only the stable backend key and resolves the credential itself. The
+request-handling process never resolves a secret and passes it to the worker.</p>
+<p>Plugin audit and job state may record the backend key, the proposal job id, the credential backend
+name, the resolution outcome category, and request start and completion times. They must not record
+the secret value, the authorization header, a Vault token, a Vault response body, or inference request
+headers. The Vault mount, path, and field are restricted configuration metadata.</p>
+<p>Vault availability is never required at startup. The connection test runs as a worker Job, on the same
+queue and the same secret boundary as a proposal job, so no web process ever resolves a credential. It
+resolves the configured reference and returns a typed result: <code>ok</code>, <code>credential_unavailable</code>,
+<code>credential_denied</code>, <code>invalid_credential_reference</code>, <code>invalid_secret_material</code>, or
+<code>invalid_configuration</code>. It never returns a secret value or a Vault response body.</p>
+<p>Running the connection test is authorized by the dedicated <code>InferenceBackend</code> object permission in
+section 13.1. There is no separate administrator or superuser check.</p>
+<h2 id="9-database-changes-and-migration-ownership">9. Database changes and migration ownership</h2>
+<p>Migrations are generated artifacts. Change a model, then generate the migration with the project's
+<code>makemigrations</code> helper. Never hand-edit a generated migration. The only exception is a data migration
+whose operations cannot be generated, and that migration contains data operations only.</p>
+<h3 id="91-new-models">9.1 New models</h3>
+<table>
+<thead>
+<tr>
+<th>Model (spec default names)</th>
+<th>Purpose</th>
+<th>Key</th>
+<th>Introduced by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SourceDocument</code></td>
+<td>The stored uploaded workbook that <code>source_document</code> references</td>
+<td>Content fingerprint indexed per Import Profile</td>
+<td>T2</td>
+</tr>
+<tr>
+<td><code>TerminationResolution</code></td>
+<td>The trace-side Row Resolution written by manual selection or proposal acceptance</td>
+<td>(Import Profile, task type, field key) unique</td>
+<td>T4</td>
+</tr>
+<tr>
+<td><code>CableClassMapping</code></td>
+<td>Cable target policy for one CableClass value</td>
+<td>(Import Profile, CableClass value) unique</td>
+<td>T4</td>
+</tr>
+<tr>
+<td><code>CableImportSource</code></td>
+<td>Provenance for one Cable and one contributing Source Trace</td>
+<td>(Cable, Import Profile, trace identity) unique</td>
+<td>T5</td>
+</tr>
+<tr>
+<td><code>InferenceBackend</code></td>
+<td>One named Inference Backend definition, at most one row enabled</td>
+<td>Backend key unique</td>
+<td>T7</td>
+</tr>
+<tr>
+<td><code>ResolutionProposal</code></td>
+<td>The Resolution Proposal request, attempt, and decision row</td>
+<td>(Import Profile, task type, field key) with at most one active row</td>
+<td>T8</td>
+</tr>
+</tbody>
+</table>
+<p><code>SourceDocument</code> stores the Import Profile, the uploaded workbook bytes, the content fingerprint, the
+original file name, the uploading operator, and the creation time. Read access follows Import Profile
+view permission, so a user who may not view the profile may not download its uploads.</p>
+<p>Retention has two rules. A row referenced by an <code>ImportExecution</code> is permanent audit input and is
+never deleted. An unreferenced row is deleted by housekeeping 30 days after its creation time (spec
+default). A newer upload never deletes an older one, so two operators previewing the same profile at
+the same time cannot delete each other's input.</p>
+<p>An execution or a replan that references a deleted <code>SourceDocument</code> fails with the typed
+stale-document error (section 2.1) and requires a fresh upload. That error is the complete recovery
+contract; the runtime adds no other concurrent-preview machinery.</p>
+<p><code>TerminationResolution</code> is a Row Resolution in glossary terms. It stores the Import Profile, the task
+type, the canonical JSON field key (which carries the role marker, section 7.1), the selected object
+type, the selected object id, and the display name at selection time. The three value columns hold the
+selection for both the <code>termination</code> and <code>mapped_peer</code> roles. <code>SourceResolution</code> keeps its flat
+<code>(profile, source_id, source_column)</code> shape and stays flat-adapter-specific.</p>
+<p><code>CableImportSource</code> records the Import Profile, the Cable (a plain foreign key), the trace identity,
+the segment index, the original From/To text and direction, the workbook provenance (fingerprint,
+sheet, block ordinal, row range), and the source export timestamp. One Cable created for a shared
+identical segment carries one row per contributing Source Trace (section 5.7).</p>
+<p><code>ResolutionProposal</code> stores the immutable request content (including the resolved Device object type
+and id), the Candidate Snapshot, the five-value status, the completion content, the backend metadata
+and per-attempt records, the raw response text, the typed failure reason, and the one-shot decision
+fields (<code>decision</code>, deciding operator, decision time, and the <code>TerminationResolution</code> link). It stores
+no secret value.</p>
+<h3 id="92-changed-models">9.2 Changed models</h3>
+<p><strong>ImportProfile (ADR 0003 cutover).</strong> The cutover is one ordered migration sequence in one release:</p>
+<ol>
+<li>A generated schema migration that adds <code>source_adapter</code> and <code>adapter_config</code>.</li>
+<li>A data migration that contains data operations only. It stamps the <code>flat_workbook</code> adapter key on
+   every existing profile and copies the device-format columns into <code>adapter_config</code>. It rewrites
+   <code>primary_contact_role</code> from a foreign key to a natural-key reference inside <code>adapter_config</code>.</li>
+<li>A generated schema migration that drops the moved columns.</li>
+</ol>
+<p>The moved columns are: <code>sheet_name</code>, <code>source_id_column</code>, <code>custom_field_name</code>, <code>update_existing</code>,
+<code>create_missing_device_types</code>, <code>capture_extra_data</code>, <code>primary_contact_role</code>,
+<code>primary_contact_lookup_field</code>, and <code>preview_view_mode</code>. Dropping <code>primary_contact_role</code> removes the
+database-level PROTECT relationship. Forms, REST, and YAML switch to the new shape in the same
+release. There is no compatibility path between the three steps and no dual read path after them.</p>
+<p><strong><code>ImportExecution</code> replaces <code>ImportJob</code>.</strong> <code>ImportJob</code> carries <code>dry_run</code> and presentation result rows,
+which ADR 0001 removes. <code>ImportExecution</code> is the audit record named by ADR 0001, and it carries:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Import Profile</td>
+<td>Required on a new row</td>
+</tr>
+<tr>
+<td><code>SourceDocument</code></td>
+<td>The stored upload the execution planned from, required on a new row</td>
+</tr>
+<tr>
+<td>Actor</td>
+<td>The operator who owns the accepted plan, required on a new row</td>
+</tr>
+<tr>
+<td>Idempotency key</td>
+<td>Required on a new row, unique together with the Import Profile</td>
+</tr>
+<tr>
+<td>Plan schema version</td>
+<td>Required on a new row</td>
+</tr>
+<tr>
+<td>Accepted plan fingerprint</td>
+<td>Required on a new row</td>
+</tr>
+<tr>
+<td>Selected Synchronization Unit identities</td>
+<td>Required on a new row</td>
+</tr>
+<tr>
+<td>Outcome</td>
+<td>Required on a new row: <code>pending</code>, <code>succeeded</code>, or <code>failed</code></td>
+</tr>
+<tr>
+<td>Applied changes</td>
+<td>Set when the transaction commits: the applied Planned Change identities, and for every deleted object an identity snapshot</td>
+</tr>
+<tr>
+<td>Failure detail</td>
+<td>Set only on a failed row: the failed Planned Change identity, the rolled-back change identities, and the dependent change identities that were not attempted</td>
+</tr>
+<tr>
+<td>Native NetBox Job link</td>
+<td>A one-to-one relation from the native Job to the <code>ImportExecution</code> row, set on the <code>pending</code> row for a background execution, null when an execution ran synchronously</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Reservation order.</strong> An execution request inserts the row with outcome <code>pending</code> and commits that
+insert first. The insert reserves the unique (Import Profile, idempotency key), so a duplicate request
+loses the race and returns the existing row whatever its outcome, including while it is still
+<code>pending</code>. The target transaction opens only after the reservation commits. When it commits, the same
+transaction sets the outcome to <code>succeeded</code> and writes the applied-changes field, so the audit result
+still commits atomically with its NetBox changes. When it rolls back, the row becomes <code>failed</code> with
+its failure detail.</p>
+<p><strong>Pending-row recovery.</strong> The <code>pending</code> row records whether the execution is job-backed and, when it
+is, its native Job reference, so a crash cannot leave a permanently pending row. At the next read, a
+job-backed <code>pending</code> row whose linked Job is terminal or missing transitions to <code>failed</code> with typed
+reason <code>abandoned</code>. A synchronous <code>pending</code> row (no Job) transitions the same way when it is older
+than the web request bound, 10 minutes (spec default), so a read during a live synchronous execution
+never marks it failed. This needs no sweeper. Duplicate delivery of the same idempotency key returns the existing row in any outcome,
+including a failed abandoned one, so a redelivered job never re-runs the writes. A new operator
+submission mints a new idempotency key, so an abandoned attempt consumes no key permanently and the
+operator can always resubmit.</p>
+<p><strong>Deleted-object snapshot.</strong> For each deleted object the applied-changes field records the object
+type, the database id, the display value, and, for a Cable, its termination set at deletion time. This
+is where a removed Logical Cable is recorded, which satisfies the audit requirement stated in sections
+5.7 and 10.7. Provenance rows never record a deletion.</p>
+<p>Every new field is nullable at the database level so retained <code>ImportJob</code> rows can keep their
+historical columns. The cutover drops <code>dry_run</code> and the stored result rows, backfills nothing, and
+marks every retained legacy row display-only: a legacy row has null new fields, never satisfies an
+idempotency lookup, and is never used for plan comparison. The unique constraint on (Import Profile,
+idempotency key) is partial, so it ignores rows with a null idempotency key (spec default for the
+constraint form; ADR 0001 fixes the idempotency requirement).</p>
+<h3 id="93-unchanged-models">9.3 Unchanged models</h3>
+<p><code>ColumnMapping</code>, <code>ColumnTransformRule</code>, <code>ClassRoleMapping</code>, <code>DeviceTypeMapping</code>,
+<code>ManufacturerMapping</code>, <code>IgnoredDevice</code>, <code>SourceResolution</code>, <code>DeviceExistingMatch</code>,
+<code>IgnoredFieldDifference</code>, and the per-Device provenance model keep their shape. Each gains an
+applicability tag derived from the catalog rather than a new column.</p>
+<h2 id="10-netbox-ui-rest-graphql-yaml-job-and-audit-impacts">10. NetBox UI, REST, GraphQL, YAML, job, and audit impacts</h2>
+<h3 id="101-import-profile-ui">10.1 Import Profile UI</h3>
+<p>The profile form asks for the Source Adapter first. The adapter selection is disabled after creation.
+The form then renders the adapter-declared configuration form and only the policy sections the catalog
+marks applicable. The CableClass mapping section appears only for a trace-adapter profile, and each
+dimension offers the running instance's Cable Type and Cable Profile choices plus an explicit none
+option.</p>
+<h3 id="102-review-workspace">10.2 Review Workspace</h3>
+<p>The workspace is one page per preview. Layout:</p>
+<ul>
+<li><strong>Summary strip</strong>: unit dispositions, terminations resolved count, active proposals, saved
+  decisions, and preview state.</li>
+<li><strong>Trace list</strong> with a disposition badge per Source Trace.</li>
+<li><strong>Three panels</strong> for the selected trace: source evidence (From and To plus the ordered Segment
+  Evidence with implied Pass-Through Claims), current NetBox topology, and proposed physical topology
+  with a per-segment status of create, reuse existing, delete Logical Cable, or conflict.</li>
+</ul>
+<p>Termination field states render as badges: <code>unresolved</code>, <code>automatically resolved</code>, <code>manually
+resolved</code>, <code>proposed</code>, <code>accepted</code>, <code>stale</code>, <code>failed</code>. The <code>automatically resolved</code> state is distinct
+from <code>manually resolved</code>, so the operator can see which terminations the exact-name rule matched
+without help.</p>
+<p>The searchable picker is scoped to eligible candidates of the claimed kind on the resolved Device and
+shows a visible "N of M eligible" count.</p>
+<p>Proposal card contract:</p>
+<table>
+<thead>
+<tr>
+<th>Card state</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Completed with a candidate</td>
+<td>A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, backend metadata with attempt count, and explicit Accept and Reject buttons</td>
+</tr>
+<tr>
+<td>Completed and stale</td>
+<td>The same card with a "Proposal - stale, not applied" badge and a disabled Accept action showing its reason</td>
+</tr>
+<tr>
+<td>Completed with no match</td>
+<td>The backend's own explanation of why the evidence did not distinguish the candidates, and no accept action</td>
+</tr>
+<tr>
+<td>Failed</td>
+<td>The typed failure reason, including <code>backend_refusal</code> for a refusal or an empty-content completion, and an Ask AI again action that creates a new proposal</td>
+</tr>
+<tr>
+<td>Queued or running</td>
+<td>Live progress refreshed in place, with its own cancel action</td>
+</tr>
+</tbody>
+</table>
+<p>A pending card polls its own state every 3 seconds and stops on a terminal state (spec default). The
+operator never leaves the field to learn what the Inference Backend is doing.</p>
+<p>Every action is always visible. An illegal action renders disabled with its reason underneath.</p>
+<p>A per-field proposal history list shows every attempt, its status, and its outcome.</p>
+<p>A drift warning strip appears when live NetBox differs from the reviewed snapshot, with a re-read
+action. The workspace compares the reviewed plan fingerprint with a freshly computed plan fingerprint
+on each full workspace load and on the explicit re-read action. It does not poll for drift
+(spec default).</p>
+<p>Visual theming adopts NetBox theme variables at implementation time. The prototype palette from #83 is
+not final.</p>
+<h3 id="103-rest">10.3 REST</h3>
+<ul>
+<li><code>ImportProfile</code> gains <code>source_adapter</code> (read-only after creation) and <code>adapter_config</code>. The
+  device-format fields are removed.</li>
+<li>Serializer choices, validation, and the writable field set for Target Fields derive from the
+  target-field catalog. An endpoint that exposes no Target Field validates against its own form schema
+  instead, which is how the Inference Backend endpoint works.</li>
+<li>New read-write endpoints: CableClass mapping and Inference Backend.</li>
+<li>New read-only endpoints: Resolution Proposal and per-Cable provenance.</li>
+<li>The Inference Backend serializer exposes the credential reference as write-only, and never exposes
+  a secret value (spec default, consistent with the Vault research).</li>
+<li>Requesting, accepting, and rejecting a Resolution Proposal happen through Review Workspace
+  endpoints, not through REST (spec default).</li>
+</ul>
+<h3 id="104-graphql">10.4 GraphQL</h3>
+<p>The <code>ImportProfile</code> type gains <code>source_adapter</code> and <code>adapter_config</code> and loses the device-format
+fields. A CableClass mapping type is added. Import Plans, Import Executions, Resolution Proposals, and
+Inference Backends are not exposed in GraphQL (spec default: they are operator workflow state, not
+queryable configuration).</p>
+<h3 id="105-yaml-profile-export-and-import">10.5 YAML profile export and import</h3>
+<p>Profile YAML serialization derives from the target-field catalog. The document carries the adapter
+key, <code>adapter_config</code> with natural-key object references, and only the policy sections applicable to
+that adapter, including CableClass mappings. The per-section hand-rolled handling is removed. An
+Inference Backend is never part of profile YAML.</p>
+<h3 id="106-jobs">10.6 Jobs</h3>
+<p>Three job types run through the NetBox job system:</p>
+<table>
+<thead>
+<tr>
+<th>Job</th>
+<th>Input</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Import execution</td>
+<td>Import Profile id, <code>source_document</code>, accepted serialized plan, selection, idempotency key, actor</td>
+<td>An <code>ImportExecution</code> row linked one-to-one from the native NetBox Job</td>
+</tr>
+<tr>
+<td>Inference proposal</td>
+<td>Resolution Proposal id and the stable Inference Backend key</td>
+<td>A completed, failed, or cancelled Resolution Proposal</td>
+</tr>
+<tr>
+<td>Inference Backend connection test</td>
+<td>The stable Inference Backend key</td>
+<td>A typed result category, never a secret value or a Vault response body</td>
+</tr>
+</tbody>
+</table>
+<p>No job receives a secret value or a database id for an Inference Backend. Import execution progress
+counts Synchronization Units and Planned Changes.</p>
+<h3 id="107-audit">10.7 Audit</h3>
+<table>
+<thead>
+<tr>
+<th>Record</th>
+<th>Written by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ImportExecution</code></td>
+<td>Every selective and final execution, committed atomically on success</td>
+</tr>
+<tr>
+<td>Per-Device provenance row</td>
+<td>The Device Target Module</td>
+</tr>
+<tr>
+<td>Per-Cable provenance row</td>
+<td>The Cable Target Module, one row per (Cable, Import Profile, trace identity)</td>
+</tr>
+<tr>
+<td>NetBox changelog entries</td>
+<td>NetBox, for every <code>NetBoxModel</code> write</td>
+</tr>
+<tr>
+<td>Resolution Proposal row</td>
+<td>Created by the request, completed or failed by the inference job, decided once by an operator</td>
+</tr>
+</tbody>
+</table>
+<p>The Logical Cable removal is recorded only in the <code>ImportExecution</code> deleted-object snapshot
+(section 9.2), which stores the Cable's object type, id, display value, and termination set at
+deletion time.</p>
+<h2 id="11-cutover-plan">11. Cutover plan</h2>
+<p>The cutover is one completed change per ticket boundary. No compatibility facade and no second runtime
+path survives it.</p>
+<h3 id="111-removed">11.1 Removed</h3>
+<table>
+<thead>
+<tr>
+<th>Removed</th>
+<th>Replacement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fixed Device and Rack pass order</td>
+<td>Target Modules resolved through the catalog and the dependency graph</td>
+</tr>
+<tr>
+<td><code>RowResult</code> and presentation result rows</td>
+<td>Synchronization Units, Planned Changes, dispositions, and diagnostics</td>
+</tr>
+<tr>
+<td><code>ImportJob</code>, with its stored result rows and <code>dry_run</code> flag</td>
+<td>The <code>ImportExecution</code> audit record; existing <code>ImportJob</code> rows are retained display-only</td>
+</tr>
+<tr>
+<td><code>run_import(..., dry_run=...)</code></td>
+<td><code>ImportEngine.plan</code> and <code>ImportEngine.execute</code></td>
+</tr>
+<tr>
+<td>View-owned safety helpers and safety-intent calculation</td>
+<td>Coordinator-owned preconditions, plan comparison, and transactions</td>
+</tr>
+<tr>
+<td>Per-format Import Profile columns</td>
+<td><code>source_adapter</code> and <code>adapter_config</code></td>
+</tr>
+<tr>
+<td>Hand-rolled per-section YAML handling</td>
+<td>Catalog-derived serialization</td>
+</tr>
+<tr>
+<td>Session dictionaries as the execution-safety contract</td>
+<td>The serialized Import Plan with its schema version and fingerprints</td>
+</tr>
+<tr>
+<td>Calls from views and jobs into private engine behavior</td>
+<td>The public Import Engine interface</td>
+</tr>
+</tbody>
+</table>
+<h3 id="112-preserved">11.2 Preserved</h3>
+<ul>
+<li>The outer import workflow: upload, preview, review, selective synchronization, final
+  synchronization, results.</li>
+<li>The NetBox Job adapter and the background execution path.</li>
+<li>User-visible Device and Rack behavior, including preview view modes, review actions, and saved
+  decisions.</li>
+<li>The existing explicit Device matching approach and per-Device provenance.</li>
+<li>Import Profile vocabulary that CONTEXT.md already defines.</li>
+</ul>
+<h3 id="113-rules">11.3 Rules</h3>
+<ul>
+<li>A cutover ticket deletes the old path in the same change. It leaves no dual code path, no
+  commented-out code, and no "remove later" marker without a tracked follow-up.</li>
+<li>Tests for obsolete private helpers are deleted after the behavior is covered through the new
+  interface.</li>
+<li>No migration keeps a dual read path. The profile move ships as one ordered migration sequence in one
+  release (section 9.2), and no code reads the old columns after that release.</li>
+</ul>
+<h2 id="12-end-to-end-and-integration-test-strategy">12. End-to-end and integration test strategy</h2>
+<h3 id="121-value-order">12.1 Value order</h3>
+<ol>
+<li><strong>End-to-end first.</strong> Drive the real HTTP request through the real view, the real database, and the
+   real response. Cover upload, preview, review commands, selective synchronization, final
+   synchronization, and the results page. Assert real database outcomes, not intermediate structures.</li>
+<li><strong>Integration second.</strong> Exercise the Import Engine and Target Modules against the real NetBox ORM,
+   real forms, and real serializers. Use real Cable, Interface, FrontPort, RearPort, and PortMapping
+   objects.</li>
+<li><strong>Narrow unit last.</strong> Reserve unit tests for pure functions such as normalization, canonical
+   orientation, and fingerprinting.</li>
+</ol>
+<h3 id="122-mocks">12.2 Mocks</h3>
+<p>Mocks are allowed at exactly two external boundaries: the Inference Backend HTTP call and Vault.
+Everything else uses real objects. Prefer a local fake or a recorded fixture over a bare mock even at
+those two boundaries. Never mock the ORM, a serializer, a form, a Target Module, the Import Engine, or
+the Source Adapter.</p>
+<h3 id="123-source-adapter-corpus">12.3 Source Adapter corpus</h3>
+<p>The committed redacted trace fixtures are the trace adapter's test corpus. The expected results in
+section 5.8 are assertions, not documentation. The flat adapter keeps its existing workbook fixture.</p>
+<p>Fixture redaction is part of the corpus contract: a redaction verifier confirms that no original
+device, host, or site identifier remains.</p>
+<h3 id="124-new-seam-rule">12.4 New-seam rule</h3>
+<p>Test a new seam through <code>ImportEngine.plan</code>, <code>ImportEngine.execute</code>, and the HTTP surface. Do not test
+a private helper. If a behavior is only reachable through a private helper, the seam is wrong and the
+design needs revisiting before the test is written.</p>
+<h3 id="125-execution-conventions">12.5 Execution conventions</h3>
+<p>Run Django tests inside the repository development container. Use a unique PostgreSQL database name
+that starts with <code>test_</code> for each task, and a dedicated Redis sidecar for each task. NetBox's
+<code>RQQueueTestMixin</code> calls Redis <code>FLUSHALL</code>, so a database number on a shared Redis service does not
+isolate one task from another. The test helpers size the worker pool to the machine and cap it at
+eight workers; each worker gets a private PostgreSQL database and private Redis task and cache
+databases. Front-end tests run with the JavaScript unit runner, and browser tests run with the browser
+runner.</p>
+<h3 id="126-required-coverage-per-area">12.6 Required coverage per area</h3>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Required tests</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Catalog and registry</td>
+<td>A profile rejects an inapplicable policy row; every surface derives its choices from the catalog</td>
+</tr>
+<tr>
+<td>Profile cutover</td>
+<td>The migration moves each column into <code>adapter_config</code> and drops it; YAML round-trips through a fresh instance</td>
+</tr>
+<tr>
+<td>Import Engine</td>
+<td>Deterministic identities and fingerprints; cycle rejection; identical-identity sharing; conflicting-identity invalidation</td>
+</tr>
+<tr>
+<td>Selective execution</td>
+<td>An unrelated unit change does not block a safe selection; a source or profile change invalidates every selection</td>
+</tr>
+<tr>
+<td>Transactions</td>
+<td>A precondition mismatch rolls back the complete selected transaction and marks the attempt failed</td>
+</tr>
+<tr>
+<td>Idempotency</td>
+<td>A duplicate submission returns the existing Import Execution</td>
+</tr>
+<tr>
+<td>Pending-row recovery</td>
+<td>A <code>pending</code> row whose linked Job is terminal or missing reads as <code>failed</code> with reason <code>abandoned</code>; a redelivery returns that row; a new submission with a new key succeeds</td>
+</tr>
+<tr>
+<td>Source document retention</td>
+<td>A referenced document survives housekeeping; an unreferenced one older than 30 days is deleted; a plan or execution against a deleted document raises the stale-source-document error</td>
+</tr>
+<tr>
+<td>Trace adapter</td>
+<td>The fixture expectations in section 5.8</td>
+</tr>
+<tr>
+<td>Cable module</td>
+<td>No-op, creation-only, partial reuse, same-port continuation, ambiguous peer, occupied termination, unmapped CableClass, permission block</td>
+</tr>
+<tr>
+<td>Patched Path Replacement end to end</td>
+<td>One HTTP execution deletes the Logical Cable, creates every segment, and writes the expected provenance rows, all asserted against the real database</td>
+</tr>
+<tr>
+<td>Shared-segment provenance</td>
+<td>Two Source Traces claiming one identical segment create one Cable and two <code>CableImportSource</code> rows</td>
+</tr>
+<tr>
+<td>Segment precedence</td>
+<td>A single-segment trace with a matching direct Cable is a no-op and deletes nothing</td>
+</tr>
+<tr>
+<td>Review Workspace</td>
+<td>Every disabled action renders its reason; the drift strip appears when live state moved</td>
+</tr>
+<tr>
+<td>Proposal lifecycle</td>
+<td>Every forbidden transition is rejected; staleness blocks acceptance inside the transaction; a <code>no_match</code> outcome cannot be accepted</td>
+</tr>
+<tr>
+<td>Proposal cancellation race</td>
+<td>A late completion arriving after cancellation never overwrites the cancelled row</td>
+</tr>
+<tr>
+<td>Inference Backend resolution</td>
+<td>A database row wins over the file entry; with no database row the file entry is used, and backend metadata records which source ran</td>
+</tr>
+<tr>
+<td>Import Execution linkage</td>
+<td>A background execution links the native NetBox Job to its <code>ImportExecution</code> row, and a duplicate submission returns the same row</td>
+</tr>
+<tr>
+<td>Inference Backend and credentials</td>
+<td>An invalid candidate id fails the row and never produces a candidate outcome; a rejected <code>api_root</code> origin fails closed; no secret value appears in any persisted row, job payload, log record, or audit record</td>
+</tr>
+</tbody>
+</table>
+<h2 id="13-security-failure-observability-and-rollback-behavior">13. Security, failure, observability, and rollback behavior</h2>
+<h3 id="131-permissions-summary">13.1 Permissions summary</h3>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>View or edit an Import Profile and its policy</td>
+<td>Standard NetBox object permissions on the plugin models</td>
+</tr>
+<tr>
+<td>Preview an import</td>
+<td>Import Profile view access plus view rights on the referenced NetBox objects</td>
+</tr>
+<tr>
+<td>Execute an Import Plan</td>
+<td>The write permissions each Target Module requires, rechecked inside the transaction as the accepted plan's operator</td>
+</tr>
+<tr>
+<td>Delete a Logical Cable, create a Cable</td>
+<td>The corresponding NetBox Cable permissions, checked at planning and again inside the transaction</td>
+</tr>
+<tr>
+<td>Request a Resolution Proposal</td>
+<td>Preview access to the profile, including view rights on the resolved Device</td>
+</tr>
+<tr>
+<td>Cancel a queued or running Resolution Proposal</td>
+<td>The same permission as requesting one, not requester-bound</td>
+</tr>
+<tr>
+<td>Accept or reject a Resolution Proposal</td>
+<td>The same permission as creating a manual Row Resolution</td>
+</tr>
+<tr>
+<td>Change an Inference Backend or run the connection test</td>
+<td>The dedicated NetBox object permission on the <code>InferenceBackend</code> model. This one rule authorizes both actions; there is no separate administrator or superuser check.</td>
+</tr>
+</tbody>
+</table>
+<p>An accepted plan belongs to its operator. A background job executes as that operator and rechecks
+current permissions. Another operator must generate and accept a new plan.</p>
+<h3 id="132-prompt-injection-stance">13.2 Prompt-injection stance</h3>
+<p>Source evidence is untrusted content. The user message is serialized JSON, so the boundary between
+instruction and data stays explicit. The system message states that the model must treat the source
+evidence as data and not as instructions, must select at most one supplied candidate, and must return
+one JSON object.</p>
+<p>The Inference Backend receives only real eligible termination candidates retrieved from the resolved
+Device, identified by opaque candidate ids. The response is validated strictly against the immutable
+request snapshot. The model has no authority to apply a change. A proposal becomes a Row Resolution
+only after an explicit operator acceptance that revalidates freshness inside the acceptance
+transaction.</p>
+<h3 id="133-typed-failure-taxonomy">13.3 Typed failure taxonomy</h3>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Class</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rate limit</td>
+<td>Transient</td>
+<td>Bounded retry, honoring a stated delay when present</td>
+</tr>
+<tr>
+<td>Temporary backend failure (500, 502, 503, 504)</td>
+<td>Transient</td>
+<td>Bounded backoff with jitter</td>
+</tr>
+<tr>
+<td>Connection failure or timeout</td>
+<td>Transient</td>
+<td>Retry under the job policy</td>
+</tr>
+<tr>
+<td>Vault unreachable, sealed, or timed out</td>
+<td>Transient</td>
+<td>Keep the Target Field unresolved, record a redacted failure, retry under the job policy</td>
+</tr>
+<tr>
+<td>Backend authentication or authorization failure (401, 403)</td>
+<td>Non-transient</td>
+<td>Fail closed, ask the operator to repair the credential or permissions</td>
+</tr>
+<tr>
+<td>Invalid configuration or request (invalid URL, unsupported authentication, 400, 404, 405)</td>
+<td>Non-transient</td>
+<td>Fail with a sanitized diagnostic, no retry</td>
+</tr>
+<tr>
+<td>Vault 401 or 403</td>
+<td>Non-transient</td>
+<td>Fail closed, never try another credential source</td>
+</tr>
+<tr>
+<td>Missing secret path or field</td>
+<td>Non-transient</td>
+<td>Fail closed, identify the Inference Backend and not the secret path</td>
+</tr>
+<tr>
+<td>Empty or wrongly typed secret value</td>
+<td>Non-transient</td>
+<td>Fail closed, never send an inference request</td>
+</tr>
+<tr>
+<td>Backend refusal: <code>finish_reason</code> <code>stop</code> with empty content or a refusal payload</td>
+<td>Non-transient, typed reason <code>backend_refusal</code></td>
+<td>Set the row to <code>failed</code>, retain the raw response, never produce a candidate outcome, no automatic retry</td>
+</tr>
+<tr>
+<td>Invalid backend response: content is present but fails JSON parsing, schema validation, or candidate-id validation. A malformed envelope or a non-<code>stop</code> finish reason classifies here too</td>
+<td>Non-transient, typed reason <code>invalid_response</code></td>
+<td>Set the row to <code>failed</code>, retain the raw response, never produce a candidate outcome, no automatic retry</td>
+</tr>
+</tbody>
+</table>
+<p>A credential or backend failure affects only the Resolution Proposal request. Device, Rack, Cable, and
+Source Trace preview and import workflows stay available.</p>
+<h3 id="134-audit-records">13.4 Audit records</h3>
+<p>Section 10.7 lists the audit records. Every selective and final execution writes an Import Execution
+record. On success it commits atomically with its NetBox changes. On failure, NetBox changes roll back
+before the attempt is marked failed, and the record identifies the failed Planned Change, the
+rolled-back changes, and the dependent changes that were not attempted.</p>
+<h3 id="135-rollback-summary">13.5 Rollback summary</h3>
+<p>One selective execution and one final execution each use one transaction, and any failure rolls back
+the complete selected transaction. Inside one Source Trace unit, the Logical Cable deletion and the
+segment creations commit together or not at all. A precondition mismatch rolls back and requires a
+replan. A permission failure inside the transaction rolls back and produces a blocked unit on the next
+plan.</p>
+<h3 id="136-observability">13.6 Observability</h3>
+<p>Progress reporting counts selected Synchronization Units and Planned Changes for an execution, and
+proposal state plus attempt count for an inference job. Logs never contain a secret value, an
+authorization header, a Vault token, a Vault response body, or inference request headers. A backend
+error body is diagnostic data and is stored redacted on the proposal row, not in application logs.</p>
+<h2 id="14-sequenced-implementation-tickets">14. Sequenced implementation tickets</h2>
+<p>Every ticket is independently mergeable with the complete test suite passing. Every ticket deletes the
+path it replaces in the same change.</p>
+<h3 id="t1-target-field-catalog-adapter-registry-and-import-profile-cutover">T1. Target-field catalog, adapter registry, and Import Profile cutover</h3>
+<p><strong>Scope.</strong> Add the static Source Adapter registry, the target-field catalog, and the output-kind and
+consumption declarations. Add <code>ImportProfile.source_adapter</code> (immutable after creation) and
+<code>adapter_config</code> with an adapter-declared validation form. Run the ordered migration sequence from
+section 9.2 that stamps the <code>flat_workbook</code> key, moves the device-format columns into
+<code>adapter_config</code>, converts the primary contact role to a natural-key reference, and drops the columns.
+Add the key-family mechanism with the Device Target Module's <code>extra_json</code> family. Move every existing
+surface onto the catalog: <code>ColumnMapping</code> and <code>ColumnTransformRule</code> validation, profile forms, REST,
+GraphQL, and YAML serialization. Add the policy applicability classification and reject inapplicable
+rows. T1 owns the catalog cutover for surfaces that exist today; the surfaces introduced by T4, T5,
+T7, and T8 are T10's scope.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>The registry is the only source of adapter choices in forms, REST, GraphQL, and YAML.</li>
+<li>A profile rejects a change to <code>source_adapter</code> after creation.</li>
+<li>The adapter-declared form rejects an unknown <code>adapter_config</code> key and an invalid value.</li>
+<li>The migration sequence runs as three ordered steps in one release, moves every listed column into
+  <code>adapter_config</code> for every existing profile, and drops the columns; the data step contains data
+  operations only; no dual read path remains.</li>
+<li><code>ColumnMapping</code> and <code>ColumnTransformRule</code> accept exactly the values they accept today, resolved
+  through the catalog, including a non-empty <code>extra_json:</code> name and the candidate-target exclusion.</li>
+<li>A dangling natural-key reference produces a validation error at the form boundary.</li>
+<li>YAML export from one instance imports into a fresh instance without an instance-local id.</li>
+<li>No surface keeps a local target-field list.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> None.</p>
+<h3 id="t2-import-engine-core-with-device-and-rack-target-modules">T2. Import Engine core with Device and Rack Target Modules</h3>
+<p><strong>Scope.</strong> Implement the Import Plan model, dispositions, diagnostics, identities, fingerprints, the
+merged dependency graph, semantic plan comparison, selective and final execution, the one outer
+transaction per execution request, idempotency, progress, and the <code>ImportExecution</code> audit record with
+its native Job link, pending reservation, and deleted-object snapshot. Add the <code>SourceDocument</code> model
+with its permission and retention rules. Move existing Device and Rack behavior behind Target Modules
+and move flat workbook parsing behind the <code>flat_workbook</code> Source Adapter in the same change. Remove
+the fixed passes, <code>RowResult</code>, the <code>dry_run</code> flag, view-owned safety helpers, and every call from a
+view or job into private engine behavior.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>Views and jobs call only <code>ImportEngine.plan</code>, <code>ImportEngine.execute</code>, and Review Workspace commands.</li>
+<li>Planning is deterministic: the same source, profile, actor, planning context, and NetBox state
+  produce the same identities, ordering, and fingerprints.</li>
+<li>The coordinator rejects a missing dependency reference and a cycle.</li>
+<li>Identical Planned Change identities share and execute once; the same identity with different
+  payloads makes the plan invalid.</li>
+<li>A change in an unrelated unit does not block a safe selection; a source, profile, actor, or
+  planning-context change invalidates every selection.</li>
+<li>A precondition mismatch inside the transaction rolls back the complete selected transaction and
+  records a failure that identifies the failed change.</li>
+<li>One outer transaction covers one execution request; no unit commits independently.</li>
+<li>The request inserts a <code>pending</code> <code>ImportExecution</code> row and commits it before the target transaction
+  opens; a duplicate submission returns the existing row in any outcome, including <code>pending</code>.</li>
+<li>The applied-changes field records every applied Planned Change identity, and every deleted object
+  with its type, id, display, and, for a Cable, its terminations.</li>
+<li>A background execution links the native NetBox Job to its <code>ImportExecution</code> row.</li>
+<li>A <code>SourceDocument</code> referenced by an <code>ImportExecution</code> is never deleted; an unreferenced one is
+  deleted by housekeeping 30 days after creation and never sooner; reading one requires Import
+  Profile view permission.</li>
+<li>A retained <code>ImportJob</code> row keeps its historical fields, has null new fields, and never satisfies an
+  idempotency lookup.</li>
+<li>A serialized plan with an incompatible schema version fails before any write.</li>
+<li>User-visible Device and Rack behavior is unchanged, proven end-to-end through HTTP.</li>
+<li><code>RowResult</code>, the fixed passes, the <code>dry_run</code> flag, and the view-owned safety helpers are deleted.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T1.</p>
+<h3 id="t3-trace-source-adapter">T3. Trace Source Adapter</h3>
+<p><strong>Scope.</strong> Implement the <code>trace_workbook</code> Source Adapter: block parsing, sheet pairing, corroboration,
+canonical orientation, the canonical JSON trace identity, the content fingerprint, duplicate collapse,
+the Endpoint Summary fallback, the Source Adapter rows of the section 5.6 taxonomy, and provenance
+capture. Emit Source Traces as a typed output kind with source diagnostics. The adapter class and its
+corpus tests ship in this ticket, but the <code>trace_workbook</code> key is not registered as a selectable
+profile choice yet: an operator cannot create a trace profile until the Cable Target Module exists.
+T5 registers the key.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>The adapter never queries NetBox, and no test grants it database access to NetBox target models.</li>
+<li>The adapter emits every Source Adapter row of the section 5.6 taxonomy, including
+  <code>trace.unknown_port_class</code> for a PortClass value outside its fixed vocabulary, and it detects that
+  row with no NetBox access.</li>
+<li>The adapter never emits <code>cable.unsupported_termination_kind</code>, <code>trace.device_unresolved</code>, or
+  <code>trace.endpoint_evidence_only</code>, because all three depend on NetBox state.</li>
+<li>The <code>trace_workbook</code> key is absent from the profile form, REST, GraphQL, and YAML adapter choices
+  after this ticket merges.</li>
+<li>The copper fixture produces 10 Source Traces, all valid with 3 Segment Evidence entries each and
+  zero duplicate conflicts.</li>
+<li>The fiber fixture produces 10 Source Traces, 8 valid with 4 to 9 segments and 4 ending at a rear
+  port, exactly one <code>trace.non_linear_path</code> and exactly one <code>trace.pass_through_at_interface</code>, and
+  zero duplicate conflicts.</li>
+<li>Cross-trace checks report zero shared terminations and zero CableClass conflicts on both fixtures.</li>
+<li>A reversed re-statement of a trace collapses into the same Source Trace and leaves the content
+  fingerprint unchanged.</li>
+<li>Two labels that differ only in separator characters produce different canonical JSON identities.</li>
+<li>A workbook with neither recognized sheet produces a batch-level error and no units.</li>
+<li>An invalid trace does not stop the rest of the batch.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T1.</p>
+<h3 id="t4-trace-decision-models-and-policy">T4. Trace decision models and policy</h3>
+<p><strong>Scope.</strong> Add the two trace-side persistence models and their operator surfaces, so the Cable planner
+in T5 has decisions and policy to read. Add <code>TerminationResolution</code> with both field-key roles
+(<code>termination</code> and <code>mapped_peer</code>), the canonical JSON key, and the three value columns. Add the
+manual-selection persistence path that writes those rows and requests a replan through
+<code>ImportEngine.plan</code>, which is why this ticket needs the engine seam from T2. Add <code>CableClassMapping</code>
+with its two tri-state dimensions, the runtime-choice validation, the single-and-duplex Cable Profile
+restriction, its profile UI section, and its registration as Cable target policy in the catalog. This
+ticket writes and validates decisions; it plans nothing.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>A <code>TerminationResolution</code> row stores the canonical JSON key with its role marker, the selected
+  object type, the selected object id, and the display name at selection time.</li>
+<li>A <code>termination</code> row and a <code>mapped_peer</code> row for the same termination coexist without overwriting.</li>
+<li>The manual-selection path writes the row through its owning model and requests a replan through
+  <code>ImportEngine.plan</code>; it never edits an Import Plan.</li>
+<li>The <code>CableClassMapping</code> form offers only Cable Type and Cable Profile values the running instance
+  reports, and only Cable Profiles compatible with one termination per side.</li>
+<li>Validation distinguishes <code>cable.cableclass_stale_mapping</code> from <code>cable.profile_incompatible</code>.</li>
+<li>The CableClass mapping section appears only on a trace-adapter profile and is rejected on any other
+  profile.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T1, T2, T3.</p>
+<h3 id="t5-cable-target-module-with-patched-path-replacement">T5. Cable Target Module with Patched Path Replacement</h3>
+<p><strong>Scope.</strong> Implement the Cable Target Module: port resolution by claimed kind and unique exact port
+name, eligible-candidate retrieval for the picker and for proposal requests, the Cable Target Module
+rows of the section 5.6 taxonomy, PortMapping verification, same-port continuation, direction-
+independent comparison, segment precedence, the no-op rule, Logical Cable identification and deletion,
+segment creation policy, preconditions, permission checks, execution, and <code>CableImportSource</code>
+provenance rows. Read the decisions and policy that T4 persists. Register the <code>trace_workbook</code> adapter
+key as a selectable profile choice. Raise and document the NetBox 4.6 floor for the trace feature.
+Until T10 lands, a trace profile is configurable through the UI only.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>The <code>trace_workbook</code> key becomes selectable in the profile form.</li>
+<li>A single-segment trace with a matching direct Cable plans as a <code>no-op</code>; that Cable is treated as a
+  proven physical segment, is never classified as the Logical Cable, and is not deleted.</li>
+<li>A trace whose complete physical path already exists plans as a <code>no-op</code>.</li>
+<li>A trace with patching plans one unit that deletes the Logical Cable first and then creates each
+  segment in canonical order, with each creation depending on the deletion.</li>
+<li>A trace with no direct Cable plans as a creation-only replacement without a deletion change.</li>
+<li>A unique mapped peer substitutes automatically and the substitution appears in the plan; several
+  mapped peers block the unit and offer exactly the mapped peers for manual selection.</li>
+<li>A stored <code>TerminationResolution</code> row for either role is reused on a replan.</li>
+<li>A resolved object that is not an Interface, FrontPort, or RearPort makes the unit <code>invalid</code> with
+  <code>cable.unsupported_termination_kind</code>.</li>
+<li>A contradicted Pass-Through Claim makes the unit <code>invalid</code> and names both ports and the actual
+  mappings.</li>
+<li>A foreign cable on a desired termination blocks the unit; no third-party cable is ever deleted or
+  edited.</li>
+<li>An unresolved CableClass dimension, a stale mapping, and an incompatible Cable Profile each block
+  the unit with their own diagnostic.</li>
+<li>Eligible-candidate retrieval returns only terminations of the claimed kind on the resolved Device,
+  scoped to the actor's view permission.</li>
+<li>A precondition mismatch inside the transaction rolls back the complete selected transaction.</li>
+<li>Every created Cable gets one provenance row per contributing Source Trace; two traces sharing one
+  identical segment create one Cable and two rows. The deleted Logical Cable appears only in the
+  <code>ImportExecution</code> deleted-object snapshot.</li>
+<li>CablePath is never written.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T2, T4.</p>
+<h3 id="t6-trace-review-workspace-ui">T6. Trace Review Workspace UI</h3>
+<p><strong>Scope.</strong> Build the review workspace: summary strip, trace list with disposition badges, the three
+per-trace panels, termination field state badges, the searchable candidate picker with its eligible
+count, the <code>Sync with dependencies</code> selection, the drift warning strip with its re-read action, and
+the disabled-with-reason pattern for every action. Consume the <code>TerminationResolution</code> write path from
+T4 and the eligible-candidate retrieval from T5. Wire review commands through the Review Workspace
+module so they persist decisions and request a new plan. Adopt NetBox theme variables.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>Every action is always visible; an illegal action renders disabled with its reason.</li>
+<li>The proposed panel shows a per-segment status of create, reuse existing, delete Logical Cable, or
+  conflict.</li>
+<li>The picker lists only eligible candidates of the claimed kind on the resolved Device and shows the
+  "N of M eligible" count.</li>
+<li>Selecting a candidate writes a <code>TerminationResolution</code> row through its owning model and triggers a
+  replan; no review command edits an Import Plan.</li>
+<li>A termination matched by the exact-name rule shows <code>automatically resolved</code>; one selected by an
+  operator shows <code>manually resolved</code>.</li>
+<li>The drift strip appears when the freshly computed plan fingerprint differs from the reviewed one,
+  and the re-read action clears it.</li>
+<li>Synchronizing a blocked trace is disabled with its reason.</li>
+<li>The workspace uses NetBox theme variables in both light and dark themes.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T5.</p>
+<h3 id="t7-inference-backend-configuration-and-credential-boundary">T7. Inference Backend configuration and credential boundary</h3>
+<p><strong>Scope.</strong> Add the <code>InferenceBackend</code> model with at most one enabled row and the <code>inference_backend</code>
+file fallback. Implement <code>api_root</code> validation with the origin allowlist, scheme rules, host resolution
+checks, and redirect handling. Implement the OpenAI-compatible backend adapter for non-streaming Chat
+Completions with typed error classification. Implement the credential backend seam and its Vault KV v2
+implementation. Add the three plugin settings with the shapes in section 8.2.1, including the two
+permitted <code>vault.auth_method</code> values. Add the connection test as a worker Job, authorized by the
+dedicated <code>InferenceBackend</code> object permission in section 13.1.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>The enabled database row is the active backend; the <code>inference_backend</code> setting under the fixed key
+  <code>file-fallback</code> is active only when no enabled database row exists; the two sources are never merged
+  field by field.</li>
+<li>A malformed <code>inference_backend</code> mapping fails as <code>invalid_configuration</code> and never silently selects
+  a different backend.</li>
+<li>The <code>vault</code> mapping rejects a <code>mount</code> key and any <code>auth_method</code> other than <code>proxy</code> or <code>token</code>; the
+  KV v2 mount is read from the credential reference.</li>
+<li>The resolver reports which source it used, and that value reaches backend metadata.</li>
+<li>An <code>api_root</code> outside the allowlist, or one resolving to a private, link-local, loopback, or
+  metadata address without explicit approval, is rejected at the form boundary and at request time.</li>
+<li>A redirect to a disallowed target is not followed.</li>
+<li>The backend adapter imports no NetBox, candidate, proposal, or job model.</li>
+<li>Each documented backend condition maps to its typed failure class.</li>
+<li>The Vault backend reads one field from one path, rejects a missing, empty, or non-string value, and
+  omits the secret from every exception message.</li>
+<li>An allowlist entry without a scheme, host, and port is rejected at startup; startup never contacts
+  Vault or the backend.</li>
+<li>No test can find a secret value in any model row, serializer output, YAML export, session, job
+  payload, audit record, or log record. The typed credential reference exists in exactly one
+  authoritative place.</li>
+<li>The connection test runs as a worker Job and returns one of the typed result categories, never a
+  secret value and never a Vault response body.</li>
+<li>A user holding the dedicated <code>InferenceBackend</code> object permission can run the connection test, and a
+  user without it cannot; no separate administrator or superuser check exists.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T1.</p>
+<h3 id="t8-resolution-proposal-model-job-and-acceptance">T8. Resolution Proposal model, job, and acceptance</h3>
+<p><strong>Scope.</strong> Add the <code>ResolutionProposal</code> model: the immutable request content (including the resolved
+Device object type and id), the Candidate Snapshot, the five-value status enum, the completion
+content, the typed failure reason, and the one-shot decision fields. Add the inference job with
+bounded transient retries, cancellation, and typed failure storage. Use the eligible-candidate
+retrieval from T5 to build the Candidate Snapshot. Implement read-time staleness, the strict response
+validator, and the acceptance transaction that revalidates freshness and upserts the
+<code>TerminationResolution</code> row that T4 delivers.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>A proposal binds to (Import Profile, task type, canonical JSON field key) and survives preview close
+  and replanning.</li>
+<li>At most one active proposal exists per bound key, and a proposal can be requested only for an
+  unresolved field.</li>
+<li>The status enum has exactly five values; a terminal status can never change; acceptance and
+  rejection set the decision fields without touching the status.</li>
+<li>The decision fields can be set exactly once.</li>
+<li>The row is created at request time and exists before any Inference Backend call.</li>
+<li>A transient failure retries at most twice and then fails; a non-transient failure fails immediately
+  with the typed reason stored.</li>
+<li>An invented, missing, duplicated, or malformed candidate id, or a wrong <code>finish_reason</code>, sets the
+  row to <code>failed</code> with its typed reason and the raw response text, and never produces a candidate
+  outcome.</li>
+<li>A structured-output refusal and an empty-content completion set the row to <code>failed</code> with typed
+  reason <code>backend_refusal</code>; neither is recorded as <code>no_match</code>.</li>
+<li>A stale proposal cannot be accepted, and staleness is revalidated inside the acceptance transaction
+  against the frozen resolved Device reference.</li>
+<li>A <code>no_match</code> outcome cannot be accepted.</li>
+<li>Acceptance upserts the <code>TerminationResolution</code> row for the bound key and links it from the proposal;
+  the last explicit operator action wins.</li>
+<li>Cancellation is allowed for any operator with request permission, and a late response arriving after
+  cancellation never overwrites the cancelled row.</li>
+<li>The lifecycle carries a task type and a generic Candidate Snapshot with nothing Contact-specific.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T5, T7.</p>
+<h3 id="t9-ask-ai-ui-integration">T9. Ask AI UI integration</h3>
+<p><strong>Scope.</strong> Add the Ask AI action to the termination field in the review workspace. Render the proposal
+card in all its states, the in-place pending progress with cancel, the per-field proposal history, and
+the accept and reject actions with their disabled reasons. Enforce the request, view, and decision
+permissions at the view boundary.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>Ask AI is disabled with its reason when the field is already resolved, when an active proposal
+  exists, when no Inference Backend is enabled, or when the operator lacks the permission.</li>
+<li>A pending card shows progress in place, polls until a terminal state, and offers cancel.</li>
+<li>A completed card shows the "Proposal - not applied" badge, the candidate with its kind, the
+  explanation, the backend metadata with attempt count, and explicit Accept and Reject buttons.</li>
+<li>A stale card shows the stale badge and a disabled Accept with its reason.</li>
+<li>A no-match card has no accept action; a failed card offers Ask AI again.</li>
+<li>Accepting writes a <code>TerminationResolution</code> row, marks the termination <code>accepted</code>, and triggers a
+  replan.</li>
+<li>Cancel is offered to any operator with request permission, not only the requester.</li>
+<li>The per-field history lists every attempt with its status and outcome.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T6, T8.</p>
+<h3 id="t10-rest-graphql-and-yaml-surface-completion">T10. REST, GraphQL, and YAML surface completion</h3>
+<p><strong>Scope.</strong> Cover only the surfaces that T4, T5, T7, and T8 introduce. T1 already moved every existing
+surface onto the catalog. Add the <code>CableClassMapping</code> REST endpoint, GraphQL type, and YAML section;
+the <code>InferenceBackend</code> endpoint with its write-only credential reference; and the read-only Resolution
+Proposal and Cable provenance endpoints. Until this ticket lands, a trace profile and its CableClass
+mappings are configurable through the UI only.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>Every new REST and GraphQL choice list and writable field set for Target Fields derives from the
+  target-field catalog.</li>
+<li>The <code>InferenceBackend</code> endpoint validates against the <code>InferenceBackend</code> form schema, not the
+  target-field catalog. Inference Backend configuration holds no Target Field.</li>
+<li>Profile YAML for a trace-adapter profile round-trips across instances with natural-key references
+  only, including CableClass mappings.</li>
+<li>YAML rejects a policy section that the profile's adapter does not support.</li>
+<li>The <code>InferenceBackend</code> serializer never returns a credential value, and the credential reference is
+  write-only.</li>
+<li>Resolution Proposal and provenance endpoints are read-only.</li>
+<li>Import Plans, <code>ImportExecution</code> rows, Resolution Proposals, and Inference Backends are absent from
+  GraphQL.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T5, T7, T8.</p>
+<h3 id="t11-hardening-and-end-to-end-pass">T11. Hardening and end-to-end pass</h3>
+<p><strong>Scope.</strong> Close the coverage matrix in section 12.6 end to end. Verify the permission summary, the
+prompt-injection stance, the failure taxonomy, the rollback behavior, and progress reporting under
+real HTTP and real database conditions. Delete every remaining test for an obsolete private helper.
+Confirm that no dual code path, commented-out code, or untracked "remove later" marker remains.</p>
+<p><strong>Acceptance criteria.</strong></p>
+<ul>
+<li>The section 12.6 matrix is fully covered, with end-to-end tests for upload through database outcome.</li>
+<li>A permission check failure inside a transaction rolls back and blocks the unit on the next plan.</li>
+<li>A redaction scan finds no secret value in any persisted row, log record, job payload, or audit
+  record. The typed credential reference is expected in exactly one authoritative place, the enabled Inference Backend row or the file fallback when no row exists, and
+  the scan asserts it appears nowhere else.</li>
+<li>A source-evidence string that looks like an instruction does not change the Inference Backend
+  request structure or bypass response validation.</li>
+<li>No test targets a private engine helper.</li>
+<li>No obsolete runtime path, compatibility facade, or dual read path remains in the tree.</li>
+<li>The change is independently mergeable with all tests passing.</li>
+</ul>
+<p><strong>Blocked by.</strong> T6, T9, T10.</p>
+<h3 id="ticket-dependency-summary">Ticket dependency summary</h3>
+<table>
+<thead>
+<tr>
+<th>Ticket</th>
+<th>Blocked by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1 Target-field catalog, adapter registry, Import Profile cutover</td>
+<td>None</td>
+</tr>
+<tr>
+<td>T2 Import Engine core with Device and Rack Target Modules</td>
+<td>T1</td>
+</tr>
+<tr>
+<td>T3 Trace Source Adapter</td>
+<td>T1</td>
+</tr>
+<tr>
+<td>T4 Trace decision models and policy</td>
+<td>T1, T2, T3</td>
+</tr>
+<tr>
+<td>T5 Cable Target Module with Patched Path Replacement</td>
+<td>T2, T4</td>
+</tr>
+<tr>
+<td>T6 Trace Review Workspace UI</td>
+<td>T5</td>
+</tr>
+<tr>
+<td>T7 Inference Backend configuration and credential boundary</td>
+<td>T1</td>
+</tr>
+<tr>
+<td>T8 Resolution Proposal model, job, and acceptance</td>
+<td>T5, T7</td>
+</tr>
+<tr>
+<td>T9 Ask AI UI integration</td>
+<td>T6, T8</td>
+</tr>
+<tr>
+<td>T10 REST, GraphQL, and YAML surface completion</td>
+<td>T5, T7, T8</td>
+</tr>
+<tr>
+<td>T11 Hardening and end-to-end pass</td>
+<td>T6, T9, T10</td>
+</tr>
+</tbody>
+</table>
+<h2 id="15-out-of-scope-and-future-fog">15. Out of scope and future fog</h2>
+<p>Out of scope for this architecture:</p>
+<ul>
+<li>Multi-fiber and multi-lane modeling beyond NetBox's existing supported Cable Profiles.</li>
+<li>Trunk, breakout, and shuffle Cable Profiles for segment creation. A created segment has one
+  termination per side, so the CableClass mapping offers only the single and duplex family
+  (section 3.6).</li>
+<li>Whole-preview batch inference processing.</li>
+<li>Contact-field assistance through the Resolution Proposal lifecycle.</li>
+<li>Creating missing Devices or ports.</li>
+<li>Termination types other than Interface, FrontPort, and RearPort.</li>
+<li>Any Inference Backend applying a change without explicit operator acceptance.</li>
+<li>Creating or mutating CablePath state.</li>
+<li>Creating a NetBox Cable Profile at run time.</li>
+<li>Updating attribute drift on a reused Cable.</li>
+<li>A trace-level database record.</li>
+<li>A durable review-session model.</li>
+<li>Migrating an old executable Import Plan or keeping a compatibility executor.</li>
+</ul>
+<p>Deferred and recorded as future fog:</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NetBox visual theme polish</td>
+<td>Deferred to implementation; the prototype palette is not final (#83)</td>
+</tr>
+<tr>
+<td>Third-party Source Adapter extensibility through entry points</td>
+<td>Not in this delivery; the registry is static in-plugin (#85)</td>
+</tr>
+<tr>
+<td>Per-Import Profile Inference Backend selection</td>
+<td>Not in this delivery; the Inference Backend is plugin-level (#85)</td>
+</tr>
+<tr>
+<td>Resolution Proposal row pruning and retention tooling</td>
+<td>Future scope; all rows are retained now (#82)</td>
+</tr>
+<tr>
+<td>Contact assistance as a second proposal task type</td>
+<td>Future scope; the lifecycle is already task-type-generic (#82)</td>
+</tr>
+<tr>
+<td>Direct AppRole Vault login without Vault Proxy</td>
+<td>Future scope; Vault Proxy auto-auth is the baseline</td>
+</tr>
+<tr>
+<td>A bounded in-process credential cache</td>
+<td>Future scope; the plugin caches nothing now</td>
+</tr>
+<tr>
+<td><code>json_object</code> and <code>json_schema</code> response modes</td>
+<td>Allowed only after an operator verifies the exact backend and model</td>
+</tr>
+<tr>
+<td>Model discovery in the Inference Backend UI</td>
+<td>Optional convenience, never a worker dependency</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
