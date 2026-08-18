@@ -70,12 +70,26 @@ class NetBoxMainWorkflowTest(TestCase):
 
 
 class ReleaseWorkflowTest(TestCase):
-    """Keep the pull request job that runs the release build command unprivileged."""
+    """Keep the release workflow unprivileged where it runs pull-request code, and serial."""
 
-    def _build_command_job(self):
+    def _jobs(self):
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yaml"
 
-        return yaml.safe_load(workflow.read_text())["jobs"]["build-command"]
+        return yaml.safe_load(workflow.read_text())["jobs"]
+
+    def _build_command_job(self):
+        return self._jobs()["build-command"]
+
+    def test_the_release_job_ignores_its_own_release_commit(self):
+        """A token pushes the release commit, so the push starts this workflow again."""
+        self.assertIn("chore(release):", self._jobs()["semantic-release"]["if"])
+
+    def test_the_release_job_runs_one_at_a_time(self):
+        """Two merges close together must not race two releases onto the same tag."""
+        concurrency = self._jobs()["semantic-release"]["concurrency"]
+
+        self.assertEqual(concurrency["group"], "release")
+        self.assertIs(concurrency["cancel-in-progress"], False)
 
     def test_the_build_command_job_only_reads(self):
         """The job runs the build command the pull request itself writes."""
@@ -87,3 +101,13 @@ class ReleaseWorkflowTest(TestCase):
         checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
 
         self.assertIs(checkout.get("with", {}).get("persist-credentials"), False)
+
+
+class WorkflowAuditTest(TestCase):
+    """Keep the GitHub Actions audit gating pull requests, not local commits alone."""
+
+    def test_the_lint_workflow_audits_the_workflows(self):
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "lint-format.yaml"
+        steps = yaml.safe_load(workflow.read_text())["jobs"]["format-and-lint"]["steps"]
+
+        self.assertTrue(any("zizmor" in str(step.get("run", "")) for step in steps))

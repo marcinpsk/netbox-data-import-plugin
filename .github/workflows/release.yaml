@@ -47,16 +47,25 @@ jobs:
           git checkout -B main
           uv run semantic-release version --patch --no-commit --no-tag --no-push --no-vcs-release
 
+  # A token pushes the release commit, so that push starts this workflow again. Skip it.
   semantic-release:
     name: Semantic Release
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'push'
+      && !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
+    # Two merges close together must not race two releases onto the same tag.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     permissions:
       contents: write
       issues: write
       pull-requests: write
     steps:
       - name: Checkout
+        # zizmor: ignore[artipacked] semantic-release pushes the release commit and tag,
+        # so this checkout has to keep its credential.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0

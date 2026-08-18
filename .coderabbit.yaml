@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+reviews:
+  poem: false
+
+  # Generated files carry no review value and spend the review budget on the free plan.
+  path_filters:
+    - "!CHANGELOG.md"
+    - "!uv.lock"
+    - "!package-lock.json"
+    - "!netbox_data_import/tests/query_counts.json"
+    - "!netbox_data_import/tests/fixtures/**"
+    - "!**/*.license"
+
+  # AGENTS.md is picked up on its own. These add the rules that are easy to miss in a diff.
+  path_instructions:
+    - path: "netbox_data_import/tests/**/*.py"
+      instructions: >-
+        Tests must exercise real objects: the real database, the ORM, forms, and serializers.
+        Report new Mock, MagicMock, or patch use unless it stands in for an external boundary
+        the suite cannot run locally. Report a bug fix that adds no test.
+    - path: "**/*.py"
+      instructions: >-
+        Every file needs an SPDX header. Comments give the non-obvious reason in one line.
+        Report comment blocks that restate the code, and prose that belongs in the commit
+        message. Report naive datetime use; this project uses timezone-aware values only.
+    - path: ".github/workflows/**"
+      instructions: >-
+        Third-party actions must be pinned to a commit SHA with the version in a trailing
+        comment. A job that does not push must set persist-credentials false and declare the
+        least permissions it needs.

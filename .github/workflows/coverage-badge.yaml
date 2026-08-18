@@ -3,15 +3,24 @@
 name: Update coverage report
 
 on:
+  # zizmor: ignore[dangerous-triggers] the job below accepts a run only from a push on this
+  # repository's main branch, which already needs write access.
   workflow_run:
     workflows: ["Test with supported NetBox and Python versions"]
     types: [completed]
     branches: [main]
 
 jobs:
+  # `branches: [main]` matches the head branch of the run, and a fork branch can be called
+  # `main` too. Without the checks below, a pull request from such a fork would publish its
+  # own coverage artifact to gh-pages through this job.
   publish-coverage:
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.head_repository.full_name == github.repository
     permissions:
       contents: write
 
@@ -36,6 +45,8 @@ jobs:
           echo "Coverage: ${TOTAL}% (${COLOR})"
 
       - name: Checkout gh-pages
+        # zizmor: ignore[artipacked] this job pushes the badge to gh-pages, so this
+        # checkout has to keep its credential.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: gh-pages
