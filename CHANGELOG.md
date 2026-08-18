@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.5.2 (2026-08-18)
+
+### Bug Fixes
+
+- Drop --offline from the release build command
+  ([#99](https://github.com/marcinpsk/netbox-data-import-plugin/pull/99),
+  [`8d8ea20`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/8d8ea205efd0a5850036be372dd5bd96a0cdaf14))
+
+- Placement, contact picker, preview interaction, and device import storage
+  ([#87](https://github.com/marcinpsk/netbox-data-import-plugin/pull/87),
+  [`ad1bcbe`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ad1bcbec890d1fc2559e3b9e8a277b2d207ea14a))
+
+### Chores
+
+- Mount the postgres 18 data parent directory
+  ([#76](https://github.com/marcinpsk/netbox-data-import-plugin/pull/76),
+  [`a138987`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a13898764a38a8330e27148836e9088ae2f50550))
+
+
 ## v1.5.1 (2026-08-17)
 
 ### Bug Fixes
