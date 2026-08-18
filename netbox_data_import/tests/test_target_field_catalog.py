@@ -376,8 +376,8 @@ def _superuser():
     return User.objects.create_superuser(username="catalog-admin", password="catalog-admin")
 
 
-class ReviewFindingRegressionTest(TestCase):
-    """Regressions for the findings raised on the T1 review."""
+class ProfileAndPolicyBoundaryTest(TestCase):
+    """Boundary rules for adapter configuration, policy rows, and an unregistered adapter."""
 
     @classmethod
     def setUpTestData(cls):
@@ -480,6 +480,30 @@ class ReviewFindingRegressionTest(TestCase):
         form = ImportSetupForm(data={"profile": self.flat.pk})
         self.assertFalse(form.is_valid())
         self.assertIn("retired_adapter", " ".join(form.errors["profile"]))
+
+    def test_rest_rejects_a_non_mapping_adapter_config(self):
+        """A falsy non-mapping is invalid input, never an empty configuration."""
+        self.client.force_login(_superuser())
+        for invalid in ([], "", 0, False):
+            with self.subTest(invalid=invalid):
+                response = self.client.post(
+                    "/api/plugins/data-import/profiles/",
+                    data=json.dumps({"name": f"Bad Config {invalid!r}", "adapter_config": invalid}),
+                    content_type="application/json",
+                    HTTP_ACCEPT="application/json",
+                )
+                self.assertEqual(response.status_code, 400, response.content)
+
+    def test_rest_rejects_a_policy_row_on_an_inapplicable_profile(self):
+        """The REST policy endpoints enforce the same applicability rule the models enforce."""
+        self.client.force_login(_superuser())
+        response = self.client.post(
+            "/api/plugins/data-import/class-role-mappings/",
+            data=json.dumps({"profile": self.trace.pk, "source_class": "Server", "role_slug": "server"}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+        self.assertEqual(response.status_code, 400, response.content)
 
     def test_yaml_import_rejects_an_adapter_change(self):
         """The bulk YAML path must keep the adapter immutable."""

@@ -20,7 +20,22 @@ from ..models import (
     SourceResolution,
     ImportJob,
     validate_contact_candidate_resolution,
+    validate_section_applicability,
 )
+
+
+class PolicySectionSerializer(serializers.ModelSerializer):
+    """Apply the shared policy-section applicability rule on the REST write path."""
+
+    def validate(self, attrs):
+        """Reject a row whose section does not apply to the profile's Source Adapter."""
+        attrs = super().validate(attrs)
+        profile = attrs.get("profile", getattr(self.instance, "profile", None))
+        try:
+            validate_section_applicability(profile, self.Meta.model.POLICY_SECTION)
+        except ValidationError as exc:
+            raise serializers.ValidationError({"profile": exc.messages}) from exc
+        return attrs
 
 
 def _validate_target_keys(instance, attrs, names, *, allow_candidates=True):
@@ -80,7 +95,7 @@ class ImportProfileSerializer(NetBoxModelSerializer):
         return attrs
 
 
-class ColumnMappingSerializer(serializers.ModelSerializer):
+class ColumnMappingSerializer(PolicySectionSerializer):
     """Serializer for ColumnMapping (plain model)."""
 
     class Meta:
@@ -89,6 +104,7 @@ class ColumnMappingSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         """Resolve the target field through the catalog."""
+        attrs = super().validate(attrs)
         _validate_target_keys(self.instance, attrs, ("target_field",))
         return attrs
 
@@ -102,7 +118,7 @@ class _RackTypeSlugField(serializers.SlugRelatedField):
         return RackType.objects.all()
 
 
-class ClassRoleMappingSerializer(serializers.ModelSerializer):
+class ClassRoleMappingSerializer(PolicySectionSerializer):
     """Serializer for ClassRoleMapping (plain model)."""
 
     rack_type = _RackTypeSlugField(slug_field="slug", allow_null=True, required=False)
@@ -112,7 +128,7 @@ class ClassRoleMappingSerializer(serializers.ModelSerializer):
         fields = ["id", "profile", "source_class", "creates_rack", "rack_type", "role_slug", "ignore"]
 
 
-class DeviceTypeMappingSerializer(serializers.ModelSerializer):
+class DeviceTypeMappingSerializer(PolicySectionSerializer):
     """Serializer for DeviceTypeMapping (plain model)."""
 
     class Meta:
@@ -127,7 +143,7 @@ class DeviceTypeMappingSerializer(serializers.ModelSerializer):
         ]
 
 
-class IgnoredDeviceSerializer(serializers.ModelSerializer):
+class IgnoredDeviceSerializer(PolicySectionSerializer):
     """Serializer for IgnoredDevice (plain model)."""
 
     class Meta:
@@ -135,7 +151,7 @@ class IgnoredDeviceSerializer(serializers.ModelSerializer):
         fields = ["id", "profile", "source_id", "device_name"]
 
 
-class ColumnTransformRuleSerializer(serializers.ModelSerializer):
+class ColumnTransformRuleSerializer(PolicySectionSerializer):
     """Serializer for ColumnTransformRule (plain model)."""
 
     class Meta:
@@ -151,15 +167,17 @@ class ColumnTransformRuleSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         """Resolve both group targets through the catalog, excluding the candidate targets."""
+        attrs = super().validate(attrs)
         _validate_target_keys(self.instance, attrs, ("group_1_target", "group_2_target"), allow_candidates=False)
         return attrs
 
 
-class SourceResolutionSerializer(serializers.ModelSerializer):
+class SourceResolutionSerializer(PolicySectionSerializer):
     """Serializer for SourceResolution (rerere, plain model)."""
 
     def validate(self, attrs):
         """Reject Contact candidate resolutions that the importer cannot apply."""
+        attrs = super().validate(attrs)
         instance = self.instance
         source_column = attrs.get("source_column", getattr(instance, "source_column", None))
         if source_column == "candidate:contact":

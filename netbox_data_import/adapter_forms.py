@@ -34,7 +34,8 @@ class AdapterConfigForm(forms.Form):
     @classmethod
     def validate_config(cls, raw: dict | None) -> dict:
         """Return the normalized configuration for *raw*, rejecting unknown keys and invalid values."""
-        raw = raw or {}
+        if raw is None:
+            raw = {}
         if not isinstance(raw, dict):
             raise ValidationError({"adapter_config": "Adapter configuration must be a mapping."})
         unknown = sorted(set(raw) - set(cls.base_fields))

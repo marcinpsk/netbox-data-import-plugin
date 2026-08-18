@@ -19,12 +19,11 @@ CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "con
 CONTACT_RESOLUTION_KEYS = CONTACT_RESOLUTION_REQUIRED_KEYS | frozenset({"contact_field_values", "contact_id"})
 
 
-def validate_section_applicability(instance, section_key):
+def validate_section_applicability(profile, section_key):
     """Reject a policy row whose section does not apply to its profile's Source Adapter."""
     section = policy_section(section_key)
-    if section is None or not instance.profile_id:
+    if section is None or profile is None:
         return
-    profile = instance.profile
     if not section.applies_to(profile.output_kinds):
         raise ValidationError(
             f"{section.label} do not apply to a profile using the '{profile.source_adapter}' source adapter."
@@ -228,7 +227,7 @@ class PolicySectionModel(models.Model):
     def clean(self):
         """Reject a row whose section does not apply to the profile's Source Adapter."""
         super().clean()
-        validate_section_applicability(self, self.POLICY_SECTION)
+        validate_section_applicability(self.profile if self.profile_id else None, self.POLICY_SECTION)
 
 
 class ColumnMapping(PolicySectionModel):
