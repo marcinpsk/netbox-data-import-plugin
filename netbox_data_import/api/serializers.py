@@ -8,6 +8,8 @@ from django.core.exceptions import ValidationError
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
+from ..adapters import DEFAULT_ADAPTER_KEY, get_adapter
+from ..catalog import CATALOG
 from ..models import (
     ImportProfile,
     ColumnMapping,
@@ -19,6 +21,18 @@ from ..models import (
     ImportJob,
     validate_contact_candidate_resolution,
 )
+
+
+def _validate_target_keys(instance, attrs, names, *, allow_candidates=True):
+    """Reject a target key the profile's Source Adapter cannot supply."""
+    profile = attrs.get("profile", getattr(instance, "profile", None))
+    output_kinds = profile.output_kinds if profile is not None else None
+    for name in names:
+        value = attrs.get(name, getattr(instance, name, None)) or ""
+        if not value and name != "target_field":
+            continue
+        if not CATALOG.is_valid(value, output_kinds=output_kinds, allow_candidates=allow_candidates):
+            raise serializers.ValidationError({name: CATALOG.invalid_key_message(value)})
 
 
 class ImportProfileSerializer(NetBoxModelSerializer):
@@ -37,20 +51,31 @@ class ImportProfileSerializer(NetBoxModelSerializer):
             "display",
             "name",
             "description",
-            "sheet_name",
-            "source_id_column",
-            "custom_field_name",
-            "update_existing",
-            "create_missing_device_types",
-            "preview_view_mode",
-            "capture_extra_data",
-            "primary_contact_role",
-            "primary_contact_lookup_field",
+            "source_adapter",
+            "adapter_config",
             "tags",
             "custom_fields",
             "created",
             "last_updated",
         ]
+
+    def validate(self, attrs):
+        """Validate the adapter configuration and keep the Source Adapter immutable."""
+        instance = self.instance
+        adapter_key = attrs.get("source_adapter") or getattr(instance, "source_adapter", DEFAULT_ADAPTER_KEY)
+        if instance is not None and "source_adapter" in attrs and attrs["source_adapter"] != instance.source_adapter:
+            raise serializers.ValidationError(
+                {"source_adapter": "The source adapter cannot change after the profile is created."}
+            )
+        adapter = get_adapter(adapter_key)
+        if adapter is None:
+            raise serializers.ValidationError({"source_adapter": f"Unknown source adapter '{adapter_key}'."})
+        if "adapter_config" in attrs:
+            try:
+                attrs["adapter_config"] = adapter.config_form_class().validate_config(attrs["adapter_config"])
+            except ValidationError as exc:
+                raise serializers.ValidationError({"adapter_config": exc.messages}) from exc
+        return attrs
 
 
 class ColumnMappingSerializer(serializers.ModelSerializer):
@@ -59,6 +84,11 @@ class ColumnMappingSerializer(serializers.ModelSerializer):
     class Meta:
         model = ColumnMapping
         fields = ["id", "profile", "source_column", "target_field"]
+
+    def validate(self, attrs):
+        """Resolve the target field through the catalog."""
+        _validate_target_keys(self.instance, attrs, ("target_field",))
+        return attrs
 
 
 class _RackTypeSlugField(serializers.SlugRelatedField):
@@ -117,6 +147,11 @@ class ColumnTransformRuleSerializer(serializers.ModelSerializer):
             "group_2_target",
         ]
 
+    def validate(self, attrs):
+        """Resolve both group targets through the catalog, excluding the candidate targets."""
+        _validate_target_keys(self.instance, attrs, ("group_1_target", "group_2_target"), allow_candidates=False)
+        return attrs
+
 
 class SourceResolutionSerializer(serializers.ModelSerializer):
     """Serializer for SourceResolution (rerere, plain model)."""
@@ -138,7 +173,7 @@ class SourceResolutionSerializer(serializers.ModelSerializer):
                 )
                 validate_contact_candidate_resolution(
                     resolved_fields,
-                    profile.primary_contact_lookup_field,
+                    profile.adapter_settings.primary_contact_lookup_field,
                     set(candidate_values) & set(configured_sources),
                 )
             except (TypeError, ValueError, json.JSONDecodeError):

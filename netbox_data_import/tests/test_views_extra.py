@@ -15,10 +15,12 @@ User = get_user_model()
 def _make_profile(name="QMapTest") -> ImportProfile:
     return ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        update_existing=False,
-        create_missing_device_types=False,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "update_existing": False,
+            "create_missing_device_types": False,
+        },
     )
 
 
@@ -146,13 +148,13 @@ class QuickAddColumnMappingViewTest(TestCase):
         )
 
     def test_invalid_extra_json_key_rejected(self):
-        """extra_json: key with invalid characters (spaces, symbols) is rejected."""
+        """An extra_json: key with no name after the prefix is rejected by the catalog validator."""
         resp = self.client.post(
             self.url,
             {
                 "profile_id": self.profile.pk,
                 "source_column": "JiraID",
-                "target_field": "extra_json:has spaces!",
+                "target_field": "extra_json:   ",
             },
         )
         self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)

@@ -9,7 +9,7 @@ class ImportProfileTable(NetBoxTable):
     """Table for listing ImportProfile objects."""
 
     name = tables.Column(linkify=True)
-    sheet_name = tables.Column()
+    source_adapter = tables.Column()
     column_mappings = tables.Column(
         accessor="column_mappings.count",
         verbose_name="Columns",
@@ -32,9 +32,7 @@ class ImportProfileTable(NetBoxTable):
         fields = (
             "pk",
             "name",
-            "sheet_name",
-            "update_existing",
-            "create_missing_device_types",
+            "source_adapter",
             "column_mappings",
             "class_role_mappings",
             "device_type_mappings",
@@ -42,7 +40,7 @@ class ImportProfileTable(NetBoxTable):
         )
         default_columns = (
             "name",
-            "sheet_name",
+            "source_adapter",
             "column_mappings",
             "class_role_mappings",
             "device_type_mappings",

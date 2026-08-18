@@ -35,15 +35,17 @@
           <strong>Expected YAML format:</strong>
           <pre class="mb-0 mt-2 small">profile:
   name: My Profile
-  sheet_name: Data
-  source_id_column: Id
-  custom_field_name: cans_id
-  update_existing: true
-  create_missing_device_types: true
-  preview_view_mode: rows
-  capture_extra_data: true
-  primary_contact_role: primary-contact
-  primary_contact_lookup_field: email
+  source_adapter: flat_workbook
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
+    custom_field_name: cans_id
+    update_existing: true
+    create_missing_device_types: true
+    preview_view_mode: rows
+    capture_extra_data: true
+    primary_contact_role: Primary Contact
+    primary_contact_lookup_field: email
 
 column_mappings:
   - source_column: Name

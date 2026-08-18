@@ -67,7 +67,7 @@ class ContactMappingWorkbookTest(TestCase):
 
     def test_primary_contact_column_maps_to_native_contact_target(self):
         """A Primary Contact cell parses as a native Contact value."""
-        profile = ImportProfile.objects.create(name="Portable Contact Mapping", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="Portable Contact Mapping", adapter_config={"sheet_name": "Data"})
         ColumnMapping.objects.create(
             profile=profile,
             source_column="Primary Contact",
@@ -81,7 +81,9 @@ class ContactMappingWorkbookTest(TestCase):
 
     def test_contact_candidate_columns_are_collected_per_row(self):
         """Every configured candidate column remains selectable per row."""
-        profile = ImportProfile.objects.create(name="Portable Contact Candidates", sheet_name="Data")
+        profile = ImportProfile.objects.create(
+            name="Portable Contact Candidates", adapter_config={"sheet_name": "Data"}
+        )
         candidate_columns = {"Primary Contact", "Contact", "Contact Number", "Owner"}
         ColumnMapping.objects.bulk_create(
             [
@@ -231,7 +233,7 @@ class LocalExampleContactMappingTest(TestCase):
 
     def test_primary_contact_column_maps_to_native_contact_target(self):
         """Populated Primary Contact cells parse as primary_contact values."""
-        profile = ImportProfile.objects.create(name="Local Contact Mapping", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="Local Contact Mapping", adapter_config={"sheet_name": "Data"})
         ColumnMapping.objects.create(
             profile=profile,
             source_column="Primary Contact",
@@ -247,7 +249,7 @@ class LocalExampleContactMappingTest(TestCase):
 
     def test_configured_contact_candidate_columns_are_collected_per_row(self):
         """Configured columns provide candidate values without asserting their meaning."""
-        profile = ImportProfile.objects.create(name="Local Contact Candidates", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="Local Contact Candidates", adapter_config={"sheet_name": "Data"})
         candidate_columns = {"Primary Contact", "Contact", "Contact Number", "Owner"}
         ColumnMapping.objects.bulk_create(
             [
@@ -285,10 +287,12 @@ class NativeContactSyncTest(TestCase):
         self.contact_role = ContactRole.objects.create(name="Primary Contact", slug="primary-contact")
         self.profile = ImportProfile.objects.create(
             name="Native Contact Sync",
-            update_existing=True,
-            create_missing_device_types=False,
-            primary_contact_role=self.contact_role,
-            primary_contact_lookup_field="email",
+            adapter_config={
+                "update_existing": True,
+                "create_missing_device_types": False,
+                "primary_contact_role": self.contact_role.name,
+                "primary_contact_lookup_field": "email",
+            },
         )
         ClassRoleMapping.objects.create(
             profile=self.profile,
@@ -1254,8 +1258,8 @@ class NativeContactSyncTest(TestCase):
 
     def test_sync_can_match_primary_contacts_by_name(self):
         """A profile can treat the source contact value as a name."""
-        self.profile.primary_contact_lookup_field = "name"
-        self.profile.save(update_fields=["primary_contact_lookup_field"])
+        self.profile.adapter_config["primary_contact_lookup_field"] = "name"
+        self.profile.save(update_fields=["adapter_config"])
 
         result = self._sync(self._row(primary_contact="Operations Team"))
 
@@ -1266,8 +1270,8 @@ class NativeContactSyncTest(TestCase):
 
     def test_sync_requires_a_contact_role_when_contact_data_exists(self):
         """Contact data fails fast when the profile has no assignment role."""
-        self.profile.primary_contact_role = None
-        self.profile.save(update_fields=["primary_contact_role"])
+        self.profile.adapter_config["primary_contact_role"] = None
+        self.profile.save(update_fields=["adapter_config"])
 
         result = self._sync(self._row(primary_contact="primary.contact@example.com"))
 
@@ -1406,8 +1410,8 @@ class NativeContactSyncTest(TestCase):
 
     def test_preview_rejects_contact_data_without_a_role(self):
         """The preview fails before a contact can use an undefined role."""
-        self.profile.primary_contact_role = None
-        self.profile.save(update_fields=["primary_contact_role"])
+        self.profile.adapter_config["primary_contact_role"] = None
+        self.profile.save(update_fields=["adapter_config"])
 
         result = run_import(
             [self._row(primary_contact="primary.contact@example.com")],
@@ -1426,8 +1430,8 @@ class NativeContactSyncTest(TestCase):
         row = self._row(primary_contact="primary.contact@example.com")
         approved = run_import([row], self.profile, {"site": self.site}, dry_run=True)
         replacement_role = ContactRole.objects.create(name="Replacement Contact", slug="replacement-contact")
-        self.profile.primary_contact_role = replacement_role
-        self.profile.save(update_fields=["primary_contact_role"])
+        self.profile.adapter_config["primary_contact_role"] = replacement_role.name
+        self.profile.save(update_fields=["adapter_config"])
 
         current = run_import([row], self.profile, {"site": self.site}, dry_run=True)
 
@@ -1486,10 +1490,12 @@ class ConcurrentNativeContactSyncTest(TransactionTestCase):
         contact_role = ContactRole.objects.create(name="Concurrent Primary Contact", slug="concurrent-primary-contact")
         self.profile = ImportProfile.objects.create(
             name="Concurrent Native Contact Sync",
-            update_existing=True,
-            create_missing_device_types=False,
-            primary_contact_role=contact_role,
-            primary_contact_lookup_field="email",
+            adapter_config={
+                "update_existing": True,
+                "create_missing_device_types": False,
+                "primary_contact_role": contact_role.name,
+                "primary_contact_lookup_field": "email",
+            },
         )
         ClassRoleMapping.objects.create(
             profile=self.profile,

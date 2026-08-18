@@ -28,7 +28,7 @@ class QuickActionProfileIdTest(TestCase):
             username="quick-action-user", email="quick@example.invalid", password="testpass"
         )
         cls.profile = ImportProfile.objects.create(
-            name="Quick Action Profile", sheet_name="Data", source_id_column="Id"
+            name="Quick Action Profile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
         )
 
     def setUp(self):

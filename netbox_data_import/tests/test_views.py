@@ -30,10 +30,12 @@ def _make_profile(name="ViewTest") -> ImportProfile:
     """Create a minimal ImportProfile with basic column and class-role mappings."""
     profile = ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        update_existing=True,
-        create_missing_device_types=True,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "update_existing": True,
+            "create_missing_device_types": True,
+        },
     )
     for src, tgt in {
         "Id": "source_id",
@@ -145,16 +147,21 @@ class ImportProfileEditViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:importprofile_add")
         data = {
             "name": "PostedProfile",
+            "source_adapter": "flat_workbook",
             "sheet_name": "Data",
             "source_id_column": "Id",
             "update_existing": "on",
             "create_missing_device_types": "on",
+            "primary_contact_lookup_field": "email",
+            "preview_view_mode": "rows",
             "_create": "1",
         }
         resp = self.client.post(url, data)
-        self.assertIn(resp.status_code, [200, 302])
-        if resp.status_code == 302:
-            self.assertTrue(ImportProfile.objects.filter(name="PostedProfile").exists())
+        self.assertEqual(resp.status_code, 302, getattr(resp, "context", None))
+        profile = ImportProfile.objects.get(name="PostedProfile")
+        self.assertEqual(profile.source_adapter, "flat_workbook")
+        self.assertEqual(profile.adapter_config["sheet_name"], "Data")
+        self.assertTrue(profile.adapter_config["update_existing"])
 
     def test_edit_view_get(self):
         """Edit profile page returns 200."""
@@ -1011,12 +1018,14 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         from tenancy.models import ContactRole
 
         self.profile = _make_profile("YamlExportProfile")
-        self.profile.primary_contact_role = ContactRole.objects.create(
-            name="Export Primary Contact",
-            slug="export-primary-contact",
-        )
-        self.profile.primary_contact_lookup_field = "name"
-        self.profile.save(update_fields=["primary_contact_role", "primary_contact_lookup_field"])
+        self.profile.adapter_config["primary_contact_role"] = (
+            ContactRole.objects.create(
+                name="Export Primary Contact",
+                slug="export-primary-contact",
+            )
+        ).name
+        self.profile.adapter_config["primary_contact_lookup_field"] = "name"
+        self.profile.save(update_fields=["adapter_config"])
         DeviceTypeMapping.objects.create(
             profile=self.profile,
             source_make="Dell",
@@ -1067,7 +1076,7 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         self.assertIn("R660", content)
 
     def test_export_yaml_includes_primary_contact_configuration(self):
-        """Exported YAML identifies the Contact Role by slug and the lookup field."""
+        """Exported YAML identifies the Contact Role by its natural key and the lookup field."""
         import yaml
 
         url = reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.profile.pk})
@@ -1075,8 +1084,8 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         response = self.client.get(url)
 
         profile_data = yaml.safe_load(response.content)["profile"]
-        self.assertEqual(profile_data["primary_contact_role"], "export-primary-contact")
-        self.assertEqual(profile_data["primary_contact_lookup_field"], "name")
+        self.assertEqual(profile_data["adapter_config"]["primary_contact_role"], "Export Primary Contact")
+        self.assertEqual(profile_data["adapter_config"]["primary_contact_lookup_field"], "name")
 
     def test_export_404_for_missing_profile(self):
         """GET for non-existent profile pk returns 404."""
@@ -1090,10 +1099,11 @@ class ImportProfileYamlViewTest(BaseViewTestCase):
 
     YAML_DATA = b"""profile:
   name: ImportedProfile
-  sheet_name: Data
-  source_id_column: Id
-  update_existing: true
-  create_missing_device_types: true
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
+    update_existing: true
+    create_missing_device_types: true
 column_mappings:
   - source_column: Name
     target_field: device_name
@@ -1135,8 +1145,9 @@ manufacturer_mappings:
         yaml_file = BytesIO(
             b"""profile:
   name: ImportedContactProfile
-  primary_contact_role: imported-primary-contact
-  primary_contact_lookup_field: name
+  adapter_config:
+    primary_contact_role: Imported Primary Contact
+    primary_contact_lookup_field: name
 """
         )
         yaml_file.name = "contact-profile.yaml"
@@ -1148,8 +1159,8 @@ manufacturer_mappings:
 
         self.assertIn(response.status_code, [200, 302])
         profile = ImportProfile.objects.get(name="ImportedContactProfile")
-        self.assertEqual(profile.primary_contact_role, role)
-        self.assertEqual(profile.primary_contact_lookup_field, "name")
+        self.assertEqual(profile.resolve_primary_contact_role(), role)
+        self.assertEqual(profile.adapter_settings.primary_contact_lookup_field, "name")
 
     def test_yaml_import_can_clear_the_primary_contact_role(self):
         """An explicit null Contact Role clears the saved profile setting."""
@@ -1158,26 +1169,35 @@ manufacturer_mappings:
         from netbox_data_import.views import _apply_profile_yaml_data
 
         role = ContactRole.objects.create(name="Role to Clear", slug="role-to-clear")
-        profile = ImportProfile.objects.create(name="Clear Contact Role", primary_contact_role=role)
+        profile = ImportProfile.objects.create(
+            name="Clear Contact Role", adapter_config={"primary_contact_role": role.name}
+        )
 
-        _apply_profile_yaml_data({"profile": {"name": profile.name, "primary_contact_role": None}})
+        _apply_profile_yaml_data({"profile": {"name": profile.name, "adapter_config": {"primary_contact_role": None}}})
 
         profile.refresh_from_db()
-        self.assertIsNone(profile.primary_contact_role)
+        self.assertIsNone(profile.resolve_primary_contact_role())
 
     def test_yaml_import_rejects_an_unknown_primary_contact_role(self):
-        """An unknown Contact Role slug fails with a descriptive error."""
+        """A dangling Contact Role natural key fails at the adapter form boundary."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        with self.assertRaisesMessage(ValueError, "ContactRole with slug 'unknown-contact-role' not found"):
+        with self.assertRaisesMessage(ValueError, "primary_contact_role"):
             _apply_profile_yaml_data(
                 {
                     "profile": {
                         "name": "Unknown Contact Role",
-                        "primary_contact_role": "unknown-contact-role",
+                        "adapter_config": {"primary_contact_role": "No Such Contact Role"},
                     }
                 }
             )
+
+    def test_yaml_import_rejects_an_unknown_profile_key(self):
+        """A key the profile block does not define is an error, never ignored."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaisesMessage(ValueError, "sheet_name"):
+            _apply_profile_yaml_data({"profile": {"name": "Stray Key", "sheet_name": "Data"}})
 
     def test_post_creates_column_mappings(self):
         """POST with YAML creates column mappings."""
@@ -2269,8 +2289,9 @@ class ImportProfileYamlWithTransformRuleTest(BaseViewTestCase):
 
     YAML_WITH_TRANSFORM = b"""profile:
   name: TransformImportProfile
-  sheet_name: Data
-  source_id_column: Id
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
 column_transform_rules:
   - source_column: Name
     pattern: "^(\\\\w+) - (.+)$"
@@ -3040,10 +3061,11 @@ class ImportProfileBulkImportViewTest(BaseViewTestCase):
 
     HIERARCHICAL_YAML = b"""profile:
   name: BulkImportedProfile
-  sheet_name: Data
-  source_id_column: Id
-  update_existing: true
-  create_missing_device_types: true
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
+    update_existing: true
+    create_missing_device_types: true
 column_mappings:
   - source_column: Name
     target_field: device_name
@@ -3115,7 +3137,8 @@ manufacturer_mappings:
         # Second import: only 1 column mapping
         reduced_yaml = b"""profile:
   name: BulkImportedProfile
-  sheet_name: Data
+  adapter_config:
+    sheet_name: Data
 column_mappings:
   - source_column: Name
     target_field: device_name
@@ -3161,7 +3184,7 @@ column_mappings:
 
     def test_post_missing_name_shows_error(self):
         """POST with profile dict missing name shows error."""
-        resp = self.client.post(self._url(), {"data": "profile:\n  sheet_name: Data\n"})
+        resp = self.client.post(self._url(), {"data": "profile:\n  description: no name\n"})
         self.assertIn(resp.status_code, [200, 302])
 
     def test_post_malformed_section_shows_error_not_500(self):
@@ -3179,13 +3202,7 @@ column_mappings:
         this rewind the parent receives an EOF file handle and imports nothing.
         Creating the profile via this path confirms seek(0) is present.
         """
-        flat_yaml = (
-            b"- name: FlatRewindProfile\n"
-            b"  sheet_name: Data\n"
-            b"  preview_view_mode: rows\n"
-            b"  update_existing: false\n"
-            b"  create_missing_device_types: false\n"
-        )
+        flat_yaml = b"- name: FlatRewindProfile\n  description: Flat upload\n  source_adapter: flat_workbook\n"
         f = BytesIO(flat_yaml)
         f.name = "flat.yaml"
         resp = self.client.post(
@@ -3205,7 +3222,8 @@ column_mappings:
         yaml_with_transforms = (
             "profile:\n"
             "  name: TransformRulesProfile\n"
-            "  sheet_name: Data\n"
+            "  adapter_config:\n"
+            "    sheet_name: Data\n"
             "column_transform_rules:\n"
             "  - source_column: HostName\n"
             "    pattern: '^([a-z]+)(\\d+)'\n"
@@ -3273,19 +3291,19 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         from netbox_data_import.views import _apply_profile_yaml_data
 
         with self.assertRaises(ValueError):
-            _apply_profile_yaml_data({"profile": {"sheet_name": "Data"}})
+            _apply_profile_yaml_data({"profile": {"description": "no name"}})
 
     def test_creates_profile_and_returns_stats(self):
         """Creates an ImportProfile and returns non-empty stats dict."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
         data = {
-            "profile": {"name": "UnitTestProfile", "sheet_name": "Sheet1"},
+            "profile": {"name": "UnitTestProfile", "adapter_config": {"sheet_name": "Sheet1"}},
             "column_mappings": [{"source_column": "Name", "target_field": "device_name"}],
         }
         profile, stats = _apply_profile_yaml_data(data)
         self.assertEqual(profile.name, "UnitTestProfile")
-        self.assertEqual(profile.sheet_name, "Sheet1")
+        self.assertEqual(profile.adapter_settings.sheet_name, "Sheet1")
         self.assertEqual(stats.get("column_mappings"), 1)
         self.assertTrue(ImportProfile.objects.filter(name="UnitTestProfile").exists())
 
@@ -3349,7 +3367,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         existing = ColumnMapping.objects.create(profile=profile, source_column="Host", target_field="device_name")
 
         # Import same profile without the column_mappings key at all.
-        data = {"profile": {"name": "PreserveProfile", "sheet_name": "Data"}}
+        data = {"profile": {"name": "PreserveProfile", "adapter_config": {"sheet_name": "Data"}}}
         _apply_profile_yaml_data(data)
 
         # The existing column mapping must still exist.
@@ -3363,7 +3381,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         from netbox_data_import.views import _apply_profile_yaml_data
 
         bad_data = {
-            "profile": {"name": "BadViewModeProfile", "preview_view_mode": "invalid"},
+            "profile": {"name": "BadViewModeProfile", "adapter_config": {"preview_view_mode": "invalid"}},
         }
         with self.assertRaises(ValueError, msg="invalid choice field must raise ValueError"):
             _apply_profile_yaml_data(bad_data)
@@ -3431,28 +3449,30 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         # Create a profile with non-default field values.
         profile = ImportProfile.objects.create(
             name="PartialReimportProfile",
-            sheet_name="CustomSheet",
-            source_id_column="SourceId",
-            custom_field_name="my_cf",
-            update_existing=False,
-            preview_view_mode="racks",
+            adapter_config={
+                "sheet_name": "CustomSheet",
+                "source_id_column": "SourceId",
+                "custom_field_name": "my_cf",
+                "update_existing": False,
+                "preview_view_mode": "racks",
+            },
         )
 
         # Re-import with only 'name' — no other profile fields.
         _apply_profile_yaml_data({"profile": {"name": "PartialReimportProfile"}})
 
         profile.refresh_from_db()
-        self.assertEqual(profile.sheet_name, "CustomSheet", "sheet_name must not be reset")
-        self.assertEqual(profile.source_id_column, "SourceId", "source_id_column must not be reset")
-        self.assertEqual(profile.custom_field_name, "my_cf", "custom_field_name must not be reset")
-        self.assertFalse(profile.update_existing, "update_existing must not be reset")
-        self.assertEqual(profile.preview_view_mode, "racks", "preview_view_mode must not be reset")
+        self.assertEqual(profile.adapter_settings.sheet_name, "CustomSheet", "sheet_name must not be reset")
+        self.assertEqual(profile.adapter_settings.source_id_column, "SourceId", "source_id_column must not be reset")
+        self.assertEqual(profile.adapter_settings.custom_field_name, "my_cf", "custom_field_name must not be reset")
+        self.assertFalse(profile.adapter_settings.update_existing, "update_existing must not be reset")
+        self.assertEqual(profile.adapter_settings.preview_view_mode, "racks", "preview_view_mode must not be reset")
 
     def test_column_mapping_missing_required_key_raises_descriptive_error(self):
         """Missing required key in column_mappings raises ValueError with section and key name."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        ImportProfile.objects.create(name="KeyErrProfile", sheet_name="Data")
+        ImportProfile.objects.create(name="KeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
             "profile": {"name": "KeyErrProfile"},
             "column_mappings": [{"source_column": "Name"}],  # missing target_field
@@ -3466,7 +3486,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         """Missing required key in device_type_mappings raises ValueError, not bare KeyError."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        ImportProfile.objects.create(name="DTMKeyErrProfile", sheet_name="Data")
+        ImportProfile.objects.create(name="DTMKeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
             "profile": {"name": "DTMKeyErrProfile"},
             "device_type_mappings": [
@@ -3485,7 +3505,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         """Missing required key in manufacturer_mappings raises ValueError with context."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        ImportProfile.objects.create(name="MMKeyErrProfile", sheet_name="Data")
+        ImportProfile.objects.create(name="MMKeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
             "profile": {"name": "MMKeyErrProfile"},
             "manufacturer_mappings": [{"source_make": "Cisco"}],  # missing netbox_manufacturer_slug

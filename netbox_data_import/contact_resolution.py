@@ -94,7 +94,7 @@ class PrimaryContactResolver:
                     "contact_field_values": row.get("contact_field_values", {}),
                     "contact_id": row.get("contact_id"),
                 },
-                profile.primary_contact_lookup_field,
+                profile.adapter_settings.primary_contact_lookup_field,
                 candidate_values,
             )
             values = dict(normalized["field_values"])
@@ -109,7 +109,7 @@ class PrimaryContactResolver:
             return ContactSelection(
                 values={
                     "name": legacy_primary_contact,
-                    profile.primary_contact_lookup_field: legacy_primary_contact,
+                    profile.adapter_settings.primary_contact_lookup_field: legacy_primary_contact,
                 }
             )
         if not candidate_values:
@@ -170,7 +170,7 @@ class PrimaryContactResolver:
         """Return one visible Contact whose configured identity occurs in the row."""
         from tenancy.models import Contact
 
-        lookup_field = profile.primary_contact_lookup_field
+        lookup_field = profile.adapter_settings.primary_contact_lookup_field
         values = []
         for candidate in candidate_values.values():
             value = _text(candidate)
@@ -203,7 +203,7 @@ class PrimaryContactResolver:
         }
 
     @classmethod
-    def _plan_assignment(cls, obj, profile, contact, user, lock):
+    def _plan_assignment(cls, obj, role, contact, user, lock):
         from tenancy.models import ContactAssignment
 
         if obj is None:
@@ -214,7 +214,7 @@ class PrimaryContactResolver:
         scope = {
             "object_type": ContentType.objects.get_for_model(obj),
             "object_id": obj.pk,
-            "role": profile.primary_contact_role,
+            "role": role,
         }
         assignments = ContactAssignment.objects.select_for_update() if lock else ContactAssignment.objects
         primary_assignments = list(assignments.filter(**scope, priority="primary")[:2])
@@ -244,12 +244,20 @@ class PrimaryContactResolver:
     def _plan(cls, obj, profile, selection: ContactSelection | None, user=None, lock=False) -> dict | None:
         if selection is None:
             return None
-        if profile.primary_contact_role_id is None:
+        role_name = profile.adapter_settings.primary_contact_role
+        if not role_name:
             raise ValidationError({"primary_contact": "Select a primary contact role on the import profile."})
+        role = profile.resolve_primary_contact_role()
+        if role is None:
+            raise ValidationError(
+                {
+                    "primary_contact": f"The import profile references Contact Role '{role_name}', which no longer exists."
+                }
+            )
 
         from tenancy.models import Contact
 
-        lookup_field = profile.primary_contact_lookup_field
+        lookup_field = profile.adapter_settings.primary_contact_lookup_field
         contact_queryset = Contact.objects.select_for_update() if lock else Contact.objects
         if selection.contact_id is not None:
             contact = contact_queryset.filter(pk=selection.contact_id).first()
@@ -293,12 +301,12 @@ class PrimaryContactResolver:
                     raise ObjectPermissionDenied("tenancy.add_contact")
                 contact = proposed_contact
 
-        primary_assignment, assignment, assignment_action = cls._plan_assignment(obj, profile, contact, user, lock)
+        primary_assignment, assignment, assignment_action = cls._plan_assignment(obj, role, contact, user, lock)
         return {
             "lookup_field": lookup_field,
             "value": _text(getattr(contact, lookup_field, "")) or _text(contact_values.get(lookup_field)),
             "contact_values": contact_values,
-            "role_id": profile.primary_contact_role_id,
+            "role_id": role.pk,
             "contact_id": contact.pk,
             "contact_name": contact.name,
             "contact_email": contact.email,
@@ -332,7 +340,7 @@ class PrimaryContactResolver:
             scope = {
                 "object_type": ContentType.objects.get_for_model(obj),
                 "object_id": obj.pk,
-                "role": profile.primary_contact_role,
+                "role_id": plan["role_id"],
             }
             action = plan["assignment_action"]
             assignment = None

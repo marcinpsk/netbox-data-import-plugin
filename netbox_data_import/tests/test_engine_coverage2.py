@@ -29,10 +29,12 @@ User = get_user_model()
 def _make_profile(name="ECov2Test") -> ImportProfile:
     return ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        update_existing=True,
-        create_missing_device_types=True,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "update_existing": True,
+            "create_missing_device_types": True,
+        },
     )
 
 
