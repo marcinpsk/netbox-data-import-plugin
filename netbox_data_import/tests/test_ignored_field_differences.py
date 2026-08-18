@@ -58,9 +58,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             status="active",
         )
         self.profile = ImportProfile.objects.create(
-            name="Field Review Profile",
-            update_existing=True,
-            create_missing_device_types=False,
+            name="Field Review Profile", adapter_config={"update_existing": True, "create_missing_device_types": False}
         )
         ClassRoleMapping.objects.create(
             profile=self.profile,
@@ -1061,8 +1059,8 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             slug="field-review-deleted-type-manufacturer-deleted-type-model",
             u_height=1,
         )
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         self.rows[0].update(make=source_manufacturer.name, model=source_type.model)
         self._save_rows(self.rows)
 

@@ -28,6 +28,7 @@ from .forms import (
     ImportProfileImportForm,
     ImportSetupForm,
 )
+from .catalog import CATALOG
 from .models import (
     ClassRoleMapping,
     ColumnMapping,
@@ -39,7 +40,6 @@ from .models import (
     ImportProfile,
     ManufacturerMapping,
     SourceResolution,
-    TARGET_FIELD_CHOICES,
     stored_import_source,
     validate_contact_candidate_resolution,
 )
@@ -249,9 +249,7 @@ logger = logging.getLogger(__name__)
 class ImportProfileListView(generic.ObjectListView):
     """List all import profiles with their mapping counts."""
 
-    queryset = ImportProfile.objects.select_related("primary_contact_role").prefetch_related(
-        "column_mappings", "class_role_mappings", "device_type_mappings"
-    )
+    queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
     table = ImportProfileTable
     filterset = ImportProfileFilterSet
     template_name = "netbox_data_import/importprofile_list.html"
@@ -260,9 +258,7 @@ class ImportProfileListView(generic.ObjectListView):
 class ImportProfileView(generic.ObjectView):
     """Detail view for a single import profile, with inline mapping tables."""
 
-    queryset = ImportProfile.objects.select_related("primary_contact_role").prefetch_related(
-        "column_mappings", "class_role_mappings", "device_type_mappings"
-    )
+    queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
 
     def get_extra_context(self, request, instance):
         """Inject inline mapping tables into the template context."""
@@ -315,17 +311,7 @@ class ImportProfileChangeLogView(generic.ObjectChangeLogView):
 
 # Scalar profile fields handled by _apply_profile_yaml_data.
 # 'tags' (M2M) is intentionally excluded — use the edit UI or the flat import path.
-_PROFILE_FIELDS = (
-    "description",
-    "sheet_name",
-    "source_id_column",
-    "custom_field_name",
-    "update_existing",
-    "create_missing_device_types",
-    "preview_view_mode",
-    "capture_extra_data",
-    "primary_contact_lookup_field",
-)
+_PROFILE_FIELDS = ("description", "source_adapter")
 
 
 def _validate_model_instance(instance, label):
@@ -343,21 +329,13 @@ def _validate_model_instance(instance, label):
 
 
 def _profile_defaults_from_yaml(profile_data):
-    """Resolve scalar profile values and the Contact Role slug from YAML."""
+    """Resolve the scalar profile values and the adapter configuration from YAML."""
+    unknown = sorted(set(profile_data) - {"name", "adapter_config", *_PROFILE_FIELDS})
+    if unknown:
+        raise ValueError(f"Unknown profile key(s): {', '.join(unknown)}")
     profile_defaults = {field: profile_data[field] for field in _PROFILE_FIELDS if field in profile_data}
-    if "primary_contact_role" not in profile_data:
-        return profile_defaults
-
-    from tenancy.models import ContactRole
-
-    role_slug = profile_data["primary_contact_role"]
-    if not role_slug:
-        profile_defaults["primary_contact_role"] = None
-        return profile_defaults
-    try:
-        profile_defaults["primary_contact_role"] = ContactRole.objects.get(slug=role_slug)
-    except ContactRole.DoesNotExist as exc:
-        raise ValueError(f"ContactRole with slug '{role_slug}' not found") from exc
+    if "adapter_config" in profile_data:
+        profile_defaults["adapter_config"] = profile_data["adapter_config"]
     return profile_defaults
 
 
@@ -944,7 +922,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_serial": device.serial,
             }
 
-        view_mode = parse_qs(urlsplit(preview_url).query).get("view", [profile.preview_view_mode])[-1]
+        view_mode = parse_qs(urlsplit(preview_url).query).get("view", [profile.adapter_settings.preview_view_mode])[-1]
 
         # Build unused columns list: filter out any that are now mapped
         mapped_source_cols = set(profile.column_mappings.values_list("source_column", flat=True))
@@ -1015,7 +993,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "existing_resolutions": existing_resolutions,
                 "can_create_role": request.user.has_perm("dcim.add_devicerole"),
                 "unused_columns": unused_columns,
-                "target_field_choices": TARGET_FIELD_CHOICES,
+                "target_field_choices": CATALOG.choices(output_kinds=profile.output_kinds),
                 "syncable_fields": SyncDeviceFieldView._ALLOWED_FIELDS,
                 "reviewable_fields": DeviceFieldReviewer.reviewable_fields(),
                 "device_match_source_ids": device_match_source_ids,
@@ -2324,7 +2302,7 @@ class SaveResolutionView(_AjaxPermissionView):
                     candidates, source_row, result_row = self._contact_candidate_context(request, profile.pk, source_id)
                     validate_contact_candidate_resolution(
                         resolved_fields,
-                        profile.primary_contact_lookup_field,
+                        profile.adapter_settings.primary_contact_lookup_field,
                         candidates,
                     )
                 except ValidationError as exc:
@@ -2595,17 +2573,8 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
             "profile": {
                 "name": profile.name,
                 "description": profile.description,
-                "sheet_name": profile.sheet_name,
-                "source_id_column": profile.source_id_column,
-                "custom_field_name": profile.custom_field_name,
-                "update_existing": profile.update_existing,
-                "create_missing_device_types": profile.create_missing_device_types,
-                "preview_view_mode": profile.preview_view_mode,
-                "capture_extra_data": profile.capture_extra_data,
-                "primary_contact_role": (
-                    profile.primary_contact_role.slug if profile.primary_contact_role_id else None
-                ),
-                "primary_contact_lookup_field": profile.primary_contact_lookup_field,
+                "source_adapter": profile.source_adapter,
+                "adapter_config": profile.adapter_config,
             },
             "column_mappings": [
                 {"source_column": cm.source_column, "target_field": cm.target_field}
@@ -3005,8 +2974,6 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Save the column mapping and redirect back to preview."""
-        import re
-
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
             messages.error(request, "A valid import profile is required. Reload the preview and try again.")
@@ -3015,14 +2982,7 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
         source_column = request.POST.get("source_column", "").strip()
         target_field = request.POST.get("target_field", "").strip()
 
-        valid_standard_fields = {choice[0] for choice in TARGET_FIELD_CHOICES}
-        is_extra_json = target_field.startswith("extra_json:")
-        if is_extra_json:
-            key = target_field[len("extra_json:") :]
-            if not re.match(r"^[a-zA-Z0-9_-]{1,50}$", key):
-                is_extra_json = False  # invalid key → fall through to error below
-
-        if not source_column or (target_field not in valid_standard_fields and not is_extra_json):
+        if not source_column or not CATALOG.is_valid(target_field, output_kinds=profile.output_kinds):
             messages.error(request, "Valid source column and target field are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 

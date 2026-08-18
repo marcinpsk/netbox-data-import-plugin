@@ -27,10 +27,12 @@ User = get_user_model()
 def _make_profile(name="VCov2Test") -> ImportProfile:
     return ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        update_existing=True,
-        create_missing_device_types=True,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "update_existing": True,
+            "create_missing_device_types": True,
+        },
     )
 
 
@@ -76,7 +78,8 @@ class ApplyProfileYamlRackTypeNullTest(TestCase):
         yaml_data = (
             "profile:\n"
             "  name: RackTypeNullProfile2\n"
-            "  sheet_name: Data\n"
+            "  adapter_config:\n"
+            "    sheet_name: Data\n"
             "class_role_mappings:\n"
             "  - source_class: Cabinet\n"
             "    creates_rack: true\n"

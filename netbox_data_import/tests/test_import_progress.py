@@ -55,8 +55,7 @@ class ImportProgressViewTest(IsolatedRQQueueTestMixin, TestCase):
         )
         role = DeviceRole.objects.create(name="Import Progress Device", slug="import-progress-device")
         self.profile = ImportProfile.objects.create(
-            name="Import Progress Profile",
-            create_missing_device_types=False,
+            name="Import Progress Profile", adapter_config={"create_missing_device_types": False}
         )
         self.class_mapping = ClassRoleMapping.objects.create(
             profile=self.profile,

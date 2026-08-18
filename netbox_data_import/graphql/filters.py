@@ -17,8 +17,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover
         raise
     ImportProfileFilter = None
 else:  # pragma: no cover
-    from strawberry_django import BaseFilterLookup
-
     StrFilterLookup = getattr(strawberry_django, "StrFilterLookup", None)
     if StrFilterLookup is None:
         StrFilterLookup = strawberry_django.FilterLookup
@@ -29,14 +27,7 @@ else:  # pragma: no cover
 
         name: StrFilterLookup[str] | None = strawberry_django.filter_field()
         description: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        sheet_name: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        source_id_column: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        custom_field_name: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        update_existing: BaseFilterLookup[bool] | None = strawberry_django.filter_field()
-        create_missing_device_types: BaseFilterLookup[bool] | None = strawberry_django.filter_field()
-        preview_view_mode: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        capture_extra_data: BaseFilterLookup[bool] | None = strawberry_django.filter_field()
-        primary_contact_lookup_field: StrFilterLookup[str] | None = strawberry_django.filter_field()
+        source_adapter: StrFilterLookup[str] | None = strawberry_django.filter_field()
 
 
 __all__ = ("ImportProfileFilter",)

@@ -30,7 +30,9 @@ class MigrateImportSourceCustomFieldTest(TestCase):
         from dcim.models import Device, Rack
 
         cls.site, _mfg, cls.device_type, cls.role = make_dcim_objects("Migrate")
-        cls.profile = ImportProfile.objects.create(name="Migrate Profile", sheet_name="Data", source_id_column="Id")
+        cls.profile = ImportProfile.objects.create(
+            name="Migrate Profile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
+        )
         cls.device = Device.objects.create(
             name="migrate-device", site=cls.site, device_type=cls.device_type, role=cls.role
         )

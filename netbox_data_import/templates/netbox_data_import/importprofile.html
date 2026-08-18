@@ -14,13 +14,14 @@
         <table class="table table-hover attr-table">
           <tr><th scope="row">Name</th><td>{{ object.name }}</td></tr>
           <tr><th scope="row">Description</th><td>{{ object.description|placeholder }}</td></tr>
-          <tr><th scope="row">Sheet Name</th><td><code>{{ object.sheet_name }}</code></td></tr>
-          <tr><th scope="row">Source ID Column</th><td>{{ object.source_id_column|placeholder }}</td></tr>
-          <tr><th scope="row">Custom Field Name</th><td>{{ object.custom_field_name|placeholder }}</td></tr>
-          <tr><th scope="row">Update Existing</th><td>{% if object.update_existing %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td></tr>
-          <tr><th scope="row">Create Missing Device Types</th><td>{% if object.create_missing_device_types %}<span class="badge text-bg-success">Yes</span>{% else %}<span class="badge text-bg-secondary">No</span>{% endif %}</td></tr>
-          <tr><th scope="row">Primary Contact Role</th><td>{{ object.primary_contact_role|placeholder }}</td></tr>
-          <tr><th scope="row">Primary Contact Lookup</th><td>{{ object.get_primary_contact_lookup_field_display }}</td></tr>
+          <tr><th scope="row">Source Adapter</th><td>{{ object.get_source_adapter_display }}</td></tr>
+          {% for label, value in object.adapter_config_display %}
+          <tr><th scope="row">{{ label }}</th><td>
+            {% if value is True %}<span class="badge text-bg-success">Yes</span>
+            {% elif value is False %}<span class="badge text-bg-secondary">No</span>
+            {% else %}{{ value|placeholder }}{% endif %}
+          </td></tr>
+          {% endfor %}
         </table>
       </div>
     </div>

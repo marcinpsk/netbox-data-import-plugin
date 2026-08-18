@@ -18,6 +18,7 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     migrate_to = ("netbox_data_import", "0016_deviceexistingmatch_ndi_devicematch_profile_device")
     # 0020 moves data and Django refuses to reverse it, so the walk back starts below it. Faking
     # that step is safe here because the operation changes no schema.
+    reverse_to = ("netbox_data_import", "0020_migrate_import_source_custom_field")
     fake_unapply_to = ("netbox_data_import", "0019_deviceimportsource")
 
     @contextmanager
@@ -31,6 +32,7 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
 
     def _fake_unapply_the_irreversible_data_migration(self):
         """Step past 0020 without reversing it: Django refuses, and reversing it would lose data."""
+        MigrationExecutor(connection).migrate([self.reverse_to])
         executor = MigrationExecutor(connection)
         plan = executor.migration_plan([self.fake_unapply_to])
         self.assertEqual(

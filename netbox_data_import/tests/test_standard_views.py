@@ -5,6 +5,7 @@
 
 from utilities.testing import APIViewTestCases, ViewTestCases
 
+from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
 from netbox_data_import.models import ImportProfile
 
 BASE_URL = "plugins:netbox_data_import:importprofile_{}"
@@ -31,6 +32,7 @@ class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
         cls.form_data = {
             "name": "Standard Created Profile",
             "description": "Created by the NetBox view contract",
+            "source_adapter": "flat_workbook",
             "sheet_name": "Inventory",
             "source_id_column": "Source ID",
             "custom_field_name": "",
@@ -41,11 +43,10 @@ class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
             "primary_contact_lookup_field": "email",
         }
         cls.csv_data = (
-            "name,description,sheet_name,source_id_column,update_existing,create_missing_device_types,"
-            "preview_view_mode,capture_extra_data,primary_contact_lookup_field",
-            "Standard Imported Profile 1,Imported 1,Inventory,Source ID,true,true,rows,false,email",
-            "Standard Imported Profile 2,Imported 2,Inventory,Source ID,true,false,racks,true,name",
-            "Standard Imported Profile 3,Imported 3,Inventory,Source ID,false,true,rows,false,email",
+            "name,description,source_adapter",
+            "Standard Imported Profile 1,Imported 1,flat_workbook",
+            "Standard Imported Profile 2,Imported 2,flat_workbook",
+            "Standard Imported Profile 3,Imported 3,flat_workbook",
         )
         cls.csv_update_data = (
             "id,name,description",
@@ -53,9 +54,6 @@ class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
         )
         cls.bulk_edit_data = {
             "description": "Bulk edited by the NetBox view contract",
-            "update_existing": False,
-            "create_missing_device_types": False,
-            "capture_extra_data": True,
         }
 
 
@@ -75,12 +73,25 @@ class ImportProfileAPIViewTestCase(APIViewTestCases.APIViewTestCase):
                 ImportProfile(name="Standard API Profile 3"),
             ]
         )
+        # The adapter normalizes a stored configuration, so submit a complete one: the standard
+        # contract asserts the response echoes exactly what was sent.
+        flat_defaults = FlatWorkbookConfigForm.validate_config({})
         cls.create_data = [
-            {"name": "Standard API Created 1", "sheet_name": "Inventory"},
-            {"name": "Standard API Created 2", "sheet_name": "Inventory", "update_existing": False},
-            {"name": "Standard API Created 3", "sheet_name": "Inventory", "capture_extra_data": True},
+            {
+                "name": "Standard API Created 1",
+                "adapter_config": {**flat_defaults, "sheet_name": "Inventory"},
+            },
+            {
+                "name": "Standard API Created 2",
+                "adapter_config": {**flat_defaults, "sheet_name": "Inventory", "update_existing": False},
+            },
+            {
+                "name": "Standard API Created 3",
+                "source_adapter": "flat_workbook",
+                "adapter_config": {**flat_defaults, "capture_extra_data": True},
+            },
         ]
         cls.bulk_update_data = {
             "description": "Bulk updated through the standard API contract",
-            "update_existing": False,
+            "adapter_config": {**flat_defaults, "update_existing": False},
         }

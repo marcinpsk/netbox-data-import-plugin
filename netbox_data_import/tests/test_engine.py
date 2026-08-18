@@ -28,11 +28,13 @@ def _make_profile(name="Test") -> ImportProfile:
     """Create a fully configured ImportProfile matching the sample fixture."""
     profile = ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        custom_field_name="",
-        update_existing=True,
-        create_missing_device_types=True,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "custom_field_name": "",
+            "update_existing": True,
+            "create_missing_device_types": True,
+        },
     )
     # Standard CANS column mappings
     field_map = {
@@ -113,7 +115,7 @@ class ParseFileTest(TestCase):
     def test_missing_sheet_raises_parse_error(self):
         """ParseError is raised when the sheet name doesn't exist."""
         profile = _make_profile("BadSheet")
-        profile.sheet_name = "NonExistent"
+        profile.adapter_config["sheet_name"] = "NonExistent"
         with open(FIXTURE_PATH, "rb") as f:
             with self.assertRaises(ParseError):
                 parse_file(f, profile)
@@ -133,9 +135,7 @@ class MultiColumnMergeTest(TestCase):
         """Profile with 'Serial Number' and 'Service Tag' both mapping to 'serial'."""
         profile = ImportProfile.objects.create(
             name="MergeTest",
-            sheet_name="Data",
-            update_existing=True,
-            create_missing_device_types=True,
+            adapter_config={"sheet_name": "Data", "update_existing": True, "create_missing_device_types": True},
         )
         for src, tgt in [
             ("Id", "source_id"),
@@ -219,9 +219,7 @@ class ApplyColumnMappingsTest(TestCase):
     def _make_profile_with_mapping(self, source: str, target: str) -> ImportProfile:
         profile = ImportProfile.objects.create(
             name="ApplyMapTest",
-            sheet_name="Data",
-            update_existing=True,
-            create_missing_device_types=True,
+            adapter_config={"sheet_name": "Data", "update_existing": True, "create_missing_device_types": True},
         )
         ColumnMapping.objects.create(profile=profile, source_column=source, target_field=target)
         return profile
@@ -249,7 +247,7 @@ class ApplyColumnMappingsTest(TestCase):
         """Two source columns with identical values merge without a conflict."""
         from netbox_data_import.engine import apply_column_mappings
 
-        profile = ImportProfile.objects.create(name="MultiSame", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="MultiSame", adapter_config={"sheet_name": "Data"})
         ColumnMapping.objects.create(profile=profile, source_column="SN1", target_field="serial")
         ColumnMapping.objects.create(profile=profile, source_column="SN2", target_field="serial")
         rows = [{"SN1": "ABC-100", "SN2": "ABC-100"}]
@@ -261,7 +259,7 @@ class ApplyColumnMappingsTest(TestCase):
         """Two source columns with different values produce a conflict entry."""
         from netbox_data_import.engine import apply_column_mappings
 
-        profile = ImportProfile.objects.create(name="MultiDiff", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="MultiDiff", adapter_config={"sheet_name": "Data"})
         ColumnMapping.objects.create(profile=profile, source_column="SN1", target_field="serial")
         ColumnMapping.objects.create(profile=profile, source_column="SN2", target_field="serial")
         rows = [{"SN1": "ABC-100", "SN2": "XYZ-999"}]
@@ -294,7 +292,7 @@ class ApplyColumnMappingsTest(TestCase):
         """Serial numbers '0042' and '42' must NOT be merged — they differ as text identifiers."""
         from netbox_data_import.engine import apply_column_mappings
 
-        profile = ImportProfile.objects.create(name="SerialExact", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="SerialExact", adapter_config={"sheet_name": "Data"})
         ColumnMapping.objects.create(profile=profile, source_column="SN1", target_field="serial")
         ColumnMapping.objects.create(profile=profile, source_column="SN2", target_field="serial")
         rows = [{"SN1": "0042", "SN2": "42"}]
@@ -306,7 +304,7 @@ class ApplyColumnMappingsTest(TestCase):
         """u_position '35.0' and '35' should merge without conflict (numeric normalization)."""
         from netbox_data_import.engine import apply_column_mappings
 
-        profile = ImportProfile.objects.create(name="UPosFloat", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="UPosFloat", adapter_config={"sheet_name": "Data"})
         ColumnMapping.objects.create(profile=profile, source_column="Pos1", target_field="u_position")
         ColumnMapping.objects.create(profile=profile, source_column="Pos2", target_field="u_position")
         rows = [{"Pos1": "35.0", "Pos2": "35"}]
@@ -558,7 +556,7 @@ class PreviewDeviceRowTest(TestCase):
         from dcim.models import Device, DeviceType, Rack
 
         # Disable create_missing_device_types to force error path
-        self.profile.create_missing_device_types = False
+        self.profile.adapter_config["create_missing_device_types"] = False
         self.profile.save()
 
         row = {
@@ -700,7 +698,7 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
         """Execute mode with create_missing_device_types=False appends no RowResult rows."""
         from dcim.models import DeviceType, Manufacturer
 
-        self.profile.create_missing_device_types = False
+        self.profile.adapter_config["create_missing_device_types"] = False
         result = ImportResult()
         row = {"_row_number": 1, "source_id": "1"}
         ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=False, result=result)
@@ -723,7 +721,7 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
         """Execute mode with create_missing_device_types=True appends no RowResult rows (creates silently)."""
         from dcim.models import DeviceType, Manufacturer
 
-        self.profile.create_missing_device_types = True
+        self.profile.adapter_config["create_missing_device_types"] = True
         result = ImportResult()
         row = {"_row_number": 1, "source_id": "1"}
         ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=False, result=result)
@@ -748,7 +746,7 @@ class EnsureDeviceTypeExecuteModeTest(TestCase):
         """Dry-run with create_missing_device_types=False does append an error RowResult."""
         from dcim.models import DeviceType, Manufacturer
 
-        self.profile.create_missing_device_types = False
+        self.profile.adapter_config["create_missing_device_types"] = False
         result = ImportResult()
         row = {"_row_number": 1, "source_id": "1"}
         ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=True, result=result)
@@ -972,7 +970,7 @@ class FieldDiffComputationTest(TestCase):
 
     def test_field_diff_absent_on_skip_row(self):
         """Skip rows (update_existing=False) must not have field_diff in extra_data."""
-        self.profile.update_existing = False
+        self.profile.adapter_config["update_existing"] = False
         self.profile.save()
         self._make_existing_device(serial="OLD123", asset_tag="OLD-TAG")
         result = self._call_preview("existing-server", serial="NEW456", asset_tag="A-001")
@@ -1106,7 +1104,7 @@ class FieldDiffComputationTest(TestCase):
 
     def test_netbox_device_id_absent_on_skip_row(self):
         """netbox_device_id must NOT be present on skip rows (update_existing=False)."""
-        self.profile.update_existing = False
+        self.profile.adapter_config["update_existing"] = False
         self.profile.save()
         self._make_existing_device(serial="SN-SKIP", asset_tag=None)
         result = self._call_preview("existing-server", serial="SN-SKIP", asset_tag=None)

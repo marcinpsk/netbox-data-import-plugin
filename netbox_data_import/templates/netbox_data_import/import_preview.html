@@ -947,7 +947,7 @@
       </div>
       <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}"
             id="contactCandidateForm"
-            data-contact-lookup-field="{{ profile.primary_contact_lookup_field }}"
+            data-contact-lookup-field="{{ profile.adapter_settings.primary_contact_lookup_field }}"
             data-contact-lookup-url="{% url 'plugins:netbox_data_import:contact_lookup' %}">
         {% csrf_token %}
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
@@ -988,7 +988,7 @@
               <input type="email" class="form-control mt-2" id="contactCandidateEmailValue"
                      aria-label="Email address value"
                      placeholder="Or enter an email address">
-              {% if profile.primary_contact_lookup_field == 'email' %}
+              {% if profile.adapter_settings.primary_contact_lookup_field == 'email' %}
               <div class="form-text">Required because this profile matches Contacts by email.</div>
               {% endif %}
             </div>

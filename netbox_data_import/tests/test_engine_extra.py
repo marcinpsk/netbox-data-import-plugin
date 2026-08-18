@@ -17,12 +17,14 @@ FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.
 def _make_profile(name="ExtraTest", capture_extra=False) -> ImportProfile:
     profile = ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        custom_field_name="",
-        update_existing=False,
-        create_missing_device_types=False,
-        capture_extra_data=capture_extra,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "custom_field_name": "",
+            "update_existing": False,
+            "create_missing_device_types": False,
+            "capture_extra_data": capture_extra,
+        },
     )
     for src, tgt in {
         "Id": "source_id",

@@ -1,105 +1,128 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+import copy
+
 from django import forms
 from dcim.models import Site, Location
-from tenancy.models import ContactRole, Tenant
+from tenancy.models import Tenant
 from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
 from utilities.forms.fields import DynamicModelChoiceField
-from utilities.forms.widgets import BulkEditNullBooleanSelect
+from .adapters import get_adapter, selectable_adapter_choices
+from .catalog import CATALOG
 from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
-from .models import (
-    COLUMN_TRANSFORM_TARGET_FIELD_CHOICES,
-    CONTACT_LOOKUP_FIELD_CHOICES,
-    PREVIEW_VIEW_CHOICES,
-    TARGET_FIELD_CHOICES,
-)
+
+
+def _profile_output_kinds(form):
+    """Return the output kinds of the profile this row belongs to, or None when unknown."""
+    profile = form.initial.get("profile") or form.instance.profile_id
+    if form.is_bound:
+        profile = form.data.get(form.add_prefix("profile")) or profile
+    if not profile:
+        return None
+    if not isinstance(profile, ImportProfile):
+        # A hidden field carries raw POST text, so a non-numeric value must not reach the query.
+        try:
+            profile = ImportProfile.objects.filter(pk=int(profile)).first()
+        except (TypeError, ValueError):
+            return None
+        if profile is None:
+            return None
+    return profile.output_kinds
+
+
+def _with_stored_target(choices, stored):
+    """Keep a stored key-family target selectable, so an existing row can be re-saved."""
+    if not stored or stored in {key for key, _label in choices}:
+        return choices
+    return [*choices, (stored, CATALOG.display(stored))]
 
 
 class ImportProfileForm(NetBoxModelForm):
-    """Form for creating and editing ImportProfile instances."""
+    """Form for creating and editing ImportProfile instances.
+
+    The Source Adapter is asked for first and is disabled after creation. The selected adapter
+    declares the remaining configuration fields.
+    """
 
     class Meta:
         model = ImportProfile
-        fields = [
-            "name",
-            "description",
-            "sheet_name",
-            "source_id_column",
-            "custom_field_name",
-            "update_existing",
-            "create_missing_device_types",
-            "preview_view_mode",
-            "capture_extra_data",
-            "primary_contact_role",
-            "primary_contact_lookup_field",
-            "tags",
-        ]
+        fields = ["name", "description", "source_adapter", "tags"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._config_form_class = None
+        adapter = get_adapter(self._selected_adapter_key())
+        if adapter is None:
+            return
+        if self.instance.pk:
+            self.fields["source_adapter"].disabled = True
+        else:
+            self.fields["source_adapter"].choices = selectable_adapter_choices()
+        self._config_form_class = adapter.config_form_class()
+        stored = self.instance.adapter_config or {}
+        for name, field in self._config_form_class.base_fields.items():
+            self.fields[name] = copy.deepcopy(field)
+            if name in stored:
+                self.initial.setdefault(name, stored[name])
+
+    def _selected_adapter_key(self):
+        """Return the adapter key this form edits: the stored one, or the submitted choice."""
+        if self.instance.pk:
+            return self.instance.source_adapter
+        if self.is_bound:
+            return self.data.get(self.add_prefix("source_adapter")) or self.instance.source_adapter
+        return self.instance.source_adapter
+
+    def clean(self):
+        """Collect the adapter-declared fields into ``adapter_config``."""
+        cleaned = super().clean()
+        if cleaned is None:
+            cleaned = self.cleaned_data
+        if self._config_form_class is not None:
+            self.instance.adapter_config = self._config_form_class.normalize(cleaned)
+        return cleaned
 
 
 class ImportProfileImportForm(NetBoxModelImportForm):
-    """CSV/YAML bulk-import form for ImportProfile objects (profile metadata only)."""
+    """CSV/YAML bulk-import form for ImportProfile objects (profile metadata only).
 
-    primary_contact_lookup_field = forms.ChoiceField(
-        choices=CONTACT_LOOKUP_FIELD_CHOICES,
-        required=False,
-    )
-
-    def clean_primary_contact_lookup_field(self):
-        """Use email matching when an older CSV omits the new column."""
-        return self.cleaned_data["primary_contact_lookup_field"] or "email"
+    Adapter configuration is nested, so it is set through the edit UI, the REST API, or the
+    hierarchical profile YAML import.
+    """
 
     class Meta:
         model = ImportProfile
-        fields = [
-            "name",
-            "description",
-            "sheet_name",
-            "source_id_column",
-            "custom_field_name",
-            "update_existing",
-            "create_missing_device_types",
-            "preview_view_mode",
-            "capture_extra_data",
-            "primary_contact_role",
-            "primary_contact_lookup_field",
-            "tags",
-        ]
+        fields = ["name", "description", "source_adapter", "tags"]
 
 
 class ImportProfileBulkEditForm(NetBoxModelBulkEditForm):
-    """Bulk-edit fields that apply safely across import profiles."""
+    """Bulk-edit fields that apply safely across import profiles.
+
+    The Source Adapter is immutable and ``adapter_config`` is adapter-scoped, so neither is
+    bulk-editable.
+    """
 
     model = ImportProfile
 
     description = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}))
-    sheet_name = forms.CharField(max_length=100, required=False)
-    source_id_column = forms.CharField(max_length=100, required=False)
-    custom_field_name = forms.CharField(max_length=100, required=False)
-    update_existing = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
-    create_missing_device_types = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
-    preview_view_mode = forms.ChoiceField(
-        choices=[("", "---------"), *PREVIEW_VIEW_CHOICES],
-        required=False,
-    )
-    capture_extra_data = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
-    primary_contact_role = DynamicModelChoiceField(queryset=ContactRole.objects.all(), required=False)
-    primary_contact_lookup_field = forms.ChoiceField(
-        choices=[("", "---------"), *CONTACT_LOOKUP_FIELD_CHOICES],
-        required=False,
-    )
 
-    nullable_fields = ("description", "source_id_column", "custom_field_name", "primary_contact_role")
+    nullable_fields = ("description",)
 
 
 class ColumnMappingForm(forms.ModelForm):
     """Form for creating and editing ColumnMapping instances."""
 
-    target_field = forms.ChoiceField(choices=TARGET_FIELD_CHOICES)
+    target_field = forms.ChoiceField(choices=CATALOG.choices)
 
     class Meta:
         model = ColumnMapping
         fields = ["profile", "source_column", "target_field"]
         widgets = {"profile": forms.HiddenInput()}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        choices = CATALOG.choices(output_kinds=_profile_output_kinds(self))
+        self.fields["target_field"].choices = _with_stored_target(choices, self.instance.target_field)
 
 
 class ClassRoleMappingForm(forms.ModelForm):
@@ -142,19 +165,21 @@ class DeviceTypeMappingForm(forms.ModelForm):
 class ColumnTransformRuleForm(forms.ModelForm):
     """Form for creating and editing ColumnTransformRule instances."""
 
-    group_1_target = forms.ChoiceField(
-        choices=[("", "---------")] + COLUMN_TRANSFORM_TARGET_FIELD_CHOICES,
-        required=False,
-    )
-    group_2_target = forms.ChoiceField(
-        choices=[("", "---------")] + COLUMN_TRANSFORM_TARGET_FIELD_CHOICES,
-        required=False,
-    )
+    group_1_target = forms.ChoiceField(required=False)
+    group_2_target = forms.ChoiceField(required=False)
 
     class Meta:
         model = ColumnTransformRule
         fields = ["profile", "source_column", "pattern", "group_1_target", "group_2_target"]
         widgets = {"profile": forms.HiddenInput()}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # A capture group yields text, so the candidate targets are not offered.
+        choices = CATALOG.choices(output_kinds=_profile_output_kinds(self), allow_candidates=False)
+        for name in ("group_1_target", "group_2_target"):
+            stored = getattr(self.instance, name, "")
+            self.fields[name].choices = [("", "---------"), *_with_stored_target(choices, stored)]
 
 
 class ImportSetupForm(forms.Form):
@@ -196,6 +221,16 @@ class ImportSetupForm(forms.Form):
         self.fields["site"].queryset = Site.objects.restrict(user, "view")
         self.fields["location"].queryset = Location.objects.restrict(user, "view")
         self.fields["tenant"].queryset = Tenant.objects.restrict(user, "view")
+
+    def clean_profile(self):
+        """Reject a profile whose stored Source Adapter this release no longer registers."""
+        profile = self.cleaned_data["profile"]
+        if profile.adapter is None:
+            raise forms.ValidationError(
+                f"This profile uses the source adapter '{profile.source_adapter}', "
+                "which this release does not register."
+            )
+        return profile
 
     def clean_excel_file(self):
         """Reject files that exceed the maximum upload size."""
