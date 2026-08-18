@@ -126,6 +126,34 @@ class SourceDocumentRetentionTest(TestCase):
         self.assertEqual(SourceDocument.purge_unreferenced(), 0)
         self.assertTrue(SourceDocument.objects.filter(pk=referenced.pk).exists())
 
+    def test_deleting_a_profile_keeps_the_documents_its_executions_reference(self):
+        """An execution's input is permanent audit input, so it outlives its Import Profile."""
+        profile = ImportProfile.objects.create(name="Deleted Profile", adapter_config={})
+        referenced = _document(profile, uploaded_by=_operator("delete-actor"))
+        ImportExecution.objects.create(
+            profile=profile,
+            source_document=referenced,
+            actor=_operator("delete-actor"),
+            idempotency_key="delete-key",
+            plan_schema_version=1,
+            accepted_plan_fingerprint="a" * 64,
+            selected_units=["unit:1"],
+            outcome=ExecutionOutcome.SUCCEEDED,
+        )
+        profile.delete()
+        referenced.refresh_from_db()
+        self.assertIsNone(referenced.profile_id)
+        self.assertTrue(SourceDocument.objects.filter(pk=referenced.pk).exists())
+
+    def test_an_orphaned_unreferenced_document_is_still_reclaimed(self):
+        """Deleting a profile leaves its unreferenced uploads to the retention window."""
+        profile = ImportProfile.objects.create(name="Orphan Profile", adapter_config={})
+        orphan = _document(profile, uploaded_by=_operator("orphan-actor"))
+        profile.delete()
+        self._age(orphan, 31)
+        self.assertEqual(SourceDocument.purge_unreferenced(), 1)
+        self.assertFalse(SourceDocument.objects.filter(pk=orphan.pk).exists())
+
     def test_a_referenced_document_cannot_be_deleted_directly(self):
         """The database enforces the audit rule, not only the housekeeping query."""
         referenced = _document(self.profile)
@@ -197,6 +225,20 @@ class ImportExecutionReservationTest(TransactionTestCase):
         with self.assertRaises(RuntimeError):
             with transaction.atomic():
                 ImportExecution.reserve(**_reservation(self.profile, self.document, self.actor))
+
+    def test_a_reservation_requires_an_idempotency_key(self):
+        """Section 9.2 makes the key required on a new row; without it nothing is reserved."""
+        for missing in ("", None):
+            with self.subTest(key=missing):
+                with self.assertRaises(ValueError):
+                    ImportExecution.reserve(**_reservation(self.profile, self.document, self.actor, key=missing))
+
+    def test_an_unrelated_integrity_error_is_not_reported_as_a_duplicate(self):
+        """Only a lost race for this key returns an existing row; anything else must surface."""
+        doomed = _document(self.profile, content=b"doomed bytes", uploaded_by=self.actor)
+        SourceDocument.objects.filter(pk=doomed.pk).delete()
+        with self.assertRaises(IntegrityError):
+            ImportExecution.reserve(**_reservation(self.profile, doomed, self.actor, key="doomed-key"))
 
     def test_a_legacy_row_never_satisfies_an_idempotency_lookup(self):
         """A retained ImportJob row keeps its historical fields and null new fields."""
@@ -340,6 +382,50 @@ class PendingRecoveryTest(TestCase):
         execution.refresh_from_db()
         self.assertEqual(execution.failure_detail["reason"], FailureReason.ABANDONED)
 
+    def test_a_row_reserved_before_its_job_is_linked_stays_pending(self):
+        """Section 4.7 commits the reservation before the Job exists, so that window is live."""
+        execution = self._pending("window-key")
+        self.assertEqual(execution.reconcile_pending().outcome, ExecutionOutcome.PENDING)
+
+    def test_a_row_never_linked_to_a_job_is_abandoned_past_the_bound(self):
+        """A background attempt that never reached the queue cannot stay pending forever."""
+        execution = self._pending("never-enqueued-key", age=timedelta(minutes=11))
+        self.assertEqual(execution.reconcile_pending().outcome, ExecutionOutcome.FAILED)
+
+    def test_linking_a_job_switches_the_row_onto_the_job_status(self):
+        """Once linked, the Job decides whether the attempt is still live."""
+        execution = self._pending("linked-key")
+        execution.link_job(self._job(JobStatusChoices.STATUS_RUNNING))
+        self.assertEqual(execution.reconcile_pending().outcome, ExecutionOutcome.PENDING)
+        Job.objects.filter(pk=execution.job_id).update(status=JobStatusChoices.STATUS_ERRORED)
+        self.assertEqual(execution.reconcile_pending().outcome, ExecutionOutcome.FAILED)
+
+    def test_a_terminal_row_refuses_a_second_outcome(self):
+        """A redelivered attempt must never overwrite committed audit evidence."""
+        succeeded = self._pending("terminal-success-key")
+        succeeded.mark_succeeded(applied_changes={"changes": ["device:1"], "deleted": []})
+        with self.assertRaises(ValueError):
+            succeeded.mark_failed(reason="precondition")
+        succeeded.refresh_from_db()
+        self.assertEqual(succeeded.applied_changes["changes"], ["device:1"])
+
+        failed = self._pending("terminal-failure-key")
+        failed.mark_failed(reason=FailureReason.ABANDONED)
+        with self.assertRaises(ValueError):
+            failed.mark_succeeded(applied_changes={"changes": [], "deleted": []})
+        failed.refresh_from_db()
+        self.assertEqual(failed.failure_detail["reason"], FailureReason.ABANDONED)
+
+    def test_a_rolled_back_reconciliation_self_heals_on_the_next_read(self):
+        """The transition is recomputed on every read, so losing it to a rollback costs nothing."""
+        execution = self._pending("rollback-key", age=timedelta(minutes=11))
+        with transaction.atomic():
+            execution.reconcile_pending()
+            transaction.set_rollback(True)
+        stored = ImportExecution.objects.get(pk=execution.pk)
+        self.assertEqual(stored.outcome, ExecutionOutcome.PENDING, "the write rolled back with the caller")
+        self.assertEqual(stored.reconcile_pending().outcome, ExecutionOutcome.FAILED)
+
     def test_a_finished_row_is_never_reconciled(self):
         """Reconciliation only ever transitions a pending row."""
         execution = self._pending("finished-key")
@@ -366,13 +452,40 @@ class SourceDocumentRetentionJobTest(TestCase):
     def setUpTestData(cls):
         cls.profile = ImportProfile.objects.create(name="Retention Job Profile", adapter_config={})
 
-    def test_the_job_is_registered_as_a_daily_system_job(self):
-        """Retention needs no operator action, so NetBox schedules it."""
-        from netbox.registry import registry
+    def test_a_real_django_startup_registers_the_daily_system_job(self):
+        """NetBox does not import a plugin's jobs module, so the plugin config must.
 
-        from netbox_data_import.jobs import SourceDocumentRetentionJob
+        This boots Django in a subprocess: importing the jobs module here would run the decorator
+        and register the job, which is exactly what the test has to prove happens without it.
+        """
+        import os
+        import subprocess
+        import sys
+        import textwrap
 
-        self.assertEqual(registry["system_jobs"][SourceDocumentRetentionJob]["interval"], 60 * 24)
+        probe = textwrap.dedent(
+            """
+            import django
+            django.setup()
+            from netbox.registry import registry
+
+            found = {
+                f"{cls.__module__}.{cls.__name__}": meta["interval"]
+                for cls, meta in registry["system_jobs"].items()
+            }
+            print(found.get("netbox_data_import.jobs.SourceDocumentRetentionJob"))
+            """
+        )
+        environment = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(path for path in sys.path if path),
+            "DJANGO_SETTINGS_MODULE": os.environ.get("DJANGO_SETTINGS_MODULE", "netbox.settings"),
+        }
+        completed = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, timeout=300, check=False, env=environment
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr[-2000:])
+        self.assertEqual(completed.stdout.strip().splitlines()[-1], str(60 * 24), completed.stderr[-2000:])
 
     def test_running_it_reclaims_only_the_unreferenced_stale_documents(self):
         """One run applies both retention rules against the real database."""

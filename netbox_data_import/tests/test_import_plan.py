@@ -14,6 +14,7 @@ from netbox_data_import.plan import (
     PlannedChange,
     Severity,
     SynchronizationUnit,
+    executable_units,
     merge_changes,
 )
 
@@ -263,3 +264,113 @@ class DependencyGraphTest(SimpleTestCase):
         )
         with self.assertRaises(PlanInvalid):
             merge_changes(units)
+
+
+class PlanBoundaryTest(SimpleTestCase):
+    """Section 4.1: the constructor is the boundary that keeps planning state out of a plan."""
+
+    def test_a_non_finite_number_is_rejected(self):
+        """NaN and Infinity are not JSON, and NaN never equals itself, so sharing would break."""
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(PlanInvalid):
+                    _change(payload={"u_position": value})
+
+    def test_a_dependency_that_is_not_an_identity_string_is_rejected(self):
+        """Dependencies are stable identities, so an ORM object must fail at construction."""
+        with self.assertRaises(PlanInvalid):
+            _change(dependencies=(object(),))
+
+    def test_a_bare_string_of_dependencies_is_rejected(self):
+        """tuple("rack:1") would silently become six single-character identities."""
+        with self.assertRaises(PlanInvalid):
+            _change(dependencies="rack:1")
+
+    def test_a_diagnostic_identity_that_is_not_a_string_is_rejected(self):
+        """The affected identities are a fingerprint input, so they must be plan data."""
+        with self.assertRaises(PlanInvalid):
+            Diagnostic(code="device.name_conflict", severity=Severity.ERROR, identities=(object(),))
+
+    def test_duplicate_unit_identities_are_rejected(self):
+        """Selection resolves a unit by identity, so two units cannot share one."""
+        with self.assertRaises(PlanInvalid):
+            _plan(units=(_unit(identity="row:7"), _unit(identity="row:7", disposition=Disposition.BLOCKED)))
+
+    def test_the_serialized_form_does_not_alias_the_plan(self):
+        """A caller that edits the serialized form must not rewrite the plan it came from."""
+        plan = _plan()
+        data = plan.to_dict()
+        data["planning_context"]["site_id"] = 99
+        data["units"][0]["changes"][0]["payload"]["name"] = "mutated"
+        data["units"][0]["display"]["label"] = "mutated"
+        self.assertEqual(plan.planning_context, {"site_id": 3})
+        self.assertEqual(plan.units[0].changes[0].payload, {"name": "sw-1"})
+        self.assertEqual(plan.fingerprint, _plan().fingerprint)
+
+    def test_the_value_types_are_hashable(self):
+        """A coordinator deduplicating changes with a set must not hit an unhashable dict."""
+        self.assertEqual(len({_change(), _change()}), 1)
+        self.assertEqual(len({_change(), _change(identity="device:2")}), 2)
+        self.assertEqual(len({_unit(), _unit()}), 1)
+        self.assertEqual(len({_plan(), _plan()}), 1)
+
+    def test_a_malformed_serialized_plan_raises_a_typed_plan_error(self):
+        """Section 4.8 requires a caller to replan, so one `except PlanError` must cover every case."""
+        from netbox_data_import.plan import PlanError
+
+        for broken in (
+            {"schema_version": SCHEMA_VERSION, "units": [{"identity": "u1"}], "diagnostics": []},
+            {"schema_version": SCHEMA_VERSION, "units": None, "diagnostics": []},
+            {"schema_version": SCHEMA_VERSION},
+            {"units": [], "diagnostics": []},
+        ):
+            with self.subTest(broken=broken):
+                with self.assertRaises(PlanError):
+                    ImportPlan.from_dict(broken)
+
+    def test_a_structurally_broken_plan_is_invalid_rather_than_a_version_mismatch(self):
+        """A caller distinguishes 'replan' from 'this payload is corrupt'."""
+        with self.assertRaises(PlanInvalid):
+            ImportPlan.from_dict({"schema_version": SCHEMA_VERSION, "units": None, "diagnostics": []})
+
+
+class ExecutableUnitsTest(SimpleTestCase):
+    """Section 4.6: only actionable units enter an execution transaction."""
+
+    def test_it_keeps_only_the_actionable_units(self):
+        """Blocked, invalid, excluded, and no-op units never execute."""
+        units = tuple(
+            _unit(identity=f"unit:{index}", disposition=disposition)
+            for index, disposition in enumerate(
+                (
+                    Disposition.ACTIONABLE,
+                    Disposition.NO_OP,
+                    Disposition.BLOCKED,
+                    Disposition.INVALID,
+                    Disposition.EXCLUDED,
+                )
+            )
+        )
+        self.assertEqual([unit.identity for unit in executable_units(units)], ["unit:0"])
+
+
+class SelectiveMergeTest(SimpleTestCase):
+    """Section 4.5: a dependency must already be reconciled or be included explicitly."""
+
+    def test_a_reconciled_dependency_satisfies_a_subset_merge(self):
+        """A later selective execution must not be rejected for depending on an executed change."""
+        unit = _unit(identity="unit:2", changes=(_change(identity="device:5", dependencies=("device_type:1",)),))
+        ordered = merge_changes((unit,), reconciled=("device_type:1",))
+        self.assertEqual([change.identity for change in ordered], ["device:5"])
+
+    def test_an_unreconciled_dependency_still_fails_the_subset_merge(self):
+        """Selective synchronization never expands silently."""
+        unit = _unit(identity="unit:2", changes=(_change(identity="device:5", dependencies=("device_type:1",)),))
+        with self.assertRaises(PlanInvalid):
+            merge_changes((unit,))
+
+    def test_a_reconciled_identity_is_not_executed_again(self):
+        """The reconciled set orders the selection; it never adds work."""
+        unit = _unit(identity="unit:2", changes=(_change(identity="device:5", dependencies=("device_type:1",)),))
+        ordered = merge_changes((unit,), reconciled=("device_type:1",))
+        self.assertNotIn("device_type:1", [change.identity for change in ordered])
