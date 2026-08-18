@@ -67,3 +67,23 @@ class NetBoxMainWorkflowTest(TestCase):
         checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
 
         self.assertIs(checkout.get("with", {}).get("persist-credentials"), False)
+
+
+class ReleaseWorkflowTest(TestCase):
+    """Keep the pull request job that runs the release build command unprivileged."""
+
+    def _build_command_job(self):
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "release.yaml"
+
+        return yaml.safe_load(workflow.read_text())["jobs"]["build-command"]
+
+    def test_the_build_command_job_only_reads(self):
+        """The job runs the build command the pull request itself writes."""
+        self.assertEqual(self._build_command_job()["permissions"], {"contents": "read"})
+
+    def test_the_build_command_job_does_not_persist_checkout_credentials(self):
+        """Do not leave the workflow token in the Git configuration for pull-request code."""
+        steps = self._build_command_job()["steps"]
+        checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
+
+        self.assertIs(checkout.get("with", {}).get("persist-credentials"), False)
