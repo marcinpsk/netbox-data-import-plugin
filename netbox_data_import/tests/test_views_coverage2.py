@@ -254,19 +254,10 @@ class ImportExecutionListViewPermissionTest(TestCase):
 
     def _regular_client(self, username, *, granted):
         """Return a logged-in non-superuser, optionally holding view_importexecution."""
-        from core.models import ObjectType
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
-
         from netbox_data_import.models import ImportExecution
+        from netbox_data_import.tests.helpers import user_with_object_permission
 
-        user = get_user_model().objects.create_user(username=username, password="testpass")
-        if granted:
-            # NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants
-            # nothing. An ObjectPermission is how an operator actually issues this permission.
-            permission = ObjectPermission.objects.create(name=f"{username} view executions", actions=["view"])
-            permission.users.add(user)
-            permission.object_types.add(ObjectType.objects.get_for_model(ImportExecution))
+        user_with_object_permission(username, ImportExecution, granted=granted)
         client = Client()
         client.login(username=username, password="testpass")
         return client

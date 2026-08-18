@@ -87,6 +87,22 @@ class PlanStructureTest(SimpleTestCase):
                     with self.assertRaises(PlanInvalid):
                         PlannedChange(identity="device:1", payload={}, **fields)
 
+    def test_a_unit_rejects_changes_and_diagnostics_that_are_not_plan_objects(self):
+        """The constructor is the boundary, so a serialized dict must fail here, not at fingerprint."""
+        for field_name in ("changes", "diagnostics"):
+            for value in ({"identity": "device:1"}, "device:1", 7):
+                with self.subTest(field=field_name, value=value):
+                    with self.assertRaises(PlanInvalid):
+                        SynchronizationUnit(identity="row:1", disposition=Disposition.ACTIONABLE, **{field_name: value})
+
+    def test_a_plan_rejects_units_and_diagnostics_that_are_not_plan_objects(self):
+        """A plan carries the same boundary as the units it holds."""
+        for field_name in ("units", "diagnostics"):
+            for value in ({"identity": "row:1"}, "row:1", 7):
+                with self.subTest(field=field_name, value=value):
+                    with self.assertRaises(PlanInvalid):
+                        ImportPlan(**{field_name: value})
+
     def test_an_unknown_disposition_is_rejected(self):
         """Section 4.2 fixes the disposition vocabulary."""
         with self.assertRaises(PlanInvalid):
