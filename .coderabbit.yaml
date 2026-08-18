@@ -4,6 +4,12 @@
 reviews:
   poem: false
 
+  auto_review:
+    # A stacked pull request targets another working branch. Only the default branch is
+    # reviewed without this, so the whole stack goes unreviewed.
+    base_branches:
+      - ".*"
+
   # Generated files carry no review value and spend the review budget on the free plan.
   path_filters:
     - "!CHANGELOG.md"
