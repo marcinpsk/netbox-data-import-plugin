@@ -238,17 +238,17 @@ class ImportPreviewViewExistingResolutionsTest(TestCase):
         )
 
 
-class ImportJobListViewPermissionTest(TestCase):
-    """Tests for ImportJobListView.get_required_permission — line 861."""
+class ImportExecutionListViewPermissionTest(TestCase):
+    """Tests for ImportExecutionListView.get_required_permission."""
 
     def setUp(self):
         self.user = _make_superuser("vcov2_joblist_user")
         self.client = Client()
         self.client.login(username="vcov2_joblist_user", password="testpass")
 
-    def test_import_job_list_returns_200(self):
-        """GET importjob_list with view_importjob perm returns 200 — line 861."""
-        url = reverse("plugins:netbox_data_import:importjob_list")
+    def test_import_execution_list_returns_200(self):
+        """GET importexecution_list with the view permission returns 200."""
+        url = reverse("plugins:netbox_data_import:importexecution_list")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 

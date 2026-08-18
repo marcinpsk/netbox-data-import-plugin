@@ -139,5 +139,5 @@ urlpatterns = [
     path("sync-single-row/", views.SyncSingleRowView.as_view(), name="sync_single_row"),
     path("unlink-device/", views.UnlinkDeviceView.as_view(), name="unlink_device"),
     # Import Job history
-    path("jobs/", views.ImportJobListView.as_view(), name="importjob_list"),
+    path("executions/", views.ImportExecutionListView.as_view(), name="importexecution_list"),
 ]

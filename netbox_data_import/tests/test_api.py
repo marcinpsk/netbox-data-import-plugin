@@ -244,7 +244,7 @@ class ManufacturerMappingAPITest(BaseAPITestCase):
 
 # ---------------------------------------------------------------------------
 # New API tests: profile_id filter for IgnoredDevice, ColumnTransformRule,
-# SourceResolution, and ImportJob viewsets.
+# SourceResolution, and ImportExecution viewsets.
 # ---------------------------------------------------------------------------
 
 
@@ -464,44 +464,34 @@ class SourceResolutionAPITest(BaseAPITestCase):
         self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-003").exists())
 
 
-class ImportJobAPITest(BaseAPITestCase):
-    """Tests for ImportJobViewSet ?profile_id filtering (lines 147-151 in api/views.py)."""
+class ImportExecutionAPITest(BaseAPITestCase):
+    """Tests for ImportExecutionViewSet ?profile_id filtering."""
 
     def setUp(self):
-        """Create two profiles each with one ImportJob."""
+        """Create two profiles each with one Import Execution."""
         super().setUp()
-        from netbox_data_import.models import ImportJob
+        from netbox_data_import.models import ImportExecution
 
         self.p1 = _make_profile("APIJobProfile1")
         self.p2 = _make_profile("APIJobProfile2")
-        ImportJob.objects.create(
-            profile=self.p1,
-            input_filename="file-p1.xlsx",
-            dry_run=True,
-            site_name="site-p1",
-        )
-        ImportJob.objects.create(
-            profile=self.p2,
-            input_filename="file-p2.xlsx",
-            dry_run=False,
-            site_name="site-p2",
-        )
+        ImportExecution.objects.create(profile=self.p1, input_filename="file-p1.xlsx", site_name="site-p1")
+        ImportExecution.objects.create(profile=self.p2, input_filename="file-p2.xlsx", site_name="site-p2")
 
-    def test_list_all_import_jobs(self):
-        """GET /api/plugins/data-import/jobs/ returns 200 and at least 2 jobs."""
+    def test_list_all_import_executions(self):
+        """GET /api/plugins/data-import/executions/ returns 200 and at least 2 rows."""
         import json
 
-        resp = self.client.get("/api/plugins/data-import/jobs/", HTTP_ACCEPT="application/json")
+        resp = self.client.get("/api/plugins/data-import/executions/", HTTP_ACCEPT="application/json")
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
         self.assertGreaterEqual(data["count"], 2)
 
     def test_filter_by_profile_id(self):
-        """GET ?profile_id=<p1.pk> returns only p1's ImportJobs."""
+        """GET ?profile_id=<p1.pk> returns only p1's executions."""
         import json
 
         resp = self.client.get(
-            f"/api/plugins/data-import/jobs/?profile_id={self.p1.pk}",
+            f"/api/plugins/data-import/executions/?profile_id={self.p1.pk}",
             HTTP_ACCEPT="application/json",
         )
         self.assertEqual(resp.status_code, 200)

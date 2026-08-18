@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+import hashlib
 from contextlib import contextmanager
+from datetime import timedelta
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.urls import reverse
+from django.utils import timezone
+from core.choices import JobStatusChoices
+from core.models import Job
 from netbox.models import NetBoxModel
 
 from .adapters import (
@@ -439,36 +445,201 @@ class ClassRoleMapping(PolicySectionModel):
         return reverse("plugins:netbox_data_import:classrolemapping_edit", args=[self.pk])
 
 
-class ImportJob(models.Model):
-    """Records a completed import run with its results."""
+class SourceDocument(models.Model):
+    """The stored uploaded workbook that a plan and its executions read.
+
+    Preview, replanning, a background execution, and an audit read all resolve the same bytes, so the
+    plan carries a reference instead of the content.
+    """
+
+    RETENTION = timedelta(days=30)
+
+    profile = models.ForeignKey(ImportProfile, on_delete=models.CASCADE, related_name="source_documents")
+    content = models.BinaryField()
+    content_fingerprint = models.CharField(max_length=64)
+    filename = models.CharField(max_length=255, blank=True)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created"]
+        indexes = [models.Index(fields=["profile", "content_fingerprint"])]
+        verbose_name = "Source Document"
+        verbose_name_plural = "Source Documents"
+
+    def __str__(self):
+        return f"{self.filename or 'upload'} ({self.content_fingerprint[:12]})"
+
+    @staticmethod
+    def fingerprint(content: bytes) -> str:
+        """Return the content fingerprint, which is what a plan compares against."""
+        return hashlib.sha256(bytes(content)).hexdigest()
+
+    @classmethod
+    def store(cls, *, profile, content, filename="", uploaded_by=None):
+        """Store one upload. A newer upload never removes an older one."""
+        return cls.objects.create(
+            profile=profile,
+            content=bytes(content),
+            content_fingerprint=cls.fingerprint(content),
+            filename=filename,
+            uploaded_by=uploaded_by,
+        )
+
+    @classmethod
+    def purge_unreferenced(cls, *, now=None) -> int:
+        """Delete unreferenced uploads past the retention window and return the count.
+
+        A document an Import Execution references is permanent audit input, so the queryset excludes
+        it and the protecting foreign key backs that up.
+        """
+        cutoff = (now or timezone.now()) - cls.RETENTION
+        stale = cls.objects.filter(import_executions__isnull=True, created__lt=cutoff)
+        return stale.delete()[0]
+
+
+class ExecutionOutcome:
+    """The outcome vocabulary of an Import Execution (section 9.2)."""
+
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+    CHOICES = ((PENDING, "Pending"), (SUCCEEDED, "Succeeded"), (FAILED, "Failed"))
+
+
+class FailureReason:
+    """Typed failure reasons an Import Execution records."""
+
+    ABANDONED = "abandoned"
+
+
+class ImportExecution(models.Model):
+    """The audit record of one selective or final execution.
+
+    Rows created before the plan cutover keep their historical columns, have null new fields, and are
+    display-only: they never satisfy an idempotency lookup and never take part in plan comparison.
+    """
+
+    #: A synchronous attempt cannot outlive the web request bound, so an older pending row is gone.
+    SYNCHRONOUS_BOUND = timedelta(minutes=10)
 
     profile = models.ForeignKey(
         ImportProfile,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="import_jobs",
+        related_name="import_executions",
     )
     created = models.DateTimeField(auto_now_add=True)
     input_filename = models.CharField(max_length=255, blank=True)
-    dry_run = models.BooleanField(default=False)
     site_name = models.CharField(max_length=100, blank=True)
     result_counts = models.JSONField(default=dict)
-    result_rows = models.JSONField(default=list)
+
+    source_document = models.ForeignKey(
+        SourceDocument,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="import_executions",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    idempotency_key = models.CharField(max_length=64, null=True, blank=True)
+    plan_schema_version = models.PositiveIntegerField(null=True, blank=True)
+    accepted_plan_fingerprint = models.CharField(max_length=64, null=True, blank=True)
+    selected_units = models.JSONField(null=True, blank=True)
+    outcome = models.CharField(max_length=16, choices=ExecutionOutcome.CHOICES, null=True, blank=True)
+    applied_changes = models.JSONField(null=True, blank=True)
+    failure_detail = models.JSONField(null=True, blank=True)
+    # Deleting the Job nulls the reference, so the row records job-backing separately (section 9.2).
+    job_backed = models.BooleanField(default=False)
+    job = models.OneToOneField(
+        "core.Job", on_delete=models.SET_NULL, null=True, blank=True, related_name="import_execution"
+    )
 
     class Meta:
         ordering = ["-created"]
-        verbose_name = "Import Job"
-        verbose_name_plural = "Import Jobs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="ndi_execution_profile_idempotency_key",
+            ),
+        ]
+        verbose_name = "Import Execution"
+        verbose_name_plural = "Import Executions"
 
     def __str__(self):
         return f"Import {self.pk} — {self.created:%Y-%m-%d %H:%M} ({self.input_filename})"
 
     def get_absolute_url(self):
-        """Return the associated profile's URL (no per-job detail view exists)."""
+        """Return the associated profile's URL (no per-execution detail view exists)."""
         if not self.profile_id:
             return reverse("plugins:netbox_data_import:importprofile_list")
         return reverse("plugins:netbox_data_import:importprofile", args=[self.profile_id])
+
+    @classmethod
+    def reserve(cls, **fields):
+        """Insert and commit the pending row, or return the row already holding this key.
+
+        The insert reserves the unique (Import Profile, idempotency key), so a duplicate submission
+        or job delivery loses the race and returns the existing row in any outcome.
+        """
+        if transaction.get_connection().in_atomic_block:
+            raise RuntimeError("The Import Execution reservation must commit before the target transaction opens.")
+        existing = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
+        if existing is not None:
+            return existing, False
+        try:
+            return cls.objects.create(outcome=ExecutionOutcome.PENDING, **fields), True
+        except IntegrityError:
+            # A concurrent request won the reservation, so its row is the one both callers observe.
+            return cls.for_idempotency(fields["profile"], fields["idempotency_key"]), False
+
+    @classmethod
+    def for_idempotency(cls, profile, idempotency_key):
+        """Return the reserved row for this key, reconciled, or None. A legacy row never matches."""
+        if not idempotency_key:
+            return None
+        found = cls.objects.filter(profile=profile, idempotency_key=idempotency_key).first()
+        return found.reconcile_pending() if found is not None else None
+
+    def reconcile_pending(self, *, now=None):
+        """Transition an abandoned pending row to failed, so no sweeper is needed."""
+        if self.outcome != ExecutionOutcome.PENDING:
+            return self
+        if self.job_backed:
+            job = Job.objects.filter(pk=self.job_id).first() if self.job_id else None
+            live = job is not None and job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES
+        else:
+            live = self.created > (now or timezone.now()) - self.SYNCHRONOUS_BOUND
+        if live:
+            return self
+        self.mark_failed(reason=FailureReason.ABANDONED)
+        return self
+
+    def mark_succeeded(self, *, applied_changes):
+        """Record the applied identities and the deleted-object snapshot."""
+        self.outcome = ExecutionOutcome.SUCCEEDED
+        self.applied_changes = applied_changes
+        self.failure_detail = None
+        self.save(update_fields=["outcome", "applied_changes", "failure_detail"])
+
+    def mark_failed(self, *, reason, failed_change=None, rolled_back=(), not_attempted=()):
+        """Record what failed, what rolled back, and what was never attempted."""
+        self.outcome = ExecutionOutcome.FAILED
+        self.applied_changes = None
+        self.failure_detail = {
+            "failed_change": failed_change,
+            "rolled_back": list(rolled_back),
+            "not_attempted": list(not_attempted),
+            "reason": reason,
+        }
+        self.save(update_fields=["outcome", "applied_changes", "failure_detail"])
 
 
 class DeviceTypeMapping(PolicySectionModel):

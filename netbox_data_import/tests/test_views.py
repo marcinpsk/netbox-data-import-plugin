@@ -922,12 +922,12 @@ class ImportResultsViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 200)
 
 
-class ImportJobListViewTest(BaseViewTestCase):
-    """Tests for ImportJobListView."""
+class ImportExecutionListViewTest(BaseViewTestCase):
+    """Tests for ImportExecutionListView."""
 
-    def test_job_list_returns_200(self):
-        """Import job list page returns 200."""
-        url = reverse("plugins:netbox_data_import:importjob_list")
+    def test_execution_list_returns_200(self):
+        """Import history page returns 200."""
+        url = reverse("plugins:netbox_data_import:importexecution_list")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
@@ -2691,21 +2691,19 @@ class ModelsStrTest(BaseViewTestCase):
         self.assertIn("Dell EMC Str", s)
         self.assertIn("dell-str", s)
 
-    def test_import_job_str(self):
-        """ImportJob.__str__ contains the pk."""
-        from netbox_data_import.models import ImportJob
+    def test_import_execution_str(self):
+        """ImportExecution.__str__ contains the pk."""
+        from netbox_data_import.models import ImportExecution
 
-        job = ImportJob.objects.create(profile=self.profile, dry_run=True, input_filename="test.xlsx")
-        s = str(job)
-        self.assertIn(str(job.pk), s)
+        execution = ImportExecution.objects.create(profile=self.profile, input_filename="test.xlsx")
+        self.assertIn(str(execution.pk), str(execution))
 
-    def test_import_job_absolute_url(self):
-        """ImportJob.get_absolute_url returns the associated profile's URL."""
-        from netbox_data_import.models import ImportJob
+    def test_import_execution_absolute_url(self):
+        """ImportExecution.get_absolute_url returns the associated profile's URL."""
+        from netbox_data_import.models import ImportExecution
 
-        job = ImportJob.objects.create(profile=self.profile, dry_run=True)
-        url = job.get_absolute_url()
-        self.assertIn(str(self.profile.pk), url)
+        execution = ImportExecution.objects.create(profile=self.profile)
+        self.assertIn(str(self.profile.pk), execution.get_absolute_url())
 
     def test_ignored_device_str(self):
         """IgnoredDevice.__str__ includes device_name."""
