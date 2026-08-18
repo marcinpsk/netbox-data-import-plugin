@@ -51,6 +51,17 @@ def _rewind_to_before_the_squash():
     return _migrate(BEFORE, fake=True)
 
 
+def _latest():
+    """Return the newest migration of the plugin app.
+
+    tearDown restores this rather than AFTER: a later migration would otherwise leave the worker
+    database short of its newest tables for every test that follows.
+    """
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    return max(name for app, name in executor.loader.graph.leaf_nodes(APP))
+
+
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
     """The squash moves the legacy settings, repairs them, and drops their columns in order."""
 
@@ -58,7 +69,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         super().setUp()
         # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
         # skips tearDown. Register before walking down, so a rewound worker always recovers.
-        self.addCleanup(_migrate, SQUASHED)
+        self.addCleanup(lambda: _migrate(_latest()))
         _rewind_to_before_the_squash()
 
     def test_it_moves_every_column_and_repairs_blank_required_settings(self):

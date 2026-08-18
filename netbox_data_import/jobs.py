@@ -7,10 +7,10 @@ from django.db import transaction
 from rq import get_current_job
 
 from core.exceptions import JobFailed
-from netbox.jobs import JobRunner
+from netbox.jobs import JobRunner, system_job
 
 from . import engine
-from .models import ImportJob, ImportProfile, validate_registered_adapter
+from .models import ImportExecution, ImportProfile, SourceDocument, validate_registered_adapter
 
 
 _PROGRESS_REPORT_INTERVAL = 25
@@ -114,13 +114,11 @@ class ImportJobRunner(JobRunner):
                 context_data,
             )
 
-        history = ImportJob.objects.create(
+        history = ImportExecution.objects.create(
             profile=profile,
             input_filename=context_data.get("filename", ""),
-            dry_run=False,
             site_name=site.name,
             result_counts=result.counts,
-            result_rows=[row.to_dict() for row in result.rows],
         )
         self._save_data(
             phase="completed",
@@ -131,4 +129,21 @@ class ImportJobRunner(JobRunner):
         )
 
 
-__all__ = ("ImportJobRunner",)
+@system_job(interval=60 * 24)
+class SourceDocumentRetentionJob(JobRunner):
+    """Reclaim stored uploads no Import Execution references (section 9.1)."""
+
+    class Meta:
+        name = "Data Import source document retention"
+
+    @staticmethod
+    def purge() -> int:
+        """Apply the retention rules and return the number of deleted documents."""
+        return SourceDocument.purge_unreferenced()
+
+    def run(self, *args, **kwargs):
+        """Run one retention pass."""
+        return self.purge()
+
+
+__all__ = ("ImportJobRunner", "SourceDocumentRetentionJob")

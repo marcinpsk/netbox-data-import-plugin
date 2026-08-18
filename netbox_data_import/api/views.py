@@ -14,7 +14,7 @@ from ..models import (
     IgnoredDevice,
     ColumnTransformRule,
     SourceResolution,
-    ImportJob,
+    ImportExecution,
 )
 from .serializers import (
     ImportProfileSerializer,
@@ -24,7 +24,7 @@ from .serializers import (
     IgnoredDeviceSerializer,
     ColumnTransformRuleSerializer,
     SourceResolutionSerializer,
-    ImportJobSerializer,
+    ImportExecutionSerializer,
 )
 
 
@@ -149,11 +149,11 @@ class SourceResolutionViewSet(_PluginModelViewSet):
         return qs
 
 
-class ImportJobViewSet(viewsets.ReadOnlyModelViewSet):
-    """Read-only viewset for ImportJob history."""
+class ImportExecutionViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only viewset for the Import Execution audit history."""
 
-    queryset = ImportJob.objects.select_related("profile")
-    serializer_class = ImportJobSerializer
+    queryset = ImportExecution.objects.select_related("profile")
+    serializer_class = ImportExecutionSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
     def get_queryset(self):

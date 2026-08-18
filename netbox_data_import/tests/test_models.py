@@ -9,7 +9,7 @@ from netbox_data_import.models import (
     ColumnMapping,
     ColumnTransformRule,
     DeviceTypeMapping,
-    ImportJob,
+    ImportExecution,
     ImportProfile,
 )
 
@@ -44,7 +44,7 @@ class ImportProfileModelTest(TestCase):
 
     def test_get_absolute_url_without_profile(self):
         """get_absolute_url returns the list URL when profile_id is None."""
-        job = ImportJob.__new__(ImportJob)
+        job = ImportExecution.__new__(ImportExecution)
         job.profile_id = None
         url = job.get_absolute_url()
         self.assertIn("/plugins/data-import/profiles/", url)
