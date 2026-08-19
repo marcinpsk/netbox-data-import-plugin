@@ -37,31 +37,19 @@
     setDiffExpanded(diffRow, diffRow.hidden);
   });
 
-  /* The whole source row toggles its own detail row, so a row with nothing actionable still
-   * answers a click. Controls inside the row keep their own behavior. */
-  function toggleRow(target) {
+  /* Clicking anywhere on a source row toggles its detail row. This is a pointer shortcut for the
+   * row's own toggle button: the row keeps its table semantics, so the button carries the
+   * keyboard and the assistive-technology contract. Controls inside the row keep their behavior. */
+  document.addEventListener('click', function (event) {
+    var target = event.target;
     if (target.closest('.ndi-diff-toggle')) return;
     if (target.closest('button, a, input, select, textarea, label, [data-ndi-modal]')) return;
     var row = target.closest('#previewRowsBody > tr[data-action]');
     if (!row) return;
-    // The detail row always follows its source row. Row ids repeat across object types, so
-    // getElementById would resolve the wrong one.
+    // The detail row always follows its source row, so no id lookup is involved.
     var diffRow = row.nextElementSibling;
     if (!diffRow || !diffRow.classList.contains('ndi-diff-row')) return;
     setDiffExpanded(diffRow, diffRow.hidden);
-    row.setAttribute('aria-expanded', diffRow.hidden ? 'false' : 'true');
-  }
-
-  document.addEventListener('click', function (event) {
-    toggleRow(event.target);
-  });
-
-  // A row carries tabindex, so Enter and Space have to reach the same detail row.
-  document.addEventListener('keydown', function (event) {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    if (!event.target.matches('#previewRowsBody > tr[data-action]')) return;
-    event.preventDefault();
-    toggleRow(event.target);
   });
 
   document.addEventListener('click', function (event) {

@@ -37,12 +37,12 @@
   [data-bs-theme="dark"] .ndi-badge-ignored { background-color: #4b5563 !important; border: 1px solid #6b7280 !important; }
   /* Generic unused-column badges need a tinted background to read in dark mode */
   [data-bs-theme="dark"] .ndi-badge-generic { background-color: #374151 !important; color: #e5e7eb !important; border-color: #4b5563 !important; }
-  /* Field diff sub-table. The collapsed state is the `hidden` attribute, not a rule here,
-     so a row cannot render expanded while this stylesheet is missing. */
   /* Every source row toggles its own detail row, so it has to look clickable. */
   #previewRowsBody > tr[data-action] { cursor: pointer; }
   #previewRowsBody > tr[data-action]:hover > td { background-color: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.03)); }
   .ndi-contact-resolved { --tblr-btn-color: var(--tblr-success); }
+  /* Field diff sub-table. The collapsed state is the `hidden` attribute, not a rule here,
+     so a row cannot render expanded while this stylesheet is missing. */
   .ndi-diff-toggle { cursor: pointer; border: none; }
   .ndi-diff-toggle:hover { opacity: 0.85; }
   .ndi-diff-table { font-size: 0.82rem; margin-bottom: 0; }
@@ -368,9 +368,9 @@
           </thead>
           <tbody id="previewRowsBody">
             {% for row in result.rows %}
-            <tr id="row-{{ row.row_number }}" data-action="{{ row.action }}"
-                tabindex="0" role="button" aria-expanded="false"
-                aria-controls="diff-{{ forloop.counter }}" class="
+            {# Row numbers repeat across object types, so the id comes from the render order. #}
+            <tr id="prow-{{ forloop.counter }}" data-action="{{ row.action }}"
+                data-object-type="{{ row.object_type }}" data-row-number="{{ row.row_number }}" class="
               {% if row.action == 'create' and row.object_type == 'device' %}table-success
               {% elif row.action == 'create' and row.object_type == 'rack' %}table-success
               {% elif row.action == 'create' %}table-warning
@@ -430,12 +430,13 @@
               <td class="small text-muted">
                 {{ row.detail }}
                 {% if row.action == 'error' and row.extra_data.conflict_row_number %}
-                  <a href="#row-{{ row.extra_data.conflict_row_number }}"
-                     class="badge bg-warning text-dark text-decoration-none ms-1 ndi-jump-to-row"
-                     data-target-row="{{ row.extra_data.conflict_row_number }}"
-                     title="Scroll to the conflicting row">
+                  <button type="button"
+                          class="badge bg-warning text-dark border-0 ms-1 ndi-jump-to-row"
+                          data-target-row="{{ row.extra_data.conflict_row_number }}"
+                          data-target-type="{{ row.object_type }}"
+                          title="Scroll to the conflicting row">
                     <i class="mdi mdi-arrow-right-thin"></i> Jump to row {{ row.extra_data.conflict_row_number }}
-                  </a>
+                  </button>
                 {% endif %}
                 {% if row.extra_data.field_diff %}
                   {% with diff=row.extra_data.field_diff %}
@@ -460,6 +461,17 @@
                     <i class="mdi mdi-eye-off"></i> {{ ignored|length }} field(s) ignored
                   </button>
                   {% endwith %}
+                {% endif %}
+                {% if not row.extra_data.field_diff and not row.extra_data.field_ignored %}
+                  {# The row click is a pointer shortcut, so the keyboard needs a real control. #}
+                  <br>
+                  <button type="button" class="badge ndi-diff-badge ndi-diff-toggle mt-1"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
+                          aria-expanded="false"
+                          title="Show what this row does">
+                    <i class="mdi mdi-chevron-down"></i> Detail
+                  </button>
                 {% endif %}
               </td>
               <td class="text-end" style="white-space:nowrap; min-width:180px;">
@@ -1096,8 +1108,11 @@ var SPLIT_FIELD_VALUES = splitFieldValuesEl ? JSON.parse(splitFieldValuesEl.text
   document.addEventListener('click', function(e) {
     var link = e.target.closest('.ndi-jump-to-row');
     if (link) {
-      var targetRow = link.dataset.targetRow;
-      var el = document.getElementById('row-' + targetRow);
+      // Row numbers repeat across object types, so match the type as well as the number.
+      var el = document.querySelector(
+        '#previewRowsBody > tr[data-object-type="' + link.dataset.targetType +
+        '"][data-row-number="' + link.dataset.targetRow + '"]'
+      );
       if (el) {
         e.preventDefault();
         el.scrollIntoView({behavior: 'smooth', block: 'center'});

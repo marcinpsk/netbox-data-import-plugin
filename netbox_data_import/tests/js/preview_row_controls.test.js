@@ -246,15 +246,15 @@ describe("clicking a source row", () => {
   function addRowWithoutAToggle() {
     document.body.innerHTML = `
       <table><tbody id="previewRowsBody">
-        <tr id="row-7" data-action="create">
+        <tr id="prow-1" data-action="create" data-object-type="device" data-row-number="7">
           <td>pw-server-01</td>
           <td><button type="button" class="ndi-sync-btn">Sync</button> <a href="/x">link</a></td>
         </tr>
-        <tr id="diff-7" class="ndi-diff-row" hidden><td>nothing to review</td></tr>
-        <tr id="row-7" data-action="error">
-          <td>duplicate row number</td>
+        <tr id="diff-1" class="ndi-diff-row" hidden><td>nothing to review</td></tr>
+        <tr id="prow-2" data-action="error" data-object-type="rack" data-row-number="7">
+          <td>the same row number, a different object type</td>
         </tr>
-        <tr id="diff-7" class="ndi-diff-row" hidden><td>the second detail row</td></tr>
+        <tr id="diff-2" class="ndi-diff-row" hidden><td>the second detail row</td></tr>
       </tbody></table>
     `;
   }
@@ -265,12 +265,11 @@ describe("clicking a source row", () => {
   });
 
   it("expands the detail row even when the row renders no toggle badge", () => {
-    document.getElementById("row-7").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-    expect(document.getElementById("diff-7").hidden).toBe(false);
+    document.getElementById("prow-1").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-1").hidden).toBe(false);
   });
 
-  it("expands the detail row that follows the clicked row, not the first matching id", () => {
-    // Row numbers repeat across object types, so the page really does carry duplicate ids.
+  it("expands the detail row that follows the clicked row", () => {
     const rows = document.querySelectorAll("#previewRowsBody > tr[data-action]");
     rows[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     const details = document.querySelectorAll("#previewRowsBody > tr.ndi-diff-row");
@@ -281,11 +280,11 @@ describe("clicking a source row", () => {
   it("changes only the clicked row's toggle state", () => {
     document.body.innerHTML = `
       <table><tbody id="previewRowsBody">
-        <tr id="row-3" data-action="create" aria-expanded="false">
+        <tr id="prow-1" data-action="create" data-object-type="device" data-row-number="3">
           <td><button type="button" class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="false"></button></td>
         </tr>
         <tr id="diff-1" class="ndi-diff-row" hidden><td>first detail</td></tr>
-        <tr id="row-3" data-action="error" aria-expanded="false">
+        <tr id="prow-2" data-action="error" data-object-type="rack" data-row-number="3">
           <td><button type="button" class="ndi-diff-toggle" data-diff-target="diff-2" aria-expanded="false"></button></td>
         </tr>
         <tr id="diff-2" class="ndi-diff-row" hidden><td>second detail</td></tr>
@@ -301,24 +300,24 @@ describe("clicking a source row", () => {
   });
 
   it("collapses again on a second click", () => {
-    const row = document.getElementById("row-7");
+    const row = document.getElementById("prow-1");
     row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-    expect(document.getElementById("diff-7").hidden).toBe(true);
+    expect(document.getElementById("diff-1").hidden).toBe(true);
   });
 
   it("leaves the detail row alone when a control inside the row is clicked", () => {
     document
-      .querySelector("#row-7 .ndi-sync-btn")
+      .querySelector("#prow-1 .ndi-sync-btn")
       .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-    expect(document.getElementById("diff-7").hidden).toBe(true);
+    expect(document.getElementById("diff-1").hidden).toBe(true);
   });
 
   it("leaves the detail row alone when a link inside the row is clicked", () => {
     document
-      .querySelector("#row-7 a")
+      .querySelector("#prow-1 a")
       .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-    expect(document.getElementById("diff-7").hidden).toBe(true);
+    expect(document.getElementById("diff-1").hidden).toBe(true);
   });
 });
 
@@ -330,7 +329,7 @@ describe("evaluating the controller twice", () => {
     window.eval(controllerSource);
     document.body.innerHTML = `
       <table><tbody id="previewRowsBody">
-        <tr id="row-9" data-action="update" tabindex="0">
+        <tr id="prow-9" data-action="update">
           <td>pw-server-09</td>
         </tr>
         <tr id="diff-9" class="ndi-diff-row" hidden><td>detail</td></tr>
@@ -339,44 +338,37 @@ describe("evaluating the controller twice", () => {
   });
 
   it("toggles a detail row once per click, not twice", () => {
-    document.getElementById("row-9").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    document.getElementById("prow-9").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     expect(document.getElementById("diff-9").hidden).toBe(false);
   });
 });
 
-/* A keyboard-only operator has to reach the same detail rows. */
+/* The row is a table row, not a button. Its own toggle button carries the keyboard contract. */
 describe("keyboard activation", () => {
   beforeEach(() => {
     loadController();
     document.body.innerHTML = `
       <table><tbody id="previewRowsBody">
-        <tr id="row-11" data-action="update" tabindex="0">
+        <tr id="prow-11" data-action="update" data-object-type="device" data-row-number="11">
           <td>pw-server-11</td>
-          <td><button type="button" class="ndi-sync-btn">Sync</button></td>
+          <td><button type="button" class="ndi-diff-toggle" data-diff-target="diff-11" aria-expanded="false">Detail</button></td>
         </tr>
         <tr id="diff-11" class="ndi-diff-row" hidden><td>detail</td></tr>
       </tbody></table>
     `;
   });
 
-  function press(key, target) {
-    (target || document.getElementById("row-11")).dispatchEvent(
-      new window.KeyboardEvent("keydown", { key, bubbles: true }),
-    );
-  }
-
-  it("expands the detail row on Enter", () => {
-    press("Enter");
-    expect(document.getElementById("diff-11").hidden).toBe(false);
-  });
-
-  it("expands the detail row on Space", () => {
-    press(" ");
-    expect(document.getElementById("diff-11").hidden).toBe(false);
-  });
-
-  it("leaves the detail row alone for a key pressed on a control inside the row", () => {
-    press("Enter", document.querySelector("#row-11 .ndi-sync-btn"));
+  it("does not treat a key press on the row as an activation", () => {
+    document
+      .getElementById("prow-11")
+      .dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(document.getElementById("diff-11").hidden).toBe(true);
+  });
+
+  it("expands the detail row from the row's own toggle button", () => {
+    const toggle = document.querySelector("#prow-11 .ndi-diff-toggle");
+    toggle.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-11").hidden).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
   });
 });

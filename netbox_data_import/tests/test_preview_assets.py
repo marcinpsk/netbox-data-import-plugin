@@ -81,7 +81,7 @@ class EveryRowCarriesADetailRowTest(ImportPreviewViewTest):
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         html = response.content.decode()
         body = html[html.index('<tbody id="previewRowsBody"') :]
-        source_rows = len(re.findall(r'<tr id="row-\d+" data-action=', body))
+        source_rows = len(re.findall(r'<tr id="prow-\d+" data-action=', body))
         detail_rows = len(re.findall(r'<tr id="diff-\d+" class="ndi-diff-row" hidden>', body))
         self.assertGreater(source_rows, 0, "the sample workbook must produce preview rows")
         self.assertEqual(detail_rows, source_rows)
@@ -108,15 +108,36 @@ class DetailRowIdsAreUniqueTest(ImportPreviewViewTest):
         targets = set(re.findall(r'data-diff-target="(diff-[^"]+)"', html))
         self.assertLessEqual(targets, detail_ids)
 
-    def test_every_source_row_is_reachable_by_keyboard(self):
-        """The row is the toggle, so a keyboard-only operator needs a seat on it."""
+    def test_every_source_row_id_is_rendered_once(self):
+        """A shared row id sent the conflict jump to the wrong row."""
         self._setup_session()
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         html = response.content.decode()
-        rows = re.findall(r'<tr id="row-\d+" data-action="[^"]*"\s+([^>]*)>', html)
+        ids = re.findall(r'<tr id="(prow-[^"]+)" data-action=', html)
+        self.assertTrue(ids, "the preview must render source rows")
+        self.assertEqual(sorted(ids), sorted(set(ids)))
+
+    def test_every_source_row_carries_a_native_detail_toggle(self):
+        """The row click is a pointer shortcut, so the keyboard needs a real button per row."""
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        body = response.content.decode()
+        body = body[body.index('<tbody id="previewRowsBody"') : body.index("</tbody>")]
+        # Cut each source row at its detail row so a toggle inside the detail row does not count.
+        chunks = [chunk.split('<tr id="diff-')[0] for chunk in re.split(r'<tr id="prow-\d+" data-action=', body)[1:]]
+        self.assertTrue(chunks, "the preview must render source rows")
+        without = [index for index, chunk in enumerate(chunks) if "ndi-diff-toggle" not in chunk]
+        self.assertEqual(without, [], "every source row needs its own toggle button")
+
+    def test_no_source_row_claims_a_button_role(self):
+        """A button role makes the links and forms inside the row presentational."""
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        html = response.content.decode()
+        rows = re.findall(r'<tr id="prow-\d+" data-action="[^"]*"\s+([^>]*)>', html)
         self.assertTrue(rows, "the preview must render source rows")
-        self.assertTrue(all('tabindex="0"' in attrs for attrs in rows), rows[:2])
-        self.assertTrue(all("aria-expanded=" in attrs for attrs in rows), rows[:2])
+        self.assertTrue(all('role="button"' not in attrs for attrs in rows), rows[:2])
+        self.assertTrue(all("tabindex=" not in attrs for attrs in rows), rows[:2])
 
 
 class PluginScriptsAreVersionedTest(ImportPreviewViewTest):
@@ -234,3 +255,23 @@ class ResolvedContactRowIsMarkedTest(BaseViewTestCase):
         classes, _ = self._contact_button(self._preview_html())
         self.assertIn("ndi-contact-resolved", classes)
         self.assertIn("btn-outline-success", classes)
+
+
+class ConflictJumpTargetsOneRowTest(SimpleTestCase):
+    """The conflict jump has to name the row it means, not a row number several rows share."""
+
+    TEMPLATE = TEMPLATE_DIR / "import_preview.html"
+
+    def test_the_jump_control_carries_the_object_type_with_the_row_number(self):
+        """`getElementById('row-N')` returned the first match, which was often the rack row."""
+        source = self.TEMPLATE.read_text()
+        jump = re.search(r"<button[^>]*ndi-jump-to-row.*?</button>", source, re.DOTALL)
+        self.assertIsNotNone(jump, "the preview must render the conflict jump control")
+        self.assertIn("data-target-row=", jump.group(0))
+        self.assertIn("data-target-type=", jump.group(0))
+
+    def test_the_jump_handler_matches_on_both_attributes(self):
+        """A handler that still resolves an id would reintroduce the wrong-row jump."""
+        source = self.TEMPLATE.read_text()
+        self.assertNotIn("getElementById('row-' + ", source)
+        self.assertIn('tr[data-object-type="', source)
