@@ -193,3 +193,19 @@ def user_with_object_permission(username, model, *, granted, password="testpass"
         permission.users.add(user)
         permission.object_types.add(ObjectType.objects.get_for_model(model))
     return user
+
+
+def client_with_object_permission(username, model, *, granted, actions=("view",)):
+    """Return a logged-in client for a user created by :func:`user_with_object_permission`.
+
+    A permission test that ignores the ``login()`` result can pass on a login redirect
+    instead of on the permission check, so the login failure has to stop the test here.
+    """
+    from django.test import Client
+
+    password = "testpass"
+    user_with_object_permission(username, model, granted=granted, password=password, actions=actions)
+    client = Client()
+    if not client.login(username=username, password=password):
+        raise AssertionError(f"the test client could not log in as '{username}'")
+    return client
