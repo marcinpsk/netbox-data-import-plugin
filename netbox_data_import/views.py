@@ -1456,11 +1456,6 @@ class ImportResultsView(PermissionRequiredMixin, View):
         return render(request, "netbox_data_import/import_results.html", {"result": result, "job_id": job_id})
 
 
-# ---------------------------------------------------------------------------
-# Import Execution history
-# ---------------------------------------------------------------------------
-
-
 class ImportExecutionListView(PermissionRequiredMixin, generic.ObjectListView):
     """List every past Import Execution, including the retained legacy rows."""
 

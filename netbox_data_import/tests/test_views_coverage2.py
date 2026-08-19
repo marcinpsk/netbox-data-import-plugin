@@ -239,7 +239,7 @@ class ImportPreviewViewExistingResolutionsTest(TestCase):
 
 
 class ImportExecutionListViewPermissionTest(TestCase):
-    """Tests for ImportExecutionListView.get_required_permission."""
+    """The history page opens for the Import Execution view permission and for nothing else."""
 
     def setUp(self):
         self.user = _make_superuser("vcov2_joblist_user")
