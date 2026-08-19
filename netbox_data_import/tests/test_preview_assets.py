@@ -69,7 +69,12 @@ class ResultsAssetsSurviveABoostedSwapTest(ImportPreviewViewTest):
         response = self.client.get(reverse("plugins:netbox_data_import:import_results"))
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
-        self.assertIn("ndi-", html[html.index("</head>") :])
+        head_end = html.find("</head>")
+        self.assertNotEqual(head_end, -1, "the results page must render a full document")
+        body = html[head_end:]
+        self.assertIn("<style", body)
+        # The badges carry these names as plain attributes too, so the rule needs its leading dot.
+        self.assertIn(".ndi-badge-create", body)
 
 
 class EveryRowCarriesADetailRowTest(ImportPreviewViewTest):
