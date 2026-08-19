@@ -2315,6 +2315,7 @@ class SaveResolutionView(_AjaxPermissionView):
             contact_context = None
             if source_column == "candidate:contact":
                 try:
+                    validate_registered_adapter(profile)
                     candidates, source_row, result_row = self._contact_candidate_context(request, profile.pk, source_id)
                     validate_contact_candidate_resolution(
                         resolved_fields,
@@ -3623,6 +3624,10 @@ class SyncSingleRowView(_AjaxPermissionView):
         profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=ctx_data.get("profile_id")).first()
         if not profile:
             return JsonResponse({"ok": False, "error": "Import profile not found"}, status=400)
+        try:
+            validate_registered_adapter(profile)
+        except ValidationError as exc:
+            return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
 
         rows = engine.reapply_saved_resolutions(rows, profile)
 

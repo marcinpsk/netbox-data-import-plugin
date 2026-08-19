@@ -3955,8 +3955,13 @@ def run_import(
     context keys: site, location (optional), tenant (optional)
     dry_run=True  → no DB writes, returns what *would* happen
     dry_run=False → writes to DB; pass user to enforce DCIM object permissions
+
+    Raises ValidationError when the profile names an adapter this release does not register.
     """
-    from .models import IgnoredDevice
+    from .models import IgnoredDevice, validate_registered_adapter
+
+    # Every adapter setting is read from deep inside the passes, so reject the profile up front.
+    validate_registered_adapter(profile)
 
     class_role_map: dict[str, object] = {
         crm.source_class: crm for crm in profile.class_role_mappings.select_related("rack_type").all()

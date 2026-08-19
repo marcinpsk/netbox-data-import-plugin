@@ -698,6 +698,41 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("retired_adapter", response.content.decode())
 
+    def _syncable_row_number(self):
+        """Return a preview row number `SyncSingleRowView` accepts, so the probe reaches the engine."""
+        preview = self.client.session.get("import_result") or {}
+        numbers = {row.get("_row_number") for row in (self.client.session.get("import_rows") or [])}
+        for row in preview.get("rows", []):
+            if (
+                row.get("action") == "create"
+                and row.get("object_type") in ("device", "rack")
+                and row.get("row_number") in numbers
+            ):
+                return row["row_number"]
+        self.fail("the sample workbook must offer one syncable create row")
+
+    def test_the_single_row_sync_refuses_a_stale_adapter(self):
+        """It runs the engine straight from the session, so it meets the retired adapter too."""
+        self._start_a_preview()
+        row_number = self._syncable_row_number()
+        self._retire_the_adapter()
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_single_row"), {"row_number": str(row_number)}
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("retired_adapter", response.json()["error"])
+
+    def test_the_engine_refuses_a_stale_adapter_at_its_own_boundary(self):
+        """Every adapter setting is read deep inside the passes, so the door has to check."""
+        from netbox_data_import import engine
+
+        self._start_a_preview()
+        rows = list(self.client.session["import_rows"])
+        self._retire_the_adapter()
+        profile = ImportProfile.objects.get(pk=self.profile.pk)
+        with self.assertRaisesMessage(ValidationError, "retired_adapter"):
+            engine.run_import(rows, profile, {"site": self.site}, dry_run=True)
+
     def test_the_job_runner_fails_the_job_on_a_stale_adapter(self):
         """A job queued before the upgrade still reaches the worker, so it needs its own guard."""
         import uuid
@@ -758,3 +793,64 @@ class RequiredTargetKeyRestTest(TestCase):
             },
         )
         self.assertEqual(response.status_code, 201, response.content)
+
+
+class StaleAdapterContactResolutionTest(TestCase):
+    """Saving a Contact resolution reads an adapter setting of its own, outside the engine."""
+
+    def _workbook(self):
+        """Return an in-memory workbook whose rows carry Contact candidate columns."""
+        import io
+
+        import openpyxl
+
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "Data"
+        sheet.append(["Id", "Rack", "Name", "Class", "UHeight", "Owner"])
+        sheet.append(["s-1", "RackS", "RackS", "Cabinet", "42", None])
+        sheet.append(["s-2", "RackS", "stale-server-01", "Server", "1", "ada@example.invalid"])
+        buffer = io.BytesIO()
+        book.save(buffer)
+        buffer.seek(0)
+        return buffer
+
+    def setUp(self):
+        from netbox_data_import.engine import parse_file, run_import
+        from netbox_data_import.tests.test_views import _make_profile
+        from netbox_data_import.views import _serialize_rows
+
+        self.site = Site.objects.create(name="Stale Contact Site", slug="stale-contact-site")
+        self.profile = _make_profile("Stale Contact")
+        ColumnMapping.objects.create(profile=self.profile, source_column="Owner", target_field="candidate:contact")
+        self.client.force_login(_superuser())
+
+        rows = parse_file(self._workbook(), self.profile)
+        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "stale-contact.xlsx",
+        }
+        session.save()
+
+    def test_it_reports_the_stale_adapter_instead_of_raising(self):
+        """`primary_contact_lookup_field` is read straight off the profile, so it needs its own guard."""
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "s-2",
+                "source_column": "candidate:contact",
+                "resolved_fields": "{}",
+            },
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("retired_adapter", response.content.decode())
