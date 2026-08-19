@@ -500,7 +500,6 @@ class ImportExecutionAPITest(BaseAPITestCase):
         self.assertEqual(data["results"][0]["input_filename"], "file-p1.xlsx")
 
     def _regular_client(self, username, *, granted):
-        """Return a client for a non-superuser, optionally holding view_importexecution."""
         from rest_framework.test import APIClient
 
         from netbox_data_import.models import ImportExecution
@@ -518,7 +517,7 @@ class ImportExecutionAPITest(BaseAPITestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_a_regular_user_without_the_view_permission_is_denied(self):
-        """The rename means an old view_importjob grant no longer opens this endpoint."""
+        """A user holding no ObjectPermission must be refused the endpoint, not served an empty list."""
         resp = self._regular_client("api_exec_denied", granted=False).get(
             "/api/plugins/data-import/executions/", HTTP_ACCEPT="application/json"
         )
