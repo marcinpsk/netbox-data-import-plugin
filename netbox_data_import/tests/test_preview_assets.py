@@ -60,16 +60,16 @@ class PreviewAssetsSurviveABoostedSwapTest(ImportPreviewViewTest):
         self.assertIn(".ndi-badge-create", body)
 
 
-class ResultsAssetsSurviveABoostedSwapTest(BaseViewTestCase):
+class ResultsAssetsSurviveABoostedSwapTest(ImportPreviewViewTest):
     """The results page is reached from the same boosted flow."""
 
     def test_the_results_stylesheet_renders_inside_the_body(self):
         """A results page reached through the boost keeps its own styling."""
+        self._setup_session()
         response = self.client.get(reverse("plugins:netbox_data_import:import_results"))
+        self.assertEqual(response.status_code, 200)
         html = response.content.decode()
-        if response.status_code != 200 or "</head>" not in html:
-            self.skipTest("the results page needs a completed import in the session")
-        self.assertIn("ndi-", html[html.find("</head>") :])
+        self.assertIn("ndi-", html[html.index("</head>") :])
 
 
 class EveryRowCarriesADetailRowTest(ImportPreviewViewTest):
@@ -308,15 +308,31 @@ class DetailRowSummaryReadsTheActionTest(ImportPreviewViewTest):
     """`netbox_device_id` is a device-only key, so it cannot decide what any other row says."""
 
     CREATE_MESSAGE = "This row creates a new object"
+    MATCH_MESSAGE = "This row matches NetBox"
+    NO_WRITE_MESSAGE = "This row writes nothing to NetBox"
 
-    def _rack_detail(self):
-        """Return (action, detail-row HTML) for the workbook's rack row in the current preview."""
+    def _detail_for(self, match):
+        """Return (action, detail-row HTML) for the first preview row `match` accepts."""
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         rows = list(response.context["result"].rows)
-        index = next(i for i, row in enumerate(rows, start=1) if row.object_type == "rack")
+        index = next(i for i, row in enumerate(rows, start=1) if match(row))
         html = response.content.decode()
         start = html.index(f'<tr id="diff-{index}" class="ndi-diff-row"')
         return rows[index - 1].action, html[start : html.index("</tr>", start)]
+
+    def _rack_detail(self):
+        """Return (action, detail-row HTML) for the workbook's rack row in the current preview."""
+        return self._detail_for(lambda row: row.object_type == "rack")
+
+    def _preview_the_rack_that_netbox_already_holds(self):
+        """Create the workbook's rack in NetBox, so its row turns from a creation into an update."""
+        from dcim.models import Rack, Site
+
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        rack_row = next(row for row in response.context["result"].rows if row.object_type == "rack")
+        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        Rack.objects.create(name=rack_row.name, site=site, u_height=42)
 
     def test_a_rack_row_that_creates_says_so(self):
         """The create message is the baseline the existing-rack case has to differ from."""
@@ -327,14 +343,32 @@ class DetailRowSummaryReadsTheActionTest(ImportPreviewViewTest):
 
     def test_an_existing_rack_row_is_not_called_a_creation(self):
         """A dry-run rack row carries `netbox_rack_id`, so the device key reported it as a creation."""
-        from dcim.models import Rack, Site
-
-        self._setup_session()
-        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
-        rack_row = next(row for row in response.context["result"].rows if row.object_type == "rack")
-        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
-        Rack.objects.create(name=rack_row.name, site=site, u_height=42)
+        self._preview_the_rack_that_netbox_already_holds()
 
         action, detail = self._rack_detail()
         self.assertNotEqual(action, "create", "the rack now exists, so the row cannot be a creation")
         self.assertNotIn(self.CREATE_MESSAGE, detail)
+
+    def test_an_error_row_is_not_called_a_match(self):
+        """An error row is never compared against NetBox, so the summary cannot claim a match."""
+
+        def blank_the_server_name(rows):
+            # The Cabinet row creates the rack, so only a device row can miss a device name.
+            target = next(row for row in rows if row.get("device_class") == "Server")
+            target["device_name"] = ""
+            target["asset_tag"] = ""
+
+        self._setup_session(mutate_rows=blank_the_server_name)
+        action, detail = self._detail_for(lambda row: row.action == "error")
+        self.assertEqual(action, "error")
+        self.assertNotIn(self.MATCH_MESSAGE, detail)
+        self.assertNotIn(self.CREATE_MESSAGE, detail)
+        self.assertIn(self.NO_WRITE_MESSAGE, detail)
+
+    def test_an_update_row_with_no_difference_still_reports_a_match(self):
+        """Scoping the match message to `update` must not remove it from the row it belongs to."""
+        self._preview_the_rack_that_netbox_already_holds()
+
+        action, detail = self._rack_detail()
+        self.assertEqual(action, "update")
+        self.assertIn(self.MATCH_MESSAGE, detail)

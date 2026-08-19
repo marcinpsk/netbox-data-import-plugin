@@ -418,8 +418,11 @@ class ImportSetupViewTest(BaseViewTestCase):
 class ImportPreviewViewTest(BaseViewTestCase):
     """Tests for ImportPreviewView."""
 
-    def _setup_session(self):
-        """Populate session with a valid import state."""
+    def _setup_session(self, *, mutate_rows=None):
+        """Populate session with a valid import state.
+
+        `mutate_rows` edits the parsed rows so a caller can preview a state the workbook lacks.
+        """
         from dcim.models import Site
         from netbox_data_import.engine import parse_file, run_import
 
@@ -427,6 +430,8 @@ class ImportPreviewViewTest(BaseViewTestCase):
         profile = _make_profile("PreviewProfile")
         with open(FIXTURE_PATH, "rb") as f:
             rows = parse_file(f, profile)
+        if mutate_rows is not None:
+            mutate_rows(rows)
 
         result = run_import(rows, profile, {"site": site}, dry_run=True)
 

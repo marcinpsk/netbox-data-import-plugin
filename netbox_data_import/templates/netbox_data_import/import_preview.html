@@ -758,9 +758,15 @@
                   </div>
                   {% elif not row.extra_data.field_diff and not row.extra_data.field_ignored %}
                   {% if not row.extra_data.netbox_device_id or not row.rack_name %}
+                  {% if row.action == 'update' %}
                   <div class="text-muted small">
                     This row matches NetBox. There is no field difference and no placement to apply.
                   </div>
+                  {% else %}
+                  <div class="text-muted small">
+                    This row writes nothing to NetBox. The Detail column gives the reason.
+                  </div>
+                  {% endif %}
                   {% endif %}
                   {% endif %}
                   {% if row.extra_data.netbox_device_id and row.rack_name %}
