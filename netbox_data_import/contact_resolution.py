@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -22,6 +23,67 @@ def _text(value) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+# A header keyword is the only signal that separates a person from any other text.
+_ROLE_HEADER_HINTS = {
+    "email": ("email", "mail"),
+    "phone": ("phone", "number", "tel", "mobile", "cell"),
+    "name": ("name", "contact", "person"),
+}
+_PHONE_PUNCTUATION = re.compile(r"[\s()\-./]")
+_PHONE_SHAPE = re.compile(r"\+?\d{7,}")
+
+
+def _looks_like_email(value: str) -> bool:
+    try:
+        validate_email(value)
+    except ValidationError:
+        return False
+    return True
+
+
+def _looks_like_phone(value: str) -> bool:
+    return bool(_PHONE_SHAPE.fullmatch(_PHONE_PUNCTUATION.sub("", value)))
+
+
+def _header_hints_at(source_column: str, role: str) -> bool:
+    lowered = source_column.lower()
+    return any(hint in lowered for hint in _ROLE_HEADER_HINTS[role])
+
+
+def suggest_contact_roles(candidate_values: dict[str, str]) -> dict[str, str]:
+    """Map each Contact field to the candidate column that most likely supplies it.
+
+    Returns ``{role: source_column}`` for the roles it can recognize, and leaves out the rest
+    so the operator decides. The value shape settles ``email`` and ``phone``. Only a header
+    keyword settles ``name``, because any text is a valid name and an organization looks the
+    same as a person.
+    """
+    by_shape = {
+        "email": [column for column, value in candidate_values.items() if _looks_like_email(value)],
+        "phone": [column for column, value in candidate_values.items() if _looks_like_phone(value)],
+    }
+    suggestions = {}
+    for role, columns in by_shape.items():
+        if not columns:
+            continue
+        hinted = [column for column in columns if _header_hints_at(column, role)]
+        suggestions[role] = (hinted or columns)[0]
+
+    claimed = set(suggestions.values())
+    # A header that says "email" or "phone" holds a malformed value of that type, never a name.
+    named = [
+        column
+        for column in candidate_values
+        if column not in claimed
+        and _header_hints_at(column, "name")
+        and not _header_hints_at(column, "email")
+        and not _header_hints_at(column, "phone")
+    ]
+    if named:
+        suggestions["name"] = named[0]
+    return suggestions
 
 
 @dataclass(frozen=True)

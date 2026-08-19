@@ -40,6 +40,22 @@ from netbox_data_import.tests.helpers import set_import_source
 LOCAL_EXAMPLE_PATH = Path(__file__).resolve().parents[3] / "libre" / "example.xlsx"
 
 
+def _json_script(response, element_id):
+    """Return the payload Django's `json_script` filter rendered under *element_id*."""
+    import html
+    import json
+    import re
+
+    match = re.search(
+        rf'<script id="{re.escape(element_id)}" type="application/json">(.*?)</script>',
+        response.content.decode(),
+        re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"the preview did not render a '{element_id}' payload")
+    return json.loads(html.unescape(match.group(1)))
+
+
 class ContactMappingWorkbookTest(TestCase):
     """Exercise Contact column mappings with a portable workbook."""
 
@@ -624,7 +640,7 @@ class NativeContactSyncTest(TestCase):
         )
 
     def test_preview_can_save_a_contact_candidate_row_resolution(self):
-        """The preview offers each candidate column for every Contact field."""
+        """The preview ships every candidate value and the role proposed for it."""
         self._set_extra_columns({"depth": 750})
         row = self._row(
             _candidate_values={
@@ -659,11 +675,23 @@ class NativeContactSyncTest(TestCase):
 
         self.assertContains(preview_response, "Resolve contact fields")
         self.assertContains(preview_response, "No contact for this row")
-        self.assertContains(preview_response, "Contact name")
-        self.assertContains(preview_response, "Email address")
-        self.assertContains(preview_response, "Phone number")
-        self.assertContains(preview_response, "Contact Number")
-        self.assertContains(preview_response, "Owner")
+        # The value rows are built from these two payloads, so they carry the contract now.
+        candidates = _json_script(preview_response, "ndi-candidate-values-by-row")
+        row_candidates = candidates[str(result.rows[0].row_number)]["contact"]
+        self.assertEqual(
+            row_candidates,
+            {
+                "Contact": "preview.contact@example.invalid",
+                "Contact Number": "+1 202-555-0100",
+                "Owner": "Preview Operator",
+            },
+        )
+        roles = _json_script(preview_response, "ndi-contact-role-suggestions-by-row")
+        # `Owner` holds a person here, but the header does not say so, so no field claims it.
+        self.assertEqual(
+            roles[str(result.rows[0].row_number)],
+            {"email": "Contact", "phone": "Contact Number"},
+        )
 
         resolution_response = self.client.post(
             reverse("plugins:netbox_data_import:save_resolution"),

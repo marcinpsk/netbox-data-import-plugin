@@ -54,7 +54,7 @@ from .tables import (
     ImportProfileTable,
 )
 from . import engine
-from .contact_resolution import PrimaryContactResolver
+from .contact_resolution import PrimaryContactResolver, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer
 from .object_permissions import ObjectPermissionDenied
 from .preview_row_actions import (
@@ -962,6 +962,11 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             for r in result.rows
             if r.extra_data.get("contact_suggestion")
         }
+        contact_role_suggestions_by_row = {
+            row_number: suggest_contact_roles(candidates["contact"])
+            for row_number, candidates in candidate_values_by_row.items()
+            if candidates.get("contact")
+        }
         extra_columns_by_row = {
             str(r.row_number): r.extra_data.get("extra_columns", {})
             for r in result.rows
@@ -1015,6 +1020,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "conflicts_by_row": conflicts_by_row,
                 "candidate_values_by_row": candidate_values_by_row,
                 "contact_suggestions_by_row": contact_suggestions_by_row,
+                "contact_role_suggestions_by_row": contact_role_suggestions_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
