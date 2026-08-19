@@ -174,6 +174,22 @@ def user_with_object_permission(username, model, *, granted, password="testpass"
     return user
 
 
+def client_with_object_permission(username, model, *, granted, actions=("view",)):
+    """Return a logged-in client for a user created by :func:`user_with_object_permission`.
+
+    A permission test that ignores the ``login()`` result can pass on a login redirect
+    instead of on the permission check, so the login failure has to stop the test here.
+    """
+    from django.test import Client
+
+    password = "testpass"
+    user_with_object_permission(username, model, granted=granted, password=password, actions=actions)
+    client = Client()
+    if not client.login(username=username, password=password):
+        raise AssertionError(f"the test client could not log in as '{username}'")
+    return client
+
+
 def wait_until_a_lock_is_blocked(test, timeout=10):
     """Block until another backend is waiting for a lock this connection holds."""
     from django.db import connection

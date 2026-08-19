@@ -255,12 +255,9 @@ class ImportExecutionListViewPermissionTest(TestCase):
     def _regular_client(self, username, *, granted):
         """Return a logged-in non-superuser, optionally holding view_importexecution."""
         from netbox_data_import.models import ImportExecution
-        from netbox_data_import.tests.helpers import user_with_object_permission
+        from netbox_data_import.tests.helpers import client_with_object_permission
 
-        user_with_object_permission(username, ImportExecution, granted=granted)
-        client = Client()
-        client.login(username=username, password="testpass")
-        return client
+        return client_with_object_permission(username, ImportExecution, granted=granted)
 
     def test_a_regular_user_holding_the_view_permission_reaches_the_history(self):
         """A superuser bypasses the check, so the permission needs a non-superuser to prove it."""
