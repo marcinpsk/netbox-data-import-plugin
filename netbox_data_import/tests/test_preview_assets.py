@@ -108,6 +108,17 @@ class DetailRowIdsAreUniqueTest(ImportPreviewViewTest):
         targets = set(re.findall(r'data-diff-target="(diff-[^"]+)"', html))
         self.assertLessEqual(targets, detail_ids)
 
+    def test_no_id_inside_the_preview_table_is_rendered_twice(self):
+        """One net for the whole class: any id keyed on a repeating row number fails here."""
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        body = response.content.decode()
+        body = body[body.index('<tbody id="previewRowsBody"') : body.index("</tbody>")]
+        ids = re.findall(r'\sid="([^"]+)"', body)
+        self.assertTrue(ids, "the preview table must render ids")
+        duplicates = sorted({value for value in ids if ids.count(value) > 1})
+        self.assertEqual(duplicates, [])
+
     def test_every_source_row_id_is_rendered_once(self):
         """A shared row id sent the conflict jump to the wrong row."""
         self._setup_session()
@@ -275,3 +286,55 @@ class ConflictJumpTargetsOneRowTest(SimpleTestCase):
         source = self.TEMPLATE.read_text()
         self.assertNotIn("getElementById('row-' + ", source)
         self.assertIn('tr[data-object-type="', source)
+
+
+class FieldRowIdsFollowTheDetailRowTest(SimpleTestCase):
+    """Both field id families must count with the detail row that holds them.
+
+    They are decorative anchors nothing reads, so the invariant is asserted on the template.
+    The rendered-page duplicate check lives in `DetailRowIdsAreUniqueTest`.
+    """
+
+    def test_both_field_id_families_use_the_detail_row_index(self):
+        """`ignored-field-*` used the source row number, which is a different number entirely."""
+        source = (TEMPLATE_DIR / "import_preview.html").read_text()
+        for family in ("diff-field", "ignored-field"):
+            match = re.search(rf'id="{family}-{{{{ ([^}}]+) }}}}-', source)
+            self.assertIsNotNone(match, f"the preview must render the {family} rows")
+            self.assertEqual(match.group(1).strip(), "forloop.parentloop.counter", family)
+
+
+class DetailRowSummaryReadsTheActionTest(ImportPreviewViewTest):
+    """`netbox_device_id` is a device-only key, so it cannot decide what any other row says."""
+
+    CREATE_MESSAGE = "This row creates a new object"
+
+    def _rack_detail(self):
+        """Return (action, detail-row HTML) for the workbook's rack row in the current preview."""
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        rows = list(response.context["result"].rows)
+        index = next(i for i, row in enumerate(rows, start=1) if row.object_type == "rack")
+        html = response.content.decode()
+        start = html.index(f'<tr id="diff-{index}" class="ndi-diff-row"')
+        return rows[index - 1].action, html[start : html.index("</tr>", start)]
+
+    def test_a_rack_row_that_creates_says_so(self):
+        """The create message is the baseline the existing-rack case has to differ from."""
+        self._setup_session()
+        action, detail = self._rack_detail()
+        self.assertEqual(action, "create")
+        self.assertIn(self.CREATE_MESSAGE, detail)
+
+    def test_an_existing_rack_row_is_not_called_a_creation(self):
+        """A dry-run rack row carries `netbox_rack_id`, so the device key reported it as a creation."""
+        from dcim.models import Rack, Site
+
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        rack_row = next(row for row in response.context["result"].rows if row.object_type == "rack")
+        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        Rack.objects.create(name=rack_row.name, site=site, u_height=42)
+
+        action, detail = self._rack_detail()
+        self.assertNotEqual(action, "create", "the rack now exists, so the row cannot be a creation")
+        self.assertNotIn(self.CREATE_MESSAGE, detail)
