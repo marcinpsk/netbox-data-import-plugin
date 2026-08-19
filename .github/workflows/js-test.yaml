@@ -39,7 +39,9 @@ jobs:
         run: npm test
 
       - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+        # The runner already has every library Chromium loads; --with-deps only added fonts.
+        timeout-minutes: 5
+        run: npx playwright install chromium
 
       - name: Run browser component test
         run: npm run test:browser
