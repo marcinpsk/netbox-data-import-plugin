@@ -39,13 +39,13 @@ class PolicySectionSerializer(serializers.ModelSerializer):
         return attrs
 
 
-def _validate_target_keys(instance, attrs, names, *, allow_candidates=True):
+def _validate_target_keys(instance, attrs, names, *, allow_candidates=True, required=False):
     """Reject a target key the profile's Source Adapter cannot supply."""
     profile = attrs.get("profile", getattr(instance, "profile", None))
     output_kinds = profile.output_kinds if profile is not None else None
     for name in names:
         value = attrs.get(name, getattr(instance, name, None)) or ""
-        if not value and name != "target_field":
+        if not value and not required:
             continue
         if not CATALOG.is_valid(value, output_kinds=output_kinds, allow_candidates=allow_candidates):
             raise serializers.ValidationError({name: CATALOG.invalid_key_message(value)})
@@ -111,7 +111,7 @@ class ColumnMappingSerializer(PolicySectionSerializer):
     def validate(self, attrs):
         """Resolve the target field through the catalog."""
         attrs = super().validate(attrs)
-        _validate_target_keys(self.instance, attrs, ("target_field",))
+        _validate_target_keys(self.instance, attrs, ("target_field",), required=True)
         return attrs
 
 

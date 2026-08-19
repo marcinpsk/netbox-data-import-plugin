@@ -42,6 +42,7 @@ from .models import (
     SourceResolution,
     stored_import_source,
     validate_contact_candidate_resolution,
+    validate_registered_adapter,
 )
 from .tables import (
     ClassRoleMappingTable,
@@ -862,6 +863,14 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.warning(request, "Import profile not found.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
+        # The session outlives an upgrade, so the stored profile can name a retired adapter.
+        try:
+            validate_registered_adapter(profile)
+        except ValidationError as exc:
+            _discard_import_preview(request)
+            messages.error(request, "; ".join(exc.messages))
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+
         site = Site.objects.filter(pk=ctx.get("site_id")).first()
         location = Location.objects.filter(pk=ctx.get("location_id")).first() if ctx.get("location_id") else None
         tenant = Tenant.objects.filter(pk=ctx.get("tenant_id")).first() if ctx.get("tenant_id") else None
@@ -1185,6 +1194,13 @@ class ImportRunView(PermissionRequiredMixin, View):
             ImportProfile.objects.restrict(request.user, "change"),
             pk=ctx_data["profile_id"],
         )
+        try:
+            validate_registered_adapter(profile)
+        except ValidationError as exc:
+            _discard_import_preview(request)
+            messages.error(request, "; ".join(exc.messages))
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+
         from core.choices import JobNotificationChoices
         from .jobs import ImportJobRunner
 

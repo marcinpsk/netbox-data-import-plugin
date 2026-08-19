@@ -9,7 +9,14 @@ from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelIm
 from utilities.forms.fields import DynamicModelChoiceField
 from .adapters import get_adapter, selectable_adapter_choices
 from .catalog import CATALOG
-from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule
+from .models import (
+    ImportProfile,
+    ColumnMapping,
+    ClassRoleMapping,
+    DeviceTypeMapping,
+    ColumnTransformRule,
+    validate_registered_adapter,
+)
 
 
 def _profile_output_kinds(form):
@@ -225,11 +232,7 @@ class ImportSetupForm(forms.Form):
     def clean_profile(self):
         """Reject a profile whose stored Source Adapter this release no longer registers."""
         profile = self.cleaned_data["profile"]
-        if profile.adapter is None:
-            raise forms.ValidationError(
-                f"This profile uses the source adapter '{profile.source_adapter}', "
-                "which this release does not register."
-            )
+        validate_registered_adapter(profile)
         return profile
 
     def clean_excel_file(self):

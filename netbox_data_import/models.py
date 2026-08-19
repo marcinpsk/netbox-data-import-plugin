@@ -27,6 +27,14 @@ def validate_adapter_target_module(adapter_key):
         )
 
 
+def validate_registered_adapter(profile):
+    """Reject a profile whose stored Source Adapter this release does not register."""
+    if profile is not None and profile.adapter is None:
+        raise ValidationError(
+            f"This profile uses the source adapter '{profile.source_adapter}', which this release does not register."
+        )
+
+
 def validate_section_applicability(profile, section_key):
     """Reject a policy row whose section does not apply to its profile's Source Adapter."""
     section = policy_section(section_key)

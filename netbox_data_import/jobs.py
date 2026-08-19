@@ -2,6 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Native NetBox background jobs for data imports."""
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from rq import get_current_job
 
@@ -9,7 +10,7 @@ from core.exceptions import JobFailed
 from netbox.jobs import JobRunner
 
 from . import engine
-from .models import ImportJob, ImportProfile
+from .models import ImportJob, ImportProfile, validate_registered_adapter
 
 
 _PROGRESS_REPORT_INTERVAL = 25
@@ -64,6 +65,11 @@ class ImportJobRunner(JobRunner):
         profile = ImportProfile.objects.restrict(user, "change").filter(pk=context_data["profile_id"]).first()
         if profile is None:
             self._fail("The import profile is no longer available.")
+        # A queued job can outlive the release that registered its adapter.
+        try:
+            validate_registered_adapter(profile)
+        except ValidationError as exc:
+            self._fail("; ".join(exc.messages))
         site = Site.objects.filter(pk=context_data["site_id"]).first()
         if site is None:
             self._fail("The target site is no longer available.")

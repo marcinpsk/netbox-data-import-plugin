@@ -278,6 +278,18 @@ class MappingValidationTest(TestCase):
         )
 
 
+def _scalars(node):
+    """Yield every non-boolean scalar in a nested YAML document."""
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from _scalars(value)
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            yield from _scalars(value)
+    elif not isinstance(node, bool):
+        yield node
+
+
 class ProfileYamlPortabilityTest(TestCase):
     """A YAML profile export imports into a different NetBox instance."""
 
@@ -300,7 +312,11 @@ class ProfileYamlPortabilityTest(TestCase):
         self.assertEqual(data["profile"]["source_adapter"], "flat_workbook")
         self.assertEqual(data["profile"]["adapter_config"]["primary_contact_role"], "Portable Owner")
         self.assertNotIn("id", data["profile"])
-        self.assertNotIn(profile.pk, list(data["profile"].values()))
+        # A nested id breaks a cross-instance import too, so walk the whole block.
+        scalars = set(_scalars(data["profile"]))
+        self.assertIn("Portable Owner", scalars, "the scan must reach inside adapter_config")
+        self.assertNotIn(profile.pk, scalars)
+        self.assertNotIn(str(profile.pk), scalars)
 
 
 class ImportProfileApiTest(TestCase):
@@ -640,3 +656,105 @@ class AdapterRuntimeSupportTest(TestCase):
         with open(FIXTURE_PATH, "rb") as handle:
             with self.assertRaises(engine.ParseError):
                 engine.parse_file(handle, self.trace)
+
+
+class StaleAdapterRuntimeGuardTest(TestCase):
+    """A profile whose adapter this release no longer registers must never reach the runtime."""
+
+    def setUp(self):
+        self.site = Site.objects.create(name="Stale Site", slug="stale-site")
+        from netbox_data_import.tests.test_views import _make_profile
+
+        self.profile = _make_profile("Stale Runtime")
+        self.user = _superuser()
+        self.client.force_login(self.user)
+
+    def _start_a_preview(self):
+        """Post the setup form so the session carries a parsed preview."""
+        with open(FIXTURE_PATH, "rb") as handle:
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:import_setup"),
+                {"profile": self.profile.pk, "site": self.site.pk, "excel_file": handle},
+            )
+        self.assertIn(response.status_code, (200, 302), response.content[:400])
+
+    def _retire_the_adapter(self):
+        """Drop the adapter out of the registry the way an upgrade would."""
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
+
+    def test_the_preview_reports_the_stale_adapter_instead_of_raising(self):
+        """The session outlives a restart, so the preview can load a profile the release dropped."""
+        self._start_a_preview()
+        self._retire_the_adapter()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"), follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("retired_adapter", response.content.decode())
+
+    def test_the_run_view_refuses_a_stale_adapter(self):
+        """A queued run would otherwise fail inside the worker with no operator feedback."""
+        self._start_a_preview()
+        self._retire_the_adapter()
+        response = self.client.post(reverse("plugins:netbox_data_import:import_run"), follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("retired_adapter", response.content.decode())
+
+    def test_the_job_runner_fails_the_job_on_a_stale_adapter(self):
+        """A job queued before the upgrade still reaches the worker, so it needs its own guard."""
+        import uuid
+
+        from core.exceptions import JobFailed
+        from core.models import Job
+
+        from netbox_data_import.jobs import ImportJobRunner
+
+        self._start_a_preview()
+        self._retire_the_adapter()
+        session = self.client.session
+        job = Job.objects.create(
+            name="Data Import",
+            user=self.user,
+            status="pending",
+            job_id=uuid.uuid4(),
+            queue_name="default",
+            data={"job_type": ImportJobRunner.job_type},
+        )
+        with self.assertRaises(JobFailed):
+            ImportJobRunner(job).run(session["import_rows"], session["import_context"], session["import_result"])
+        job.refresh_from_db()
+        self.assertEqual(job.data["phase"], "failed")
+        self.assertIn("retired_adapter", job.data["message"])
+
+
+class RequiredTargetKeyRestTest(TestCase):
+    """The catalog check runs on an empty value only where the target key is required."""
+
+    def setUp(self):
+        self.profile = ImportProfile.objects.create(name="Required Target", adapter_config={})
+        self.client.force_login(_superuser())
+
+    def _post(self, route, payload):
+        return self.client.post(
+            _api_url(route),
+            data=json.dumps({"profile": self.profile.pk, **payload}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+    def test_rest_rejects_a_column_mapping_without_a_target_field(self):
+        """A column mapping carries no meaning without a target, so an empty value is invalid."""
+        response = self._post("columnmapping-list", {"source_column": "Name", "target_field": ""})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("target_field", response.json())
+
+    def test_rest_accepts_a_transform_rule_with_only_the_first_group_target(self):
+        """The second group target is optional, so an empty value must skip the catalog check."""
+        response = self._post(
+            "columntransformrule-list",
+            {
+                "source_column": "Name",
+                "pattern": r"^(\S+)$",
+                "group_1_target": "device_name",
+                "group_2_target": "",
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.content)
