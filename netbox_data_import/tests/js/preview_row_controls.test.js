@@ -240,3 +240,135 @@ describe("preview row controls", () => {
     expect(() => clickToggle()).not.toThrow();
   });
 });
+
+/* Every row expands on a click, so a row with nothing actionable still responds. */
+describe("clicking a source row", () => {
+  function addRowWithoutAToggle() {
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr id="prow-1" data-action="create" data-object-type="device" data-row-number="7">
+          <td>pw-server-01</td>
+          <td><button type="button" class="ndi-sync-btn">Sync</button> <a href="/x">link</a></td>
+        </tr>
+        <tr id="diff-1" class="ndi-diff-row" hidden><td>nothing to review</td></tr>
+        <tr id="prow-2" data-action="error" data-object-type="rack" data-row-number="7">
+          <td>the same row number, a different object type</td>
+        </tr>
+        <tr id="diff-2" class="ndi-diff-row" hidden><td>the second detail row</td></tr>
+      </tbody></table>
+    `;
+  }
+
+  beforeEach(() => {
+    loadController();
+    addRowWithoutAToggle();
+  });
+
+  it("expands the detail row even when the row renders no toggle badge", () => {
+    document.getElementById("prow-1").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-1").hidden).toBe(false);
+  });
+
+  it("expands the detail row that follows the clicked row", () => {
+    const rows = document.querySelectorAll("#previewRowsBody > tr[data-action]");
+    rows[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    const details = document.querySelectorAll("#previewRowsBody > tr.ndi-diff-row");
+    expect(details[0].hidden).toBe(true);
+    expect(details[1].hidden).toBe(false);
+  });
+
+  it("changes only the clicked row's toggle state", () => {
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr id="prow-1" data-action="create" data-object-type="device" data-row-number="3">
+          <td><button type="button" class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="false"></button></td>
+        </tr>
+        <tr id="diff-1" class="ndi-diff-row" hidden><td>first detail</td></tr>
+        <tr id="prow-2" data-action="error" data-object-type="rack" data-row-number="3">
+          <td><button type="button" class="ndi-diff-toggle" data-diff-target="diff-2" aria-expanded="false"></button></td>
+        </tr>
+        <tr id="diff-2" class="ndi-diff-row" hidden><td>second detail</td></tr>
+      </tbody></table>
+    `;
+    const rows = document.querySelectorAll("#previewRowsBody > tr[data-action]");
+    rows[1].querySelector("td").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    const toggles = document.querySelectorAll(".ndi-diff-toggle");
+    expect(document.getElementById("diff-1").hidden).toBe(true);
+    expect(document.getElementById("diff-2").hidden).toBe(false);
+    expect(toggles[0].getAttribute("aria-expanded")).toBe("false");
+    expect(toggles[1].getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("collapses again on a second click", () => {
+    const row = document.getElementById("prow-1");
+    row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-1").hidden).toBe(true);
+  });
+
+  it("leaves the detail row alone when a control inside the row is clicked", () => {
+    document
+      .querySelector("#prow-1 .ndi-sync-btn")
+      .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-1").hidden).toBe(true);
+  });
+
+  it("leaves the detail row alone when a link inside the row is clicked", () => {
+    document
+      .querySelector("#prow-1 a")
+      .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-1").hidden).toBe(true);
+  });
+});
+
+/* The script now ships inside the swapped content, so an htmx boost evaluates it again on every
+ * navigation. Document listeners outlive the swap, so a second evaluation must not double them. */
+describe("evaluating the controller twice", () => {
+  beforeEach(() => {
+    loadController();
+    window.eval(controllerSource);
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr id="prow-9" data-action="update">
+          <td>pw-server-09</td>
+        </tr>
+        <tr id="diff-9" class="ndi-diff-row" hidden><td>detail</td></tr>
+      </tbody></table>
+    `;
+  });
+
+  it("toggles a detail row once per click, not twice", () => {
+    document.getElementById("prow-9").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-9").hidden).toBe(false);
+  });
+});
+
+/* The row is a table row, not a button. Its own toggle button carries the keyboard contract. */
+describe("keyboard activation", () => {
+  beforeEach(() => {
+    loadController();
+    document.body.innerHTML = `
+      <table><tbody id="previewRowsBody">
+        <tr id="prow-11" data-action="update" data-object-type="device" data-row-number="11">
+          <td>pw-server-11</td>
+          <td><button type="button" class="ndi-diff-toggle" data-diff-target="diff-11" aria-expanded="false">Detail</button></td>
+        </tr>
+        <tr id="diff-11" class="ndi-diff-row" hidden><td>detail</td></tr>
+      </tbody></table>
+    `;
+  });
+
+  it("does not treat a key press on the row as an activation", () => {
+    document
+      .getElementById("prow-11")
+      .dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(document.getElementById("diff-11").hidden).toBe(true);
+  });
+
+  it("expands the detail row from the row's own toggle button", () => {
+    const toggle = document.querySelector("#prow-11 .ndi-diff-toggle");
+    toggle.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    expect(document.getElementById("diff-11").hidden).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+});
