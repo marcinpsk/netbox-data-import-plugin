@@ -247,13 +247,11 @@ class ImportExecutionListViewPermissionTest(TestCase):
         self.client.login(username="vcov2_joblist_user", password="testpass")
 
     def test_import_execution_list_returns_200(self):
-        """GET importexecution_list with the view permission returns 200."""
         url = reverse("plugins:netbox_data_import:importexecution_list")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
     def _regular_client(self, username, *, granted):
-        """Return a logged-in non-superuser, optionally holding view_importexecution."""
         from netbox_data_import.models import ImportExecution
         from netbox_data_import.tests.helpers import client_with_object_permission
 
@@ -265,7 +263,7 @@ class ImportExecutionListViewPermissionTest(TestCase):
         self.assertEqual(self._regular_client("vcov2_exec_granted", granted=True).get(url).status_code, 200)
 
     def test_a_regular_user_without_the_view_permission_is_denied(self):
-        """The rename means an old view_importjob grant no longer opens the history page."""
+        """A user holding no ObjectPermission must be refused the page, not served an empty history."""
         url = reverse("plugins:netbox_data_import:importexecution_list")
         self.assertIn(self._regular_client("vcov2_exec_denied", granted=False).get(url).status_code, (302, 403))
 
