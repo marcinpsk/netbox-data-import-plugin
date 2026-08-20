@@ -448,6 +448,7 @@
       })
       .then(function () {
         saveInFlight = false;
+        if (!stillShowing(sourceId)) resetSaveButton();
       });
   }
 

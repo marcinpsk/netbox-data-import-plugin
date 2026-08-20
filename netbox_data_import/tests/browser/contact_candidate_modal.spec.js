@@ -634,6 +634,9 @@ test("a save that settles late leaves the row now on screen alone", async ({ pag
   // The late response belongs to the row that is gone, so it must not close this one.
   await expect(page.locator("#contactCandidateSourceId")).toHaveValue("source-saved");
   await expect(page.locator("#contactCandidateError")).toHaveCount(0);
+  const submit = page.locator("#contactCandidateForm button[type=submit]");
+  await expect(submit).toBeEnabled();
+  await expect(submit).not.toHaveText("Saving...");
   expect(await page.evaluate(() => window.__hides)).toBe(0);
 });
 
@@ -646,6 +649,9 @@ test("a late failure does not report itself against another row", async ({ page 
   await page.evaluate(() => window.__release[0].fail());
 
   await expect(page.locator("#contactCandidateError")).toHaveCount(0);
+  const submit = page.locator("#contactCandidateForm button[type=submit]");
+  await expect(submit).toBeEnabled();
+  await expect(submit).not.toHaveText("Saving...");
 });
 
 test("a reused blank input is given the role it was asked for", async ({ page }) => {
