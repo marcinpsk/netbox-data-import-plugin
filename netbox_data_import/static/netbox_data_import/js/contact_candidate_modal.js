@@ -319,6 +319,7 @@
       && !Object.keys(savedValues).length
       && !resolvedFields.contact_id;
 
+    modalError('');
     setExpanded(editToggle, editPanel, false);
     setExpanded(linkExisting, existingWrap, Boolean(contactId.value || suggestion));
     toggleContactFields();
@@ -366,7 +367,82 @@
       contact_field_values: noContact.checked ? {} : selection.values,
       contact_id: !noContact.checked && contactId.value ? Number(contactId.value) : null,
     });
+
+    // Without the row-action helper the form posts normally and the server redirects, so the
+    // modal keeps working when the scripts fail to load.
+    if (!window.ndiPostPreviewAction) return;
+    event.preventDefault();
+    saveDeferred();
   });
+
+  function modalError(message) {
+    var existing = document.getElementById('contactCandidateError');
+    if (!message) {
+      if (existing) existing.remove();
+      return;
+    }
+    var alert = existing || document.createElement('div');
+    alert.id = 'contactCandidateError';
+    alert.className = 'alert alert-danger mt-3 mb-0';
+    alert.setAttribute('role', 'alert');
+    alert.textContent = message;
+    if (!existing) form.querySelector('.modal-body').prepend(alert);
+  }
+
+  function saveDeferred() {
+    var save = form.querySelector('button[type=submit]');
+    var original = save.innerHTML;
+    save.disabled = true;
+    save.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Saving...';
+    modalError('');
+
+    var sourceId = document.getElementById('contactCandidateSourceId').value;
+    var resolvedFields = document.getElementById('contactCandidateResolvedFields').value;
+
+    window.ndiPostPreviewAction(form.action, new FormData(form))
+      .then(function () {
+        window.ndiMarkPreviewStale();
+        rememberResolution(sourceId, resolvedFields);
+        markRowResolved(sourceId);
+        var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
+        if (ModalClass) {
+          ModalClass.getOrCreateInstance(modal).hide();
+        }
+        // The page is not reloaded, so the button is the only thing that can report the result.
+        save.innerHTML = '<i class="mdi mdi-check"></i> Saved';
+      })
+      .catch(function (error) {
+        modalError(error.message);
+        save.disabled = false;
+        save.innerHTML = original;
+      });
+  }
+
+  /* The page no longer reloads after a save, so the map the modal reads on open has to record
+   * the decision here. Without this the next open shows the proposal and a second save
+   * overwrites what the operator chose. */
+  function rememberResolution(sourceId, resolvedFieldsJson) {
+    if (!window.EXISTING_RESOLUTIONS) window.EXISTING_RESOLUTIONS = {};
+    var forSource = window.EXISTING_RESOLUTIONS[sourceId] || {};
+    forSource['candidate:contact'] = {
+      original_value: document.getElementById('contactCandidateOriginalValue').value,
+      resolved_fields: JSON.parse(resolvedFieldsJson),
+    };
+    window.EXISTING_RESOLUTIONS[sourceId] = forSource;
+  }
+
+  /* The row keeps the action it was rendered with until the preview is recalculated. Only the
+   * Contact button answers now, so the operator can see which rows are still open. */
+  function markRowResolved(sourceId) {
+    var button = document.querySelector(
+      '[data-ndi-modal="#contactCandidateModal"][data-source-id="' + CSS.escape(sourceId) + '"]'
+    );
+    if (!button) return;
+    button.classList.remove('btn-outline-warning');
+    button.classList.add('btn-outline-success', 'ndi-contact-resolved');
+    button.innerHTML = '<i class="mdi mdi-account-check"></i> Contact resolved';
+    button.title = "This row's Contact fields are resolved. Open to review or change them.";
+  }
 
   function addBlankFor(role) {
     var row = literalRow(role, '');

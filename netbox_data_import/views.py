@@ -1439,9 +1439,11 @@ def _wants_json(request) -> bool:
 
 def _preview_action_error(request, next_url, message, *, status=409):
     """Return one preview-action error through JSON or the form fallback."""
-    messages.error(request, message)
     if _wants_json(request):
+        # A JSON caller renders the reason itself, so a queued message would surface later
+        # on an unrelated page.
         return JsonResponse({"ok": False, "error": message}, status=status)
+    messages.error(request, message)
     return redirect(next_url)
 
 
@@ -2310,8 +2312,17 @@ class SaveResolutionView(_AjaxPermissionView):
         resolved_fields_json = request.POST.get("resolved_fields", "{}")
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
         if profile_id is None:
-            messages.error(request, "A valid import profile is required.")
-            return redirect(next_url)
+            return _preview_action_error(request, next_url, "A valid import profile is required.", status=400)
+
+        # Another tab can recalculate between opening the modal and saving it, which would
+        # store a decision against candidate values the operator never saw.
+        if _wants_json(request) and request.POST.get("preview_revision") != current_preview_revision(request.session):
+            return _preview_action_error(
+                request,
+                next_url,
+                "The preview was recalculated in another tab. Reload the preview and choose again.",
+                status=409,
+            )
 
         try:
             resolved_fields = json.loads(resolved_fields_json)
@@ -2334,8 +2345,7 @@ class SaveResolutionView(_AjaxPermissionView):
                         candidates,
                     )
                 except ValidationError as exc:
-                    messages.error(request, "; ".join(exc.messages))
-                    return redirect(next_url)
+                    return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
                 original_value = json.dumps(candidates, sort_keys=True)
                 contact_context = (source_row, result_row)
             try:
@@ -2370,22 +2380,36 @@ class SaveResolutionView(_AjaxPermissionView):
                             PrimaryContactResolver.apply(device, profile, contact_review, request.user)
                             contact_updated = True
             except IntegrityError:
-                messages.error(request, "The resolution changed while this request was being processed. Try again.")
-                return redirect(next_url)
+                return _preview_action_error(
+                    request,
+                    next_url,
+                    "The resolution changed while this request was being processed. Try again.",
+                )
             except ObjectPermissionDenied as exc:
-                messages.error(request, f"Permission denied: {exc}")
-                return redirect(next_url)
+                return _preview_action_error(request, next_url, f"Permission denied: {exc}", status=403)
             except ValidationError as exc:
-                messages.error(request, "; ".join(exc.messages))
-                return redirect(next_url)
-            if allowed:
-                if contact_updated:
-                    messages.success(request, "Resolution saved and the linked Device Contact was updated.")
-                else:
-                    messages.success(request, "Resolution saved. Re-run the import to apply it.")
-            else:
-                messages.error(request, "Permission denied: cannot create or change this resolution.")
-        return redirect(next_url)
+                return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
+            if not allowed:
+                return _preview_action_error(
+                    request,
+                    next_url,
+                    "Permission denied: cannot create or change this resolution.",
+                    status=403,
+                )
+            saved_message = (
+                "Resolution saved and the linked Device Contact was updated."
+                if contact_updated
+                else "Resolution saved. Recalculate the preview to apply it."
+            )
+            # The rendered row keeps the action it had before this decision, so the page must
+            # ask for a recalculation whichever path saved it.
+            mark_preview_dirty(request.session)
+            if _wants_json(request):
+                row_number = contact_context[1].get("row_number") if contact_context else None
+                return JsonResponse(pending_preview_payload(row_number, saved_message))
+            messages.success(request, saved_message)
+            return redirect(next_url)
+        return _preview_action_error(request, next_url, "A source row and column are required.", status=400)
 
 
 # ---------------------------------------------------------------------------
