@@ -2949,38 +2949,49 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         if not netbox_dt_slug:
             netbox_dt_slug = slugify(source_model)
 
-        # Save/update DeviceTypeMapping
-        dtm, created = DeviceTypeMapping.objects.update_or_create(
-            profile=profile,
-            source_make=source_make,
-            source_model=source_model,
-            defaults={
-                "netbox_manufacturer_slug": netbox_mfg_slug,
-                "netbox_device_type_slug": netbox_dt_slug,
-            },
-        )
+        # Every name and slug below is posted directly, so validate each write before it happens.
+        try:
+            with transaction.atomic():
+                mapping = _get_or_init(
+                    DeviceTypeMapping,
+                    profile=profile,
+                    source_make=source_make,
+                    source_model=source_model,
+                )
+                created = mapping.pk is None
+                mapping.netbox_manufacturer_slug = netbox_mfg_slug
+                mapping.netbox_device_type_slug = netbox_dt_slug
+                _validate_model_instance(mapping, f"device type mapping '{source_make} / {source_model}'")
+                mapping.save()
+
+                if action == "create_now":
+                    if not request.user.has_perm("dcim.add_manufacturer"):  # pragma: no cover
+                        messages.error(request, "Permission denied: dcim.add_manufacturer required.")
+                        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+                    if not request.user.has_perm("dcim.add_devicetype"):  # pragma: no cover
+                        messages.error(request, "Permission denied: dcim.add_devicetype required.")
+                        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+                    mfg = _get_or_init(Manufacturer, slug=netbox_mfg_slug)
+                    if mfg.pk is None:
+                        mfg.name = source_make
+                        _validate_model_instance(mfg, f"manufacturer '{source_make}'")
+                        mfg.save()
+                    dt_name = request.POST.get("netbox_dt_name", source_model).strip() or source_model
+                    try:
+                        u_height = max(1, int(request.POST.get("u_height", "1")))
+                    except ValueError:
+                        u_height = 1
+                    device_type = _get_or_init(DeviceType, manufacturer=mfg, slug=netbox_dt_slug)
+                    if device_type.pk is None:
+                        device_type.model = dt_name
+                        device_type.u_height = u_height
+                        _validate_model_instance(device_type, f"device type '{dt_name}'")
+                        device_type.save()
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         if action == "create_now":
-            if not request.user.has_perm("dcim.add_manufacturer"):  # pragma: no cover
-                messages.error(request, "Permission denied: dcim.add_manufacturer required.")
-                return redirect(reverse("plugins:netbox_data_import:import_preview"))
-            if not request.user.has_perm("dcim.add_devicetype"):  # pragma: no cover
-                messages.error(request, "Permission denied: dcim.add_devicetype required.")
-                return redirect(reverse("plugins:netbox_data_import:import_preview"))
-            mfg, _ = Manufacturer.objects.get_or_create(
-                slug=netbox_mfg_slug,
-                defaults={"name": source_make},
-            )
-            dt_name = request.POST.get("netbox_dt_name", source_model).strip() or source_model
-            try:
-                u_height = max(1, int(request.POST.get("u_height", "1")))
-            except ValueError:
-                u_height = 1
-            DeviceType.objects.get_or_create(
-                manufacturer=mfg,
-                slug=netbox_dt_slug,
-                defaults={"model": dt_name, "u_height": u_height},
-            )
             messages.success(
                 request, f"Mapping saved and device type '{source_make} / {source_model}' created in NetBox."
             )

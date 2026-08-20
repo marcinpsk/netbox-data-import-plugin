@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ColumnMapping, ImportProfile
+from netbox_data_import.models import ColumnMapping, DeviceTypeMapping, ImportProfile
 from netbox_data_import.views import _fuzzy_match_netbox_field
 
 User = get_user_model()
@@ -292,4 +292,77 @@ class QuickAddColumnMappingViewTest(TestCase):
                 ).values_list("target_field", flat=True)
             ),
             {"candidate:contact", "asset_tag", "serial"},
+        )
+
+
+class QuickResolveDeviceTypeValidationTest(TestCase):
+    """The device-type quick action reads slugs and names straight from the request."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser("qdtuser", "qdt@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="qdtuser", password="testpass")
+        self.profile = _make_profile("QDeviceTypeTest")
+        self.url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
+        self.preview = reverse("plugins:netbox_data_import:import_preview")
+
+    def _post(self, **overrides):
+        payload = {
+            "profile_id": self.profile.pk,
+            "source_make": "Acme",
+            "source_model": "Widget",
+            "netbox_mfg_slug": "acme",
+            "netbox_dt_slug": "widget",
+        }
+        payload.update(overrides)
+        return self.client.post(self.url, payload)
+
+    def test_an_overlength_device_type_slug_is_refused(self):
+        """The slug is posted directly and the mapping column holds 100 characters."""
+        response = self._post(netbox_dt_slug="d" * 300)
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+
+    def test_an_overlength_manufacturer_slug_is_refused(self):
+        """The manufacturer slug shares the same 100 character column."""
+        response = self._post(netbox_mfg_slug="m" * 300)
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+
+    def test_an_overlength_source_make_is_refused(self):
+        """The source make is read from the request and the column holds 200 characters."""
+        response = self._post(source_make="M" * 300)
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+
+    def test_creating_now_refuses_a_make_the_manufacturer_name_cannot_hold(self):
+        """The mapping accepts 200 characters, but the NetBox manufacturer name holds 100."""
+        from dcim.models import Manufacturer
+
+        response = self._post(source_make="M" * 150, action="create_now")
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
+
+    def test_creating_now_refuses_a_model_the_device_type_cannot_hold(self):
+        """The posted device type name is never bounded and the NetBox model holds 100."""
+        from dcim.models import DeviceType
+
+        response = self._post(netbox_dt_name="D" * 150, action="create_now")
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceType.objects.filter(slug="widget").exists())
+
+    def test_a_valid_mapping_is_still_saved(self):
+        """The guard must not refuse the values the preview page actually posts."""
+        response = self._post()
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertTrue(
+            DeviceTypeMapping.objects.filter(
+                profile=self.profile, source_make="Acme", netbox_device_type_slug="widget"
+            ).exists()
         )
