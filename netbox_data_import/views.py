@@ -111,6 +111,18 @@ def _parse_posted_profile_id(request):
         return None
 
 
+def _reject_overlong_fields(instance, model):
+    """Reject a string the column cannot hold, before the database raises DataError.
+
+    Only length is checked. `full_clean` would also refuse a field that is legitimately blank.
+    """
+    for field in model._meta.concrete_fields:
+        max_length = getattr(field, "max_length", None)
+        value = getattr(instance, field.attname, None)
+        if max_length and isinstance(value, str) and len(value) > max_length:
+            raise ValidationError(f"{model._meta.verbose_name} {field.name} holds {max_length} characters.")
+
+
 def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=True):
     """Create or update one object within the user's NetBox permission scope."""
     with transaction.atomic():
@@ -119,7 +131,9 @@ def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=
             permission = get_permission_for_model(model, "add")
             if not user.has_perm(permission):
                 return False
-            instance = model.objects.create(**lookup, **values)
+            instance = model(**lookup, **values)
+            _reject_overlong_fields(instance, model)
+            instance.save()
         else:
             if not allow_update:
                 return False
@@ -128,6 +142,7 @@ def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=
                 return False
             for field_name, value in values.items():
                 setattr(instance, field_name, value)
+            _reject_overlong_fields(instance, model)
             instance.save(update_fields=list(values))
         allowed = user.has_perm(permission, instance)
         if not allowed:
@@ -1407,11 +1422,15 @@ class IgnoreDeviceView(PermissionRequiredMixin, View):
             messages.error(request, "A valid import profile is required.")
         elif source_id:
             profile = get_object_or_404(ImportProfile, pk=profile_id)
-            IgnoredDevice.objects.get_or_create(
-                profile=profile,
-                source_id=source_id,
-                defaults={"device_name": device_name},
-            )
+            ignored = _get_or_init(IgnoredDevice, profile=profile, source_id=source_id)
+            if ignored.pk is None:
+                ignored.device_name = device_name
+                try:
+                    _validate_model_instance(ignored, f"ignored device '{source_id}'")
+                except ValueError as exc:
+                    messages.error(request, str(exc))
+                    return redirect(next_url)
+                ignored.save()
             messages.success(request, f"Device '{device_name or source_id}' added to ignore list.")
         return redirect(next_url)
 
@@ -1715,6 +1734,8 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
                         next_url,
                         "Permission denied: cannot create or change this field review.",
                     )
+        except ValidationError as exc:
+            return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
         except IntegrityError:
             return _preview_action_error(
                 request,
@@ -2311,6 +2332,9 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
                 {"profile": profile, "source_id": source_id, "source_column": "device_name"},
                 resolution_values,
             )
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+            return _name_resolution_response(request, next_url)
         except IntegrityError:
             messages.error(request, "The saved name changed while this request was being processed. Try again.")
             return _name_resolution_response(request, next_url)
@@ -2873,10 +2897,16 @@ class QuickCreateManufacturerView(PermissionRequiredMixin, View):
         if not mfg_name or not mfg_slug:
             messages.error(request, "Manufacturer name and slug are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        mfg, created = Manufacturer.objects.get_or_create(
-            slug=mfg_slug,
-            defaults={"name": mfg_name},
-        )
+        mfg = _get_or_init(Manufacturer, slug=mfg_slug)
+        created = mfg.pk is None
+        if created:
+            mfg.name = mfg_name
+            try:
+                _validate_model_instance(mfg, f"manufacturer '{mfg_name}'")
+            except ValueError as exc:
+                messages.error(request, str(exc))
+                return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            mfg.save()
         if created:
             messages.success(request, f"Manufacturer '{mfg.name}' created.")
         else:
@@ -2905,11 +2935,15 @@ class QuickResolveManufacturerView(PermissionRequiredMixin, View):
         if not source_make or not netbox_mfg_slug:
             messages.error(request, "Source make and NetBox manufacturer slug are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        _, created = ManufacturerMapping.objects.update_or_create(
-            profile=profile,
-            source_make=source_make,
-            defaults={"netbox_manufacturer_slug": netbox_mfg_slug},
-        )
+        mapping = _get_or_init(ManufacturerMapping, profile=profile, source_make=source_make)
+        created = mapping.pk is None
+        mapping.netbox_manufacturer_slug = netbox_mfg_slug
+        try:
+            _validate_model_instance(mapping, f"manufacturer mapping '{source_make}'")
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        mapping.save()
         verb = "Created" if created else "Updated"
         messages.success(request, f"{verb} manufacturer mapping: '{source_make}' → {netbox_mfg_slug}")
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
@@ -3053,16 +3087,18 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
             messages.error(request, "A role slug is required when mapping action is 'role'.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        _, created = ClassRoleMapping.objects.update_or_create(
-            profile=profile,
-            source_class=source_class,
-            defaults={
-                "ignore": mapping_action == "ignore",
-                "creates_rack": creates_rack,
-                "rack_type": rack_type,
-                "role_slug": role_slug if mapping_action == "role" else "",
-            },
-        )
+        mapping = _get_or_init(ClassRoleMapping, profile=profile, source_class=source_class)
+        created = mapping.pk is None
+        mapping.ignore = mapping_action == "ignore"
+        mapping.creates_rack = creates_rack
+        mapping.rack_type = rack_type
+        mapping.role_slug = role_slug if mapping_action == "role" else ""
+        try:
+            _validate_model_instance(mapping, f"class role mapping '{source_class}'")
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        mapping.save()
         verb = "Created" if created else "Updated"
         if mapping_action == "ignore":
             action_label = "ignore"
@@ -3213,6 +3249,9 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
                 {"profile": profile, "source_id": source_id},
                 binding_values,
             )
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         except IntegrityError:
             messages.error(request, "The device link changed while this request was being processed. Try again.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
@@ -3409,7 +3448,13 @@ class QuickCreateDeviceRoleView(_AjaxPermissionView):
             )
 
         try:
-            role, created = DeviceRole.objects.get_or_create(slug=slug, defaults={"name": name, "color": color})
+            role = _get_or_init(DeviceRole, slug=slug)
+            created = role.pk is None
+            if created:
+                role.name = name
+                role.color = color
+                _validate_model_instance(role, f"device role '{name}'")
+                role.save()
         except IntegrityError:
             logger.exception("QuickCreateDeviceRoleView: integrity error creating role slug=%s", slug)
             return JsonResponse({"error": "A device role with that slug already exists."}, status=400)
@@ -3646,7 +3691,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                         },
                         allow_update=False,
                     )
-                except IntegrityError:
+                except (ValidationError, IntegrityError):
                     skipped += 1
                     continue
                 if not allowed:

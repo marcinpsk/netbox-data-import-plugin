@@ -1365,7 +1365,7 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         from unittest.mock import patch
         from django.db import DatabaseError
 
-        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=DatabaseError("raw db detail SECRET")):
+        with patch("dcim.models.DeviceRole.save", side_effect=DatabaseError("raw db detail SECRET")):
             resp = self.client.post(self._url(), {"name": "X", "slug": "xfail"})
         self.assertEqual(resp.status_code, 500)
         self.assertNotIn("SECRET", resp.content.decode())
@@ -1377,7 +1377,7 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         from django.db import IntegrityError
 
         with patch(
-            "dcim.models.DeviceRole.objects.get_or_create",
+            "dcim.models.DeviceRole.save",
             side_effect=IntegrityError("duplicate key value violates unique constraint"),
         ):
             resp = self.client.post(self._url(), {"name": "X", "slug": "xrace"})
@@ -1385,14 +1385,15 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         self.assertNotIn("unique constraint", resp.content.decode())
 
     def test_validation_error_is_sanitized(self):
-        """ValidationError is caught and returns generic 400."""
-        from unittest.mock import patch
-        from django.core.exceptions import ValidationError
+        """A name the column cannot hold is refused, and the field error is not echoed back."""
+        from dcim.models import DeviceRole
 
-        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=ValidationError("bad value")):
-            resp = self.client.post(self._url(), {"name": "X", "slug": "xval"})
+        resp = self.client.post(self._url(), {"name": "N" * 300, "slug": "xval"})
+
         self.assertEqual(resp.status_code, 400)
         self.assertIn("invalid", resp.json()["error"].lower())
+        self.assertNotIn("300", resp.content.decode())
+        self.assertFalse(DeviceRole.objects.filter(slug="xval").exists())
 
 
 class QuickResolveManufacturerViewTest(BaseViewTestCase):
