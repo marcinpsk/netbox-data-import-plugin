@@ -82,6 +82,7 @@ class ImportJobRunner(JobRunner):
         if tenant_id and tenant is None:
             self._fail("The target tenant is no longer available.")
         context = {"site": site, "location": location, "tenant": tenant}
+        rows = engine.reapply_saved_resolutions(rows, profile)
 
         self._save_data(phase="validating")
         current_preview = engine.run_import(rows, profile, context, dry_run=True, user=user)
