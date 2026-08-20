@@ -42,7 +42,6 @@ LOCAL_EXAMPLE_PATH = Path(__file__).resolve().parents[3] / "libre" / "example.xl
 
 def _json_script(response, element_id):
     """Return the payload Django's `json_script` filter rendered under *element_id*."""
-    import html
     import json
     import re
 
@@ -53,7 +52,7 @@ def _json_script(response, element_id):
     )
     if match is None:
         raise AssertionError(f"the preview did not render a '{element_id}' payload")
-    return json.loads(html.unescape(match.group(1)))
+    return json.loads(match.group(1))
 
 
 class ContactMappingWorkbookTest(TestCase):

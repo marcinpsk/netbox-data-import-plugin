@@ -362,7 +362,7 @@
         var role = required[index];
         if (selection.resolved[role]) continue;
         setExpanded(editToggle, editPanel, true);
-        var blank = valueRows.querySelector('.ndi-contact-literal') || addBlankFor(role);
+        var blank = emptyLiteral() || addBlankFor(role);
         blank.setCustomValidity('Give this row a ' + (ROLE_LABELS[role] || role).toLowerCase() + ', or select no contact.');
         blank.reportValidity();
         event.preventDefault();
@@ -464,6 +464,17 @@
     button.classList.add('btn-outline-success', 'ndi-contact-resolved');
     button.innerHTML = '<i class="mdi mdi-account-check"></i> Contact resolved';
     button.title = "This row's Contact fields are resolved. Open to review or change them.";
+  }
+
+  /* A saved literal is rendered as its own row, so the first literal on screen is often a
+   * filled one belonging to another field. */
+  function emptyLiteral() {
+    var found = null;
+    valueRows.querySelectorAll('.ndi-contact-value-row[data-literal]').forEach(function (row) {
+      var input = row.querySelector('.ndi-contact-literal');
+      if (!found && !input.value.trim()) found = input;
+    });
+    return found;
   }
 
   function addBlankFor(role) {

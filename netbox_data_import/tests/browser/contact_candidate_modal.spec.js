@@ -65,6 +65,15 @@ const previewFixture = `
             "contact_field_sources": { "name": "Owner" }
           }
         }
+      },
+      "source-literal": {
+        "candidate:contact": {
+          "resolved_fields": {
+            "contact_resolution_applied": true,
+            "contact_field_sources": {},
+            "contact_field_values": { "name": "Typed Name" }
+          }
+        }
       }
     };
   </script>
@@ -521,4 +530,26 @@ test("a linked Contact is still shown when the saved row is reopened", async ({ 
 
   await expect(page.locator("#contactCandidateContactId")).toHaveValue("91");
   await expect(page.locator("#contactCandidateSummaryName")).toHaveText("Late Contact");
+});
+
+test("the missing-field message lands on an empty input, not a filled one", async ({ page }) => {
+  await setUpBothControllers(page);
+  // This row stores a typed name and no email, so a saved literal is already on screen.
+  await openRow(page, "saved-row", "source-literal");
+  await page.locator("#contactCandidateEditToggle").click();
+  await expect(page.locator(".ndi-contact-literal")).toHaveValue("Typed Name");
+
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  const literals = await page.evaluate(() =>
+    [...document.querySelectorAll(".ndi-contact-literal")].map((input) => ({
+      value: input.value,
+      message: input.validationMessage,
+    })),
+  );
+  const named = literals.find((input) => input.value === "Typed Name");
+  expect(named.message).toBe("");
+  // The email is what is missing, so an empty input has to carry the message.
+  expect(literals.some((input) => input.value === "" && /email/i.test(input.message))).toBe(true);
+  expect(await page.evaluate(() => window.__requests.length)).toBe(0);
 });

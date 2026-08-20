@@ -9,7 +9,7 @@
  * a missing lookup URL, the network call behind the picker, and a page with no saved state. */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TomSelect from "tom-select";
 
 const controllerPath = resolve(
@@ -111,6 +111,12 @@ beforeEach(() => {
   document.body.innerHTML = "";
 });
 
+// A stub restored at the end of a test body survives a failed assertion above it and turns
+// one failure into several.
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("contact candidate modal", () => {
   it("opens a row when no saved-resolution global is present", () => {
     addPreviewFixture();
@@ -149,7 +155,6 @@ describe("contact candidate modal", () => {
       expect.objectContaining({ headers: { Accept: "application/json" } }),
     );
     expect(results[0].name).toBe("Fresh Contact");
-    vi.unstubAllGlobals();
   });
 
   it("asks for a query of at least two characters before calling the endpoint", async () => {
@@ -162,7 +167,6 @@ describe("contact candidate modal", () => {
     await new Promise((done) => picker.settings.load("a", done));
 
     expect(fetchMock).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
   });
 
   it("reopens a saved literal value as its own row", () => {
