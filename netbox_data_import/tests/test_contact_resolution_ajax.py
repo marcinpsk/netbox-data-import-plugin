@@ -11,6 +11,7 @@ import json
 
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
+from unittest.mock import patch
 from django.test import TestCase
 from django.urls import reverse
 
@@ -202,6 +203,49 @@ class ContactResolutionAjaxTest(TestCase):
         self.client.post(reverse("plugins:netbox_data_import:save_resolution"), self._payload())
 
         self.assertIs(self.client.session.get(PREVIEW_DIRTY_SESSION_KEY), True)
+
+    def test_a_queued_import_refuses_a_decision_from_the_form_path_too(self):
+        """Without scripts the same decision would still never reach the queued run."""
+        session = self.client.session
+        session["import_preview_pending"] = False
+        session.save()
+
+        response = self.client.post(reverse("plugins:netbox_data_import:save_resolution"), self._payload())
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
+    def test_restoring_a_replacement_preview_retires_the_open_tab(self):
+        """A worker preview can match a Device the open tab never saw, so its token must expire."""
+        import uuid
+
+        from core.models import Job
+
+        from netbox_data_import.views import _restore_import_session
+
+        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        session = self.client.session
+        session["import_preview_pending"] = False
+        session.save()
+        job = Job.objects.create(
+            name="Data Import",
+            status="errored",
+            job_id=uuid.uuid4(),
+            queue_name="default",
+            data={
+                "job_type": "netbox_data_import.import",
+                "preview_result": session["import_result"],
+                "context_data": session["import_context"],
+            },
+        )
+
+        request = self.client.request().wsgi_request
+        request.session = self.client.session
+        with patch("netbox_data_import.views._import_source_rows_available", return_value=True):
+            _restore_import_session(request, job)
+
+        self.assertIs(request.session.get("import_preview_pending"), True)
+        self.assertNotEqual(request.session[PREVIEW_REVISION_SESSION_KEY], before)
 
     def test_a_plain_form_post_still_redirects(self):
         """The form works without scripts, so the browser path must keep its redirect.

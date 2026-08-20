@@ -38,16 +38,22 @@ class SuggestContactRolesTest(SimpleTestCase):
 
         self.assertEqual(suggestions, {"email": "Column 7"})
 
-    def test_a_header_keyword_breaks_a_tie_between_two_addresses(self):
-        """Two columns hold addresses, so the header decides which one is the Contact email."""
+    def test_a_header_keyword_does_not_choose_between_two_addresses(self):
+        """The header says which field a value feeds, not which of several values is the right one.
+
+        `Backup Email` carries the email keyword and `Primary Contact` does not, so preferring the
+        keyword proposed the backup address as the primary Contact email.
+        """
         suggestions = suggest_contact_roles(
             {
-                "Reported By": "helpdesk@example.invalid",
-                "Email Address": "ada@example.invalid",
+                "Primary Contact": "primary@example.invalid",
+                "Backup Email": "backup@example.invalid",
+                "Contact Name": "Alice",
             }
         )
 
-        self.assertEqual(suggestions["email"], "Email Address")
+        self.assertNotIn("email", suggestions)
+        self.assertEqual(suggestions["name"], "Contact Name")
 
     def test_two_indistinguishable_addresses_propose_nothing(self):
         """Picking one by column order would store an arbitrary identity under a one-click save."""

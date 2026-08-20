@@ -25,7 +25,8 @@ def _text(value) -> str:
     return str(value).strip()
 
 
-# A header keyword is the only signal that separates a person from any other text.
+# `name` is proposed from its header, because any text is a valid name. The `email` and `phone`
+# entries only keep a column that names a different field out of the name proposal.
 _ROLE_HEADER_HINTS = {
     "email": ("email", "mail"),
     "phone": ("phone", "number", "tel", "mobile", "cell"),
@@ -66,14 +67,12 @@ def suggest_contact_roles(candidate_values: dict[str, str]) -> dict[str, str]:
     }
     suggestions = {}
     for role, columns in by_shape.items():
-        if not columns:
-            continue
-        hinted = [column for column in columns if _header_hints_at(column, role)]
-        candidates = hinted or columns
-        # Two columns of the same shape with nothing to separate them: the operator decides,
-        # because the collapsed modal turns a proposal into a one-click save.
-        if len(candidates) == 1:
-            suggestions[role] = candidates[0]
+        # A header says which field a value can feed, never which of several same-shaped values
+        # is the right one: `Backup Email` carries the keyword that `Primary Contact` does not.
+        # So a second value of the same shape means the operator decides, because the collapsed
+        # modal turns a proposal into a one-click save.
+        if len(columns) == 1:
+            suggestions[role] = columns[0]
 
     recognized = set(by_shape["email"]) | set(by_shape["phone"])
     claimed = set(suggestions.values())

@@ -65,6 +65,7 @@ from .preview_row_actions import (
     mark_preview_dirty,
     pending_preview_payload,
     record_recalculated_preview,
+    retire_preview_revision,
 )
 
 
@@ -1173,6 +1174,8 @@ def _restore_import_session(request, job):
         request.session["import_context"] = data["context_data"]
         request.session["import_preview_pending"] = True
         request.session["import_preview_source_job_id"] = job.pk
+        # The worker may have matched a Device the open tab never saw, so its token expires.
+        retire_preview_revision(request.session)
     if data.get("result"):
         if preview_is_pending:
             request.session["import_restored_job_result"] = data["result"]
@@ -1437,11 +1440,16 @@ def _wants_json(request) -> bool:
     return "application/json" in request.headers.get("Accept", "")
 
 
+def _preview_is_active(request) -> bool:
+    """Answer whether a preview is still on screen and able to receive a decision."""
+    return request.session.get("import_preview_pending") is True
+
+
 def _preview_accepts_decisions(request) -> bool:
     """Answer whether the posted decision belongs to the preview that is still active."""
-    return request.session.get("import_preview_pending") is True and request.POST.get(
-        "preview_revision"
-    ) == current_preview_revision(request.session)
+    return _preview_is_active(request) and request.POST.get("preview_revision") == current_preview_revision(
+        request.session
+    )
 
 
 def _preview_action_error(request, next_url, message, *, status=409):
@@ -2308,6 +2316,32 @@ class SaveResolutionView(_AjaxPermissionView):
             result_rows[0],
         )
 
+    @staticmethod
+    def _refuse_stale_preview(request, next_url):
+        """Return a refusal when the preview can no longer take a Contact decision.
+
+        Run Import consumes the rows it queued and never reapplies a resolution, so a decision
+        stored after it would be dropped in silence. Only the Contact branch calls this: a
+        split-name correction is standalone and needs no preview at all.
+        """
+        if not _preview_is_active(request):
+            return _preview_action_error(
+                request,
+                next_url,
+                "The import already started, so this preview can no longer take a decision.",
+                status=409,
+            )
+        # A second tab can also recalculate between opening the modal and saving it. Only a JSON
+        # caller carries a revision to check, which is what load_cached_preview already does.
+        if _wants_json(request) and not _preview_accepts_decisions(request):
+            return _preview_action_error(
+                request,
+                next_url,
+                "This preview is no longer the current one. Reload the preview and choose again.",
+                status=409,
+            )
+        return None
+
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
         import json
@@ -2321,17 +2355,6 @@ class SaveResolutionView(_AjaxPermissionView):
         if profile_id is None:
             return _preview_action_error(request, next_url, "A valid import profile is required.", status=400)
 
-        # Another tab can recalculate, or start the import, between opening the modal and
-        # saving it. Run Import consumes the rows it queued, so a decision stored afterwards
-        # would never reach that run.
-        if _wants_json(request) and not _preview_accepts_decisions(request):
-            return _preview_action_error(
-                request,
-                next_url,
-                "This preview is no longer the current one. Reload the preview and choose again.",
-                status=409,
-            )
-
         try:
             resolved_fields = json.loads(resolved_fields_json)
         except (json.JSONDecodeError, TypeError):
@@ -2344,6 +2367,9 @@ class SaveResolutionView(_AjaxPermissionView):
             )
             contact_context = None
             if source_column == "candidate:contact":
+                stale = self._refuse_stale_preview(request, next_url)
+                if stale is not None:
+                    return stale
                 try:
                     validate_registered_adapter(profile)
                     candidates, source_row, result_row = self._contact_candidate_context(request, profile.pk, source_id)

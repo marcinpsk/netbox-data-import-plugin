@@ -38,6 +38,7 @@
   var addValue = document.getElementById('contactCandidateAddValue');
   var provenance = document.getElementById('contactCandidateProvenance');
   var linkedContacts = {};
+  var saveInFlight = false;
   var summary = {
     name: document.getElementById('contactCandidateSummaryName'),
     email: document.getElementById('contactCandidateSummaryEmail'),
@@ -99,9 +100,7 @@
       releaseRole(select);
       clearSelectedContact();
       // A literal the browser rejected keeps blocking submit even once a row supplies the field.
-      valueRows.querySelectorAll('.ndi-contact-literal').forEach(function (input) {
-        input.setCustomValidity('');
-      });
+      clearLiteralValidity();
       refreshSummary();
     });
     return select;
@@ -244,8 +243,10 @@
     var contact = instance.options[value];
     if (!contact) return;
     contactId.value = String(contact.id);
-    // A linked Contact supplies every field, so no row may also claim one.
+    // A linked Contact supplies every field, so no row may also claim one, and a literal the
+    // required-field check rejected must stop blocking the form.
     valueRows.querySelectorAll('.ndi-contact-role').forEach(function (select) { select.value = ''; });
+    clearLiteralValidity();
     refreshSummary();
   }
 
@@ -385,7 +386,8 @@
 
   function resetSaveButton() {
     var save = form.querySelector('button[type=submit]');
-    if (!save) return;
+    // A request still in flight owns the button, or reopening the modal would arm a second one.
+    if (!save || saveInFlight) return;
     save.disabled = false;
     if (save.dataset.ndiOriginalHtml) save.innerHTML = save.dataset.ndiOriginalHtml;
   }
@@ -413,12 +415,20 @@
     modalError('');
 
     var sourceId = document.getElementById('contactCandidateSourceId').value;
-    var resolvedFields = document.getElementById('contactCandidateResolvedFields').value;
+    var snapshot = {
+      resolvedFields: document.getElementById('contactCandidateResolvedFields').value,
+      originalValue: document.getElementById('contactCandidateOriginalValue').value,
+      contactId: contactId.value,
+      linkedOption: existingContact.tomselect && contactId.value
+        ? existingContact.tomselect.options[contactId.value]
+        : null,
+    };
 
+    saveInFlight = true;
     window.ndiPostPreviewAction(form.action, new FormData(form))
       .then(function () {
         window.ndiMarkPreviewStale();
-        rememberResolution(sourceId, resolvedFields);
+        rememberResolution(sourceId, snapshot);
         markRowResolved(sourceId);
         var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
         if (ModalClass) {
@@ -431,26 +441,27 @@
         modalError(error.message);
         save.disabled = false;
         save.innerHTML = original;
+      })
+      .then(function () {
+        saveInFlight = false;
       });
   }
 
   /* The page no longer reloads after a save, so the map the modal reads on open has to record
    * the decision here. Without this the next open shows the proposal and a second save
    * overwrites what the operator chose. */
-  function rememberResolution(sourceId, resolvedFieldsJson) {
+  function rememberResolution(sourceId, snapshot) {
     if (!window.EXISTING_RESOLUTIONS) window.EXISTING_RESOLUTIONS = {};
     var forSource = window.EXISTING_RESOLUTIONS[sourceId] || {};
     forSource['candidate:contact'] = {
-      original_value: document.getElementById('contactCandidateOriginalValue').value,
-      resolved_fields: JSON.parse(resolvedFieldsJson),
+      original_value: snapshot.originalValue,
+      resolved_fields: JSON.parse(snapshot.resolvedFields),
     };
     window.EXISTING_RESOLUTIONS[sourceId] = forSource;
 
     // The picker rebuilds from the page's suggestions, which never held a Contact the operator
     // searched for. Keep the option so reopening the row still shows what it is linked to.
-    var instance = existingContact.tomselect;
-    var linked = instance && contactId.value ? instance.options[contactId.value] : null;
-    if (linked) linkedContacts[contactId.value] = linked;
+    if (snapshot.linkedOption) linkedContacts[snapshot.contactId] = snapshot.linkedOption;
   }
 
   /* The row keeps the action it was rendered with until the preview is recalculated. Only the
@@ -464,6 +475,12 @@
     button.classList.add('btn-outline-success', 'ndi-contact-resolved');
     button.innerHTML = '<i class="mdi mdi-account-check"></i> Contact resolved';
     button.title = "This row's Contact fields are resolved. Open to review or change them.";
+  }
+
+  function clearLiteralValidity() {
+    valueRows.querySelectorAll('.ndi-contact-literal').forEach(function (input) {
+      input.setCustomValidity('');
+    });
   }
 
   /* A saved literal is rendered as its own row, so the first literal on screen is often a

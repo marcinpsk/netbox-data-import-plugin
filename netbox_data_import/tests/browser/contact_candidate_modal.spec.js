@@ -405,6 +405,23 @@ test("a failure on one row is not shown when another row opens", async ({ page }
   await expect(page.locator("#contactCandidateError")).toHaveCount(0);
 });
 
+/* Hold the save open so the modal can be driven while a request is still in flight. */
+async function setUpWithPendingSave(page) {
+  await page.setContent(previewFixture);
+  await initNetBoxSelects(page);
+  await page.addScriptTag({ content: rowActionsSource });
+  await page.addScriptTag({ content: controllerSource });
+  await page.evaluate(() => {
+    window.__requests = [];
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (url, options) => {
+      if (!String(url).includes("/save-resolution/")) return realFetch(url, options);
+      window.__requests.push({ url, fields: Object.fromEntries(options.body.entries()) });
+      return new Promise(() => {});
+    };
+  });
+}
+
 /* The two controllers together, with only the network stubbed. This is the pair that ships:
  * a stubbed helper would keep passing if `preview_row_actions.js` stopped exporting it. */
 async function setUpBothControllers(page, { status = 200, payload = null } = {}) {
@@ -552,4 +569,46 @@ test("the missing-field message lands on an empty input, not a filled one", asyn
   // The email is what is missing, so an empty input has to carry the message.
   expect(literals.some((input) => input.value === "" && /email/i.test(input.message))).toBe(true);
   expect(await page.evaluate(() => window.__requests.length)).toBe(0);
+});
+
+test("reopening the modal during a save cannot start a second one", async ({ page }) => {
+  await setUpWithPendingSave(page);
+  await openRow(page, "first-row", "source-first");
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+  expect(await page.evaluate(() => window.__requests.length)).toBe(1);
+
+  // The operator closes the modal and opens another row while the first save is still open.
+  await openRow(page, "first-row", "source-first");
+
+  await expect(page.locator("#contactCandidateForm button[type=submit]")).toBeDisabled();
+  expect(await page.evaluate(() => window.__requests.length)).toBe(1);
+});
+
+test("linking a Contact clears a validation message left on a literal", async ({ page }) => {
+  await page.route("**/contact-lookup/?q=*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        results: [{ id: 77, name: "Rescue Contact", email: "rescue@example.invalid", phone: "" }],
+      }),
+    });
+  });
+  await setUpBothControllers(page);
+  await openRow(page, "first-row", "source-first");
+  await page.locator("#contactCandidateEditToggle").click();
+  // Drop the name so the required-field check marks a literal invalid.
+  await page.locator('.ndi-contact-value-row[data-source-column="Contact"] .ndi-contact-role')
+    .selectOption("");
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+  expect(await page.evaluate(() => window.__requests.length)).toBe(0);
+
+  await page.locator("#contactCandidateLinkExisting").click();
+  await page.locator("#contactCandidateExisting + .ts-wrapper .ts-control input").fill("rescue");
+  await page.locator("#contactCandidateExisting + .ts-wrapper .ts-dropdown .option").click();
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  // A linked Contact supplies every field, so nothing may still block the save.
+  const requests = await page.evaluate(() => window.__requests);
+  expect(requests).toHaveLength(1);
+  expect(JSON.parse(requests[0].fields.resolved_fields).contact_id).toBe(77);
 });
