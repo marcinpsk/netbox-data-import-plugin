@@ -11,7 +11,6 @@ import json
 
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
-from unittest.mock import patch
 from django.test import TestCase
 from django.urls import reverse
 
@@ -221,7 +220,7 @@ class ContactResolutionAjaxTest(TestCase):
 
         from core.models import Job
 
-        from netbox_data_import.views import _restore_import_session
+        from netbox_data_import.views import _IMPORT_SOURCE_ROWS_JOB_SESSION_KEY, _restore_import_session
 
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         session = self.client.session
@@ -238,11 +237,12 @@ class ContactResolutionAjaxTest(TestCase):
                 "context_data": session["import_context"],
             },
         )
+        session[_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY] = job.pk
+        session.save()
 
         request = self.client.request().wsgi_request
         request.session = self.client.session
-        with patch("netbox_data_import.views._import_source_rows_available", return_value=True):
-            _restore_import_session(request, job)
+        _restore_import_session(request, job)
 
         self.assertIs(request.session.get("import_preview_pending"), True)
         self.assertNotEqual(request.session[PREVIEW_REVISION_SESSION_KEY], before)
