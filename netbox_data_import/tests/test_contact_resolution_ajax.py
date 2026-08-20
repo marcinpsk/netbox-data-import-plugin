@@ -260,6 +260,50 @@ class ContactResolutionAjaxTest(TestCase):
 
         self.assertFalse(SourceResolution.objects.filter(source_column="_merge_serial").exists())
 
+    def test_a_queued_import_refuses_a_duplicate_name_resolution(self):
+        """The endpoint refuses a replacement name once Run Import has queued the rows."""
+        session = self.client.session
+        session["import_preview_pending"] = False
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "AJAX-001",
+                "row_number": 1,
+                "new_name": "queued-name-resolution",
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+            follow=True,
+        )
+
+        self.assertFalse(SourceResolution.objects.filter(source_column="device_name").exists())
+        self.assertContains(response, "The import already started")
+
+    def test_a_queued_duplicate_name_refusal_redirects_htmx(self):
+        """A refused decision must navigate, not swap a preview the queued import has frozen."""
+        session = self.client.session
+        session["import_preview_pending"] = False
+        session.save()
+        next_url = reverse("plugins:netbox_data_import:import_preview")
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "AJAX-001",
+                "row_number": 1,
+                "new_name": "queued-htmx-name-resolution",
+                "next": next_url,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.headers["HX-Redirect"], next_url)
+        self.assertFalse(SourceResolution.objects.filter(source_column="device_name").exists())
+
     def test_a_resolution_with_no_preview_in_the_session_is_still_saved(self):
         """A decision saved outside a preview is standalone and must not need one."""
         session = self.client.session

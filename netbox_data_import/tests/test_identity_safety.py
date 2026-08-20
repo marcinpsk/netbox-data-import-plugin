@@ -26,6 +26,10 @@ from netbox_data_import.engine import (
 )
 from netbox_data_import.forms import ImportSetupForm
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile, SourceResolution
+from netbox_data_import.preview_row_actions import (
+    PREVIEW_REVISION_SESSION_KEY,
+    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+)
 from netbox_data_import.tests.helpers import set_import_source
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.views import _import_intents, _save_permission_scoped_object, _serialize_rows
@@ -126,6 +130,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             "filename": "identity-safety.xlsx",
         }
         session["import_result"] = result.to_session_dict() if hasattr(result, "to_session_dict") else result
+        session["import_preview_pending"] = True
         session.save()
 
     def _grant_object_permission(self, user, name, model, actions, constraints=None):
@@ -403,6 +408,54 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         result = run_import(resolved_rows, self.profile, {"site": self.site}, dry_run=True)
         device_rows = [row for row in result.rows if row.object_type == "device"]
         self.assertEqual([row.action for row in device_rows], ["create", "create"])
+
+    def test_duplicate_name_form_refuses_a_stale_preview_revision(self):
+        """A name from a retired rendered preview cannot become a row resolution."""
+        rows = [
+            self._device_row(2, "STALE-NAME-A", "stale-shared", self.rack_a, 1),
+            self._device_row(3, "STALE-NAME-B", "stale-shared", self.rack_b, 2),
+        ]
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        suggestion = next(row for row in preview.rows if row.row_number == 3 and row.object_type == "device")
+        self._set_import_session(rows, preview)
+        session = self.client.session
+        session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "rendered-name-preview"
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        session.save()
+        preview_url = reverse("plugins:netbox_data_import:import_preview")
+        resolve_url = reverse("plugins:netbox_data_import:resolve_duplicate_name")
+
+        preview_response = self.client.get(preview_url)
+
+        html = preview_response.content.decode()
+        form_start = html.index(f'action="{resolve_url}"')
+        form_end = html.index("</form>", form_start)
+        name_form = html[form_start:form_end]
+        self.assertIn(
+            'name="preview_revision" value="rendered-name-preview"',
+            name_form,
+        )
+
+        session = self.client.session
+        session[PREVIEW_REVISION_SESSION_KEY] = "current-name-preview"
+        session.save()
+        response = self.client.post(
+            resolve_url,
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "STALE-NAME-B",
+                "row_number": 3,
+                "new_name": suggestion.extra_data["suggested_name"],
+                "preview_revision": "rendered-name-preview",
+                "next": preview_url,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.headers["HX-Redirect"], preview_url)
+        self.assertFalse(SourceResolution.objects.filter(source_id="STALE-NAME-B").exists())
 
     def test_single_row_sync_rechecks_full_batch_and_does_not_update_same_name_device(self):
         from dcim.models import Device

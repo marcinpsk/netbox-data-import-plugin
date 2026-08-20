@@ -82,6 +82,15 @@ def _safe_next_url(request, fallback: str) -> str:
     return reverse(fallback)
 
 
+def _navigation_response(request, url):
+    """Send an HTMX caller through a real page load, or redirect a standard browser."""
+    if request.headers.get("HX-Request") == "true":
+        response = HttpResponse(status=204)
+        response["HX-Redirect"] = url
+        return response
+    return redirect(url)
+
+
 def _name_resolution_response(request, url):
     """Return an updated preview for HTMX or redirect a standard browser."""
     if request.headers.get("HX-Request") == "true":
@@ -91,10 +100,7 @@ def _name_resolution_response(request, url):
             if not 300 <= preview_response.status_code < 400:
                 return preview_response
             url = preview_response.headers["Location"]
-        response = HttpResponse(status=204)
-        response["HX-Redirect"] = url
-        return response
-    return redirect(url)
+    return _navigation_response(request, url)
 
 
 def _parse_posted_profile_id(request):
@@ -1476,6 +1482,18 @@ def _preview_action_error(request, next_url, message, *, status=409):
     return redirect(next_url)
 
 
+def _stale_preview_reason(request):
+    """Return why the preview can no longer take a decision, or None."""
+    if not _session_holds_a_preview(request):
+        return None
+    if not _preview_is_active(request):
+        return "The import already started, so this preview can no longer take a decision."
+    # A second tab can recalculate between opening the modal and saving it.
+    if _revision_is_checkable(request) and not _preview_accepts_decisions(request):
+        return "This preview is no longer the current one. Reload the preview and choose again."
+    return None
+
+
 def _field_review_row(request):
     """Return the current row and target field for a review POST."""
     preview = load_cached_preview(request)
@@ -2241,6 +2259,10 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             ImportProfile.objects.restrict(request.user, "change"),
             pk=profile_id,
         )
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            messages.error(request, stale_reason)
+            return _navigation_response(request, next_url)
         try:
             row_number = int(request.POST.get("row_number", ""))
         except (TypeError, ValueError):
@@ -2330,34 +2352,6 @@ class SaveResolutionView(_AjaxPermissionView):
             result_rows[0],
         )
 
-    @staticmethod
-    def _refuse_stale_preview(request, next_url):
-        """Return a refusal when the preview can no longer take a Contact decision.
-
-        Run Import consumes the rows it queued and never reapplies a resolution, so a decision
-        stored after it would be dropped in silence. Every decision the preview page produces is
-        replayed onto the rows, so the split and conflict modals need this as much as the Contact
-        one. A save with no preview in the session stands alone and is left untouched.
-        """
-        if not _session_holds_a_preview(request):
-            return None
-        if not _preview_is_active(request):
-            return _preview_action_error(
-                request,
-                next_url,
-                "The import already started, so this preview can no longer take a decision.",
-                status=409,
-            )
-        # A second tab can also recalculate between opening the modal and saving it.
-        if _revision_is_checkable(request) and not _preview_accepts_decisions(request):
-            return _preview_action_error(
-                request,
-                next_url,
-                "This preview is no longer the current one. Reload the preview and choose again.",
-                status=409,
-            )
-        return None
-
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
         import json
@@ -2381,9 +2375,9 @@ class SaveResolutionView(_AjaxPermissionView):
                 ImportProfile.objects.restrict(request.user, "change"),
                 pk=profile_id,
             )
-            stale = self._refuse_stale_preview(request, next_url)
-            if stale is not None:
-                return stale
+            stale_reason = _stale_preview_reason(request)
+            if stale_reason is not None:
+                return _preview_action_error(request, next_url, stale_reason, status=409)
 
             contact_context = None
             if source_column == "candidate:contact":
