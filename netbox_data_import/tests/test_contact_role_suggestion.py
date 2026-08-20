@@ -49,6 +49,25 @@ class SuggestContactRolesTest(SimpleTestCase):
 
         self.assertEqual(suggestions["email"], "Email Address")
 
+    def test_two_indistinguishable_addresses_propose_nothing(self):
+        """Picking one by column order would store an arbitrary identity under a one-click save."""
+        suggestions = suggest_contact_roles(
+            {
+                "Office": "alice.office@example.invalid",
+                "Personal": "alice.personal@example.invalid",
+            }
+        )
+
+        self.assertNotIn("email", suggestions)
+        # An address is not a name either, whatever its column is called.
+        self.assertNotIn("name", suggestions)
+
+    def test_two_indistinguishable_numbers_propose_nothing(self):
+        """The same reasoning applies to the phone field."""
+        suggestions = suggest_contact_roles({"Desk": "+1 202-555-0111", "Backup": "+1 202-555-0112"})
+
+        self.assertNotIn("phone", suggestions)
+
     def test_a_phone_number_survives_its_punctuation(self):
         """Source files write numbers with spaces, dashes, dots, and parentheses."""
         for written in ("+44 20 7946 0102", "(020) 7946-0102", "020.7946.0102", "+1-202-555-0106"):

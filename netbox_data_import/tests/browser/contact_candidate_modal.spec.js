@@ -406,12 +406,16 @@ async function setUpBothControllers(page, { status = 200, payload = null } = {})
   await page.evaluate(
     ({ status: code, payload: responseBody }) => {
       window.__requests = [];
+      const realFetch = window.fetch.bind(window);
       window.fetch = (url, options) => {
+        // Only the save is stubbed; the Contact lookup still goes out to its route.
+        if (!String(url).includes("/save-resolution/")) return realFetch(url, options);
         window.__requests.push({
           url,
           revision: options.body.get("preview_revision"),
           csrf: options.headers["X-CSRFToken"],
           accept: options.headers.Accept,
+          fields: Object.fromEntries(options.body.entries()),
         });
         return Promise.resolve({
           ok: code < 400,
@@ -453,4 +457,68 @@ test("a server envelope without the recalculation state is refused", async ({ pa
 
   await expect(page.locator("#contactCandidateError")).toContainText("invalid state");
   await expect(page.locator("#ndi-preview-stale")).toBeHidden();
+});
+
+test("the save button is usable again on the next row", async ({ page }) => {
+  await setUpBothControllers(page);
+  await openRow(page, "first-row", "source-first");
+  // Press the real control, so a disabled button would stop the test the way it stops an operator.
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
+
+  // `saved-row` stores a name only, so opening it proves the button is restored for a row the
+  // required-field check would still stop.
+  await openRow(page, "saved-row", "source-saved");
+  await expect(page.locator("#contactCandidateForm button[type=submit]")).toBeEnabled();
+
+  await openRow(page, "first-row", "source-first");
+
+  const save = page.locator("#contactCandidateForm button[type=submit]");
+  await expect(save).toBeEnabled();
+  await expect(save).toHaveText(/Save/);
+  await save.click();
+  expect(await page.evaluate(() => window.__requests.length)).toBe(2);
+});
+
+test("filling a missing field from a candidate row clears the block on saving", async ({ page }) => {
+  await setUpBothControllers(page);
+  await openRow(page, "first-row", "source-first");
+  await page.locator("#contactCandidateEditToggle").click();
+
+  // Strip the name, submit to raise the validity message, then supply a name from a row.
+  await page.locator('.ndi-contact-value-row[data-source-column="Contact"] .ndi-contact-role')
+    .selectOption("");
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+  await expect(page.locator(".ndi-contact-literal")).toHaveCount(1);
+  await page.locator('.ndi-contact-value-row[data-source-column="Owner"] .ndi-contact-role')
+    .selectOption("name");
+
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  const requests = await page.evaluate(() => window.__requests);
+  expect(requests).toHaveLength(1);
+  expect(JSON.parse(requests[0].fields.resolved_fields).contact_field_sources.name).toBe("Owner");
+});
+
+test("a linked Contact is still shown when the saved row is reopened", async ({ page }) => {
+  await page.route("**/contact-lookup/?q=*", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        results: [{ id: 91, name: "Late Contact", email: "late@example.invalid", phone: "+1 202-555-0199" }],
+      }),
+    });
+  });
+  await setUpBothControllers(page);
+  await openRow(page, "first-row", "source-first");
+  await page.locator("#contactCandidateLinkExisting").click();
+  await page.locator("#contactCandidateExisting + .ts-wrapper .ts-control input").fill("late");
+  await page.locator("#contactCandidateExisting + .ts-wrapper .ts-dropdown .option").click();
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
+
+  await openRow(page, "first-row", "source-first");
+
+  await expect(page.locator("#contactCandidateContactId")).toHaveValue("91");
+  await expect(page.locator("#contactCandidateSummaryName")).toHaveText("Late Contact");
 });

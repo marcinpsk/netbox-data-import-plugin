@@ -37,6 +37,7 @@
   var editToggle = document.getElementById('contactCandidateEditToggle');
   var addValue = document.getElementById('contactCandidateAddValue');
   var provenance = document.getElementById('contactCandidateProvenance');
+  var linkedContacts = {};
   var summary = {
     name: document.getElementById('contactCandidateSummaryName'),
     email: document.getElementById('contactCandidateSummaryEmail'),
@@ -97,6 +98,10 @@
     select.addEventListener('change', function () {
       releaseRole(select);
       clearSelectedContact();
+      // A literal the browser rejected keeps blocking submit even once a row supplies the field.
+      valueRows.querySelectorAll('.ndi-contact-literal').forEach(function (input) {
+        input.setCustomValidity('');
+      });
       refreshSummary();
     });
     return select;
@@ -302,8 +307,10 @@
       instance.clear(true);
       instance.clearOptions();
       if (suggestion) instance.addOption(contactOption(suggestion));
-      if (suggestion && String(suggestion.id) === String(resolvedFields.contact_id || '')) {
-        instance.setValue(String(suggestion.id), true);
+      var remembered = linkedContacts[resolvedFields.contact_id || ''];
+      if (remembered) instance.addOption(remembered);
+      if (resolvedFields.contact_id && instance.options[String(resolvedFields.contact_id)]) {
+        instance.setValue(String(resolvedFields.contact_id), true);
       }
       instance.refreshOptions(false);
     }
@@ -320,6 +327,7 @@
       && !resolvedFields.contact_id;
 
     modalError('');
+    resetSaveButton();
     setExpanded(editToggle, editPanel, false);
     setExpanded(linkExisting, existingWrap, Boolean(contactId.value || suggestion));
     toggleContactFields();
@@ -375,6 +383,13 @@
     saveDeferred();
   });
 
+  function resetSaveButton() {
+    var save = form.querySelector('button[type=submit]');
+    if (!save) return;
+    save.disabled = false;
+    if (save.dataset.ndiOriginalHtml) save.innerHTML = save.dataset.ndiOriginalHtml;
+  }
+
   function modalError(message) {
     var existing = document.getElementById('contactCandidateError');
     if (!message) {
@@ -391,7 +406,8 @@
 
   function saveDeferred() {
     var save = form.querySelector('button[type=submit]');
-    var original = save.innerHTML;
+    if (!save.dataset.ndiOriginalHtml) save.dataset.ndiOriginalHtml = save.innerHTML;
+    var original = save.dataset.ndiOriginalHtml;
     save.disabled = true;
     save.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Saving...';
     modalError('');
@@ -429,6 +445,12 @@
       resolved_fields: JSON.parse(resolvedFieldsJson),
     };
     window.EXISTING_RESOLUTIONS[sourceId] = forSource;
+
+    // The picker rebuilds from the page's suggestions, which never held a Contact the operator
+    // searched for. Keep the option so reopening the row still shows what it is linked to.
+    var instance = existingContact.tomselect;
+    var linked = instance && contactId.value ? instance.options[contactId.value] : null;
+    if (linked) linkedContacts[contactId.value] = linked;
   }
 
   /* The row keeps the action it was rendered with until the preview is recalculated. Only the

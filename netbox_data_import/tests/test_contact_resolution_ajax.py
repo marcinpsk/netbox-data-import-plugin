@@ -10,6 +10,7 @@ decision, marks the preview stale, and leaves the recalculation to the operator.
 import json
 
 from django.contrib.auth import get_user_model
+from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from django.urls import reverse
 
@@ -148,7 +149,18 @@ class ContactResolutionAjaxTest(TestCase):
         self.assertEqual(response.status_code, 409, response.content)
         body = json.loads(response.content)
         self.assertIs(body["ok"], False)
-        self.assertIn("recalculat", body["error"].lower())
+        self.assertIn("reload the preview", body["error"].lower())
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
+    def test_a_queued_import_refuses_a_later_decision(self):
+        """Run Import consumes the rows it queued, so a decision saved after it never applies."""
+        session = self.client.session
+        session["import_preview_pending"] = False
+        session.save()
+
+        response = self._post()
+
+        self.assertEqual(response.status_code, 409, response.content)
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
     def test_an_invalid_decision_answers_json_not_a_redirect(self):
@@ -241,5 +253,13 @@ class ContactResolutionAjaxTest(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         body = json.loads(response.content)
         self.assertIn("Device Contact", body["message"])
-        device.refresh_from_db()
         self.assertEqual(body["preview_state"], "recalculation_required")
+        # The message names a Contact write, so the assignment has to exist.
+        from tenancy.models import ContactAssignment
+
+        assignment = ContactAssignment.objects.get(
+            object_id=device.pk,
+            object_type=ContentType.objects.get_for_model(Device),
+        )
+        self.assertEqual(assignment.contact.email, "ajax.person@example.invalid")
+        self.assertEqual(assignment.role, role)

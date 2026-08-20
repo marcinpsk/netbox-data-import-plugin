@@ -1437,6 +1437,13 @@ def _wants_json(request) -> bool:
     return "application/json" in request.headers.get("Accept", "")
 
 
+def _preview_accepts_decisions(request) -> bool:
+    """Answer whether the posted decision belongs to the preview that is still active."""
+    return request.session.get("import_preview_pending") is True and request.POST.get(
+        "preview_revision"
+    ) == current_preview_revision(request.session)
+
+
 def _preview_action_error(request, next_url, message, *, status=409):
     """Return one preview-action error through JSON or the form fallback."""
     if _wants_json(request):
@@ -2314,13 +2321,14 @@ class SaveResolutionView(_AjaxPermissionView):
         if profile_id is None:
             return _preview_action_error(request, next_url, "A valid import profile is required.", status=400)
 
-        # Another tab can recalculate between opening the modal and saving it, which would
-        # store a decision against candidate values the operator never saw.
-        if _wants_json(request) and request.POST.get("preview_revision") != current_preview_revision(request.session):
+        # Another tab can recalculate, or start the import, between opening the modal and
+        # saving it. Run Import consumes the rows it queued, so a decision stored afterwards
+        # would never reach that run.
+        if _wants_json(request) and not _preview_accepts_decisions(request):
             return _preview_action_error(
                 request,
                 next_url,
-                "The preview was recalculated in another tab. Reload the preview and choose again.",
+                "This preview is no longer the current one. Reload the preview and choose again.",
                 status=409,
             )
 

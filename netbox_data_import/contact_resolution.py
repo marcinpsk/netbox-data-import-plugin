@@ -69,19 +69,25 @@ def suggest_contact_roles(candidate_values: dict[str, str]) -> dict[str, str]:
         if not columns:
             continue
         hinted = [column for column in columns if _header_hints_at(column, role)]
-        suggestions[role] = (hinted or columns)[0]
+        candidates = hinted or columns
+        # Two columns of the same shape with nothing to separate them: the operator decides,
+        # because the collapsed modal turns a proposal into a one-click save.
+        if len(candidates) == 1:
+            suggestions[role] = candidates[0]
 
+    recognized = set(by_shape["email"]) | set(by_shape["phone"])
     claimed = set(suggestions.values())
     # A header that says "email" or "phone" holds a malformed value of that type, never a name.
     named = [
         column
         for column in candidate_values
         if column not in claimed
+        and column not in recognized
         and _header_hints_at(column, "name")
         and not _header_hints_at(column, "email")
         and not _header_hints_at(column, "phone")
     ]
-    if named:
+    if len(named) == 1:
         suggestions["name"] = named[0]
     return suggestions
 
