@@ -1004,6 +1004,8 @@
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
         <input type="hidden" name="source_id" id="contactCandidateSourceId">
         <input type="hidden" name="source_column" value="candidate:contact">
+        {# The scripts overwrite this with the live token; without them it is the only one sent. #}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <input type="hidden" name="original_value" id="contactCandidateOriginalValue">
         <input type="hidden" name="resolved_fields" id="contactCandidateResolvedFields">
         <input type="hidden" id="contactCandidateContactId">

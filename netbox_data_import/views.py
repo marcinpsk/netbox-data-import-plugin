@@ -1440,6 +1440,11 @@ def _wants_json(request) -> bool:
     return "application/json" in request.headers.get("Accept", "")
 
 
+def _session_holds_a_preview(request) -> bool:
+    """Answer whether this save belongs to a preview at all, rather than standing alone."""
+    return bool(request.session.get("import_rows") or request.session.get("import_context"))
+
+
 def _preview_is_active(request) -> bool:
     """Answer whether a preview is still on screen and able to receive a decision."""
     return request.session.get("import_preview_pending") is True
@@ -1450,6 +1455,15 @@ def _preview_accepts_decisions(request) -> bool:
     return _preview_is_active(request) and request.POST.get("preview_revision") == current_preview_revision(
         request.session
     )
+
+
+def _revision_is_checkable(request) -> bool:
+    """Answer whether the caller presented a token to compare.
+
+    A JSON caller always stamps one. A rendered form only carries one where the template puts
+    it there, so a form without it keeps the behaviour it had before.
+    """
+    return _wants_json(request) or bool(request.POST.get("preview_revision"))
 
 
 def _preview_action_error(request, next_url, message, *, status=409):
@@ -2321,9 +2335,12 @@ class SaveResolutionView(_AjaxPermissionView):
         """Return a refusal when the preview can no longer take a Contact decision.
 
         Run Import consumes the rows it queued and never reapplies a resolution, so a decision
-        stored after it would be dropped in silence. Only the Contact branch calls this: a
-        split-name correction is standalone and needs no preview at all.
+        stored after it would be dropped in silence. Every decision the preview page produces is
+        replayed onto the rows, so the split and conflict modals need this as much as the Contact
+        one. A save with no preview in the session stands alone and is left untouched.
         """
+        if not _session_holds_a_preview(request):
+            return None
         if not _preview_is_active(request):
             return _preview_action_error(
                 request,
@@ -2331,9 +2348,8 @@ class SaveResolutionView(_AjaxPermissionView):
                 "The import already started, so this preview can no longer take a decision.",
                 status=409,
             )
-        # A second tab can also recalculate between opening the modal and saving it. Only a JSON
-        # caller carries a revision to check, which is what load_cached_preview already does.
-        if _wants_json(request) and not _preview_accepts_decisions(request):
+        # A second tab can also recalculate between opening the modal and saving it.
+        if _revision_is_checkable(request) and not _preview_accepts_decisions(request):
             return _preview_action_error(
                 request,
                 next_url,
@@ -2365,11 +2381,12 @@ class SaveResolutionView(_AjaxPermissionView):
                 ImportProfile.objects.restrict(request.user, "change"),
                 pk=profile_id,
             )
+            stale = self._refuse_stale_preview(request, next_url)
+            if stale is not None:
+                return stale
+
             contact_context = None
             if source_column == "candidate:contact":
-                stale = self._refuse_stale_preview(request, next_url)
-                if stale is not None:
-                    return stale
                 try:
                     validate_registered_adapter(profile)
                     candidates, source_row, result_row = self._contact_candidate_context(request, profile.pk, source_id)
@@ -3752,6 +3769,8 @@ class SyncSingleRowView(_AjaxPermissionView):
                     or _previewed_writes_changed(import_result_data, current_preview)
                 ):
                     request.session["import_result"] = current_preview.to_session_dict()
+                    # The page keeps its rendered rows, so its token must stop being accepted.
+                    retire_preview_revision(request.session)
                     detail = current_row.detail if current_row is not None else "The row is no longer available."
                     return JsonResponse(
                         {

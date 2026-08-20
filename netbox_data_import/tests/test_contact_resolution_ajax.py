@@ -247,15 +247,61 @@ class ContactResolutionAjaxTest(TestCase):
         self.assertIs(request.session.get("import_preview_pending"), True)
         self.assertNotEqual(request.session[PREVIEW_REVISION_SESSION_KEY], before)
 
-    def test_a_plain_form_post_still_redirects(self):
-        """The form works without scripts, so the browser path must keep its redirect.
+    def test_a_queued_import_refuses_a_conflict_merge_too(self):
+        """`_merge_*` is replayed onto the rows as well, so it is preview-coupled the same way."""
+        session = self.client.session
+        session["import_preview_pending"] = False
+        session.save()
 
-        It carries a stale revision on purpose: the guard belongs to the JSON callers, which is
-        what `load_cached_preview` already does for the other deferred row actions.
-        """
+        self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            self._payload(source_column="_merge_serial", resolved_fields=json.dumps({"serial": "ABC"})),
+        )
+
+        self.assertFalse(SourceResolution.objects.filter(source_column="_merge_serial").exists())
+
+    def test_a_resolution_with_no_preview_in_the_session_is_still_saved(self):
+        """A decision saved outside a preview is standalone and must not need one."""
+        session = self.client.session
+        for key in ("import_rows", "import_context", "import_result", "import_preview_pending"):
+            session.pop(key, None)
+        session.save()
+
+        self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "STANDALONE-1",
+                "source_column": "device_name",
+                "original_value": "old",
+                "resolved_fields": json.dumps({"device_name": "new"}),
+                "next": "/",
+            },
+        )
+
+        self.assertTrue(SourceResolution.objects.filter(source_id="STANDALONE-1").exists())
+
+    def test_the_native_contact_form_carries_the_preview_revision(self):
+        """Without scripts the form is the only thing that can present a token to check."""
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, 'name="preview_revision"')
+
+    def test_a_stale_revision_is_refused_on_the_form_path_when_it_supplies_one(self):
+        """The rendered page carries its own token, so a retired one must not be honoured."""
         response = self.client.post(
             reverse("plugins:netbox_data_import:save_resolution"),
             self._payload(preview_revision="revision-zero"),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
+    def test_a_plain_form_post_still_redirects(self):
+        """The form works without scripts, so the browser path must keep its redirect."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            self._payload(),
         )
 
         self.assertRedirects(

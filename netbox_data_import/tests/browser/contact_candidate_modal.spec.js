@@ -414,10 +414,19 @@ async function setUpWithPendingSave(page) {
   await page.evaluate(() => {
     window.__requests = [];
     const realFetch = window.fetch.bind(window);
+    window.__release = [];
+    window.__hides = 0;
+    window.Modal = { getOrCreateInstance: () => ({ hide: () => { window.__hides += 1; } }) };
     window.fetch = (url, options) => {
       if (!String(url).includes("/save-resolution/")) return realFetch(url, options);
       window.__requests.push({ url, fields: Object.fromEntries(options.body.entries()) });
-      return new Promise(() => {});
+      return new Promise((resolve, reject) => {
+        window.__release.push({
+          ok: () => resolve({ ok: true, status: 200, json: () => Promise.resolve(
+            { ok: true, row_number: 1, preview_state: "recalculation_required", message: "Saved." }) }),
+          fail: () => reject(new Error("save A failed")),
+        });
+      });
     };
   });
 }
@@ -611,4 +620,51 @@ test("linking a Contact clears a validation message left on a literal", async ({
   const requests = await page.evaluate(() => window.__requests);
   expect(requests).toHaveLength(1);
   expect(JSON.parse(requests[0].fields.resolved_fields).contact_id).toBe(77);
+});
+
+test("a save that settles late leaves the row now on screen alone", async ({ page }) => {
+  await setUpWithPendingSave(page);
+  await openRow(page, "first-row", "source-first");
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  // The operator moves on to another row while the first save is still open.
+  await openRow(page, "saved-row", "source-saved");
+  await page.evaluate(() => window.__release[0].ok());
+
+  // The late response belongs to the row that is gone, so it must not close this one.
+  await expect(page.locator("#contactCandidateSourceId")).toHaveValue("source-saved");
+  await expect(page.locator("#contactCandidateError")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__hides)).toBe(0);
+});
+
+test("a late failure does not report itself against another row", async ({ page }) => {
+  await setUpWithPendingSave(page);
+  await openRow(page, "first-row", "source-first");
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+  await openRow(page, "saved-row", "source-saved");
+
+  await page.evaluate(() => window.__release[0].fail());
+
+  await expect(page.locator("#contactCandidateError")).toHaveCount(0);
+});
+
+test("a reused blank input is given the role it was asked for", async ({ page }) => {
+  await setUpBothControllers(page);
+  await openRow(page, "first-row", "source-first");
+  await page.locator("#contactCandidateEditToggle").click();
+  // A blank row the operator added themselves, still marked "Not used".
+  await page.locator("#contactCandidateAddValue").click();
+  await page.locator('.ndi-contact-value-row[data-source-column="Primary Contact"] .ndi-contact-role')
+    .selectOption("");
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  // The blank input now carries the email message, so typing there must satisfy the check.
+  await page.locator(".ndi-contact-literal").fill("typed@example.invalid");
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  const requests = await page.evaluate(() => window.__requests);
+  expect(requests).toHaveLength(1);
+  expect(JSON.parse(requests[0].fields.resolved_fields).contact_field_values.email).toBe(
+    "typed@example.invalid",
+  );
 });

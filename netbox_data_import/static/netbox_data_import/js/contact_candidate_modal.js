@@ -363,7 +363,9 @@
         var role = required[index];
         if (selection.resolved[role]) continue;
         setExpanded(editToggle, editPanel, true);
-        var blank = emptyLiteral() || addBlankFor(role);
+        var blank = emptyLiteral();
+        if (blank) blank.closest('.ndi-contact-value-row').querySelector('.ndi-contact-role').value = role;
+        else blank = addBlankFor(role);
         blank.setCustomValidity('Give this row a ' + (ROLE_LABELS[role] || role).toLowerCase() + ', or select no contact.');
         blank.reportValidity();
         event.preventDefault();
@@ -430,6 +432,7 @@
         window.ndiMarkPreviewStale();
         rememberResolution(sourceId, snapshot);
         markRowResolved(sourceId);
+        if (!stillShowing(sourceId)) return;
         var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
         if (ModalClass) {
           ModalClass.getOrCreateInstance(modal).hide();
@@ -438,6 +441,7 @@
         save.innerHTML = '<i class="mdi mdi-check"></i> Saved';
       })
       .catch(function (error) {
+        if (!stillShowing(sourceId)) return;
         modalError(error.message);
         save.disabled = false;
         save.innerHTML = original;
@@ -475,6 +479,12 @@
     button.classList.add('btn-outline-success', 'ndi-contact-resolved');
     button.innerHTML = '<i class="mdi mdi-account-check"></i> Contact resolved';
     button.title = "This row's Contact fields are resolved. Open to review or change them.";
+  }
+
+  /* The modal is shared. A response that arrives after the operator moved on still records its
+   * decision, but it must not close or write over the row now on screen. */
+  function stillShowing(sourceId) {
+    return document.getElementById('contactCandidateSourceId').value === sourceId;
   }
 
   function clearLiteralValidity() {
