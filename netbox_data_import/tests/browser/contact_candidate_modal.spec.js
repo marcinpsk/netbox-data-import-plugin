@@ -403,7 +403,7 @@ test("a failure on one row is not shown when another row opens", async ({ page }
   await expect(page.locator("#contactCandidateError")).toHaveCount(0);
 });
 
-/* Load the fixture with both shipped controllers. Callers stub only the network. */
+/* Load the fixture with both shipped controllers. Callers add their own stubs on top. */
 async function setUpShippedControllers(page) {
   await page.setContent(previewFixture);
   await initNetBoxSelects(page);
