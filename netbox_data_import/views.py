@@ -1729,6 +1729,9 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
                     defaults,
                 )
                 if not allowed:
+                    # The binding above already wrote. A plain return leaves atomic() normally and
+                    # would commit it while telling the operator the review was refused.
+                    transaction.set_rollback(True)
                     return _preview_action_error(
                         request,
                         next_url,
