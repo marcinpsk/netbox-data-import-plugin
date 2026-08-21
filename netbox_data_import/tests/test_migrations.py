@@ -6,6 +6,7 @@ from contextlib import contextmanager
 
 from django.apps import apps
 from django.db import connection
+from django.db.migrations import Migration, RunPython
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
@@ -17,12 +18,13 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     migrate_from = ("netbox_data_import", "0014_alter_columnmapping_target_field_and_more")
     migrate_to = ("netbox_data_import", "0016_deviceexistingmatch_ndi_devicematch_profile_device")
     # Django refuses to reverse these data migrations, so the walk back fakes each one, newest
-    # first. Faking is safe here because none changes the schema.
+    # first. A test-only Migration reverses the squash's real schema operations, then its recorder
+    # state is faked down. Faking the older data-only migration is safe because it changes no schema.
     irreversible_data_steps = (
-        ("0024_repair_empty_primary_contact_lookup_field", "0023_drop_moved_profile_columns"),
-        ("0022_migrate_profile_adapter_config", "0021_importprofile_adapter_config_and_more"),
+        ("0021_importprofile_adapter_config", "0020_migrate_import_source_custom_field"),
         ("0020_migrate_import_source_custom_field", "0019_deviceimportsource"),
     )
+    squashed_data_and_schema_step = "0021_importprofile_adapter_config"
 
     @contextmanager
     def _migration_apps(self):
@@ -33,10 +35,33 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         finally:
             apps.set_available_apps(self.available_apps)
 
-    def _fake_unapply_the_irreversible_data_migrations(self):
-        """Step past each data migration without reversing it: Django refuses, and data would go."""
+    def _reverse_squashed_schema_operations(self, executor, step, below):
+        """Reverse the real schema operations without running either irreversible data operation."""
+        squashed_migration = executor.loader.get_migration("netbox_data_import", step)
+        data_operations = [operation for operation in squashed_migration.operations if isinstance(operation, RunPython)]
+        self.assertEqual(len(data_operations), 2)
+
+        schema_migration = Migration(step, "netbox_data_import")
+        schema_migration.atomic = squashed_migration.atomic
+        schema_migration.operations = [
+            operation for operation in squashed_migration.operations if not isinstance(operation, RunPython)
+        ]
+        before_state = executor.loader.project_state([("netbox_data_import", below)])
+        with connection.schema_editor(atomic=schema_migration.atomic) as schema_editor:
+            schema_migration.unapply(before_state, schema_editor)
+
+    def _unapply_the_irreversible_data_migrations(self):
+        """Step past each data operation without attempting to reconstruct its old values."""
         for step, below in self.irreversible_data_steps:
             MigrationExecutor(connection).migrate([("netbox_data_import", step)])
+            if step == self.squashed_data_and_schema_step:
+                executor = MigrationExecutor(connection)
+                plan = executor.migration_plan([("netbox_data_import", below)])
+                self.assertEqual([migration.name for migration, _backwards in plan], [step])
+                self._reverse_squashed_schema_operations(executor, step, below)
+                executor.migrate([("netbox_data_import", below)], fake=True)
+                continue
+
             executor = MigrationExecutor(connection)
             plan = executor.migration_plan([("netbox_data_import", below)])
             self.assertEqual(
@@ -53,7 +78,7 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         # left below the leaf fails every later test that reads a current column.
         self.addCleanup(self._restore_the_leaf_migrations)
         with self._migration_apps():
-            self._fake_unapply_the_irreversible_data_migrations()
+            self._unapply_the_irreversible_data_migrations()
             executor = MigrationExecutor(connection)
             executor.migrate([self.migrate_from])
             old_apps = executor.loader.project_state([self.migrate_from]).apps

@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Run the ordered Import Profile cutover against the real migration executor."""
+"""Run the squashed Import Profile cutover against the real migration executor."""
+
+from importlib import import_module
 
 from django.db import connection
+from django.db.migrations import AddField, Migration, RemoveField, RunPython
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.recorder import MigrationRecorder
 from django.test import TransactionTestCase
 
 APP = "netbox_data_import"
-BEFORE = "0021_importprofile_adapter_config_and_more"
-DATA_STEP = "0022_migrate_profile_adapter_config"
-AFTER = "0023_drop_moved_profile_columns"
-REPAIR_STEP = "0024_repair_empty_primary_contact_lookup_field"
+BEFORE = "0020_migrate_import_source_custom_field"
+SQUASHED = "0021_importprofile_adapter_config"
 
 MOVED_COLUMNS = (
     "sheet_name",
@@ -24,56 +25,55 @@ MOVED_COLUMNS = (
     "primary_contact_lookup_field",
     "preview_view_mode",
 )
+REMOVED_FIELDS = (*MOVED_COLUMNS, "primary_contact_role")
 
 
-def _migrate(target):
+def _migrate(target, *, fake=False):
     """Migrate the plugin app to *target* and return the resulting historical app registry."""
     executor = MigrationExecutor(connection)
     executor.loader.build_graph()
-    executor.migrate([(APP, target)])
+    executor.migrate([(APP, target)], fake=fake)
     executor.loader.build_graph()
     return executor.loader.project_state([(APP, target)]).apps
 
 
 def _applied_steps():
-    """Return the plugin migrations the recorder currently holds, in order."""
-    return sorted(name for app, name in MigrationRecorder(connection).applied_migrations() if app == APP)
+    """Return the plugin migration names currently held by the recorder."""
+    return {name for app, name in MigrationRecorder(connection).applied_migrations() if app == APP}
 
 
-def _rewind_to_before_the_data_step():
-    """Restore the moved columns, then forget the data step so the executor runs it again.
+def _rewind_to_before_the_squash():
+    """Reverse only the squash's schema so its real forward data operations can run again."""
+    executor = MigrationExecutor(connection)
+    squashed_migration = executor.loader.get_migration(APP, SQUASHED)
+    data_operations = [operation for operation in squashed_migration.operations if isinstance(operation, RunPython)]
+    if len(data_operations) != 2:
+        raise AssertionError(f"Expected two RunPython operations in {SQUASHED}, found {len(data_operations)}")
 
-    Unapplying 0023 is a real schema rollback. The data step has no reverse, so only its recorder
-    row is dropped: nothing it wrote is undone, and the columns it read are back.
-    """
-    apps = _migrate(DATA_STEP)
-    MigrationRecorder(connection).record_unapplied(APP, DATA_STEP)
-    return apps
-
-
-def _rewind_to_before_the_repair_step():
-    """Forget only the repair recorder row so its irreversible data operation runs again."""
-    apps = _migrate(REPAIR_STEP)
-    MigrationRecorder(connection).record_unapplied(APP, REPAIR_STEP)
-    return apps
+    schema_migration = Migration(SQUASHED, APP)
+    schema_migration.atomic = squashed_migration.atomic
+    schema_migration.operations = [
+        operation for operation in squashed_migration.operations if not isinstance(operation, RunPython)
+    ]
+    before_state = executor.loader.project_state([(APP, BEFORE)])
+    with connection.schema_editor(atomic=schema_migration.atomic) as schema_editor:
+        schema_migration.unapply(before_state, schema_editor)
+    return _migrate(BEFORE, fake=True)
 
 
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
-    """The three ordered steps move every column and drop the originals."""
+    """The squash moves the legacy settings, repairs them, and drops their columns in order."""
 
     def setUp(self):
         super().setUp()
         # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
-        # skips tearDown. Register before anything migrates, so a rewound worker always recovers.
-        self.addCleanup(_migrate, REPAIR_STEP)
-        # The repair is data-only and irreversible. Forget its recorder row before walking down to
-        # the older cutover, then let cleanup reapply it at the leaf.
-        _migrate(REPAIR_STEP)
-        MigrationRecorder(connection).record_unapplied(APP, REPAIR_STEP)
+        # skips tearDown. Register before walking down, so a rewound worker always recovers.
+        self.addCleanup(_migrate, SQUASHED)
+        _rewind_to_before_the_squash()
 
-    def test_it_moves_every_column_for_every_existing_profile(self):
-        """The data step stamps the adapter key and copies each declared column."""
-        apps = _rewind_to_before_the_data_step()
+    def test_it_moves_every_column_and_repairs_a_blank_lookup(self):
+        """A fresh upgrade preserves legacy values and repairs the invalid value 0020 can store."""
+        apps = MigrationExecutor(connection).loader.project_state([(APP, BEFORE)]).apps
         ContactRole = apps.get_model("tenancy", "ContactRole")
         ImportProfile = apps.get_model(APP, "ImportProfile")
         role = ContactRole.objects.create(name="Migrated Owner", slug="migrated-owner")
@@ -90,12 +90,12 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
             preview_view_mode="racks",
         )
         ImportProfile.objects.create(name="Legacy Defaults")
+        ImportProfile.objects.create(name="Legacy Blank Lookup", primary_contact_lookup_field="")
 
-        _migrate(AFTER)
+        migrated_apps = _migrate(SQUASHED)
+        MigratedProfile = migrated_apps.get_model(APP, "ImportProfile")
 
-        from netbox_data_import.models import ImportProfile as CurrentProfile
-
-        full = CurrentProfile.objects.get(name="Legacy Full")
+        full = MigratedProfile.objects.get(name="Legacy Full")
         self.assertEqual(full.source_adapter, "flat_workbook")
         self.assertEqual(
             full.adapter_config,
@@ -112,15 +112,19 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
             },
         )
 
-        defaults = CurrentProfile.objects.get(name="Legacy Defaults")
+        defaults = MigratedProfile.objects.get(name="Legacy Defaults")
         self.assertEqual(defaults.source_adapter, "flat_workbook")
         self.assertEqual(defaults.adapter_config["sheet_name"], "Data")
         self.assertTrue(defaults.adapter_config["update_existing"])
+        self.assertEqual(defaults.adapter_config["primary_contact_lookup_field"], "email")
         self.assertIsNone(defaults.adapter_config["primary_contact_role"])
 
+        blank = MigratedProfile.objects.get(name="Legacy Blank Lookup")
+        self.assertEqual(blank.adapter_config["primary_contact_lookup_field"], "email")
+
     def test_the_moved_columns_are_gone_afterwards(self):
-        """No dual read path survives the sequence."""
-        _migrate(AFTER)
+        """No dual read path survives the squash."""
+        _migrate(SQUASHED)
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
@@ -132,73 +136,40 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         self.assertIn("adapter_config", columns)
         self.assertIn("source_adapter", columns)
 
-    def test_the_data_step_refuses_a_rollback(self):
-        """A renamed or deleted ContactRole cannot be resolved back to its id, so no reverse exists."""
-        _migrate(AFTER)
+    def test_the_squash_refuses_a_rollback(self):
+        """Neither frozen data transformation has a safe reverse operation."""
+        _migrate(SQUASHED)
 
         with self.assertRaises(IrreversibleError):
             _migrate(BEFORE)
 
-        # 0023 reverses cleanly and comes off first, so the run stops on the data step. Pinning
-        # that keeps a wider partial rollback from surfacing as an unrelated failure later.
-        self.assertEqual(_applied_steps()[-1], DATA_STEP)
+        migration = import_module(f"{APP}.migrations.{SQUASHED}").Migration
+        replaced_steps = {name for app, name in migration.replaces if app == APP}
+        self.assertTrue(replaced_steps.issubset(_applied_steps()))
 
-    def test_the_data_step_carries_data_operations_only(self):
-        """The middle step never touches the schema."""
-        from importlib import import_module
-
-        from django.db.migrations import RunPython
-
-        migration = import_module(f"{APP}.migrations.{DATA_STEP}").Migration
-        self.assertTrue(migration.operations)
-        for operation in migration.operations:
-            self.assertIsInstance(operation, RunPython)
-
-
-class EmptyPrimaryContactLookupMigrationTest(TransactionTestCase):
-    """The repair freezes the default only for the two invalid stored values."""
-
-    def setUp(self):
-        super().setUp()
-        self.addCleanup(_migrate, REPAIR_STEP)
-
-    def test_it_repairs_only_explicitly_empty_flat_workbook_lookup_fields(self):
-        apps = _rewind_to_before_the_repair_step()
-        ImportProfile = apps.get_model(APP, "ImportProfile")
-        fixtures = {
-            "Blank Lookup": {"primary_contact_lookup_field": ""},
-            "Null Lookup": {"primary_contact_lookup_field": None},
-            "Missing Lookup": {"sheet_name": "Data"},
-            "Email Lookup": {"primary_contact_lookup_field": "email"},
-            "Name Lookup": {"primary_contact_lookup_field": "name"},
+    def test_the_squash_preserves_the_cutover_operation_order(self):
+        """Data moves only after its targets exist and before its source columns disappear."""
+        migration = import_module(f"{APP}.migrations.{SQUASHED}").Migration
+        operations = migration.operations
+        add_indices = {
+            operation.name: index for index, operation in enumerate(operations) if isinstance(operation, AddField)
         }
-        for name, adapter_config in fixtures.items():
-            ImportProfile.objects.create(
-                name=name,
-                source_adapter="flat_workbook",
-                adapter_config=adapter_config,
-            )
-        ImportProfile.objects.create(
-            name="Trace Blank Lookup",
-            source_adapter="trace_workbook",
-            adapter_config={"primary_contact_lookup_field": ""},
-        )
+        remove_indices = {
+            operation.name: index for index, operation in enumerate(operations) if isinstance(operation, RemoveField)
+        }
+        data_indices = {
+            operation.code.__name__: index
+            for index, operation in enumerate(operations)
+            if isinstance(operation, RunPython)
+        }
 
-        migrated_apps = _migrate(REPAIR_STEP)
-        MigratedProfile = migrated_apps.get_model(APP, "ImportProfile")
-        migrated = dict(MigratedProfile.objects.values_list("name", "adapter_config"))
-
-        self.assertEqual(migrated["Blank Lookup"], {"primary_contact_lookup_field": "email"})
-        self.assertEqual(migrated["Null Lookup"], {"primary_contact_lookup_field": "email"})
-        self.assertEqual(migrated["Missing Lookup"], {"sheet_name": "Data"})
-        self.assertEqual(migrated["Email Lookup"], {"primary_contact_lookup_field": "email"})
-        self.assertEqual(migrated["Name Lookup"], {"primary_contact_lookup_field": "name"})
-        self.assertEqual(migrated["Trace Blank Lookup"], {"primary_contact_lookup_field": ""})
-
-    def test_the_repair_refuses_a_rollback(self):
-        _migrate(REPAIR_STEP)
-
-        with self.assertRaises(IrreversibleError):
-            _migrate(AFTER)
-
-        self.assertEqual(_applied_steps()[-1], REPAIR_STEP)
+        move_index = data_indices["move_columns_into_adapter_config"]
+        repair_index = data_indices["repair_empty_primary_contact_lookup_field"]
+        self.assertEqual(set(add_indices), {"adapter_config", "source_adapter"})
+        self.assertLess(max(add_indices.values()), move_index)
+        self.assertEqual(set(remove_indices), set(REMOVED_FIELDS))
+        self.assertLess(move_index, min(remove_indices.values()))
+        self.assertLess(max(remove_indices.values()), repair_index)
+        self.assertEqual(repair_index, len(operations) - 1)
+        self.assertIsNone(operations[move_index].reverse_code)
+        self.assertIsNone(operations[repair_index].reverse_code)
