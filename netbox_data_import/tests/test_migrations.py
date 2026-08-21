@@ -16,10 +16,12 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     available_apps = ["netbox_data_import"]
     migrate_from = ("netbox_data_import", "0014_alter_columnmapping_target_field_and_more")
     migrate_to = ("netbox_data_import", "0016_deviceexistingmatch_ndi_devicematch_profile_device")
-    # 0020 moves data and Django refuses to reverse it, so the walk back starts below it. Faking
-    # that step is safe here because the operation changes no schema.
-    reverse_to = ("netbox_data_import", "0020_migrate_import_source_custom_field")
-    fake_unapply_to = ("netbox_data_import", "0019_deviceimportsource")
+    # Django refuses to reverse these data migrations, so the walk back fakes each one, newest
+    # first. Faking is safe here because neither changes the schema.
+    irreversible_data_steps = (
+        ("0022_migrate_profile_adapter_config", "0021_importprofile_adapter_config_and_more"),
+        ("0020_migrate_import_source_custom_field", "0019_deviceimportsource"),
+    )
 
     @contextmanager
     def _migration_apps(self):
@@ -30,22 +32,27 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         finally:
             apps.set_available_apps(self.available_apps)
 
-    def _fake_unapply_the_irreversible_data_migration(self):
-        """Step past 0020 without reversing it: Django refuses, and reversing it would lose data."""
-        MigrationExecutor(connection).migrate([self.reverse_to])
-        executor = MigrationExecutor(connection)
-        plan = executor.migration_plan([self.fake_unapply_to])
-        self.assertEqual(
-            [migration.name for migration, _backwards in plan],
-            ["0020_migrate_import_source_custom_field"],
-            "Only the irreversible data migration may be faked. A later migration needs a real reverse.",
-        )
-        executor.migrate([self.fake_unapply_to], fake=True)
+    def _fake_unapply_the_irreversible_data_migrations(self):
+        """Step past each data migration without reversing it: Django refuses, and data would go."""
+        for step, below in self.irreversible_data_steps:
+            MigrationExecutor(connection).migrate([("netbox_data_import", step)])
+            executor = MigrationExecutor(connection)
+            plan = executor.migration_plan([("netbox_data_import", below)])
+            self.assertEqual(
+                [migration.name for migration, _backwards in plan],
+                [step],
+                "Only the irreversible data migration may be faked. A later migration needs a real reverse.",
+            )
+            executor.migrate([("netbox_data_import", below)], fake=True)
 
     def setUp(self):
         super().setUp()
+        self.profile_pk = None
+        # Register before the first walk down: a failure inside setUp skips tearDown, and a worker
+        # left below the leaf fails every later test that reads a current column.
+        self.addCleanup(self._restore_the_leaf_migrations)
         with self._migration_apps():
-            self._fake_unapply_the_irreversible_data_migration()
+            self._fake_unapply_the_irreversible_data_migrations()
             executor = MigrationExecutor(connection)
             executor.migrate([self.migrate_from])
             old_apps = executor.loader.project_state([self.migrate_from]).apps
@@ -67,14 +74,16 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
             )
             self.profile_pk = profile.pk
 
-    def tearDown(self):
+    def _restore_the_leaf_migrations(self):
+        """Walk back up to the leaf and drop the legacy profile the walk down created."""
         with self._migration_apps():
             executor = MigrationExecutor(connection)
             executor.migrate(executor.loader.graph.leaf_nodes())
+        if self.profile_pk is None:
+            return
         from netbox_data_import.models import ImportProfile
 
         ImportProfile.objects.filter(pk=self.profile_pk).delete()
-        super().tearDown()
 
     def test_migration_removes_all_ambiguous_bindings(self):
         with self._migration_apps():

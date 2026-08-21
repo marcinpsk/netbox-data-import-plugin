@@ -29,21 +29,6 @@ def move_columns_into_adapter_config(apps, schema_editor):
         profile.save(update_fields=["source_adapter", "adapter_config"])
 
 
-def restore_columns_from_adapter_config(apps, schema_editor):
-    """Copy the adapter configuration back into the columns 0023 restores on a rollback."""
-    ImportProfile = apps.get_model("netbox_data_import", "ImportProfile")
-    ContactRole = apps.get_model("tenancy", "ContactRole")
-    role_ids = dict(ContactRole.objects.values_list("name", "pk"))
-
-    for profile in ImportProfile.objects.all().iterator():
-        config = profile.adapter_config or {}
-        for column in MOVED_COLUMNS:
-            if column in config:
-                setattr(profile, column, config[column])
-        profile.primary_contact_role_id = role_ids.get(config.get("primary_contact_role"))
-        profile.save(update_fields=[*MOVED_COLUMNS, "primary_contact_role"])
-
-
 class Migration(migrations.Migration):
     dependencies = [
         ("tenancy", "0001_initial"),
@@ -51,5 +36,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunPython(move_columns_into_adapter_config, restore_columns_from_adapter_config),
+        # No reverse callable: a renamed or deleted ContactRole cannot be resolved back to its id.
+        migrations.RunPython(move_columns_into_adapter_config),
     ]

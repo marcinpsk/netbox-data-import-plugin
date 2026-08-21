@@ -3,7 +3,9 @@
 """Run the ordered Import Profile cutover against the real migration executor."""
 
 from django.db import connection
+from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.recorder import MigrationRecorder
 from django.test import TransactionTestCase
 
 APP = "netbox_data_import"
@@ -32,6 +34,17 @@ def _migrate(target):
     return executor.loader.project_state([(APP, target)]).apps
 
 
+def _rewind_to_before_the_data_step():
+    """Restore the moved columns, then forget the data step so the executor runs it again.
+
+    Unapplying 0023 is a real schema rollback. The data step has no reverse, so only its recorder
+    row is dropped: nothing it wrote is undone, and the columns it read are back.
+    """
+    apps = _migrate(DATA_STEP)
+    MigrationRecorder(connection).record_unapplied(APP, DATA_STEP)
+    return apps
+
+
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
     """The three ordered steps move every column and drop the originals."""
 
@@ -41,7 +54,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
 
     def test_it_moves_every_column_for_every_existing_profile(self):
         """The data step stamps the adapter key and copies each declared column."""
-        apps = _migrate(BEFORE)
+        apps = _rewind_to_before_the_data_step()
         ContactRole = apps.get_model("tenancy", "ContactRole")
         ImportProfile = apps.get_model(APP, "ImportProfile")
         role = ContactRole.objects.create(name="Migrated Owner", slug="migrated-owner")
@@ -99,6 +112,13 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         self.assertNotIn("primary_contact_role_id", columns)
         self.assertIn("adapter_config", columns)
         self.assertIn("source_adapter", columns)
+
+    def test_the_data_step_refuses_a_rollback(self):
+        """A renamed or deleted ContactRole cannot be resolved back to its id, so no reverse exists."""
+        _migrate(AFTER)
+
+        with self.assertRaises(IrreversibleError):
+            _migrate(BEFORE)
 
     def test_the_data_step_carries_data_operations_only(self):
         """The middle step never touches the schema."""
