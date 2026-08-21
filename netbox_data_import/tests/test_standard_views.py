@@ -73,8 +73,7 @@ class ImportProfileAPIViewTestCase(APIViewTestCases.APIViewTestCase):
                 ImportProfile(name="Standard API Profile 3"),
             ]
         )
-        # The adapter normalizes a stored configuration, so submit a complete one: the standard
-        # contract asserts the response echoes exactly what was sent.
+        # Submit a normalized configuration: the standard contract asserts the response echoes the request.
         flat_defaults = FlatWorkbookConfigForm.validate_config({})
         cls.create_data = [
             {
