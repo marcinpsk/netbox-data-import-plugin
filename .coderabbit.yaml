@@ -31,7 +31,10 @@ reviews:
         the suite cannot run locally. Report a bug fix that adds no test.
     - path: "**/*.py"
       instructions: >-
-        Every file needs an SPDX header. Comments give the non-obvious reason in one line.
+        Every file needs an SPDX header. docs/agents/licensing.md is the only authority on its
+        format: a new file uses SPDX-FileCopyrightText with the year it was added, and an
+        existing Copyright (C) header keeps its original year. Do not report either as wrong.
+        Comments give the non-obvious reason in one line.
         Report comment blocks that restate the code, and prose that belongs in the commit
         message. Report naive datetime use; this project uses timezone-aware values only.
     - path: ".github/workflows/**"
