@@ -40,11 +40,11 @@ const roleSuggestions = {
   "first-row": { name: "Contact Name", email: "Contact Email" },
 };
 
-function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/" } = {}) {
+function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/", lookupField = "email" } = {}) {
   const lookupAttribute = lookupUrl === null ? "" : ` data-contact-lookup-url="${lookupUrl}"`;
   document.body.innerHTML = `
     <div id="contactCandidateModal">
-      <form id="contactCandidateForm" data-contact-lookup-field="email"${lookupAttribute}>
+      <form id="contactCandidateForm" data-contact-lookup-field="${lookupField}"${lookupAttribute}>
         <input type="hidden" id="contactCandidateSourceId">
         <input type="hidden" id="contactCandidateOriginalValue">
         <input type="hidden" id="contactCandidateResolvedFields">
@@ -167,6 +167,15 @@ describe("contact candidate modal", () => {
     await new Promise((done) => picker.settings.load("a", done));
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("submits when the profile stores no contact lookup field", () => {
+    /* AdapterSettings returns an explicitly stored empty string, and a blank role can never be
+     * satisfied, so requiring it would block every save on such a profile. */
+    addPreviewFixture({}, { lookupField: "" });
+    openRow("first-row", "source-first");
+
+    expect(submitPayload().contact_resolution_applied).toBe(true);
   });
 
   it("reopens a saved literal value as its own row", () => {
