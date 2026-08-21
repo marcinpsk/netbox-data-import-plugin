@@ -306,7 +306,7 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
         self.url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
         self.preview = reverse("plugins:netbox_data_import:import_preview")
 
-    def _post(self, **overrides):
+    def _payload(self, **overrides):
         payload = {
             "profile_id": self.profile.pk,
             "source_make": "Acme",
@@ -315,7 +315,31 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
             "netbox_dt_slug": "widget",
         }
         payload.update(overrides)
-        return self.client.post(self.url, payload)
+        return payload
+
+    def _post(self, **overrides):
+        return self.client.post(self.url, self._payload(**overrides))
+
+    def _client_holding_only_the_mapping_permission(self, username, *, also_add_manufacturer=False):
+        """Log in a user who may save the mapping but may not create every NetBox object.
+
+        NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants nothing.
+        """
+        from dcim.models import Manufacturer
+        from django.contrib.contenttypes.models import ContentType
+        from users.models import ObjectPermission
+
+        user = User.objects.create_user(username, f"{username}@example.com", "testpass")
+        granted = [(DeviceTypeMapping, ["add"])]
+        if also_add_manufacturer:
+            granted.append((Manufacturer, ["add"]))
+        for model, actions in granted:
+            permission = ObjectPermission.objects.create(name=f"{username} {model.__name__}", actions=actions)
+            permission.object_types.add(ContentType.objects.get_for_model(model))
+            permission.users.add(user)
+        client = Client()
+        self.assertTrue(client.login(username=username, password="testpass"))
+        return client
 
     def test_an_overlength_device_type_slug_is_refused(self):
         """The slug is posted directly and the mapping column holds 100 characters."""
@@ -353,16 +377,39 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
 
     def test_creating_now_refuses_a_model_the_device_type_cannot_hold(self):
         """The posted device type name is never bounded and the NetBox model holds 100."""
-        from dcim.models import DeviceType
+        from dcim.models import DeviceType, Manufacturer
 
         response = self._post(netbox_dt_name="D" * 150, action="create_now")
 
         self.assertRedirects(response, self.preview, fetch_redirect_response=False)
         self.assertFalse(DeviceType.objects.filter(slug="widget").exists())
+        # The manufacturer is written first, so the refusal has to take it back too.
+        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
         self.assertFalse(
             DeviceTypeMapping.objects.filter(profile=self.profile).exists(),
             "a refused create_now must not leave the mapping behind",
         )
+
+    def test_a_missing_manufacturer_permission_leaves_no_mapping_behind(self):
+        """The refusal must not commit the mapping the same request already wrote."""
+        client = self._client_holding_only_the_mapping_permission("qdt-no-mfg")
+
+        response = client.post(self.url, self._payload(action="create_now"))
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+
+    def test_a_missing_device_type_permission_leaves_no_mapping_behind(self):
+        """The second permission sits behind the first, so it needs its own refusal."""
+        from dcim.models import Manufacturer
+
+        client = self._client_holding_only_the_mapping_permission("qdt-no-dt", also_add_manufacturer=True)
+
+        response = client.post(self.url, self._payload(action="create_now"))
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
 
     def test_a_valid_mapping_is_still_saved(self):
         """The guard must not refuse the values the preview page actually posts."""

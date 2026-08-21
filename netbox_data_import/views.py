@@ -2983,6 +2983,14 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         if not netbox_dt_slug:
             netbox_dt_slug = slugify(source_model)
 
+        # Refuse before the transaction opens: a return inside atomic() exits it normally and commits,
+        # so a check placed after the mapping save would deny the request and keep the row.
+        if action == "create_now":
+            for permission in ("dcim.add_manufacturer", "dcim.add_devicetype"):
+                if not request.user.has_perm(permission):
+                    messages.error(request, f"Permission denied: {permission} required.")
+                    return redirect(reverse("plugins:netbox_data_import:import_preview"))
+
         # Every name and slug below is posted directly, so validate each write before it happens.
         try:
             with transaction.atomic():
@@ -2999,12 +3007,6 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
                 mapping.save()
 
                 if action == "create_now":
-                    if not request.user.has_perm("dcim.add_manufacturer"):  # pragma: no cover
-                        messages.error(request, "Permission denied: dcim.add_manufacturer required.")
-                        return redirect(reverse("plugins:netbox_data_import:import_preview"))
-                    if not request.user.has_perm("dcim.add_devicetype"):  # pragma: no cover
-                        messages.error(request, "Permission denied: dcim.add_devicetype required.")
-                        return redirect(reverse("plugins:netbox_data_import:import_preview"))
                     mfg = _get_or_init(Manufacturer, slug=netbox_mfg_slug)
                     if mfg.pk is None:
                         mfg.name = source_make
