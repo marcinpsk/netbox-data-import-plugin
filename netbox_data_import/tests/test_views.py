@@ -415,8 +415,8 @@ class ImportSetupViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 200)
 
 
-class ImportPreviewViewTest(BaseViewTestCase):
-    """Tests for ImportPreviewView."""
+class PreviewSessionMixin:
+    """Build the preview session state without dragging another class's test methods along."""
 
     def _setup_session(self, *, mutate_rows=None):
         """Populate session with a valid import state.
@@ -450,6 +450,10 @@ class ImportPreviewViewTest(BaseViewTestCase):
         }
         session.save()
         return profile
+
+
+class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
+    """Tests for ImportPreviewView."""
 
     def test_preview_without_session_redirects(self):
         """GET /import/preview/ without session data redirects to setup."""

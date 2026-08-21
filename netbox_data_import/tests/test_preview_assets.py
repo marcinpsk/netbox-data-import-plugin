@@ -12,7 +12,7 @@ from pathlib import Path
 from django.test import SimpleTestCase
 from django.urls import reverse
 
-from netbox_data_import.tests.test_views import BaseViewTestCase, ImportPreviewViewTest
+from netbox_data_import.tests.test_views import BaseViewTestCase, PreviewSessionMixin
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "templates" / "netbox_data_import"
 HEAD_BLOCK = re.compile(r"{%\s*block head\s*%}(.*?){%\s*endblock\s*%}", re.DOTALL)
@@ -36,7 +36,7 @@ class HeadBlockCarriesNoPageAssetsTest(SimpleTestCase):
         )
 
 
-class PreviewAssetsSurviveABoostedSwapTest(ImportPreviewViewTest):
+class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase):
     """The rendered preview must carry its assets in the part htmx keeps."""
 
     def _rendered_body(self):
@@ -60,7 +60,7 @@ class PreviewAssetsSurviveABoostedSwapTest(ImportPreviewViewTest):
         self.assertIn(".ndi-badge-create", body)
 
 
-class ResultsAssetsSurviveABoostedSwapTest(ImportPreviewViewTest):
+class ResultsAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase):
     """The results page is reached from the same boosted flow."""
 
     def test_the_results_stylesheet_renders_inside_the_body(self):
@@ -77,7 +77,7 @@ class ResultsAssetsSurviveABoostedSwapTest(ImportPreviewViewTest):
         self.assertIn(".ndi-badge-create", body)
 
 
-class EveryRowCarriesADetailRowTest(ImportPreviewViewTest):
+class EveryRowCarriesADetailRowTest(PreviewSessionMixin, BaseViewTestCase):
     """A detail row per source row is what makes a row click answer and a placement reachable."""
 
     def test_the_detail_row_count_matches_the_source_row_count(self):
@@ -92,7 +92,7 @@ class EveryRowCarriesADetailRowTest(ImportPreviewViewTest):
         self.assertEqual(detail_rows, source_rows)
 
 
-class DetailRowIdsAreUniqueTest(ImportPreviewViewTest):
+class DetailRowIdsAreUniqueTest(PreviewSessionMixin, BaseViewTestCase):
     """Row numbers repeat across object types, so the detail row cannot be keyed on them."""
 
     def test_no_detail_row_id_is_rendered_twice(self):
@@ -156,7 +156,7 @@ class DetailRowIdsAreUniqueTest(ImportPreviewViewTest):
         self.assertTrue(all("tabindex=" not in attrs for attrs in rows), rows[:2])
 
 
-class PluginScriptsAreVersionedTest(ImportPreviewViewTest):
+class PluginScriptsAreVersionedTest(PreviewSessionMixin, BaseViewTestCase):
     """A browser must not keep running the previous release's script after an upgrade."""
 
     def test_every_plugin_script_carries_the_plugin_version(self):
@@ -309,7 +309,7 @@ class FieldRowIdsFollowTheDetailRowTest(SimpleTestCase):
             self.assertEqual(match.group(1).strip(), "forloop.parentloop.counter", family)
 
 
-class DetailRowSummaryReadsTheActionTest(ImportPreviewViewTest):
+class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
     """`netbox_device_id` is a device-only key, so it cannot decide what any other row says."""
 
     CREATE_MESSAGE = "This row creates a new object"
