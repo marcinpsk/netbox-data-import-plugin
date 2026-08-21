@@ -45,7 +45,8 @@ def _applied_steps():
 
 
 def _rewind_to_before_the_squash():
-    """Reverse only the squash's schema so its real forward data operations can run again."""
+    """Reverse every descendant, then only the squash's schema, so it can run again."""
+    _migrate(SQUASHED)
     executor = MigrationExecutor(connection)
     reverse_squashed_schema_operations(executor, APP, SQUASHED, BEFORE, expected_data_operations=2)
     return _migrate(BEFORE, fake=True)
