@@ -1388,6 +1388,21 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertNotIn("unique constraint", resp.content.decode())
 
+    def test_a_duplicate_name_is_refused_before_the_database(self):
+        """full_clean validates the unique constraints, so the duplicate never reaches the insert."""
+        from dcim.models import DeviceRole
+
+        DeviceRole.objects.create(name="Access", slug="access")
+
+        resp = self.client.post(self._url(), {"name": "Access", "slug": "access-spare"})
+
+        self.assertEqual(resp.status_code, 400)
+        body = resp.content.decode()
+        self.assertIn("invalid", resp.json()["error"].lower())
+        self.assertNotIn("unique constraint", body.lower())
+        self.assertNotIn("dcim_devicerole_name", body)
+        self.assertFalse(DeviceRole.objects.filter(slug="access-spare").exists())
+
     def test_validation_error_is_sanitized(self):
         """A name the column cannot hold is refused, and the field error is not echoed back."""
         from dcim.models import DeviceRole
