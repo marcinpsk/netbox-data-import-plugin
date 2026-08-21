@@ -32,7 +32,11 @@ from netbox_data_import.preview_row_actions import (
 )
 from netbox_data_import.tests.helpers import set_import_source
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
-from netbox_data_import.views import _import_intents, _save_permission_scoped_object, _serialize_rows
+from netbox_data_import.object_permissions import (
+    ObjectPermissionDenied,
+    save_permission_scoped_object,
+)
+from netbox_data_import.views import _import_intents, _serialize_rows
 
 
 class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
@@ -3550,15 +3554,15 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             device_name=first_device.name,
         )
 
-        allowed = _save_permission_scoped_object(
-            self.user,
-            DeviceExistingMatch,
-            {"profile": self.profile, "source_id": binding.source_id},
-            {"netbox_device_id": second_device.pk, "device_name": second_device.name},
-            allow_update=False,
-        )
+        with self.assertRaises(ObjectPermissionDenied):
+            save_permission_scoped_object(
+                self.user,
+                DeviceExistingMatch,
+                {"profile": self.profile, "source_id": binding.source_id},
+                {"netbox_device_id": second_device.pk, "device_name": second_device.name},
+                on_existing="reject",
+            )
 
-        self.assertFalse(allowed)
         binding.refresh_from_db()
         self.assertEqual(binding.netbox_device_id, first_device.pk)
 

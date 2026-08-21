@@ -56,7 +56,7 @@ from .tables import (
 from . import engine
 from .contact_resolution import PrimaryContactResolver, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer
-from .object_permissions import ObjectPermissionDenied
+from .object_permissions import ObjectPermissionDenied, save_permission_scoped_object
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
@@ -111,49 +111,6 @@ def _parse_posted_profile_id(request):
         return None
 
 
-def _reject_overlong_fields(instance, model):
-    """Reject a string the column cannot hold, before the database raises DataError.
-
-    Only length is checked. `full_clean` would also refuse a field that is legitimately blank.
-    """
-    for field in model._meta.concrete_fields:
-        max_length = getattr(field, "max_length", None)
-        value = getattr(instance, field.attname, None)
-        if max_length and isinstance(value, str) and len(value) > max_length:
-            raise ValidationError(f"{model._meta.verbose_name} {field.name} holds {max_length} characters.")
-
-
-def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=True):
-    """Create or update one object within the user's NetBox permission scope."""
-    with transaction.atomic():
-        instance = model.objects.select_for_update().filter(**lookup).first()
-        if instance is None:
-            permission = get_permission_for_model(model, "add")
-            if not user.has_perm(permission):
-                # atomic-exit-safe: add-denied-before-write
-                return False
-            instance = model(**lookup, **values)
-            _reject_overlong_fields(instance, model)
-            instance.save()
-        else:
-            if not allow_update:
-                # atomic-exit-safe: update-refused-before-write
-                return False
-            permission = get_permission_for_model(model, "change")
-            if not user.has_perm(permission, instance):
-                # atomic-exit-safe: change-denied-before-write
-                return False
-            for field_name, value in values.items():
-                setattr(instance, field_name, value)
-            _reject_overlong_fields(instance, model)
-            instance.save(update_fields=list(values))
-        allowed = user.has_perm(permission, instance)
-        if not allowed:
-            transaction.set_rollback(True)
-        # atomic-exit-safe: denied-after-rollback
-        return allowed
-
-
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
     """Persist the confirmed source-to-device identity for a field review."""
     existing_match = (
@@ -171,17 +128,18 @@ def _ensure_field_review_device_match(user, profile, source_id, device, source_a
         return False, "conflict"
     if existing_match is not None and existing_match.netbox_device_id == device.pk:
         return True, ""
-    allowed = _save_permission_scoped_object(
-        user,
-        DeviceExistingMatch,
-        {"profile": profile, "source_id": source_id},
-        {
-            "netbox_device_id": device.pk,
-            "device_name": device.name,
-            "source_asset_tag": source_asset_tag,
-        },
-    )
-    if not allowed:
+    try:
+        save_permission_scoped_object(
+            user,
+            DeviceExistingMatch,
+            {"profile": profile, "source_id": source_id},
+            {
+                "netbox_device_id": device.pk,
+                "device_name": device.name,
+                "source_asset_tag": source_asset_tag,
+            },
+        )
+    except ObjectPermissionDenied:
         return False, "permission"
     return True, ""
 
@@ -1727,20 +1685,19 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
                     )
                     # atomic-exit-safe: binding-refused-before-write
                     return _preview_action_error(request, next_url, message)
-                allowed = _save_permission_scoped_object(
+                # A denial raises, so the binding written above unwinds with the block.
+                save_permission_scoped_object(
                     request.user,
                     IgnoredFieldDifference,
                     lookup,
                     defaults,
                 )
-                if not allowed:
-                    # The binding above already wrote, and a plain return would leave atomic() and commit it.
-                    transaction.set_rollback(True)
-                    return _preview_action_error(
-                        request,
-                        next_url,
-                        "Permission denied: cannot create or change this field review.",
-                    )
+        except ObjectPermissionDenied:
+            return _preview_action_error(
+                request,
+                next_url,
+                "Permission denied: cannot create or change this field review.",
+            )
         except ValidationError as exc:
             return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
         except IntegrityError:
@@ -2336,12 +2293,15 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             "resolved_fields": {"device_name": new_name},
         }
         try:
-            allowed = _save_permission_scoped_object(
+            save_permission_scoped_object(
                 request.user,
                 SourceResolution,
                 {"profile": profile, "source_id": source_id, "source_column": "device_name"},
                 resolution_values,
             )
+        except ObjectPermissionDenied:
+            messages.error(request, "Permission denied: cannot create or change this saved name.")
+            return _name_resolution_response(request, next_url)
         except ValidationError as exc:
             messages.error(request, "; ".join(exc.messages))
             return _name_resolution_response(request, next_url)
@@ -2349,9 +2309,6 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             messages.error(request, "The saved name changed while this request was being processed. Try again.")
             return _name_resolution_response(request, next_url)
 
-        if not allowed:
-            messages.error(request, "Permission denied: cannot create or change this saved name.")
-            return _name_resolution_response(request, next_url)
         messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
         return _name_resolution_response(request, next_url)
 
@@ -2429,7 +2386,7 @@ class SaveResolutionView(_AjaxPermissionView):
                 contact_context = (source_row, result_row)
             try:
                 with transaction.atomic():
-                    allowed = _save_permission_scoped_object(
+                    save_permission_scoped_object(
                         request.user,
                         SourceResolution,
                         {"profile": profile, "source_id": source_id, "source_column": source_column},
@@ -2439,7 +2396,7 @@ class SaveResolutionView(_AjaxPermissionView):
                         },
                     )
                     contact_updated = False
-                    if allowed and contact_context is not None:
+                    if contact_context is not None:
                         source_row, result_row = contact_context
                         device_id = result_row.get("extra_data", {}).get("netbox_device_id")
                         if device_id:
@@ -2468,13 +2425,6 @@ class SaveResolutionView(_AjaxPermissionView):
                 return _preview_action_error(request, next_url, f"Permission denied: {exc}", status=403)
             except ValidationError as exc:
                 return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
-            if not allowed:
-                return _preview_action_error(
-                    request,
-                    next_url,
-                    "Permission denied: cannot create or change this resolution.",
-                    status=403,
-                )
             saved_message = (
                 "Resolution saved and the linked Device Contact was updated."
                 if contact_updated
@@ -3254,12 +3204,15 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
             "source_asset_tag": engine._str_val(source_rows[0].get("asset_tag"))[:50],
         }
         try:
-            allowed = _save_permission_scoped_object(
+            save_permission_scoped_object(
                 request.user,
                 DeviceExistingMatch,
                 {"profile": profile, "source_id": source_id},
                 binding_values,
             )
+        except ObjectPermissionDenied:
+            messages.error(request, "Permission denied: cannot create or change this device link.")
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         except ValidationError as exc:
             messages.error(request, "; ".join(exc.messages))
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
@@ -3267,9 +3220,6 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
             messages.error(request, "The device link changed while this request was being processed. Try again.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        if not allowed:
-            messages.error(request, "Permission denied: cannot create or change this device link.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         messages.success(request, f"Source '{source_id}' linked to existing device '{device.name}'.")
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
@@ -3691,7 +3641,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                     ambiguous += 1
                     continue
                 try:
-                    allowed = _save_permission_scoped_object(
+                    save_permission_scoped_object(
                         request.user,
                         DeviceExistingMatch,
                         {"profile": profile, "source_id": source_id},
@@ -3700,12 +3650,9 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                             "device_name": device.name,
                             "source_asset_tag": asset_tag,
                         },
-                        allow_update=False,
+                        on_existing="reject",
                     )
-                except (ValidationError, IntegrityError):
-                    skipped += 1
-                    continue
-                if not allowed:
+                except (ValidationError, IntegrityError, ObjectPermissionDenied):
                     skipped += 1
                     continue
                 bound_device_by_source[source_id] = device.pk

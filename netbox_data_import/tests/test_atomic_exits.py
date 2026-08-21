@@ -25,17 +25,14 @@ PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 # (qualified function, marker id) -> why this exit commits nothing it should not.
 # A new exit fails the guard until it is audited and listed here.
 AUDITED_EXITS = {
-    ("_save_permission_scoped_object", "add-denied-before-write"): (
-        "The add permission is refused before the new instance is saved."
+    ("save_permission_scoped_object", "existing-row-kept-unwritten"): (
+        "on_existing is keep, so the row is returned untouched after its view check."
     ),
-    ("_save_permission_scoped_object", "update-refused-before-write"): (
-        "allow_update is False and the existing instance is left untouched."
+    ("save_permission_scoped_object", "scoped-write-committed"): (
+        "The success path: every check passed, so committing the write is the point."
     ),
-    ("_save_permission_scoped_object", "change-denied-before-write"): (
-        "The change permission is refused before any field is reassigned."
-    ),
-    ("_save_permission_scoped_object", "denied-after-rollback"): (
-        "The only path reaching this return with allowed False has already set rollback."
+    ("delete_permission_scoped_objects", "scoped-delete-committed"): (
+        "Every row cleared its delete check before any row was deleted."
     ),
     ("IgnoreFieldDifferenceView.post", "binding-refused-before-write"): (
         "The binding helper either wrote nothing or rolled back its own savepoint."

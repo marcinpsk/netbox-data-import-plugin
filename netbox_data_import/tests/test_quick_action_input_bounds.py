@@ -95,7 +95,7 @@ def _permission_scoped_writer_url_names():
             if (
                 isinstance(sub, ast.Call)
                 and isinstance(sub.func, ast.Name)
-                and sub.func.id == "_save_permission_scoped_object"
+                and sub.func.id == "save_permission_scoped_object"
             ):
                 writers.add(node.name)
                 break
