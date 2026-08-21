@@ -34,6 +34,11 @@ def _migrate(target):
     return executor.loader.project_state([(APP, target)]).apps
 
 
+def _applied_steps():
+    """Return the plugin migrations the recorder currently holds, in order."""
+    return sorted(name for app, name in MigrationRecorder(connection).applied_migrations() if app == APP)
+
+
 def _rewind_to_before_the_data_step():
     """Restore the moved columns, then forget the data step so the executor runs it again.
 
@@ -48,9 +53,11 @@ def _rewind_to_before_the_data_step():
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
     """The three ordered steps move every column and drop the originals."""
 
-    def tearDown(self):
-        """Leave the database at the latest migration for the rest of the suite."""
-        _migrate(AFTER)
+    def setUp(self):
+        super().setUp()
+        # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
+        # skips tearDown. Register before anything migrates, so a rewound worker always recovers.
+        self.addCleanup(_migrate, AFTER)
 
     def test_it_moves_every_column_for_every_existing_profile(self):
         """The data step stamps the adapter key and copies each declared column."""
@@ -119,6 +126,10 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
 
         with self.assertRaises(IrreversibleError):
             _migrate(BEFORE)
+
+        # 0023 reverses cleanly and comes off first, so the run stops on the data step. Pinning
+        # that keeps a wider partial rollback from surfacing as an unrelated failure later.
+        self.assertEqual(_applied_steps()[-1], DATA_STEP)
 
     def test_the_data_step_carries_data_operations_only(self):
         """The middle step never touches the schema."""
