@@ -1377,7 +1377,9 @@ class _PermissionScopedWriteMixin:
         try:
             return super().dispatch(request, *args, **kwargs)
         except ObjectPermissionDenied as exc:
-            error = f"Permission denied: {exc}."
+            # The permission names an object the caller may not be allowed to know exists.
+            logger.warning("%s: write refused outside the caller's object scope: %s", type(self).__name__, exc)
+            error = "Permission denied: this action is outside your NetBox object permissions."
             if getattr(self, "permission_denied_response_format", "redirect") == "json":
                 return JsonResponse({"ok": False, "error": error}, status=403)
             messages.error(request, error)
@@ -2450,7 +2452,13 @@ class SaveResolutionView(_AjaxPermissionView):
                     "The resolution changed while this request was being processed. Try again.",
                 )
             except ObjectPermissionDenied as exc:
-                return _preview_action_error(request, next_url, f"Permission denied: {exc}", status=403)
+                logger.warning("SaveResolutionView: write refused outside the caller's object scope: %s", exc)
+                return _preview_action_error(
+                    request,
+                    next_url,
+                    "Permission denied: this action is outside your NetBox object permissions.",
+                    status=403,
+                )
             except ValidationError as exc:
                 return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
             saved_message = (

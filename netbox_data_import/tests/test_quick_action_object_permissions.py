@@ -5,6 +5,7 @@
 from dcim.models import DeviceRole, DeviceType, Manufacturer
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.messages import get_messages
 from django.test import Client, TestCase
 from django.urls import reverse
 from users.models import ObjectPermission
@@ -282,3 +283,21 @@ class QuickActionObjectPermissionTest(TestCase):
         )
 
         self._assert_preview_redirect(response)
+
+    def test_a_refusal_does_not_echo_the_permission_name(self):
+        """CodeQL caught the exception text reaching the response; the operator log keeps it.
+
+        The permission names an object the caller may not be allowed to know exists.
+        """
+        client = self._client_with("scope-leak-user")
+
+        response = client.post(
+            reverse("plugins:netbox_data_import:quick_create_manufacturer"),
+            {"profile_id": self.profile.pk, "mfg_name": "Acme", "mfg_slug": "acme"},
+        )
+
+        # The refusal rides on a Django message, so it is only visible once the redirect renders.
+        shown = " ".join(str(message) for message in get_messages(response.wsgi_request))
+        self.assertIn("Permission denied", shown)
+        self.assertNotIn("dcim.add_manufacturer", shown)
+        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())

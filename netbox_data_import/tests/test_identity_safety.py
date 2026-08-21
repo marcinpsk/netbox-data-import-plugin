@@ -3737,13 +3737,19 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         )
         self.client.force_login(limited_user)
 
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:quick_create_role"),
-            {"profile_id": self.profile.pk, "name": "Boundary Role", "slug": "boundary-role"},
-        )
+        from dcim.models import DeviceRole
+
+        with self.assertLogs("netbox_data_import.views", level="WARNING") as logs:
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:quick_create_role"),
+                {"profile_id": self.profile.pk, "name": "Boundary Role", "slug": "boundary-role"},
+            )
 
         self.assertEqual(response.status_code, 403)
-        self.assertIn("dcim.add_devicerole", response.json()["error"])
+        self.assertFalse(DeviceRole.objects.filter(slug="boundary-role").exists())
+        # The permission names an object the caller may not know exists, so it goes to the log only.
+        self.assertNotIn("dcim.add_devicerole", response.json()["error"])
+        self.assertIn("dcim.add_devicerole", "\n".join(logs.output))
 
     def test_single_row_sync_validates_row_number_and_active_site(self):
         row = self._device_row(2, "SYNC-BOUNDARY", "sync-boundary-device", self.rack_a, 1)
