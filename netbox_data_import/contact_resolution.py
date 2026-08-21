@@ -314,7 +314,14 @@ class PrimaryContactResolver:
         role_name = profile.adapter_settings.primary_contact_role
         if not role_name:
             raise ValidationError({"primary_contact": "Select a primary contact role on the import profile."})
-        role = profile.resolved_primary_contact_role
+        # The profile memoizes the role, and one instance serves both review and apply. Re-read it
+        # under the apply lock so a role deleted in between is refused here, not by the FK check.
+        if lock:
+            from tenancy.models import ContactRole
+
+            role = ContactRole.objects.select_for_update().filter(name=role_name).first()
+        else:
+            role = profile.resolved_primary_contact_role
         if role is None:
             raise ValidationError(
                 {

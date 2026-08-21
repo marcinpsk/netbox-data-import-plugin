@@ -466,6 +466,21 @@ class NativeContactSyncTest(TestCase):
         with self.assertRaisesMessage(ValidationError, "valid email"):
             PrimaryContactResolver.review(self.device, row, self.profile)
 
+    def test_apply_refuses_a_role_deleted_after_the_review(self):
+        """One profile instance serves both calls, and it memoizes the role it resolved."""
+        from tenancy.models import ContactRole
+
+        row = self._row(
+            contact_resolution_applied=True,
+            contact_field_values={"name": "Late Contact", "email": "late@example.invalid"},
+            contact_field_sources={},
+        )
+        review = PrimaryContactResolver.review(self.device, row, self.profile)
+        ContactRole.objects.filter(name=self.profile.adapter_settings.primary_contact_role).delete()
+
+        with self.assertRaisesMessage(ValidationError, "no longer exists"):
+            PrimaryContactResolver.apply(self.device, self.profile, review)
+
     def test_review_without_contact_data_has_no_contact_plan(self):
         """A row without Contact data leaves native assignments unchanged."""
         self._set_extra_columns({"depth": 750})
