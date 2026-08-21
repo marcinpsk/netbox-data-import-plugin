@@ -130,15 +130,18 @@ def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=
         if instance is None:
             permission = get_permission_for_model(model, "add")
             if not user.has_perm(permission):
+                # atomic-exit-safe: add-denied-before-write
                 return False
             instance = model(**lookup, **values)
             _reject_overlong_fields(instance, model)
             instance.save()
         else:
             if not allow_update:
+                # atomic-exit-safe: update-refused-before-write
                 return False
             permission = get_permission_for_model(model, "change")
             if not user.has_perm(permission, instance):
+                # atomic-exit-safe: change-denied-before-write
                 return False
             for field_name, value in values.items():
                 setattr(instance, field_name, value)
@@ -147,6 +150,7 @@ def _save_permission_scoped_object(user, model, lookup, values, *, allow_update=
         allowed = user.has_perm(permission, instance)
         if not allowed:
             transaction.set_rollback(True)
+        # atomic-exit-safe: denied-after-rollback
         return allowed
 
 
@@ -1721,6 +1725,7 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
                         if binding_error == "permission"
                         else "The source row or device is already linked elsewhere."
                     )
+                    # atomic-exit-safe: binding-refused-before-write
                     return _preview_action_error(request, next_url, message)
                 allowed = _save_permission_scoped_object(
                     request.user,
@@ -1797,12 +1802,14 @@ class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
                     .first()
                 )
                 if record is None:
+                    # atomic-exit-safe: record-absent-before-write
                     return _preview_action_error(
                         request,
                         next_url,
                         "The selected field review is no longer current. Refresh the preview.",
                     )
                 if not request.user.has_perm("netbox_data_import.delete_ignoredfielddifference", record):
+                    # atomic-exit-safe: delete-denied-before-write
                     return _preview_action_error(
                         request,
                         next_url,
@@ -1821,6 +1828,7 @@ class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
                         if binding_error == "permission"
                         else "The source row or device is already linked elsewhere."
                     )
+                    # atomic-exit-safe: binding-refused-before-delete
                     return _preview_action_error(request, next_url, message)
                 record.delete()
         except IntegrityError:
@@ -3825,6 +3833,7 @@ class SyncSingleRowView(_AjaxPermissionView):
                     # The page keeps its rendered rows, so its token must stop being accepted.
                     retire_preview_revision(request.session)
                     detail = current_row.detail if current_row is not None else "The row is no longer available."
+                    # atomic-exit-safe: stale-preview-after-dry-run
                     return JsonResponse(
                         {
                             "ok": False,

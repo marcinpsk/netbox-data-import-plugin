@@ -446,6 +446,7 @@ class PrimaryContactResolver:
                 enforce_saved_object_permission(assignment, user, "change")
 
             cls._remove_legacy_json(obj)
+            # atomic-exit-safe: success-commit-intended
             return plan
 
     @staticmethod
