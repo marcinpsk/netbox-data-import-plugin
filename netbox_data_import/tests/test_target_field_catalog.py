@@ -158,6 +158,10 @@ class AdapterConfigValidationTest(TestCase):
 class ImportProfileAdapterTest(TestCase):
     """The Source Adapter is required and immutable after creation."""
 
+    EMPTY_REQUIRED_SETTING_ERROR = (
+        "The required adapter setting 'primary_contact_lookup_field' is empty. Edit and save this import profile."
+    )
+
     def test_the_adapter_cannot_change_after_creation(self):
         """A different source format needs a new Import Profile."""
         profile = ImportProfile.objects.create(name="Immutable", adapter_config={})
@@ -175,9 +179,149 @@ class ImportProfileAdapterTest(TestCase):
 
     def test_settings_fall_back_to_the_declared_defaults(self):
         """A partial stored configuration still reads every declared setting."""
-        profile = ImportProfile.objects.create(name="Partial", adapter_config={"sheet_name": "Only"})
+        profile = ImportProfile.objects.create(name="Partial")
+        ImportProfile.objects.filter(pk=profile.pk).update(adapter_config={"sheet_name": "Only"})
+        profile.refresh_from_db()
         self.assertEqual(profile.adapter_settings.sheet_name, "Only")
         self.assertEqual(profile.adapter_settings.preview_view_mode, "rows")
+
+    def test_create_refuses_an_explicitly_blank_required_setting(self):
+        with self.assertRaises(ValidationError):
+            ImportProfile.objects.create(
+                name="Blank Lookup",
+                adapter_config={"primary_contact_lookup_field": ""},
+            )
+
+        self.assertFalse(ImportProfile.objects.filter(name="Blank Lookup").exists())
+
+    def test_create_refuses_an_explicitly_null_required_setting(self):
+        with self.assertRaises(ValidationError):
+            ImportProfile.objects.create(
+                name="Null Lookup",
+                adapter_config={"primary_contact_lookup_field": None},
+            )
+
+        self.assertFalse(ImportProfile.objects.filter(name="Null Lookup").exists())
+
+    def test_create_stores_a_partial_configuration_normalized(self):
+        profile = ImportProfile.objects.create(
+            name="Normalized Create",
+            adapter_config={"sheet_name": "Inventory"},
+        )
+        profile.refresh_from_db()
+
+        self.assertEqual(
+            profile.adapter_config,
+            {
+                "sheet_name": "Inventory",
+                "source_id_column": "",
+                "custom_field_name": "",
+                "update_existing": True,
+                "create_missing_device_types": True,
+                "capture_extra_data": False,
+                "primary_contact_role": None,
+                "primary_contact_lookup_field": "email",
+                "preview_view_mode": "rows",
+            },
+        )
+
+    def test_create_preserves_valid_values_and_optional_empty_settings(self):
+        profile = ImportProfile.objects.create(
+            name="Valid Optional Empties",
+            adapter_config={
+                "source_id_column": "",
+                "custom_field_name": "",
+                "update_existing": False,
+                "create_missing_device_types": False,
+                "capture_extra_data": False,
+                "primary_contact_role": None,
+                "primary_contact_lookup_field": "name",
+            },
+        )
+        profile.refresh_from_db()
+
+        self.assertEqual(profile.adapter_config["primary_contact_lookup_field"], "name")
+        self.assertEqual(profile.adapter_config["source_id_column"], "")
+        self.assertEqual(profile.adapter_config["custom_field_name"], "")
+        self.assertFalse(profile.adapter_config["update_existing"])
+        self.assertFalse(profile.adapter_config["create_missing_device_types"])
+        self.assertFalse(profile.adapter_config["capture_extra_data"])
+        self.assertIsNone(profile.adapter_config["primary_contact_role"])
+
+    def test_saving_adapter_config_through_update_fields_validates_it(self):
+        profile = ImportProfile.objects.create(name="Validate Partial Save")
+        stored_config = profile.adapter_config.copy()
+        profile.adapter_config = {"primary_contact_lookup_field": ""}
+
+        with self.assertRaises(ValidationError):
+            profile.save(update_fields=["adapter_config"])
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.adapter_config, stored_config)
+
+    def test_saving_an_unrelated_field_does_not_read_or_rewrite_adapter_config(self):
+        profile = ImportProfile.objects.create(name="Unrelated Partial Save")
+        ImportProfile.objects.filter(pk=profile.pk).update(adapter_config={"primary_contact_lookup_field": ""})
+        profile.refresh_from_db()
+        profile.name = "Renamed With Corrupt Config"
+
+        profile.save(update_fields=["name"])
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.name, "Renamed With Corrupt Config")
+        self.assertEqual(profile.adapter_config, {"primary_contact_lookup_field": ""})
+
+    def test_reading_a_corrupted_required_setting_fails_with_repair_guidance(self):
+        for index, invalid_value in enumerate(("", None)):
+            with self.subTest(invalid_value=invalid_value):
+                profile = ImportProfile.objects.create(name=f"Corrupt Read {index}")
+                ImportProfile.objects.filter(pk=profile.pk).update(
+                    adapter_config={"primary_contact_lookup_field": invalid_value}
+                )
+                profile.refresh_from_db()
+
+                with self.assertRaisesMessage(ValidationError, self.EMPTY_REQUIRED_SETTING_ERROR):
+                    profile.adapter_settings.primary_contact_lookup_field
+
+    def test_explicit_optional_empty_values_keep_their_meanings_on_read(self):
+        profile = ImportProfile.objects.create(name="Optional Empty Read")
+        ImportProfile.objects.filter(pk=profile.pk).update(
+            adapter_config={
+                "source_id_column": "",
+                "update_existing": False,
+                "primary_contact_role": None,
+                "primary_contact_lookup_field": "name",
+            }
+        )
+        profile.refresh_from_db()
+
+        self.assertEqual(profile.adapter_settings.source_id_column, "")
+        self.assertFalse(profile.adapter_settings.update_existing)
+        self.assertIsNone(profile.adapter_settings.primary_contact_role)
+
+    def test_adapter_settings_reuses_its_wrapper_and_keeps_in_place_edits_live(self):
+        profile = ImportProfile.objects.create(name="Live Adapter Settings")
+        settings = profile.adapter_settings
+
+        profile.adapter_config["primary_contact_lookup_field"] = "name"
+
+        self.assertIs(profile.adapter_settings, settings)
+        self.assertEqual(settings.primary_contact_lookup_field, "name")
+
+    def test_replacing_the_config_or_adapter_invalidates_adapter_settings(self):
+        profile = ImportProfile.objects.create(name="Invalidated Adapter Settings")
+        original = profile.adapter_settings
+        profile.adapter_config = {"primary_contact_lookup_field": "name"}
+
+        replaced = profile.adapter_settings
+        self.assertIsNot(replaced, original)
+        self.assertEqual(replaced.primary_contact_lookup_field, "name")
+
+        profile.source_adapter = "trace_workbook"
+        trace_settings = profile.adapter_settings
+        self.assertIsNot(trace_settings, replaced)
+        with self.assertRaises(AttributeError):
+            trace_settings.primary_contact_lookup_field
 
     def test_reading_a_setting_the_adapter_does_not_declare_fails(self):
         """An unknown setting is an error, not None."""

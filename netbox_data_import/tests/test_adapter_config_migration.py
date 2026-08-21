@@ -12,6 +12,7 @@ APP = "netbox_data_import"
 BEFORE = "0021_importprofile_adapter_config_and_more"
 DATA_STEP = "0022_migrate_profile_adapter_config"
 AFTER = "0023_drop_moved_profile_columns"
+REPAIR_STEP = "0024_repair_empty_primary_contact_lookup_field"
 
 MOVED_COLUMNS = (
     "sheet_name",
@@ -50,6 +51,13 @@ def _rewind_to_before_the_data_step():
     return apps
 
 
+def _rewind_to_before_the_repair_step():
+    """Forget only the repair recorder row so its irreversible data operation runs again."""
+    apps = _migrate(REPAIR_STEP)
+    MigrationRecorder(connection).record_unapplied(APP, REPAIR_STEP)
+    return apps
+
+
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
     """The three ordered steps move every column and drop the originals."""
 
@@ -57,7 +65,11 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         super().setUp()
         # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
         # skips tearDown. Register before anything migrates, so a rewound worker always recovers.
-        self.addCleanup(_migrate, AFTER)
+        self.addCleanup(_migrate, REPAIR_STEP)
+        # The repair is data-only and irreversible. Forget its recorder row before walking down to
+        # the older cutover, then let cleanup reapply it at the leaf.
+        _migrate(REPAIR_STEP)
+        MigrationRecorder(connection).record_unapplied(APP, REPAIR_STEP)
 
     def test_it_moves_every_column_for_every_existing_profile(self):
         """The data step stamps the adapter key and copies each declared column."""
@@ -141,3 +153,52 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         self.assertTrue(migration.operations)
         for operation in migration.operations:
             self.assertIsInstance(operation, RunPython)
+
+
+class EmptyPrimaryContactLookupMigrationTest(TransactionTestCase):
+    """The repair freezes the default only for the two invalid stored values."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(_migrate, REPAIR_STEP)
+
+    def test_it_repairs_only_explicitly_empty_flat_workbook_lookup_fields(self):
+        apps = _rewind_to_before_the_repair_step()
+        ImportProfile = apps.get_model(APP, "ImportProfile")
+        fixtures = {
+            "Blank Lookup": {"primary_contact_lookup_field": ""},
+            "Null Lookup": {"primary_contact_lookup_field": None},
+            "Missing Lookup": {"sheet_name": "Data"},
+            "Email Lookup": {"primary_contact_lookup_field": "email"},
+            "Name Lookup": {"primary_contact_lookup_field": "name"},
+        }
+        for name, adapter_config in fixtures.items():
+            ImportProfile.objects.create(
+                name=name,
+                source_adapter="flat_workbook",
+                adapter_config=adapter_config,
+            )
+        ImportProfile.objects.create(
+            name="Trace Blank Lookup",
+            source_adapter="trace_workbook",
+            adapter_config={"primary_contact_lookup_field": ""},
+        )
+
+        migrated_apps = _migrate(REPAIR_STEP)
+        MigratedProfile = migrated_apps.get_model(APP, "ImportProfile")
+        migrated = dict(MigratedProfile.objects.values_list("name", "adapter_config"))
+
+        self.assertEqual(migrated["Blank Lookup"], {"primary_contact_lookup_field": "email"})
+        self.assertEqual(migrated["Null Lookup"], {"primary_contact_lookup_field": "email"})
+        self.assertEqual(migrated["Missing Lookup"], {"sheet_name": "Data"})
+        self.assertEqual(migrated["Email Lookup"], {"primary_contact_lookup_field": "email"})
+        self.assertEqual(migrated["Name Lookup"], {"primary_contact_lookup_field": "name"})
+        self.assertEqual(migrated["Trace Blank Lookup"], {"primary_contact_lookup_field": ""})
+
+    def test_the_repair_refuses_a_rollback(self):
+        _migrate(REPAIR_STEP)
+
+        with self.assertRaises(IrreversibleError):
+            _migrate(AFTER)
+
+        self.assertEqual(_applied_steps()[-1], REPAIR_STEP)

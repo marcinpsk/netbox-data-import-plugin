@@ -146,6 +146,16 @@ class ImportProfile(NetBoxModel):
         """Return the detail URL for this import profile."""
         return reverse("plugins:netbox_data_import:importprofile", args=[self.pk])
 
+    def save(self, *args, **kwargs):
+        """Normalize adapter configuration on every supported write that stores it."""
+        update_fields = kwargs.get("update_fields")
+        if update_fields is None or "adapter_config" in update_fields:
+            adapter = self.adapter
+            if adapter is None:
+                raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
+            self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
+        return super().save(*args, **kwargs)
+
     @property
     def adapter(self):
         """Return the registered Source Adapter class for this profile."""
@@ -159,7 +169,13 @@ class ImportProfile(NetBoxModel):
     @property
     def adapter_settings(self):
         """Return attribute access over ``adapter_config`` backed by the adapter's declared defaults."""
-        return AdapterSettings(self.adapter, self.adapter_config, self.source_adapter)
+        cache_key = (self.source_adapter, id(self.adapter_config))
+        cached = self.__dict__.get("_adapter_settings_cache")
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        settings = AdapterSettings(self.adapter, self.adapter_config, self.source_adapter)
+        self.__dict__["_adapter_settings_cache"] = (cache_key, settings)
+        return settings
 
     @property
     def adapter_config_display(self):
@@ -236,7 +252,13 @@ class AdapterSettings:
         if name not in fields:
             raise AttributeError(f"'{name}' is not a setting of this profile's source adapter")
         config = object.__getattribute__(self, "_config")
-        return config.get(name, fields[name].initial)
+        field = fields[name]
+        if name not in config:
+            return field.initial
+        value = config[name]
+        if field.required and (value is None or value == ""):
+            raise ValidationError(f"The required adapter setting '{name}' is empty. Edit and save this import profile.")
+        return value
 
 
 class PolicySectionModel(models.Model):

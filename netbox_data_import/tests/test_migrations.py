@@ -17,8 +17,9 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     migrate_from = ("netbox_data_import", "0014_alter_columnmapping_target_field_and_more")
     migrate_to = ("netbox_data_import", "0016_deviceexistingmatch_ndi_devicematch_profile_device")
     # Django refuses to reverse these data migrations, so the walk back fakes each one, newest
-    # first. Faking is safe here because neither changes the schema.
+    # first. Faking is safe here because none changes the schema.
     irreversible_data_steps = (
+        ("0024_repair_empty_primary_contact_lookup_field", "0023_drop_moved_profile_columns"),
         ("0022_migrate_profile_adapter_config", "0021_importprofile_adapter_config_and_more"),
         ("0020_migrate_import_source_custom_field", "0019_deviceimportsource"),
     )

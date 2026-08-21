@@ -358,9 +358,7 @@
   form.addEventListener('submit', function (event) {
     var selection = readSelection();
     if (!noContact.checked && !contactId.value) {
-      // A profile can store an empty lookup field, and a blank role is a demand no row can meet.
-      var required = ['name'];
-      if (form.dataset.contactLookupField) required.push(form.dataset.contactLookupField);
+      var required = ['name', form.dataset.contactLookupField];
       for (var index = 0; index < required.length; index++) {
         var role = required[index];
         if (selection.resolved[role]) continue;
