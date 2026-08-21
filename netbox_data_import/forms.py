@@ -37,9 +37,16 @@ def _profile_output_kinds(form):
     return profile.output_kinds
 
 
-def _with_stored_target(choices, stored):
-    """Keep a stored key-family target selectable, so an existing row can be re-saved."""
+def _with_stored_target(choices, stored, output_kinds, *, allow_candidates=True):
+    """Keep a stored key-family target selectable, so an existing row can be re-saved.
+
+    CATALOG.choices lists fixed keys only, so a stored family key such as `extra_json:asset_id` is
+    never among them. Re-offer it only when the model would still accept it: the row's clean()
+    runs the same check, and offering more would put a choice in the list that saving rejects.
+    """
     if not stored or stored in {key for key, _label in choices}:
+        return choices
+    if not CATALOG.is_valid(stored, output_kinds=output_kinds, allow_candidates=allow_candidates):
         return choices
     return [*choices, (stored, CATALOG.display(stored))]
 
@@ -128,8 +135,9 @@ class ColumnMappingForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        choices = CATALOG.choices(output_kinds=_profile_output_kinds(self))
-        self.fields["target_field"].choices = _with_stored_target(choices, self.instance.target_field)
+        output_kinds = _profile_output_kinds(self)
+        choices = CATALOG.choices(output_kinds=output_kinds)
+        self.fields["target_field"].choices = _with_stored_target(choices, self.instance.target_field, output_kinds)
 
 
 class ClassRoleMappingForm(forms.ModelForm):
@@ -183,10 +191,12 @@ class ColumnTransformRuleForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # A capture group yields text, so the candidate targets are not offered.
-        choices = CATALOG.choices(output_kinds=_profile_output_kinds(self), allow_candidates=False)
+        output_kinds = _profile_output_kinds(self)
+        choices = CATALOG.choices(output_kinds=output_kinds, allow_candidates=False)
         for name in ("group_1_target", "group_2_target"):
             stored = getattr(self.instance, name, "")
-            self.fields[name].choices = [("", "---------"), *_with_stored_target(choices, stored)]
+            preserved = _with_stored_target(choices, stored, output_kinds, allow_candidates=False)
+            self.fields[name].choices = [("", "---------"), *preserved]
 
 
 class ImportSetupForm(forms.Form):

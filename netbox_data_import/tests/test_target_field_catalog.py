@@ -480,6 +480,32 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         form = ColumnTransformRuleForm(instance=rule, initial={"profile": self.flat})
         self.assertIn("extra_json:jira_id", [key for key, _label in form.fields["group_1_target"].choices])
 
+    def test_a_stored_target_the_catalog_dropped_is_not_offered(self):
+        """An upgrade can retire a target, and clean() rejects it, so the form must not offer it."""
+        mapping = ColumnMapping.objects.create(profile=self.flat, source_column="Old", target_field="retired_field")
+
+        form = ColumnMappingForm(instance=mapping, initial={"profile": self.flat})
+
+        self.assertNotIn("retired_field", [key for key, _label in form.fields["target_field"].choices])
+        bound = ColumnMappingForm(
+            instance=mapping,
+            data={"profile": self.flat.pk, "source_column": "Old", "target_field": "retired_field"},
+        )
+        self.assertFalse(bound.is_valid())
+
+    def test_a_stored_candidate_group_target_is_not_offered(self):
+        """A capture group yields text, and clean() refuses a candidate target, so neither may the form."""
+        rule = ColumnTransformRule.objects.create(
+            profile=self.flat,
+            source_column="Name",
+            pattern=r"^(\w+)$",
+            group_1_target="candidate:contact",
+        )
+
+        form = ColumnTransformRuleForm(instance=rule, initial={"profile": self.flat})
+
+        self.assertNotIn("candidate:contact", [key for key, _label in form.fields["group_1_target"].choices])
+
     def test_a_transform_rule_is_rejected_on_an_inapplicable_profile(self):
         """ColumnTransformRule must run the shared applicability check too."""
         rule = ColumnTransformRule(profile=self.trace, source_column="Name", pattern=r"^(\w+)$")
