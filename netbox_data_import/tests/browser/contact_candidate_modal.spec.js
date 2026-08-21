@@ -381,13 +381,11 @@ test("a saved decision is what the row shows when it is reopened", async ({ page
   await expect(page.locator("#contactCandidateNone")).toBeChecked();
   expect(Object.values(await rolesByColumn(page)).filter(Boolean)).toEqual([]);
   // Re-saving must not resurrect the proposal over the stored decision.
-  const payload = await page.evaluate(() => {
+  await page.evaluate(() => {
     window.__calls.length = 0;
     document.getElementById("contactCandidateForm")
       .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    return null;
   });
-  void payload;
   const calls = await page.evaluate(() => window.__calls);
   expect(JSON.parse(calls[0].fields.resolved_fields).contact_field_sources).toEqual({});
 });
@@ -405,12 +403,17 @@ test("a failure on one row is not shown when another row opens", async ({ page }
   await expect(page.locator("#contactCandidateError")).toHaveCount(0);
 });
 
-/* Hold the save open so the modal can be driven while a request is still in flight. */
-async function setUpWithPendingSave(page) {
+/* Load the fixture with both shipped controllers. Callers stub only the network. */
+async function setUpShippedControllers(page) {
   await page.setContent(previewFixture);
   await initNetBoxSelects(page);
   await page.addScriptTag({ content: rowActionsSource });
   await page.addScriptTag({ content: controllerSource });
+}
+
+/* Hold the save open so the modal can be driven while a request is still in flight. */
+async function setUpWithPendingSave(page) {
+  await setUpShippedControllers(page);
   await page.evaluate(() => {
     window.__requests = [];
     const realFetch = window.fetch.bind(window);
@@ -434,10 +437,7 @@ async function setUpWithPendingSave(page) {
 /* The two controllers together, with only the network stubbed. This is the pair that ships:
  * a stubbed helper would keep passing if `preview_row_actions.js` stopped exporting it. */
 async function setUpBothControllers(page, { status = 200, payload = null } = {}) {
-  await page.setContent(previewFixture);
-  await initNetBoxSelects(page);
-  await page.addScriptTag({ content: rowActionsSource });
-  await page.addScriptTag({ content: controllerSource });
+  await setUpShippedControllers(page);
   await page.evaluate(
     ({ status: code, payload: responseBody }) => {
       window.__requests = [];
