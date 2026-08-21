@@ -346,6 +346,10 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
 
         self.assertRedirects(response, self.preview, fetch_redirect_response=False)
         self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
+        self.assertFalse(
+            DeviceTypeMapping.objects.filter(profile=self.profile).exists(),
+            "a refused create_now must not leave the mapping behind",
+        )
 
     def test_creating_now_refuses_a_model_the_device_type_cannot_hold(self):
         """The posted device type name is never bounded and the NetBox model holds 100."""
@@ -355,6 +359,10 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
 
         self.assertRedirects(response, self.preview, fetch_redirect_response=False)
         self.assertFalse(DeviceType.objects.filter(slug="widget").exists())
+        self.assertFalse(
+            DeviceTypeMapping.objects.filter(profile=self.profile).exists(),
+            "a refused create_now must not leave the mapping behind",
+        )
 
     def test_a_valid_mapping_is_still_saved(self):
         """The guard must not refuse the values the preview page actually posts."""
