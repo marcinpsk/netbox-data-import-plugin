@@ -1729,8 +1729,7 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
                     defaults,
                 )
                 if not allowed:
-                    # The binding above already wrote. A plain return leaves atomic() normally and
-                    # would commit it while telling the operator the review was refused.
+                    # The binding above already wrote, and a plain return would leave atomic() and commit it.
                     transaction.set_rollback(True)
                     return _preview_action_error(
                         request,
@@ -2986,8 +2985,7 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         if not netbox_dt_slug:
             netbox_dt_slug = slugify(source_model)
 
-        # Refuse before the transaction opens: a return inside atomic() exits it normally and commits,
-        # so a check placed after the mapping save would deny the request and keep the row.
+        # Refuse before the transaction opens: a return inside atomic() commits the mapping it denies.
         if action == "create_now":
             for permission in ("dcim.add_manufacturer", "dcim.add_devicetype"):
                 if not request.user.has_perm(permission):
