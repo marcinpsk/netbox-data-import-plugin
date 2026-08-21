@@ -1273,12 +1273,21 @@ manufacturer_mappings:
 class QuickCreateManufacturerViewTest(BaseViewTestCase):
     """Tests for QuickCreateManufacturerView."""
 
+    def setUp(self):
+        super().setUp()
+        self.profile = ImportProfile.objects.create(name="Quick Manufacturer Profile")
+
+    def _post(self, payload):
+        return self.client.post(
+            reverse("plugins:netbox_data_import:quick_create_manufacturer"),
+            {"profile_id": self.profile.pk, **payload},
+        )
+
     def test_creates_manufacturer(self):
         """POST creates a new Manufacturer in NetBox."""
         from dcim.models import Manufacturer
 
-        url = reverse("plugins:netbox_data_import:quick_create_manufacturer")
-        resp = self.client.post(url, {"mfg_name": "AcmeCorp", "mfg_slug": "acmecorp"})
+        resp = self._post({"mfg_name": "AcmeCorp", "mfg_slug": "acmecorp"})
         self.assertIn(resp.status_code, [200, 302])
         self.assertTrue(Manufacturer.objects.filter(slug="acmecorp").exists())
 
@@ -1286,29 +1295,34 @@ class QuickCreateManufacturerViewTest(BaseViewTestCase):
         """POSTing the same manufacturer twice does not create a duplicate."""
         from dcim.models import Manufacturer
 
-        url = reverse("plugins:netbox_data_import:quick_create_manufacturer")
         for _ in range(2):
-            self.client.post(url, {"mfg_name": "AcmeCorp2", "mfg_slug": "acmecorp2"})
+            self._post({"mfg_name": "AcmeCorp2", "mfg_slug": "acmecorp2"})
         self.assertEqual(Manufacturer.objects.filter(slug="acmecorp2").count(), 1)
 
     def test_missing_slug_redirects(self):
         """POST without slug redirects with error (does not crash)."""
-        url = reverse("plugins:netbox_data_import:quick_create_manufacturer")
-        resp = self.client.post(url, {"mfg_name": "NoSlug"})
+        resp = self._post({"mfg_name": "NoSlug"})
         self.assertIn(resp.status_code, [200, 302])
 
 
 class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
     """Tests for QuickCreateDeviceRoleView."""
 
+    def setUp(self):
+        super().setUp()
+        self.profile = ImportProfile.objects.create(name="Quick Role Profile")
+
     def _url(self):
         return reverse("plugins:netbox_data_import:quick_create_role")
+
+    def _post(self, payload):
+        return self.client.post(self._url(), {"profile_id": self.profile.pk, **payload})
 
     def test_creates_role(self):
         """POST creates a new DeviceRole and returns JSON with its id."""
         from dcim.models import DeviceRole
 
-        resp = self.client.post(self._url(), {"name": "Spine", "slug": "spine"})
+        resp = self._post({"name": "Spine", "slug": "spine"})
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertTrue(body["created"])
@@ -1319,9 +1333,8 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         """Re-POSTing the same slug returns created=False and does not duplicate."""
         from dcim.models import DeviceRole
 
-        url = self._url()
-        self.client.post(url, {"name": "Leaf", "slug": "leaf"})
-        resp = self.client.post(url, {"name": "Leaf", "slug": "leaf"})
+        self._post({"name": "Leaf", "slug": "leaf"})
+        resp = self._post({"name": "Leaf", "slug": "leaf"})
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.json()["created"])
         self.assertEqual(DeviceRole.objects.filter(slug="leaf").count(), 1)
@@ -1330,38 +1343,43 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         """Empty/missing color falls back to the default 9e9e9e."""
         from dcim.models import DeviceRole
 
-        resp = self.client.post(self._url(), {"name": "Edge", "slug": "edge", "color": ""})
+        resp = self._post({"name": "Edge", "slug": "edge", "color": ""})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(DeviceRole.objects.get(slug="edge").color, "9e9e9e")
 
     def test_missing_name_returns_400(self):
         """Missing name returns 400 with a field error."""
-        resp = self.client.post(self._url(), {"slug": "x"})
+        resp = self._post({"slug": "x"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("required", resp.json()["error"].lower())
 
     def test_missing_slug_returns_400(self):
         """Missing slug returns 400."""
-        resp = self.client.post(self._url(), {"name": "X"})
+        resp = self._post({"name": "X"})
         self.assertEqual(resp.status_code, 400)
 
     def test_invalid_slug_returns_400(self):
         """Slug with invalid chars is rejected."""
-        resp = self.client.post(self._url(), {"name": "Bad", "slug": "Bad Slug!"})
+        resp = self._post({"name": "Bad", "slug": "Bad Slug!"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("slug", resp.json()["error"].lower())
 
     def test_missing_devicerole_permission_returns_403(self):
         """User without dcim.add_devicerole gets a 403 JSON response."""
-        from django.contrib.auth.models import Permission
+        from django.contrib.contenttypes.models import ContentType
+        from users.models import ObjectPermission
 
         self.client.logout()
         non_super = User.objects.create_user("limited", "l@example.com", "pw")
-        # Grant only the plugin view permission, NOT dcim.add_devicerole.
-        perm = Permission.objects.get(content_type__app_label="netbox_data_import", codename="view_importprofile")
-        non_super.user_permissions.add(perm)
+        permission = ObjectPermission.objects.create(
+            name="limited profile change",
+            actions=["change"],
+            constraints={"pk": self.profile.pk},
+        )
+        permission.object_types.add(ContentType.objects.get_for_model(ImportProfile))
+        permission.users.add(non_super)
         self.client.login(username="limited", password="pw")
-        resp = self.client.post(self._url(), {"name": "NoPerm", "slug": "noperm"})
+        resp = self._post({"name": "NoPerm", "slug": "noperm"})
         self.assertEqual(resp.status_code, 403)
 
     def test_database_error_is_sanitized(self):
@@ -1370,7 +1388,7 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         from django.db import DatabaseError
 
         with patch("dcim.models.DeviceRole.save", side_effect=DatabaseError("raw db detail SECRET")):
-            resp = self.client.post(self._url(), {"name": "X", "slug": "xfail"})
+            resp = self._post({"name": "X", "slug": "xfail"})
         self.assertEqual(resp.status_code, 500)
         self.assertNotIn("SECRET", resp.content.decode())
         self.assertIn("internal", resp.json()["error"].lower())
@@ -1384,7 +1402,7 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
             "dcim.models.DeviceRole.save",
             side_effect=IntegrityError("duplicate key value violates unique constraint"),
         ):
-            resp = self.client.post(self._url(), {"name": "X", "slug": "xrace"})
+            resp = self._post({"name": "X", "slug": "xrace"})
         self.assertEqual(resp.status_code, 400)
         self.assertNotIn("unique constraint", resp.content.decode())
 
@@ -1394,7 +1412,7 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
 
         DeviceRole.objects.create(name="Access", slug="access")
 
-        resp = self.client.post(self._url(), {"name": "Access", "slug": "access-spare"})
+        resp = self._post({"name": "Access", "slug": "access-spare"})
 
         self.assertEqual(resp.status_code, 400)
         body = resp.content.decode()
@@ -1407,7 +1425,7 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         """A name the column cannot hold is refused, and the field error is not echoed back."""
         from dcim.models import DeviceRole
 
-        resp = self.client.post(self._url(), {"name": "N" * 300, "slug": "xval"})
+        resp = self._post({"name": "N" * 300, "slug": "xval"})
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn("invalid", resp.json()["error"].lower())

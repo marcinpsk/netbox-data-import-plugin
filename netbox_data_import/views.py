@@ -56,7 +56,11 @@ from .tables import (
 from . import engine
 from .contact_resolution import PrimaryContactResolver, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer
-from .object_permissions import ObjectPermissionDenied, save_permission_scoped_object
+from .object_permissions import (
+    ObjectPermissionDenied,
+    delete_permission_scoped_objects,
+    save_permission_scoped_object,
+)
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
@@ -1366,10 +1370,24 @@ class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 
 
-class IgnoreDeviceView(PermissionRequiredMixin, View):
+class _PermissionScopedWriteMixin:
+    """Mark preview writers and render their object-scope refusals in one place."""
+
+    def dispatch(self, request, *args, **kwargs):
+        try:
+            return super().dispatch(request, *args, **kwargs)
+        except ObjectPermissionDenied as exc:
+            error = f"Permission denied: {exc}."
+            if getattr(self, "permission_denied_response_format", "redirect") == "json":
+                return JsonResponse({"ok": False, "error": error}, status=403)
+            messages.error(request, error)
+            return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
+
+
+class IgnoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Mark a specific device (by source_id) as ignored for a profile."""
 
-    permission_required = "netbox_data_import.add_ignoreddevice"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Add the specified device to the profile's ignore list."""
@@ -1383,7 +1401,7 @@ class IgnoreDeviceView(PermissionRequiredMixin, View):
         if profile_id is None:
             messages.error(request, "A valid import profile is required.")
         elif source_id:
-            profile = get_object_or_404(ImportProfile, pk=profile_id)
+            profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
             ignored = _get_or_init(IgnoredDevice, profile=profile, source_id=source_id)
             if ignored.pk is None:
                 ignored.device_name = device_name
@@ -1392,29 +1410,38 @@ class IgnoreDeviceView(PermissionRequiredMixin, View):
                 except ValueError as exc:
                     messages.error(request, str(exc))
                     return redirect(next_url)
-                ignored.save()
+            save_permission_scoped_object(
+                request.user,
+                IgnoredDevice,
+                {"profile": profile, "source_id": source_id},
+                {"device_name": device_name},
+                on_existing="keep",
+            )
             messages.success(request, f"Device '{device_name or source_id}' added to ignore list.")
         return redirect(next_url)
 
 
-class UnignoreDeviceView(PermissionRequiredMixin, View):
+class UnignoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Remove a device from the ignore list."""
 
-    permission_required = "netbox_data_import.delete_ignoreddevice"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Remove the specified device from the profile's ignore list."""
         from .models import IgnoredDevice
 
-        profile_id = request.POST.get("profile_id")
+        profile_id = _parse_posted_profile_id(request)
         source_id = request.POST.get("source_id")
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
 
-        if profile_id and source_id:
-            count, _ = IgnoredDevice.objects.filter(
-                profile_id=profile_id,
-                source_id=source_id,
-            ).delete()
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required.")
+        elif source_id:
+            profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+            count = delete_permission_scoped_objects(
+                request.user,
+                IgnoredDevice.objects.filter(profile=profile, source_id=source_id),
+            )
             if count:
                 messages.success(request, "Device removed from ignore list.")
             else:
@@ -1869,6 +1896,7 @@ class _AjaxPermissionView(ConditionalLoginRequiredMixin, View):
     """
 
     permission_required = None
+    permission_denied_response_format = "json"
 
     def dispatch(self, request, *args, **kwargs):
         from django.http import JsonResponse
@@ -2837,36 +2865,45 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 
 
-class QuickCreateManufacturerView(PermissionRequiredMixin, View):
+class QuickCreateManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Immediately create a Manufacturer in NetBox from the preview page.
 
     Redirects back to preview so the row changes from 'create' to a device action.
     """
 
-    permission_required = "netbox_data_import.add_devicetypemapping"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Create the manufacturer in NetBox and redirect back to preview."""
         from dcim.models import Manufacturer
 
-        if not request.user.has_perm("dcim.add_manufacturer"):  # pragma: no cover
-            messages.error(request, "Permission denied: dcim.add_manufacturer required.")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
         mfg_name = request.POST.get("mfg_name", "").strip()
         mfg_slug = request.POST.get("mfg_slug", "").strip()
         if not mfg_name or not mfg_slug:
             messages.error(request, "Manufacturer name and slug are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
         mfg = _get_or_init(Manufacturer, slug=mfg_slug)
-        created = mfg.pk is None
-        if created:
+        if mfg.pk is None:
             mfg.name = mfg_name
             try:
                 _validate_model_instance(mfg, f"manufacturer '{mfg_name}'")
             except ValueError as exc:
                 messages.error(request, str(exc))
                 return redirect(reverse("plugins:netbox_data_import:import_preview"))
-            mfg.save()
+        result = save_permission_scoped_object(
+            request.user,
+            Manufacturer,
+            {"slug": mfg_slug},
+            {"name": mfg_name},
+            on_existing="keep",
+        )
+        mfg = result.instance
+        created = result.created
         if created:
             messages.success(request, f"Manufacturer '{mfg.name}' created.")
         else:
@@ -2874,14 +2911,14 @@ class QuickCreateManufacturerView(PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickResolveManufacturerView(PermissionRequiredMixin, View):
+class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page.
 
     Used when a source has inconsistent naming (e.g. 'Dell EMC' → 'dell').
     Redirects back to preview which re-runs with the mapping applied.
     """
 
-    permission_required = "netbox_data_import.add_manufacturermapping"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Save the manufacturer mapping and redirect back to preview."""
@@ -2889,34 +2926,38 @@ class QuickResolveManufacturerView(PermissionRequiredMixin, View):
         if profile_id is None:
             messages.error(request, "A valid import profile is required. Reload the preview and try again.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        profile = get_object_or_404(ImportProfile, pk=profile_id)
+        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
         source_make = " ".join(request.POST.get("source_make", "").split())
         netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
         if not source_make or not netbox_mfg_slug:
             messages.error(request, "Source make and NetBox manufacturer slug are required.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
         mapping = _get_or_init(ManufacturerMapping, profile=profile, source_make=source_make)
-        created = mapping.pk is None
         mapping.netbox_manufacturer_slug = netbox_mfg_slug
         try:
             _validate_model_instance(mapping, f"manufacturer mapping '{source_make}'")
         except ValueError as exc:
             messages.error(request, str(exc))
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        mapping.save()
-        verb = "Created" if created else "Updated"
+        result = save_permission_scoped_object(
+            request.user,
+            ManufacturerMapping,
+            {"profile": profile, "source_make": source_make},
+            {"netbox_manufacturer_slug": netbox_mfg_slug},
+        )
+        verb = "Created" if result.created else "Updated"
         messages.success(request, f"{verb} manufacturer mapping: '{source_make}' → {netbox_mfg_slug}")
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
+class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page.
 
     Optionally also creates the manufacturer and/or device type in NetBox right now.
     Redirects back to preview which re-runs and shows the resolved rows.
     """
 
-    permission_required = "netbox_data_import.add_devicetypemapping"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Save the device type mapping (and optionally create objects) then redirect."""
@@ -2927,7 +2968,7 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         if profile_id is None:
             messages.error(request, "A valid import profile is required. Reload the preview and try again.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        profile = get_object_or_404(ImportProfile, pk=profile_id)
+        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
         source_make = " ".join(request.POST.get("source_make", "").split())
         source_model = " ".join(request.POST.get("source_model", "").split())
         netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
@@ -2943,13 +2984,6 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         if not netbox_dt_slug:
             netbox_dt_slug = slugify(source_model)
 
-        # Refuse before the transaction opens: a return inside atomic() commits the mapping it denies.
-        if action == "create_now":
-            for permission in ("dcim.add_manufacturer", "dcim.add_devicetype"):
-                if not request.user.has_perm(permission):
-                    messages.error(request, f"Permission denied: {permission} required.")
-                    return redirect(reverse("plugins:netbox_data_import:import_preview"))
-
         # Every name and slug below is posted directly, so validate each write before it happens.
         try:
             with transaction.atomic():
@@ -2959,29 +2993,52 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
                     source_make=source_make,
                     source_model=source_model,
                 )
-                created = mapping.pk is None
                 mapping.netbox_manufacturer_slug = netbox_mfg_slug
                 mapping.netbox_device_type_slug = netbox_dt_slug
-                _validate_model_instance(mapping, f"device type mapping '{source_make} / {source_model}'")
-                mapping.save()
+                _validate_model_instance(
+                    mapping,
+                    f"device type mapping '{source_make} / {source_model}'",
+                )
+                mapping_result = save_permission_scoped_object(
+                    request.user,
+                    DeviceTypeMapping,
+                    {"profile": profile, "source_make": source_make, "source_model": source_model},
+                    {
+                        "netbox_manufacturer_slug": netbox_mfg_slug,
+                        "netbox_device_type_slug": netbox_dt_slug,
+                    },
+                )
+                created = mapping_result.created
 
                 if action == "create_now":
-                    mfg = _get_or_init(Manufacturer, slug=netbox_mfg_slug)
-                    if mfg.pk is None:
-                        mfg.name = source_make
-                        _validate_model_instance(mfg, f"manufacturer '{source_make}'")
-                        mfg.save()
+                    mfg_candidate = _get_or_init(Manufacturer, slug=netbox_mfg_slug)
+                    if mfg_candidate.pk is None:
+                        mfg_candidate.name = source_make
+                        _validate_model_instance(mfg_candidate, f"manufacturer '{source_make}'")
+                    mfg = save_permission_scoped_object(
+                        request.user,
+                        Manufacturer,
+                        {"slug": netbox_mfg_slug},
+                        {"name": source_make},
+                        on_existing="keep",
+                    ).instance
                     dt_name = request.POST.get("netbox_dt_name", source_model).strip() or source_model
                     try:
                         u_height = max(1, int(request.POST.get("u_height", "1")))
                     except ValueError:
                         u_height = 1
-                    device_type = _get_or_init(DeviceType, manufacturer=mfg, slug=netbox_dt_slug)
-                    if device_type.pk is None:
-                        device_type.model = dt_name
-                        device_type.u_height = u_height
-                        _validate_model_instance(device_type, f"device type '{dt_name}'")
-                        device_type.save()
+                    device_type_candidate = _get_or_init(DeviceType, manufacturer=mfg, slug=netbox_dt_slug)
+                    if device_type_candidate.pk is None:
+                        device_type_candidate.model = dt_name
+                        device_type_candidate.u_height = u_height
+                        _validate_model_instance(device_type_candidate, f"device type '{dt_name}'")
+                    save_permission_scoped_object(
+                        request.user,
+                        DeviceType,
+                        {"manufacturer": mfg, "slug": netbox_dt_slug},
+                        {"model": dt_name, "u_height": u_height},
+                        on_existing="keep",
+                    )
         except ValueError as exc:
             messages.error(request, str(exc))
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
@@ -3000,13 +3057,13 @@ class QuickResolveDeviceTypeView(PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
+class QuickAddClassRoleMappingView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Quickly add a ClassRoleMapping (ignore / role) directly from an error row in preview.
 
     Redirects back to preview; error rows for that class disappear on re-run.
     """
 
-    permission_required = "netbox_data_import.add_classrolemapping"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Save the class→role mapping and redirect back to preview."""
@@ -3016,7 +3073,7 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
         if profile_id is None:
             messages.error(request, "A valid import profile is required. Reload the preview and try again.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        profile = get_object_or_404(ImportProfile, pk=profile_id)
+        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
         source_class = request.POST.get("source_class", "").strip()
         mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore", "role", or "rack"
         role_slug = request.POST.get("role_slug", "").strip()
@@ -3048,19 +3105,27 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
             messages.error(request, "A role slug is required when mapping action is 'role'.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
+        values = {
+            "ignore": mapping_action == "ignore",
+            "creates_rack": creates_rack,
+            "rack_type": rack_type,
+            "role_slug": role_slug if mapping_action == "role" else "",
+        }
         mapping = _get_or_init(ClassRoleMapping, profile=profile, source_class=source_class)
-        created = mapping.pk is None
-        mapping.ignore = mapping_action == "ignore"
-        mapping.creates_rack = creates_rack
-        mapping.rack_type = rack_type
-        mapping.role_slug = role_slug if mapping_action == "role" else ""
+        for field_name, value in values.items():
+            setattr(mapping, field_name, value)
         try:
             _validate_model_instance(mapping, f"class role mapping '{source_class}'")
         except ValueError as exc:
             messages.error(request, str(exc))
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        mapping.save()
-        verb = "Created" if created else "Updated"
+        result = save_permission_scoped_object(
+            request.user,
+            ClassRoleMapping,
+            {"profile": profile, "source_class": source_class},
+            values,
+        )
+        verb = "Created" if result.created else "Updated"
         if mapping_action == "ignore":
             action_label = "ignore"
         elif mapping_action == "rack":
@@ -3072,10 +3137,10 @@ class QuickAddClassRoleMappingView(PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
-class QuickAddColumnMappingView(PermissionRequiredMixin, View):
+class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Quickly map an unmapped source column to a NetBox target field from the preview panel."""
 
-    permission_required = "netbox_data_import.add_columnmapping"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Save the column mapping and redirect back to preview."""
@@ -3083,7 +3148,7 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
         if profile_id is None:
             messages.error(request, "A valid import profile is required. Reload the preview and try again.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
-        profile = get_object_or_404(ImportProfile, pk=profile_id)
+        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
         source_column = request.POST.get("source_column", "").strip()
         target_field = request.POST.get("target_field", "").strip()
 
@@ -3103,33 +3168,37 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         if target_field.startswith(CANDIDATE_TARGET_PREFIX):
-            _, created = ColumnMapping.objects.get_or_create(
-                profile=profile,
-                source_column=source_column,
-                target_field=target_field,
+            result = save_permission_scoped_object(
+                request.user,
+                ColumnMapping,
+                {"profile": profile, "source_column": source_column, "target_field": target_field},
+                {},
+                on_existing="keep",
             )
-            verb = "Created" if created else "Kept"
+            verb = "Created" if result.created else "Kept"
             messages.success(request, f"{verb} candidate mapping: '{source_column}' → {target_field}")
         else:
             # A quick direct mapping replaces the source column that supplied the target before it.
-            displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
-                source_column=source_column
-            )
-            displaced_source = displaced.values_list("source_column", flat=True).first()
-            displaced.delete()
-
-            _, created = ColumnMapping.objects.get_or_create(
-                profile=profile,
-                source_column=source_column,
-                target_field=target_field,
-            )
+            with transaction.atomic():
+                displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
+                    source_column=source_column
+                )
+                displaced_source = displaced.values_list("source_column", flat=True).first()
+                delete_permission_scoped_objects(request.user, displaced)
+                result = save_permission_scoped_object(
+                    request.user,
+                    ColumnMapping,
+                    {"profile": profile, "source_column": source_column, "target_field": target_field},
+                    {},
+                    on_existing="keep",
+                )
             if displaced_source:
                 messages.success(
                     request,
                     f"Reassigned: '{source_column}' → {target_field} (previously mapped from '{displaced_source}')",
                 )
             else:
-                verb = "Created" if created else "Updated"
+                verb = "Created" if result.created else "Kept"
                 messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
 
         # Re-apply all column mappings to the in-session rows so the new
@@ -3377,22 +3446,24 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
             )
 
 
-class QuickCreateDeviceRoleView(_AjaxPermissionView):
+class QuickCreateDeviceRoleView(_PermissionScopedWriteMixin, _AjaxPermissionView):
     """AJAX endpoint: create a new DeviceRole and return its details as JSON.
 
     Used by the Configure Class modal so operators can create missing roles
     without leaving the import preview page.
     """
 
-    permission_required = "netbox_data_import.view_importprofile"
+    permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Create the DeviceRole and return JSON {id, name, slug}."""
         from dcim.models import DeviceRole
         from django.http import JsonResponse
 
-        if not request.user.has_perm("dcim.add_devicerole"):
-            return JsonResponse({"error": "Permission denied: dcim.add_devicerole required."}, status=403)
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            return JsonResponse({"error": "A valid import profile is required."}, status=400)
+        get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
 
         name = request.POST.get("name", "").strip()
         slug = request.POST.get("slug", "").strip()
@@ -3410,12 +3481,19 @@ class QuickCreateDeviceRoleView(_AjaxPermissionView):
 
         try:
             role = _get_or_init(DeviceRole, slug=slug)
-            created = role.pk is None
-            if created:
+            if role.pk is None:
                 role.name = name
                 role.color = color
                 _validate_model_instance(role, f"device role '{name}'")
-                role.save()
+            result = save_permission_scoped_object(
+                request.user,
+                DeviceRole,
+                {"slug": slug},
+                {"name": name, "color": color},
+                on_existing="keep",
+            )
+            role = result.instance
+            created = result.created
         except IntegrityError:
             logger.exception("QuickCreateDeviceRoleView: integrity error creating role slug=%s", slug)
             return JsonResponse({"error": "A device role with that slug already exists."}, status=400)

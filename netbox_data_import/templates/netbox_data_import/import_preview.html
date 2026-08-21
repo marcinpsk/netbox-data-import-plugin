@@ -1723,7 +1723,7 @@ function cmCreateRole() {
   }
 
   var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
-  var body = new URLSearchParams({ name: name, slug: slug });
+  var body = new URLSearchParams({ profile_id: '{{ profile_id }}', name: name, slug: slug });
   fetch('{% url "plugins:netbox_data_import:quick_create_role" %}', {
     method: 'POST',
     headers: { 'X-CSRFToken': csrfToken, 'Content-Type': 'application/x-www-form-urlencoded' },

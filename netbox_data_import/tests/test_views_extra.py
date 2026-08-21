@@ -330,11 +330,18 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
         from users.models import ObjectPermission
 
         user = User.objects.create_user(username, f"{username}@example.com", "testpass")
-        granted = [(DeviceTypeMapping, ["add"])]
+        granted = [
+            (ImportProfile, ["change"], {"pk": self.profile.pk}),
+            (DeviceTypeMapping, ["add"], None),
+        ]
         if also_add_manufacturer:
-            granted.append((Manufacturer, ["add"]))
-        for model, actions in granted:
-            permission = ObjectPermission.objects.create(name=f"{username} {model.__name__}", actions=actions)
+            granted.append((Manufacturer, ["add"], None))
+        for model, actions, constraints in granted:
+            permission = ObjectPermission.objects.create(
+                name=f"{username} {model.__name__}",
+                actions=actions,
+                constraints=constraints,
+            )
             permission.object_types.add(ContentType.objects.get_for_model(model))
             permission.users.add(user)
         client = Client()

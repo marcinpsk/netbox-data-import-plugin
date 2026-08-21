@@ -52,6 +52,8 @@ OVERLENGTH_PAYLOADS = {
         {"source_make": LONG, "netbox_mfg_slug": "acme"},
         {"source_make": "Acme", "netbox_mfg_slug": LONG_SLUG},
     ],
+    # This action deletes a stored row but writes no bounded request value.
+    "unignore_device": [],
 }
 
 
@@ -81,7 +83,7 @@ ROW_ACTION_PAYLOADS = {
 
 
 def _permission_scoped_writer_url_names():
-    """Return the URL name of every view that writes through the permission-scoped saver."""
+    """Return deferred writers, excluding the quick actions covered by their own ratchet."""
     import ast
 
     from netbox_data_import import urls
@@ -104,21 +106,29 @@ def _permission_scoped_writer_url_names():
         view_class = getattr(pattern.callback, "view_class", None)
         if view_class is not None and view_class.__name__ in writers:
             names.add(pattern.name)
-    return names
+    return names - _quick_action_url_names()
 
 
-def _quick_action_url_names():
-    """Return the URL name of every quick action the preview page can post."""
+def _quick_action_routes():
+    """Return routed preview writer class names keyed by their URL names."""
     from netbox_data_import import urls
 
-    names = set()
+    routes = {}
     for pattern in urls.urlpatterns:
         view_class = getattr(pattern.callback, "view_class", None)
         if view_class is None:
             continue
-        if view_class.__name__.startswith("Quick") or view_class.__name__ == "IgnoreDeviceView":
-            names.add(pattern.name)
-    return names
+        if view_class.__name__.startswith("Quick") or view_class.__name__ in {
+            "IgnoreDeviceView",
+            "UnignoreDeviceView",
+        }:
+            routes[pattern.name] = view_class.__name__
+    return routes
+
+
+def _quick_action_url_names():
+    """Return the URL name of every quick action the preview page can post."""
+    return set(_quick_action_routes())
 
 
 class QuickActionInputBoundsTest(TestCase):
@@ -140,6 +150,51 @@ class QuickActionInputBoundsTest(TestCase):
     def test_every_quick_action_is_covered(self):
         """A new quick action has to arrive with its own boundary payload."""
         self.assertEqual(_quick_action_url_names() - set(OVERLENGTH_PAYLOADS), set())
+
+    def test_every_quick_action_uses_only_the_permission_scoped_write_seam(self):
+        """A routed preview writer cannot bypass object constraints with a direct ORM write."""
+        import ast
+
+        from netbox_data_import import urls
+
+        source = pathlib.Path(urls.__file__).with_name("views.py").read_text()
+        classes = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)}
+        scoped_writers = {"save_permission_scoped_object", "delete_permission_scoped_objects"}
+        direct_mutations = {
+            "save",
+            "delete",
+            "create",
+            "update",
+            "get_or_create",
+            "update_or_create",
+            "bulk_create",
+            "bulk_update",
+        }
+        errors = []
+
+        for url_name, class_name in sorted(_quick_action_routes().items()):
+            view = classes[class_name]
+            base_names = {getattr(base, "id", None) for base in view.bases}
+            if "_PermissionScopedWriteMixin" not in base_names:
+                errors.append(f"{url_name}: {class_name} lacks _PermissionScopedWriteMixin")
+
+            post = next(
+                (node for node in view.body if isinstance(node, ast.FunctionDef) and node.name == "post"),
+                None,
+            )
+            if post is None:
+                errors.append(f"{url_name}: {class_name} has no post()")
+                continue
+
+            calls = [node for node in ast.walk(post) if isinstance(node, ast.Call)]
+            if not any(isinstance(call.func, ast.Name) and call.func.id in scoped_writers for call in calls):
+                errors.append(f"{url_name}: {class_name}.post() does not call a scoped writer")
+            for call in calls:
+                method = getattr(call.func, "attr", None)
+                if method in direct_mutations:
+                    errors.append(f"{url_name}: {class_name}.post() calls direct .{method}() at line {call.lineno}")
+
+        self.assertEqual(errors, [])
 
     def test_no_quick_action_writes_a_value_its_column_cannot_hold(self):
         """The database raises DataError and returns HTTP 500 when the view does not check first."""

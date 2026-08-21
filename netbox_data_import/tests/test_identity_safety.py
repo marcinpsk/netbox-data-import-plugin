@@ -3731,15 +3731,15 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         )
         self._grant_object_permission(
             limited_user,
-            "View profiles without adding roles",
+            "Change profiles without adding roles",
             ImportProfile,
-            ["view"],
+            ["change"],
         )
         self.client.force_login(limited_user)
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:quick_create_role"),
-            {"name": "Boundary Role", "slug": "boundary-role"},
+            {"profile_id": self.profile.pk, "name": "Boundary Role", "slug": "boundary-role"},
         )
 
         self.assertEqual(response.status_code, 403)
