@@ -23,6 +23,8 @@ CONTACT_LOOKUP_FIELD_CHOICES = [
 ]
 
 
+# Approved exception to the NetBox base-class rule: this validates adapter configuration rather
+# than a model, and NetBox ships no generic non-model form base.
 class AdapterConfigForm(forms.Form):
     """Base form for an adapter's scalar settings."""
 
