@@ -28,7 +28,7 @@ from .forms import (
     ImportProfileImportForm,
     ImportSetupForm,
 )
-from .catalog import CATALOG
+from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
 from . import __version__ as _plugin_version
 from .models import (
     ClassRoleMapping,
@@ -3141,7 +3141,7 @@ class QuickAddColumnMappingView(PermissionRequiredMixin, View):
             messages.error(request, str(exc))
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        if target_field.startswith("candidate:"):
+        if target_field.startswith(CANDIDATE_TARGET_PREFIX):
             _, created = ColumnMapping.objects.get_or_create(
                 profile=profile,
                 source_column=source_column,
