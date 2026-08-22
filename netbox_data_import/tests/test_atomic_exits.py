@@ -114,6 +114,8 @@ def _normal_exits(body, loop_depth, rolled_back, in_nested_atomic=False):
             inner = getattr(statement, field, None)
             if inner:
                 yield from _normal_exits(inner, depth, dominated, nested)
+        for case in getattr(statement, "cases", []):
+            yield from _normal_exits(case.body, depth, dominated, nested)
         for handler in getattr(statement, "handlers", []):
             yield from _normal_exits(handler.body, loop_depth, dominated, nested)
 
@@ -283,12 +285,30 @@ class AtomicExitScannerTest(SimpleTestCase):
         source = "def f():\n    with atomic():\n        obj.save()\n        return 1\n"
         self.assertEqual([row[0] for row in self._report(source)], ["f"])
 
+    def test_a_return_in_a_match_case_is_reported(self):
+        source = (
+            "def f(value):\n"
+            "    with transaction.atomic():\n"
+            "        match value:\n"
+            "            case 1:\n"
+            "                obj.save()\n"
+            "                return 1\n"
+        )
+        self.assertEqual([row[0] for row in self._report(source)], ["f"])
+
 
 class PackageAtomicExitsTest(SimpleTestCase):
     """The package itself must carry no unaudited atomic exit."""
 
     def _modules(self):
-        return sorted(path for path in PACKAGE.glob("*.py"))
+        tests = PACKAGE / "tests"
+        return sorted(path for path in PACKAGE.rglob("*.py") if not path.is_relative_to(tests))
+
+    def test_module_scan_includes_nested_non_test_modules(self):
+        modules = self._modules()
+
+        self.assertIn(PACKAGE / "api" / "serializers.py", modules)
+        self.assertNotIn(PACKAGE / "tests" / "helpers.py", modules)
 
     def test_no_module_leaves_an_atomic_block_unaudited(self):
         """A new early return inside a transaction has to be reviewed before it can land."""
@@ -296,7 +316,7 @@ class PackageAtomicExitsTest(SimpleTestCase):
         for path in self._modules():
             for qualified, line, marker in unaudited_atomic_exits(path.read_text()):
                 seen = f" (marker {marker!r} is not in AUDITED_EXITS)" if marker else " (no marker)"
-                offenders.append(f"{path.name}:{line} in {qualified}{seen}")
+                offenders.append(f"{path.relative_to(PACKAGE)}:{line} in {qualified}{seen}")
         self.assertEqual(
             offenders,
             [],
