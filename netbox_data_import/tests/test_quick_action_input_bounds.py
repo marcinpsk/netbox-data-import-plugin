@@ -191,6 +191,49 @@ def _quick_action_url_names():
     return set(_quick_action_routes())
 
 
+def _quick_action_write_seam_errors(source, routes):
+    """Return quick-action classes that bypass the permission-scoped write seam."""
+    import ast
+
+    classes = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)}
+    scoped_writers = {"save_permission_scoped_object", "delete_permission_scoped_objects"}
+    direct_mutations = {
+        "save",
+        "delete",
+        "create",
+        "update",
+        "get_or_create",
+        "update_or_create",
+        "bulk_create",
+        "bulk_update",
+    }
+    errors = []
+
+    for url_name, class_name in sorted(routes.items()):
+        view = classes[class_name]
+        base_names = {getattr(base, "id", None) for base in view.bases}
+        if "_PermissionScopedWriteMixin" not in base_names:
+            errors.append(f"{url_name}: {class_name} lacks _PermissionScopedWriteMixin")
+
+        post = next(
+            (node for node in view.body if isinstance(node, ast.FunctionDef) and node.name == "post"),
+            None,
+        )
+        if post is None:
+            errors.append(f"{url_name}: {class_name} has no post()")
+            continue
+
+        post_calls = [node for node in ast.walk(post) if isinstance(node, ast.Call)]
+        if not any(isinstance(call.func, ast.Name) and call.func.id in scoped_writers for call in post_calls):
+            errors.append(f"{url_name}: {class_name}.post() does not call a scoped writer")
+        for call in (node for node in ast.walk(view) if isinstance(node, ast.Call)):
+            method = getattr(call.func, "attr", None)
+            if method in direct_mutations:
+                errors.append(f"{url_name}: {class_name} calls direct .{method}() at line {call.lineno}")
+
+    return errors
+
+
 class QuickActionInputBoundsTest(TestCase):
     """Each quick action writes request values straight to a column with a fixed width."""
 
@@ -345,50 +388,29 @@ class DeleteOnlyView:
 
         self.assertEqual(_permission_scoped_writer_class_names(source), {"DeleteOnlyView"})
 
+    def test_the_write_seam_scanner_checks_helpers_on_the_view_class(self):
+        source = """
+class DeleteThroughHelper(_PermissionScopedWriteMixin):
+    def _delete(self):
+        Widget.objects.create()
+
+    def post(self):
+        delete_permission_scoped_objects(user, queryset)
+"""
+
+        errors = _quick_action_write_seam_errors(source, {"delete_widget": "DeleteThroughHelper"})
+
+        self.assertTrue(
+            any("DeleteThroughHelper calls direct .create()" in error for error in errors),
+            errors,
+        )
+
     def test_every_quick_action_uses_only_the_permission_scoped_write_seam(self):
         """A routed preview writer cannot bypass object constraints with a direct ORM write."""
-        import ast
-
         from netbox_data_import import urls
 
         source = pathlib.Path(urls.__file__).with_name("views.py").read_text()
-        classes = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)}
-        scoped_writers = {"save_permission_scoped_object", "delete_permission_scoped_objects"}
-        direct_mutations = {
-            "save",
-            "delete",
-            "create",
-            "update",
-            "get_or_create",
-            "update_or_create",
-            "bulk_create",
-            "bulk_update",
-        }
-        errors = []
-
-        for url_name, class_name in sorted(_quick_action_routes().items()):
-            view = classes[class_name]
-            base_names = {getattr(base, "id", None) for base in view.bases}
-            if "_PermissionScopedWriteMixin" not in base_names:
-                errors.append(f"{url_name}: {class_name} lacks _PermissionScopedWriteMixin")
-
-            post = next(
-                (node for node in view.body if isinstance(node, ast.FunctionDef) and node.name == "post"),
-                None,
-            )
-            if post is None:
-                errors.append(f"{url_name}: {class_name} has no post()")
-                continue
-
-            calls = [node for node in ast.walk(post) if isinstance(node, ast.Call)]
-            if not any(isinstance(call.func, ast.Name) and call.func.id in scoped_writers for call in calls):
-                errors.append(f"{url_name}: {class_name}.post() does not call a scoped writer")
-            for call in calls:
-                method = getattr(call.func, "attr", None)
-                if method in direct_mutations:
-                    errors.append(f"{url_name}: {class_name}.post() calls direct .{method}() at line {call.lineno}")
-
-        self.assertEqual(errors, [])
+        self.assertEqual(_quick_action_write_seam_errors(source, _quick_action_routes()), [])
 
     def test_an_overlength_quick_action_leaves_the_database_unchanged(self):
         """Reject each create or update without truncating or changing an existing row."""

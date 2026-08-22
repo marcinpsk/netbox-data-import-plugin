@@ -16,6 +16,7 @@ from netbox_data_import.models import (
     IgnoredFieldDifference,
     ImportProfile,
 )
+from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.views import _serialize_rows
 
 
@@ -151,22 +152,14 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         add_ignoredfielddifference, so a user without it never enters the transaction.
         """
         from dcim.models import Device
-        from django.contrib.contenttypes.models import ContentType
-        from users.models import ObjectPermission
 
-        user = get_user_model().objects.create_user(username="constrained-review-user", password="testpass")
         grants = [
             (IgnoredFieldDifference, ["add"], {"target_field": "serial"}),
             (DeviceExistingMatch, ["add"], None),
             (Device, ["view"], None),
             (ImportProfile, ["view", "change"], None),
         ]
-        for model, actions, constraints in grants:
-            permission = ObjectPermission.objects.create(
-                name=f"constrained {model.__name__}", actions=actions, constraints=constraints
-            )
-            permission.object_types.add(ContentType.objects.get_for_model(model))
-            permission.users.add(user)
+        user_with_object_permission("constrained-review-user", grants)
 
         client = Client()
         self.assertTrue(client.login(username="constrained-review-user", password="testpass"))

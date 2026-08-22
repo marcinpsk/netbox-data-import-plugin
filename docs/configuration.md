@@ -75,3 +75,7 @@ profile:
     source_id_column: Id
     primary_contact_role: Primary Contact
 ```
+
+When imported, `adapter_config` replaces the profile's stored adapter configuration. It is not
+merged. A setting that is absent from the mapping resets to the adapter's declared default. Include
+each setting that you want to preserve in a hand-written or partial YAML file.

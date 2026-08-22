@@ -67,26 +67,44 @@ def _markers_by_line(source):
     return markers
 
 
+def _is_atomic_reference(node):
+    """Return True for `transaction.atomic` and for a bare imported `atomic`."""
+    return getattr(node, "attr", None) == "atomic" or getattr(node, "id", None) == "atomic"
+
+
 def _opens_atomic(node):
-    """Return True for `with transaction.atomic():` and for a bare imported `atomic()`."""
-    if not isinstance(node, (ast.With, ast.AsyncWith)):
-        return False
-    for item in node.items:
-        call = item.context_expr
-        if isinstance(call, ast.Call) and (
-            getattr(call.func, "attr", None) == "atomic" or getattr(call.func, "id", None) == "atomic"
-        ):
-            return True
+    """Return True for an atomic context manager or synchronous function decorator."""
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return any(
+            isinstance(item.context_expr, ast.Call) and _is_atomic_reference(item.context_expr.func)
+            for item in node.items
+        )
+    if isinstance(node, ast.FunctionDef):
+        return any(
+            _is_atomic_reference(decorator.func if isinstance(decorator, ast.Call) else decorator)
+            for decorator in node.decorator_list
+        )
     return False
 
 
 def _sets_rollback(statement):
-    """Return True for a bare `transaction.set_rollback(...)` statement."""
-    return (
+    """Return True for a bare `transaction.set_rollback(True)` statement."""
+    if not (
         isinstance(statement, ast.Expr)
         and isinstance(statement.value, ast.Call)
         and getattr(statement.value.func, "attr", None) == "set_rollback"
+    ):
+        return False
+    call = statement.value
+    argument = (
+        call.args[0]
+        if call.args
+        else next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "rollback"),
+            None,
+        )
     )
+    return isinstance(argument, ast.Constant) and argument.value is True
 
 
 def _normal_exits(body, loop_depth, rolled_back, in_nested_atomic=False):
@@ -129,7 +147,19 @@ def unaudited_atomic_exits(source, audited=None):
     def walk(node, scope):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                walk(child, [*scope, child.name])
+                child_scope = [*scope, child.name]
+                if _opens_atomic(child):
+                    qualified = ".".join(child_scope)
+                    for exit_node, dominated in _normal_exits(child.body, 0, False):
+                        if dominated:
+                            continue
+                        marker = markers.get(exit_node.lineno) or markers.get(exit_node.lineno - 1)
+                        if marker is not None and (qualified, marker) in audited:
+                            continue
+                        row = (qualified, exit_node.lineno, marker)
+                        if row not in reported:
+                            reported.append(row)
+                walk(child, child_scope)
                 continue
             if _opens_atomic(child):
                 qualified = ".".join(scope)
@@ -156,7 +186,14 @@ def used_markers(source):
     def walk(node, scope):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                walk(child, [*scope, child.name])
+                child_scope = [*scope, child.name]
+                if _opens_atomic(child):
+                    qualified = ".".join(child_scope)
+                    for exit_node, _dominated in _normal_exits(child.body, 0, False):
+                        marker = markers.get(exit_node.lineno) or markers.get(exit_node.lineno - 1)
+                        if marker is not None:
+                            used.add((qualified, marker))
+                walk(child, child_scope)
                 continue
             if _opens_atomic(child):
                 qualified = ".".join(scope)
@@ -191,6 +228,16 @@ class AtomicExitScannerTest(SimpleTestCase):
             "        transaction.set_rollback(True)\n"
             "        status = 1\n"
             "        return status\n"
+        )
+        self.assertEqual(self._report(source), [])
+
+    def test_a_keyword_true_rollback_clears_the_exit(self):
+        source = (
+            "def f():\n"
+            "    with transaction.atomic():\n"
+            "        obj.save()\n"
+            "        transaction.set_rollback(rollback=True)\n"
+            "        return 1\n"
         )
         self.assertEqual(self._report(source), [])
 
@@ -284,6 +331,26 @@ class AtomicExitScannerTest(SimpleTestCase):
     def test_a_bare_imported_atomic_is_recognized(self):
         source = "def f():\n    with atomic():\n        obj.save()\n        return 1\n"
         self.assertEqual([row[0] for row in self._report(source)], ["f"])
+
+    def test_a_transaction_atomic_decorator_is_recognized(self):
+        source = "@transaction.atomic\ndef f():\n    obj.save()\n    return 1\n"
+        self.assertEqual([row[0] for row in self._report(source)], ["f"])
+
+    def test_a_called_atomic_decorator_is_recognized(self):
+        source = "@atomic()\ndef f():\n    obj.save()\n    return 1\n"
+        self.assertEqual([row[0] for row in self._report(source)], ["f"])
+
+    def test_only_a_constant_true_rollback_clears_the_exit(self):
+        for arguments in ("False", "should_rollback", "rollback=False", "rollback=should_rollback"):
+            with self.subTest(arguments=arguments):
+                source = (
+                    "def f():\n"
+                    "    with transaction.atomic():\n"
+                    "        obj.save()\n"
+                    f"        transaction.set_rollback({arguments})\n"
+                    "        return 1\n"
+                )
+                self.assertEqual([row[0] for row in self._report(source)], ["f"])
 
     def test_a_return_in_a_match_case_is_reported(self):
         source = (

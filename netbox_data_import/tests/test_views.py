@@ -1165,21 +1165,23 @@ manufacturer_mappings:
         self.assertEqual(profile.resolved_primary_contact_role, role)
         self.assertEqual(profile.adapter_settings.primary_contact_lookup_field, "name")
 
-    def test_yaml_import_can_clear_the_primary_contact_role(self):
-        """An explicit null Contact Role clears the saved profile setting."""
+    def test_yaml_adapter_config_replaces_stored_settings_and_can_clear_role(self):
+        """Adapter configuration replaces the stored mapping instead of merging it."""
         from tenancy.models import ContactRole
 
         from netbox_data_import.views import _apply_profile_yaml_data
 
         role = ContactRole.objects.create(name="Role to Clear", slug="role-to-clear")
         profile = ImportProfile.objects.create(
-            name="Clear Contact Role", adapter_config={"primary_contact_role": role.name}
+            name="Clear Contact Role",
+            adapter_config={"primary_contact_role": role.name, "sheet_name": "Inventory"},
         )
 
         _apply_profile_yaml_data({"profile": {"name": profile.name, "adapter_config": {"primary_contact_role": None}}})
 
         profile.refresh_from_db()
         self.assertIsNone(profile.resolved_primary_contact_role)
+        self.assertEqual(profile.adapter_settings.sheet_name, "Data")
 
     def test_yaml_import_rejects_an_unknown_primary_contact_role(self):
         """A dangling Contact Role natural key fails at the adapter form boundary."""
