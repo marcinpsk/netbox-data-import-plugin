@@ -87,8 +87,10 @@ See [`docs/agents/domain.md`](docs/agents/domain.md).
 
 ## Key conventions
 
-- All views, forms, serializers, and tables inherit from NetBox base classes.
-- Use `NetBoxModel`, `NetBoxModelViewSet`, `NetBoxModelForm`, and similar. Never raw Django/DRF.
+- A class backed by `NetBoxModel` uses the matching NetBox view, form, serializer, or table base.
+  A class backed by plain `django.db.models.Model`, including `PolicySectionModel` subclasses, does
+  not use a base that requires NetBox model features such as custom fields, tags, changelog data, or
+  `last_updated`.
 - Commits follow Conventional Commits format (enforced by a pre-commit hook).
 - Never add a `Co-authored-by` trailer to commit messages.
 - Schema migrations are generated artifacts. Change a model, then run
