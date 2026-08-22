@@ -6,7 +6,7 @@ import os
 from io import BytesIO
 
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase
+from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
@@ -18,7 +18,11 @@ from netbox_data_import.models import (
     SourceResolution,
     stored_import_source,
 )
-from netbox_data_import.tests.helpers import set_import_source, setup_preview_with_device_matches
+from netbox_data_import.tests.helpers import (
+    run_on_separate_connection,
+    set_import_source,
+    setup_preview_with_device_matches,
+)
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
@@ -1382,30 +1386,6 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         resp = self._post({"name": "NoPerm", "slug": "noperm"})
         self.assertEqual(resp.status_code, 403)
 
-    def test_database_error_is_sanitized(self):
-        """Database errors are logged but not leaked in the response body."""
-        from unittest.mock import patch
-        from django.db import DatabaseError
-
-        with patch("dcim.models.DeviceRole.save", side_effect=DatabaseError("raw db detail SECRET")):
-            resp = self._post({"name": "X", "slug": "xfail"})
-        self.assertEqual(resp.status_code, 500)
-        self.assertNotIn("SECRET", resp.content.decode())
-        self.assertIn("internal", resp.json()["error"].lower())
-
-    def test_integrity_error_is_sanitized(self):
-        """IntegrityError from a race returns a generic 400, not the raw message."""
-        from unittest.mock import patch
-        from django.db import IntegrityError
-
-        with patch(
-            "dcim.models.DeviceRole.save",
-            side_effect=IntegrityError("duplicate key value violates unique constraint"),
-        ):
-            resp = self._post({"name": "X", "slug": "xrace"})
-        self.assertEqual(resp.status_code, 400)
-        self.assertNotIn("unique constraint", resp.content.decode())
-
     def test_a_duplicate_name_is_refused_before_the_database(self):
         """full_clean validates the unique constraints, so the duplicate never reaches the insert."""
         from dcim.models import DeviceRole
@@ -1431,6 +1411,94 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         self.assertIn("invalid", resp.json()["error"].lower())
         self.assertNotIn("300", resp.content.decode())
         self.assertFalse(DeviceRole.objects.filter(slug="xval").exists())
+
+
+class QuickCreateDeviceRoleDatabaseFailureTest(TransactionTestCase):
+    """Exercise database failure responses against real locks and constraints."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser("role-failure-user", "role-failure@example.invalid", "testpass")
+        self.client = Client()
+        self.client.force_login(self.user)
+        self.profile = ImportProfile.objects.create(name="Quick Role Database Failure Profile")
+
+    def _post(self, payload):
+        return self.client.post(
+            reverse("plugins:netbox_data_import:quick_create_role"),
+            {"profile_id": self.profile.pk, **payload},
+        )
+
+    def test_integrity_error_is_sanitized(self):
+        """An unrelated unique collision returns generic text and keeps only the winner."""
+        from threading import Event, current_thread
+
+        from dcim.models import DeviceRole
+        from django.db.models.signals import pre_save
+
+        insert_started = Event()
+        competing_insert_finished = Event()
+        request_thread = current_thread()
+
+        def pause_before_insert(sender, instance, **kwargs):
+            if current_thread() is request_thread and instance.name == "Concurrent Role":
+                insert_started.set()
+                self.assertTrue(competing_insert_finished.wait(timeout=10))
+
+        pre_save.connect(pause_before_insert, sender=DeviceRole, weak=False)
+        self.addCleanup(pre_save.disconnect, pause_before_insert, sender=DeviceRole)
+
+        def insert_competing_role():
+            self.assertTrue(insert_started.wait(timeout=10))
+            try:
+                DeviceRole.objects.create(name="Concurrent Role", slug="concurrent-role-winner")
+            finally:
+                competing_insert_finished.set()
+
+        with run_on_separate_connection(insert_competing_role):
+            response = self._post({"name": "Concurrent Role", "slug": "concurrent-role-request"})
+
+        body = response.content.decode().lower()
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("unique constraint", body)
+        self.assertNotIn("dcim_devicerole_name", body)
+        self.assertEqual(DeviceRole.objects.filter(name="Concurrent Role").count(), 1)
+        self.assertTrue(DeviceRole.objects.filter(slug="concurrent-role-winner").exists())
+
+    def test_database_error_is_sanitized(self):
+        """A real statement timeout returns generic text instead of database details."""
+        from threading import Event
+
+        from dcim.models import DeviceRole
+        from django.db import connection, transaction
+
+        lock_acquired = Event()
+        release_lock = Event()
+
+        def hold_device_role_table_lock():
+            with transaction.atomic():
+                with connection.cursor() as cursor:
+                    table = connection.ops.quote_name(DeviceRole._meta.db_table)
+                    cursor.execute(f"LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")
+                lock_acquired.set()
+                self.assertTrue(release_lock.wait(timeout=10))
+
+        with run_on_separate_connection(hold_device_role_table_lock):
+            try:
+                self.assertTrue(lock_acquired.wait(timeout=10))
+                with connection.cursor() as cursor:
+                    cursor.execute("SET statement_timeout TO '200ms'")
+                response = self._post({"name": "Locked Role", "slug": "locked-role"})
+            finally:
+                release_lock.set()
+                with connection.cursor() as cursor:
+                    cursor.execute("SET statement_timeout TO 0")
+
+        body = response.content.decode().lower()
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("internal", response.json()["error"].lower())
+        self.assertNotIn("statement timeout", body)
+        self.assertNotIn("canceling statement", body)
+        self.assertFalse(DeviceRole.objects.filter(slug="locked-role").exists())
 
 
 class QuickResolveManufacturerViewTest(BaseViewTestCase):
