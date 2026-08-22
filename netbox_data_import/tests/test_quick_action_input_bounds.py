@@ -12,7 +12,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ImportProfile
+from netbox_data_import.models import ImportProfile, ManufacturerMapping
 
 LONG = "L" * 300
 LONG_SLUG = "l" * 300
@@ -82,6 +82,44 @@ ROW_ACTION_PAYLOADS = {
 }
 
 
+def _writer_database_state():
+    """Return every row that the bounded request writers can affect."""
+    from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
+
+    from netbox_data_import.models import (
+        ClassRoleMapping,
+        ColumnMapping,
+        DeviceExistingMatch,
+        DeviceImportSource,
+        DeviceTypeMapping,
+        IgnoredDevice,
+        IgnoredFieldDifference,
+        SourceResolution,
+    )
+
+    models = (
+        ClassRoleMapping,
+        ColumnMapping,
+        DeviceExistingMatch,
+        DeviceImportSource,
+        DeviceTypeMapping,
+        IgnoredDevice,
+        IgnoredFieldDifference,
+        ManufacturerMapping,
+        SourceResolution,
+        Device,
+        DeviceRole,
+        DeviceType,
+        Manufacturer,
+    )
+    state = []
+    for model in models:
+        fields = [field.attname for field in model._meta.concrete_fields]
+        rows = tuple(model.objects.order_by("pk").values_list(*fields))
+        state.append((model._meta.label_lower, rows))
+    return tuple(state)
+
+
 def _permission_scoped_writer_url_names():
     """Return deferred writers, excluding the quick actions covered by their own ratchet."""
     import ast
@@ -142,6 +180,11 @@ class QuickActionInputBoundsTest(TestCase):
         cls.profile = ImportProfile.objects.create(
             name="Quick Bounds Profile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
         )
+        cls.existing_mapping = ManufacturerMapping.objects.create(
+            profile=cls.profile,
+            source_make="Acme",
+            netbox_manufacturer_slug="before",
+        )
 
     def setUp(self):
         self.client = Client()
@@ -196,11 +239,12 @@ class QuickActionInputBoundsTest(TestCase):
 
         self.assertEqual(errors, [])
 
-    def test_no_quick_action_writes_a_value_its_column_cannot_hold(self):
-        """The database raises DataError and returns HTTP 500 when the view does not check first."""
+    def test_an_overlength_quick_action_leaves_the_database_unchanged(self):
+        """Reject each create or update without truncating or changing an existing row."""
         for url_name, payloads in OVERLENGTH_PAYLOADS.items():
             for index, payload in enumerate(payloads):
                 with self.subTest(url_name=url_name, payload=index):
+                    before = _writer_database_state()
                     response = self.client.post(
                         reverse(f"plugins:netbox_data_import:{url_name}"),
                         {"profile_id": self.profile.pk, **payload},
@@ -210,17 +254,23 @@ class QuickActionInputBoundsTest(TestCase):
                         response.status_code,
                         500,
                         f"{url_name} payload {index} returned {response.status_code}",
+                    )
+                    self.assertEqual(
+                        _writer_database_state(),
+                        before,
+                        f"{url_name} payload {index} changed a database row",
                     )
 
     def test_every_permission_scoped_writer_is_covered(self):
         """A new view that writes through the shared saver has to arrive with its own payload."""
         self.assertEqual(_permission_scoped_writer_url_names() - set(ROW_ACTION_PAYLOADS), set())
 
-    def test_no_row_action_writes_a_value_its_column_cannot_hold(self):
-        """These views share one saver, so an unbounded value reaches the database through it."""
+    def test_an_overlength_row_action_leaves_the_database_unchanged(self):
+        """Reject each deferred write without creating or changing an affected row."""
         for url_name, payloads in ROW_ACTION_PAYLOADS.items():
             for index, payload in enumerate(payloads):
                 with self.subTest(url_name=url_name, payload=index):
+                    before = _writer_database_state()
                     response = self.client.post(
                         reverse(f"plugins:netbox_data_import:{url_name}"),
                         {"profile_id": self.profile.pk, **payload},
@@ -230,4 +280,9 @@ class QuickActionInputBoundsTest(TestCase):
                         response.status_code,
                         500,
                         f"{url_name} payload {index} returned {response.status_code}",
+                    )
+                    self.assertEqual(
+                        _writer_database_state(),
+                        before,
+                        f"{url_name} payload {index} changed a database row",
                     )
