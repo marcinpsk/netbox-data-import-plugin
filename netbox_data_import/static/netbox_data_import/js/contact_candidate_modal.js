@@ -291,13 +291,20 @@
     contactId.value = resolvedFields.contact_id || '';
 
     // A saved decision wins over the proposal, so re-opening the modal shows what was stored.
-    var roleByColumn = {};
+    var rolesByColumn = Object.create(null);
     var source = existing ? savedSources : proposed;
-    for (var role in source) roleByColumn[source[role]] = role;
+    for (var role in source) {
+      var sourceColumn = source[role];
+      if (!rolesByColumn[sourceColumn]) rolesByColumn[sourceColumn] = [];
+      rolesByColumn[sourceColumn].push(role);
+    }
 
     valueRows.textContent = '';
     for (var column in rowCandidates) {
-      valueRows.appendChild(candidateRow(column, rowCandidates[column], roleByColumn[column] || ''));
+      var columnRoles = rolesByColumn[column] || [''];
+      columnRoles.forEach(function (columnRole) {
+        valueRows.appendChild(candidateRow(column, rowCandidates[column], columnRole));
+      });
     }
     for (var literalRole in savedValues) {
       valueRows.appendChild(literalRow(literalRole, savedValues[literalRole]));

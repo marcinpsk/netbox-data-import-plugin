@@ -16,8 +16,11 @@ MOVED_COLUMNS = (
 )
 
 ADAPTER_KEY = "flat_workbook"
-SETTING_KEY = "primary_contact_lookup_field"
-FROZEN_DEFAULT = "email"
+FROZEN_REQUIRED_DEFAULTS = {
+    "sheet_name": "Data",
+    "primary_contact_lookup_field": "email",
+    "preview_view_mode": "rows",
+}
 
 
 def move_columns_into_adapter_config(apps, schema_editor):
@@ -35,17 +38,21 @@ def move_columns_into_adapter_config(apps, schema_editor):
         profile.save(update_fields=["source_adapter", "adapter_config"])
 
 
-def repair_empty_primary_contact_lookup_field(apps, schema_editor):
-    """Replace the two invalid stored lookup values with the default in effect at this release."""
+def repair_empty_required_settings(apps, schema_editor):
+    """Replace empty required settings with the defaults in effect at this release."""
     ImportProfile = apps.get_model("netbox_data_import", "ImportProfile")
     profiles = ImportProfile.objects.filter(source_adapter=ADAPTER_KEY).only("pk", "adapter_config")
     for profile in profiles.iterator():
         config = profile.adapter_config
-        if not isinstance(config, dict) or SETTING_KEY not in config:
+        if not isinstance(config, dict):
             continue
-        if config[SETTING_KEY] not in ("", None):
+        repaired = {
+            key: default if config.get(key) in ("", None) else config[key]
+            for key, default in FROZEN_REQUIRED_DEFAULTS.items()
+        }
+        if all(config.get(key) == value for key, value in repaired.items()):
             continue
-        ImportProfile.objects.filter(pk=profile.pk).update(adapter_config={**config, SETTING_KEY: FROZEN_DEFAULT})
+        ImportProfile.objects.filter(pk=profile.pk).update(adapter_config={**config, **repaired})
 
 
 class Migration(migrations.Migration):
@@ -110,5 +117,5 @@ class Migration(migrations.Migration):
             model_name="importprofile",
             name="update_existing",
         ),
-        migrations.RunPython(repair_empty_primary_contact_lookup_field),
+        migrations.RunPython(repair_empty_required_settings),
     ]

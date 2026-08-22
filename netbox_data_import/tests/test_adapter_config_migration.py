@@ -5,11 +5,13 @@
 from importlib import import_module
 
 from django.db import connection
-from django.db.migrations import AddField, Migration, RemoveField, RunPython
+from django.db.migrations import AddField, RemoveField, RunPython
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
 from django.db.migrations.recorder import MigrationRecorder
 from django.test import TransactionTestCase
+
+from netbox_data_import.tests.helpers import reverse_squashed_schema_operations
 
 APP = "netbox_data_import"
 BEFORE = "0020_migrate_import_source_custom_field"
@@ -45,19 +47,7 @@ def _applied_steps():
 def _rewind_to_before_the_squash():
     """Reverse only the squash's schema so its real forward data operations can run again."""
     executor = MigrationExecutor(connection)
-    squashed_migration = executor.loader.get_migration(APP, SQUASHED)
-    data_operations = [operation for operation in squashed_migration.operations if isinstance(operation, RunPython)]
-    if len(data_operations) != 2:
-        raise AssertionError(f"Expected two RunPython operations in {SQUASHED}, found {len(data_operations)}")
-
-    schema_migration = Migration(SQUASHED, APP)
-    schema_migration.atomic = squashed_migration.atomic
-    schema_migration.operations = [
-        operation for operation in squashed_migration.operations if not isinstance(operation, RunPython)
-    ]
-    before_state = executor.loader.project_state([(APP, BEFORE)])
-    with connection.schema_editor(atomic=schema_migration.atomic) as schema_editor:
-        schema_migration.unapply(before_state, schema_editor)
+    reverse_squashed_schema_operations(executor, APP, SQUASHED, BEFORE, expected_data_operations=2)
     return _migrate(BEFORE, fake=True)
 
 
@@ -71,8 +61,8 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         self.addCleanup(_migrate, SQUASHED)
         _rewind_to_before_the_squash()
 
-    def test_it_moves_every_column_and_repairs_a_blank_lookup(self):
-        """A fresh upgrade preserves legacy values and repairs the invalid value 0020 can store."""
+    def test_it_moves_every_column_and_repairs_blank_required_settings(self):
+        """A fresh upgrade preserves legacy values and repairs invalid values 0020 can store."""
         apps = MigrationExecutor(connection).loader.project_state([(APP, BEFORE)]).apps
         ContactRole = apps.get_model("tenancy", "ContactRole")
         ImportProfile = apps.get_model(APP, "ImportProfile")
@@ -90,7 +80,12 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
             preview_view_mode="racks",
         )
         ImportProfile.objects.create(name="Legacy Defaults")
-        ImportProfile.objects.create(name="Legacy Blank Lookup", primary_contact_lookup_field="")
+        ImportProfile.objects.create(
+            name="Legacy Blank Required Settings",
+            sheet_name="",
+            primary_contact_lookup_field="",
+            preview_view_mode="",
+        )
 
         migrated_apps = _migrate(SQUASHED)
         MigratedProfile = migrated_apps.get_model(APP, "ImportProfile")
@@ -119,8 +114,10 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         self.assertEqual(defaults.adapter_config["primary_contact_lookup_field"], "email")
         self.assertIsNone(defaults.adapter_config["primary_contact_role"])
 
-        blank = MigratedProfile.objects.get(name="Legacy Blank Lookup")
+        blank = MigratedProfile.objects.get(name="Legacy Blank Required Settings")
+        self.assertEqual(blank.adapter_config["sheet_name"], "Data")
         self.assertEqual(blank.adapter_config["primary_contact_lookup_field"], "email")
+        self.assertEqual(blank.adapter_config["preview_view_mode"], "rows")
 
     def test_the_moved_columns_are_gone_afterwards(self):
         """No dual read path survives the squash."""
@@ -164,7 +161,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         }
 
         move_index = data_indices["move_columns_into_adapter_config"]
-        repair_index = data_indices["repair_empty_primary_contact_lookup_field"]
+        repair_index = data_indices["repair_empty_required_settings"]
         self.assertEqual(set(add_indices), {"adapter_config", "source_adapter"})
         self.assertLess(max(add_indices.values()), move_index)
         self.assertEqual(set(remove_indices), set(REMOVED_FIELDS))

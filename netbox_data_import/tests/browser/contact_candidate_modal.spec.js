@@ -120,8 +120,11 @@ async function openRow(page, rowNumber, sourceId) {
   );
 }
 
-async function setUp(page, fixture = previewFixture) {
+async function setUp(page, fixture = previewFixture, candidateRows = {}) {
   await page.setContent(fixture);
+  await page.locator("#ndi-candidate-values-by-row").evaluate((node, rows) => {
+    node.textContent = JSON.stringify({...JSON.parse(node.textContent), ...rows});
+  }, candidateRows);
   await initNetBoxSelects(page);
   await page.addScriptTag({ content: controllerSource });
 }
@@ -198,6 +201,58 @@ test("a saved decision wins over the proposal", async ({ page }) => {
 
   // The proposal would put the address in `email`; the stored decision names Owner only.
   expect(await rolesByColumn(page)).toEqual({ "Primary Contact": "", Owner: "name" });
+});
+
+test("a saved source column can supply more than one Contact field", async ({ page }) => {
+  await setUp(page);
+  await page.evaluate(() => {
+    window.EXISTING_RESOLUTIONS["source-first"] = {
+      "candidate:contact": {
+        resolved_fields: {
+          contact_resolution_applied: true,
+          contact_field_sources: { name: "Primary Contact", email: "Primary Contact" },
+          contact_field_values: {},
+          contact_id: null,
+        },
+      },
+    };
+  });
+  await openRow(page, "first-row", "source-first");
+
+  const sharedRoles = await page
+    .locator('.ndi-contact-value-row[data-source-column="Primary Contact"] .ndi-contact-role')
+    .evaluateAll((selects) => selects.map((select) => select.value).sort());
+  expect(sharedRoles).toEqual(["email", "name"]);
+  expect((await submitPayload(page)).contact_field_sources).toEqual({
+    email: "Primary Contact",
+    name: "Primary Contact",
+  });
+});
+
+test("a source column matching an inherited object property still opens", async ({ page }) => {
+  await setUp(page, previewFixture, {
+    "reserved-row": {contact: {constructor: "reserved@example.invalid"}},
+  });
+  await page.evaluate(() => {
+    window.EXISTING_RESOLUTIONS["source-reserved"] = {
+      "candidate:contact": {
+        resolved_fields: {
+          contact_resolution_applied: true,
+          contact_field_sources: {email: "constructor", name: "constructor"},
+          contact_field_values: {},
+          contact_id: null,
+        },
+      },
+    };
+  });
+
+  await openRow(page, "reserved-row", "source-reserved");
+
+  const roles = await page
+    .locator('.ndi-contact-value-row[data-source-column="constructor"] .ndi-contact-role')
+    .evaluateAll((selects) => selects.map((select) => select.value).sort());
+  expect(roles).toEqual(["email", "name"]);
+  expect((await submitPayload(page)).contact_field_sources).toEqual({email: "constructor", name: "constructor"});
 });
 
 test("the submitted payload keeps the field-sources contract", async ({ page }) => {

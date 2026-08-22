@@ -56,6 +56,28 @@ def user_with_object_permission(username, grants):
     return user
 
 
+def reverse_squashed_schema_operations(executor, app_label, step, below, *, expected_data_operations):
+    """Reverse a squash's schema operations without running its irreversible data operations."""
+    from django.db import connection
+    from django.db.migrations import Migration, RunPython
+
+    squashed_migration = executor.loader.get_migration(app_label, step)
+    data_operations = [operation for operation in squashed_migration.operations if isinstance(operation, RunPython)]
+    if len(data_operations) != expected_data_operations:
+        raise AssertionError(
+            f"Expected {expected_data_operations} RunPython operations in {step}, found {len(data_operations)}"
+        )
+
+    schema_migration = Migration(step, app_label)
+    schema_migration.atomic = squashed_migration.atomic
+    schema_migration.operations = [
+        operation for operation in squashed_migration.operations if not isinstance(operation, RunPython)
+    ]
+    before_state = executor.loader.project_state([(app_label, below)])
+    with connection.schema_editor(atomic=schema_migration.atomic) as schema_editor:
+        schema_migration.unapply(before_state, schema_editor)
+
+
 def make_dcim_objects(name_prefix=""):
     """Create and return (site, manufacturer, device_type, role) with the given prefix.
 

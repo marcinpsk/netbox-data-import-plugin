@@ -140,29 +140,33 @@ def _writer_database_state():
 
 def _permission_scoped_writer_url_names():
     """Return deferred writers, excluding the quick actions covered by their own ratchet."""
-    import ast
-
     from netbox_data_import import urls
 
     source = pathlib.Path(urls.__file__).with_name("views.py").read_text()
-    writers = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for sub in ast.walk(node):
-            if (
-                isinstance(sub, ast.Call)
-                and isinstance(sub.func, ast.Name)
-                and sub.func.id == "save_permission_scoped_object"
-            ):
-                writers.add(node.name)
-                break
+    writers = _permission_scoped_writer_class_names(source)
     names = set()
     for pattern in urls.urlpatterns:
         view_class = getattr(pattern.callback, "view_class", None)
         if view_class is not None and view_class.__name__ in writers:
             names.add(pattern.name)
     return names - _quick_action_url_names()
+
+
+def _permission_scoped_writer_class_names(source):
+    """Return classes whose methods call either permission-scoped write helper."""
+    import ast
+
+    helper_names = {"delete_permission_scoped_objects", "save_permission_scoped_object"}
+    writers = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if any(
+            isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in helper_names
+            for sub in ast.walk(node)
+        ):
+            writers.add(node.name)
+    return writers
 
 
 def _quick_action_routes():
@@ -330,6 +334,16 @@ class QuickActionInputBoundsTest(TestCase):
     def test_every_quick_action_is_covered(self):
         """A new quick action has to arrive with its own boundary payload."""
         self.assertEqual(_quick_action_url_names() - set(OVERLENGTH_PAYLOADS), set())
+
+    def test_the_deferred_writer_scanner_recognizes_a_delete_only_view(self):
+        """A routed delete-only writer must enter the same coverage ratchet as a save writer."""
+        source = """
+class DeleteOnlyView:
+    def post(self):
+        delete_permission_scoped_objects(user, queryset)
+"""
+
+        self.assertEqual(_permission_scoped_writer_class_names(source), {"DeleteOnlyView"})
 
     def test_every_quick_action_uses_only_the_permission_scoped_write_seam(self):
         """A routed preview writer cannot bypass object constraints with a direct ORM write."""

@@ -7,6 +7,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ColumnMapping, DeviceTypeMapping, ImportProfile
+from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.views import _fuzzy_match_netbox_field
 
 User = get_user_model()
@@ -326,24 +327,14 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
         NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants nothing.
         """
         from dcim.models import Manufacturer
-        from django.contrib.contenttypes.models import ContentType
-        from users.models import ObjectPermission
 
-        user = User.objects.create_user(username, f"{username}@example.com", "testpass")
         granted = [
             (ImportProfile, ["change"], {"pk": self.profile.pk}),
             (DeviceTypeMapping, ["add"], None),
         ]
         if also_add_manufacturer:
             granted.append((Manufacturer, ["add"], None))
-        for model, actions, constraints in granted:
-            permission = ObjectPermission.objects.create(
-                name=f"{username} {model.__name__}",
-                actions=actions,
-                constraints=constraints,
-            )
-            permission.object_types.add(ContentType.objects.get_for_model(model))
-            permission.users.add(user)
+        user_with_object_permission(username, granted)
         client = Client()
         self.assertTrue(client.login(username=username, password="testpass"))
         return client
