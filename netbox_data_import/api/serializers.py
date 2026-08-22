@@ -29,7 +29,18 @@ class PolicySectionSerializer(serializers.ModelSerializer):
     """Apply the shared policy-section applicability rule on the REST write path."""
 
     def validate(self, attrs):
-        """Reject a row whose section does not apply to the profile's Source Adapter."""
+        """
+        Validate that the policy section applies to the profile.
+        
+        Parameters:
+            attrs (dict): Validated serializer attributes.
+        
+        Returns:
+            dict: The validated serializer attributes.
+        
+        Raises:
+            serializers.ValidationError: If the policy section does not apply to the profile.
+        """
         attrs = super().validate(attrs)
         profile = attrs.get("profile", getattr(self.instance, "profile", None))
         try:
@@ -40,7 +51,19 @@ class PolicySectionSerializer(serializers.ModelSerializer):
 
 
 def _validate_target_keys(instance, attrs, names, *, allow_candidates=True, required=False):
-    """Reject a target key the profile's Source Adapter cannot supply."""
+    """
+    Validate configured target keys against the catalog and profile adapter output kinds.
+    
+    Parameters:
+        instance: Existing object containing profile and target values.
+        attrs: Candidate attribute values to validate.
+        names: Target attribute names to validate.
+        allow_candidates (bool): Whether candidate target keys are accepted.
+        required (bool): Whether each target value must be present.
+    
+    Raises:
+        serializers.ValidationError: If a required target is missing or a target key is invalid.
+    """
     profile = attrs.get("profile", getattr(instance, "profile", None))
     output_kinds = profile.output_kinds if profile is not None else None
     for name in names:
@@ -76,7 +99,18 @@ class ImportProfileSerializer(NetBoxModelSerializer):
         ]
 
     def validate(self, attrs):
-        """Validate the adapter configuration and keep the Source Adapter immutable."""
+        """
+        Validate the selected source adapter and normalize its configuration.
+        
+        Parameters:
+        	attrs (dict): Serializer attributes to validate and update.
+        
+        Returns:
+        	dict: Validated attributes with normalized adapter configuration.
+        
+        Raises:
+        	serializers.ValidationError: If the adapter is unknown, cannot be changed after profile creation, has an invalid target module, or has invalid configuration.
+        """
         instance = self.instance
         adapter_key = attrs.get("source_adapter") or getattr(instance, "source_adapter", DEFAULT_ADAPTER_KEY)
         if instance is not None and "source_adapter" in attrs and attrs["source_adapter"] != instance.source_adapter:
@@ -119,6 +153,7 @@ class _RackTypeSlugField(serializers.SlugRelatedField):
     """SlugRelatedField for RackType that defers the queryset import."""
 
     def get_queryset(self):
+        """Return all available rack types."""
         from dcim.models import RackType
 
         return RackType.objects.all()
@@ -172,7 +207,15 @@ class ColumnTransformRuleSerializer(PolicySectionSerializer):
         ]
 
     def validate(self, attrs):
-        """Resolve both group targets through the catalog, excluding the candidate targets."""
+        """
+        Validate both group targets against the catalog without allowing candidate targets.
+        
+        Parameters:
+        	attrs (dict): Serializer attributes to validate.
+        
+        Returns:
+        	dict: The validated serializer attributes.
+        """
         attrs = super().validate(attrs)
         _validate_target_keys(self.instance, attrs, ("group_1_target", "group_2_target"), allow_candidates=False)
         return attrs
@@ -182,7 +225,12 @@ class SourceResolutionSerializer(PolicySectionSerializer):
     """Serializer for SourceResolution (rerere, plain model)."""
 
     def validate(self, attrs):
-        """Reject Contact candidate resolutions that the importer cannot apply."""
+        """
+        Validate source resolutions, including Contact candidate values and resolved fields.
+        
+        Returns:
+            dict: Validated serializer attributes.
+        """
         attrs = super().validate(attrs)
         instance = self.instance
         source_column = attrs.get("source_column", getattr(instance, "source_column", None))

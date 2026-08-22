@@ -511,12 +511,19 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
 
 
 def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
-    """Read the Excel file and return a list of row-dicts keyed by target_field name.
-
-    When return_stats=True, returns a tuple (rows, unused_stats) where unused_stats
-    is a dict mapping unmapped source column names to {"count": int, "samples": list[str]}.
-
-    Raises ParseError if the file or sheet is invalid.
+    """
+    Parse an Excel worksheet into row dictionaries keyed by target field names.
+    
+    Parameters:
+    	file_obj: A readable Excel file object.
+    	profile (ImportProfile): Import profile defining the source adapter, worksheet, mappings, and parsing settings.
+    	return_stats (bool): Whether to include statistics for unmapped source columns.
+    
+    Returns:
+    	list: Parsed row dictionaries, or a tuple containing the rows and unmapped-column statistics when `return_stats` is true.
+    
+    Raises:
+    	ParseError: If the configured adapter is unavailable, the workbook cannot be opened, or the configured worksheet is missing.
     """
     if not has_implemented_module(profile.output_kinds):
         raise ParseError(f"This release has no Target Module for the '{profile.source_adapter}' source adapter.")
@@ -763,7 +770,18 @@ def _ensure_manufacturer(
     *,
     explicit_identity=False,
 ):
-    """Create (or preview-create) a manufacturer if not yet seen."""
+    """
+    Ensure that the manufacturer identified by the slug exists or is recorded for preview creation.
+    
+    Parameters:
+        mfg_slug: Slug used to identify the manufacturer.
+        make: Source manufacturer name.
+        seen_manufacturers: Slugs already processed during the import.
+        ctx: Import context controlling execution mode, permissions, and results.
+        row: Source row associated with the manufacturer.
+        Manufacturer: Manufacturer model used for lookup and creation.
+        explicit_identity: Whether the manufacturer identity came from an explicit mapping.
+    """
     if ctx.dry_run and mfg_slug in seen_manufacturers:
         return
     seen_manufacturers.add(mfg_slug)
@@ -813,7 +831,23 @@ def _ensure_device_type(
     *,
     explicit_identity=False,
 ):
-    """Create (or preview-create) a device type if not yet seen."""
+    """
+    Ensure that the manufacturer and device type required by an import row exist or are represented in the preview.
+    
+    Parameters:
+        mfg_slug: Slug identifying the manufacturer.
+        dt_slug: Slug identifying the device type.
+        make: Source manufacturer name.
+        model: Source device model.
+        u_height: Device type height in rack units.
+        seen_device_types: Set of manufacturer and device type slug pairs already processed.
+        ctx: Import context containing execution settings, permissions, and result state.
+        row: Source row associated with the device type.
+        Manufacturer: Manufacturer model class.
+        DeviceType: Device type model class.
+        explicit_identity: Whether the manufacturer and device type identity was explicitly mapped.
+    
+    """
     dt_key = (mfg_slug, dt_slug)
     if ctx.dry_run and dt_key in seen_device_types:
         return
@@ -1221,7 +1255,20 @@ def _rack_validation_error_row(row, source_id, rack_name, exc, operation):
 
 
 def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=None):
-    """Write or update a rack in the database and record the result."""
+    """
+    Create a rack or update an existing rack, recording the operation result.
+    
+    Parameters:
+    	rack_name: Name used to identify the rack.
+    	u_height: Rack height in rack units.
+    	serial: Rack serial number.
+    	source_id: Source-system identifier for the rack.
+    	row: Parsed source row containing import metadata.
+    	ctx: Import context containing profile, permissions, and result state.
+    	Rack: Rack model class.
+    	rack_type: Optional rack type to assign.
+    
+    """
     rack, ambiguous = _get_unique_rack(Rack, ctx, rack_name, lock=True)
     if ambiguous:
         ctx.result.rows.append(_ambiguous_rack_row(row, source_id, rack_name, rack_name, ctx, "rack"))
@@ -1322,7 +1369,14 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
 
 
 def _pass2_process_racks(rows, ctx, class_role_map):
-    """Pass 2: create or update Rack objects. Populates ctx.rack_map in place."""
+    """
+    Process rack rows by creating, updating, or previewing racks and record their results.
+    
+    Parameters:
+    	rows: Source rows containing rack data.
+    	ctx: Import context holding configuration, state, and result records.
+    	class_role_map: Mapping of device classes to rack and role configuration.
+    """
     from dcim.models import Rack
 
     for row in rows:
@@ -2280,7 +2334,29 @@ def _preview_device_row(  # noqa: C901
     ambiguous_names: frozenset = frozenset(),
     role_slug=_NOT_PROVIDED,
 ):
-    """Return a RowResult for *dry_run* mode (no DB writes)."""
+    """
+    Preview a device import row and return the proposed action, validation results, identity information, and field changes without modifying the database.
+    
+    Parameters:
+        row: Parsed source row to preview.
+        ctx: Import context containing profile, site, location, permissions, and preview state.
+        make: Source manufacturer name.
+        model: Source device model name.
+        mfg_slug: Resolved manufacturer slug.
+        dt_slug: Resolved device type slug.
+        source_id: Source-system identifier for the device.
+        device_name: Proposed device name.
+        serial: Source serial number.
+        asset_tag: Source asset tag.
+        DeviceType: Device type model class.
+        Device: Device model class.
+        Rack: Rack model class.
+        ip_fields (dict | None): Parsed IP address values associated with the device.
+        role_slug: Resolved device role slug, when provided.
+    
+    Returns:
+        RowResult: Preview result describing the proposed device action, validation errors, identity match, placement, field differences, and related metadata.
+    """
     # Parse u_height early so it's available in all return paths
     u_height_raw = row.get("u_height", 1)
     review_u_height = _coerce_int(u_height_raw, 1)
@@ -2813,6 +2889,35 @@ def _write_device_row(  # noqa: C901
     ip_fields: dict | None = None,
     ambiguous_names: frozenset = frozenset(),
 ):
+    """
+    Create a device or update an existing device from an import row.
+    
+    Parameters:
+        row: Source row containing device and placement data.
+        ctx: Import context containing profile, site, location, tenant, permissions, and state.
+        make: Source manufacturer name.
+        model: Source device model name.
+        crm: Resolved device role information.
+        mfg_slug: Manufacturer slug.
+        dt_slug: Device type slug.
+        source_id: Source-system identifier for the device.
+        device_name: Device name to create or use for matching.
+        serial: Device serial number.
+        asset_tag: Device asset tag.
+        position: Rack position.
+        face: Rack-facing direction.
+        airflow: Device airflow direction.
+        status: Device status.
+        DeviceType: Device type model class.
+        DeviceRole: Device role model class.
+        Rack: Rack model class.
+        Device: Device model class.
+        ip_fields: Optional mapping of device IP fields to source IP values.
+        ambiguous_names: Device names that cannot be used for unambiguous matching.
+    
+    Returns:
+        RowResult: The outcome of the device operation, including creation, update, skip, or error details.
+    """
     rack_name = _str_val(row.get("rack_name"))
     device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
     device_role = _cached_device_role(ctx, DeviceRole, crm.role_slug)
@@ -3950,13 +4055,23 @@ def run_import(
     expected_intents: dict | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> ImportResult:
-    """Run (or preview) the import.
-
-    context keys: site, location (optional), tenant (optional)
-    dry_run=True  → no DB writes, returns what *would* happen
-    dry_run=False → writes to DB; pass user to enforce DCIM object permissions
-
-    Raises ValidationError when the profile names an adapter this release does not register.
+    """
+    Run or preview an Excel-to-NetBox import.
+    
+    Parameters:
+        rows (list[dict]): Parsed source rows to process.
+        profile (ImportProfile): Import profile defining adapter and field mappings.
+        context (dict): Import context containing `site` and optional `location` and `tenant`.
+        dry_run (bool): If true, preview changes without writing to the database.
+        user (object | None): User whose permissions apply during database writes.
+        expected_intents (dict | None): Expected row actions and identities used to detect stale previews.
+        progress_callback (Callable[[int, int], None] | None): Callback receiving completed and total row counts.
+    
+    Returns:
+        ImportResult: Results and counts for the processed rows.
+    
+    Raises:
+        ValidationError: If the profile references an unregistered adapter.
     """
     from .models import IgnoredDevice, validate_registered_adapter
 
@@ -4054,9 +4169,17 @@ def _build_candidate_source_columns(profile: ImportProfile) -> dict[str, frozens
 def _store_source_id(
     obj, profile: ImportProfile, source_id: str, extra_columns: dict | None = None, ip_data: dict | None = None
 ):
-    """Store the source ID in the profile's custom field and the plugin's import record.
-
-    The import record covers Devices. A Rack keeps only the operator-configured custom field.
+    """
+    Store the source identifier for an imported object.
+    
+    The identifier is written to the profile-configured custom field when available. For devices, also create or update the associated import record with the source identifier, extra columns, and unassigned IP data.
+    
+    Parameters:
+        obj: Imported object receiving the source identifier.
+        profile (ImportProfile): Import profile containing the storage configuration.
+        source_id (str): Source-system identifier.
+        extra_columns (dict | None): Additional source values to store for devices.
+        ip_data (dict | None): Unassigned IP data to store for devices.
     """
     # Per-profile custom field (e.g. cans_id → plain string)
     if profile.adapter_settings.custom_field_name and source_id:

@@ -107,7 +107,12 @@ class KeyFamily:
     name_label: str = "Custom field"
 
     def matches(self, key: str) -> bool:
-        """Return True when *key* carries this family's prefix."""
+        """
+        Determine whether a key begins with this family's prefix.
+        
+        Returns:
+            `true` if the key begins with the family's prefix, `false` otherwise.
+        """
         return key.startswith(self.prefix)
 
     def name_of(self, key: str) -> str:
@@ -124,7 +129,12 @@ class KeyFamily:
 
     @property
     def target_modules(self) -> frozenset[str]:
-        """Return the Target Modules that consume this family, derived from its output kinds."""
+        """
+        Identify the target modules that consume this key family.
+        
+        Returns:
+        	frozenset[str]: Keys of the consuming target modules.
+        """
         return frozenset(m.key for m in TARGET_MODULES if m.consumes & self.output_kinds)
 
 
@@ -144,6 +154,7 @@ class TargetFieldCatalog:
     _by_key: dict[str, TargetField] = field(init=False, repr=False, compare=False, default_factory=dict)
 
     def __post_init__(self):
+        """Build the catalog's lookup index from field keys."""
         object.__setattr__(self, "_by_key", {entry.key: entry for entry in self.fields})
 
     def entry(self, key: str) -> TargetField | None:
@@ -158,7 +169,17 @@ class TargetFieldCatalog:
         return None
 
     def is_valid(self, key: str, *, output_kinds: frozenset[str] | None = None, allow_candidates: bool = True) -> bool:
-        """Return True when *key* is a Target Field the given output kinds can supply."""
+        """
+        Determine whether a target-field key is valid for the specified output kinds.
+        
+        Parameters:
+            key (str): Target-field key to validate.
+            output_kinds (frozenset[str] | None): Output kinds that may supply the field.
+            allow_candidates (bool): Whether candidate-target fields are permitted.
+        
+        Returns:
+            bool: `true` if the key is valid for the specified criteria, `false` otherwise.
+        """
         entry = self.entry(key)
         if entry is not None:
             if entry.candidate_target and not allow_candidates:

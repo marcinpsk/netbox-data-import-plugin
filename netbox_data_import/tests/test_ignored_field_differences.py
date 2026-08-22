@@ -145,10 +145,11 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         return next(row for row in session["import_result"]["rows"] if row["object_type"] == "device")
 
     def _constrained_review_client(self):
-        """A client that may bind the device but whose review permission excludes this field.
-
-        That is the only way to reach the refusal: the view's own mixin already requires
-        add_ignoredfielddifference, so a user without it never enters the transaction.
+        """
+        Create an authenticated client with restricted permissions for field-review refusal tests.
+        
+        Returns:
+        	Client: An authenticated client sharing the active import preview session.
         """
         from dcim.models import Device
         from django.contrib.contenttypes.models import ContentType

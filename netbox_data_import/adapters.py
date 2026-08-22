@@ -81,7 +81,12 @@ def adapter_choices():
 
 
 def selectable_adapter_choices():
-    """Return choice pairs for the adapters a Target Module in this release can consume."""
+    """
+    List key/label pairs for adapters supported by an implemented Target Module.
+    
+    Returns:
+        list[tuple[str, str]]: Adapter keys and labels available for selection.
+    """
     return [(adapter.key, adapter.label) for adapter in ADAPTERS if has_implemented_module(adapter.output_kinds)]
 
 

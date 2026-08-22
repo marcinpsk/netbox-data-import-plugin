@@ -52,7 +52,14 @@ class ImportJobRunner(JobRunner):
         rq_job.save_meta()
 
     def run(self, rows, context_data, stored_preview):
-        """Revalidate the preview, execute the import, and persist its audit record."""
+        """
+        Validate and execute a queued data import after confirming its preview is unchanged.
+        
+        Parameters:
+            rows: Import rows to process.
+            context_data: Saved import context, including profile, target, and filename details.
+            stored_preview: Preview generated before the job was queued.
+        """
         from dcim.models import Location, Site
         from tenancy.models import Tenant
 

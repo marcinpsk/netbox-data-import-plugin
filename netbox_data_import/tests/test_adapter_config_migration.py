@@ -72,7 +72,9 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         _rewind_to_before_the_squash()
 
     def test_it_moves_every_column_and_repairs_a_blank_lookup(self):
-        """A fresh upgrade preserves legacy values and repairs the invalid value 0020 can store."""
+        """
+        Verify that migrating legacy import profiles preserves configured values, applies defaults, and repairs blank contact lookup fields.
+        """
         apps = MigrationExecutor(connection).loader.project_state([(APP, BEFORE)]).apps
         ContactRole = apps.get_model("tenancy", "ContactRole")
         ImportProfile = apps.get_model(APP, "ImportProfile")

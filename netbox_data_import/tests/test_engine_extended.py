@@ -85,7 +85,15 @@ class _MockUserViewOnly:
 
 
 def _make_profile(name="EngineTest2") -> ImportProfile:
-    """Create a profile matching the sample fixture."""
+    """
+    Create an import profile configured for the sample fixture.
+    
+    Parameters:
+        name (str): Name assigned to the import profile.
+    
+    Returns:
+        ImportProfile: The configured import profile.
+    """
     profile = ImportProfile.objects.create(
         name=name,
         adapter_config={
@@ -1881,7 +1889,7 @@ class ResolveDeviceTypeSlugsNormalizeTest(TestCase):
     """Test _resolve_device_type_slugs normalizer loops (lines 241-242, 251-252)."""
 
     def setUp(self):
-        """Create profile and a device type mapping with unicode escape in model."""
+        """Create the import profile used by the test fixture."""
         self.profile = ImportProfile.objects.create(
             name="DTSNProfile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
         )
@@ -1960,7 +1968,7 @@ class PreviewMatchedBySerialTest(TestCase):
     """Test _preview_device_row matched-by-serial path (lines 664-665)."""
 
     def setUp(self):
-        """Create a device with a serial, profile and site."""
+        """Create the site, device, import profile, and class-role mapping used by the tests."""
         from dcim.models import Site, Manufacturer, DeviceType, DeviceRole, Device
 
         self.site = Site.objects.create(name="PMBSSite", slug="pmbs-site")

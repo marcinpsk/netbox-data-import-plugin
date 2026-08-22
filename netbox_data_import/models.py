@@ -47,7 +47,18 @@ def validate_section_applicability(profile, section_key):
 
 
 def _validated_contact_id(contact_id):
-    """Return a saved Contact ID as a positive int, rejecting anything int() would reshape."""
+    """
+    Normalize an optional Contact identifier for lookup.
+    
+    Parameters:
+        contact_id: A Contact identifier or an empty value.
+    
+    Returns:
+        The identifier as a positive integer, or None for an empty value.
+    
+    Raises:
+        ValidationError: If the identifier is invalid or less than 1.
+    """
     if contact_id in ("", None):
         return None
     # int() truncates, so a JSON float would silently select a different Contact.
@@ -67,7 +78,20 @@ def validate_contact_candidate_resolution(
     lookup_field: str,
     available_source_columns,
 ) -> dict:
-    """Validate and normalize one saved Contact candidate resolution."""
+    """
+    Validate and normalize a saved Contact candidate resolution.
+    
+    Parameters:
+        resolved_fields (dict): Resolution data containing selected source columns, literal field values, and a Contact ID.
+        lookup_field (str): Contact field required for lookup.
+        available_source_columns: Source columns available for the candidate row.
+    
+    Returns:
+        dict: Normalized field sources, stripped literal field values, and validated Contact ID.
+    
+    Raises:
+        ValidationError: If the resolution structure, fields, source columns, literal values, Contact ID, or required lookup fields are invalid.
+    """
     if (
         not isinstance(resolved_fields, dict)
         or not CONTACT_RESOLUTION_REQUIRED_KEYS <= set(resolved_fields)
@@ -147,7 +171,12 @@ class ImportProfile(NetBoxModel):
         return reverse("plugins:netbox_data_import:importprofile", args=[self.pk])
 
     def save(self, *args, **kwargs):
-        """Normalize adapter configuration on every supported write that stores it."""
+        """
+        Validate and normalize the adapter configuration before saving the profile.
+        
+        Raises:
+            ValidationError: If the configured source adapter is unavailable.
+        """
         update_fields = kwargs.get("update_fields")
         if update_fields is None or "adapter_config" in update_fields:
             adapter = self.adapter
@@ -197,10 +226,11 @@ class ImportProfile(NetBoxModel):
 
     @property
     def resolved_primary_contact_role(self):
-        """Return the referenced Contact Role object, or None when unset or dangling.
-
-        Planning reads this once per row, so the lookup is memoized against the configured name. A
-        plain instance cache would keep returning the old role after ``adapter_config`` changes.
+        """
+        Resolve the configured primary Contact Role.
+        
+        Returns:
+            ContactRole | None: The matching Contact Role, or ``None`` when no role is configured or the configured role does not exist.
         """
         name = self.adapter_settings.primary_contact_role
         if not name:
@@ -215,7 +245,11 @@ class ImportProfile(NetBoxModel):
         return role
 
     def clean(self):
-        """Reject an adapter change after creation and validate the adapter configuration."""
+        """Validate the profile's source adapter and configuration.
+        
+        Raises:
+            ValidationError: If the adapter is unknown, changes after creation, targets an unsupported module, or has invalid configuration.
+        """
         super().clean()
         adapter = self.adapter
         if adapter is None:
@@ -240,11 +274,26 @@ class AdapterSettings:
     """Read one adapter setting, falling back to the adapter form's declared default."""
 
     def __init__(self, adapter, config, adapter_key):
+        """Initialize settings access for a source adapter using the supplied configuration."""
         self._adapter_key = adapter_key
         self._fields = adapter.config_form_class().base_fields if adapter is not None else None
         self._config = config if isinstance(config, dict) else {}
 
     def __getattr__(self, name):
+        """
+        Provide access to a source adapter setting by name.
+        
+        Parameters:
+        	name (str): The name of the adapter setting to retrieve.
+        
+        Returns:
+        	object: The configured setting value, or its declared initial value when no value is configured.
+        
+        Raises:
+        	UnknownSourceAdapter: If the source adapter is unavailable.
+        	AttributeError: If the setting is not declared by the adapter.
+        	ValidationError: If a required setting has an empty value.
+        """
         fields = object.__getattribute__(self, "_fields")
         if fields is None:
             key = object.__getattribute__(self, "_adapter_key")
@@ -297,7 +346,12 @@ class ColumnMapping(PolicySectionModel):
         verbose_name_plural = "Column Mappings"
 
     def clean(self):
-        """Resolve the target field through the catalog and reject an inapplicable row."""
+        """
+        Validate the target field against the profile's supported output kinds.
+        
+        Raises:
+            ValidationError: If the target field is not defined in the catalog or is unsupported by the profile.
+        """
         super().clean()
         value = self.target_field or ""
         if not CATALOG.is_valid(value, output_kinds=self.profile.output_kinds if self.profile_id else None):
@@ -308,6 +362,7 @@ class ColumnMapping(PolicySectionModel):
         return CATALOG.display(self.target_field)
 
     def __str__(self):
+        """Return a readable representation of the source-column mapping."""
         return f"{self.source_column} → {self.get_target_field_display()}"
 
     def get_absolute_url(self):
@@ -465,6 +520,7 @@ class ManufacturerMapping(PolicySectionModel):
         verbose_name_plural = "Manufacturer Mappings"
 
     def __str__(self):
+        """Return a display string showing the source manufacturer and mapped NetBox manufacturer slug."""
         return f"{self.source_make} → {self.netbox_manufacturer_slug}"
 
 
@@ -497,6 +553,7 @@ class IgnoredDevice(PolicySectionModel):
         verbose_name_plural = "Ignored Devices"
 
     def __str__(self):
+        """Return a display label identifying the ignored device by name or source ID."""
         return f"{self.device_name or self.source_id} (ignored)"
 
 
@@ -543,7 +600,13 @@ class ColumnTransformRule(PolicySectionModel):
         verbose_name_plural = "Column Transform Rules"
 
     def clean(self):
-        """Validate the regex pattern, group counts, and group target field names."""
+        """
+        Validate the transformation pattern and configured capture-group targets.
+        
+        Raises:
+            ValidationError: If the regex is invalid, lacks required capture groups, or a
+                target field is unsupported for the profile.
+        """
         import re
 
         from django.core.exceptions import ValidationError
@@ -580,6 +643,7 @@ class ColumnTransformRule(PolicySectionModel):
                 raise ValidationError({attr: CATALOG.invalid_key_message(value)})
 
     def __str__(self):
+        """Return the source column and transformation pattern as a display string."""
         return f"{self.source_column}: {self.pattern}"
 
     def get_absolute_url(self):
@@ -629,6 +693,7 @@ class SourceResolution(PolicySectionModel):
         verbose_name_plural = "Source Resolutions"
 
     def __str__(self):
+        """Return a display string combining the source identifier, column, and original value."""
         return f"{self.source_id}/{self.source_column}: {self.original_value!r}"
 
 
@@ -679,6 +744,7 @@ class DeviceExistingMatch(PolicySectionModel):
         verbose_name_plural = "Device Existing Matches"
 
     def __str__(self):
+        """Return a display string identifying the source asset and its linked NetBox device."""
         tag = f" / {self.source_asset_tag}" if self.source_asset_tag else ""
         return f"{self.source_id}{tag} → Device #{self.netbox_device_id} ({self.device_name})"
 

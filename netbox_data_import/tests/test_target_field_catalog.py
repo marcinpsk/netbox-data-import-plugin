@@ -30,7 +30,16 @@ API = "plugins-api:netbox_data_import-api"
 
 
 def _api_url(route, *args):
-    """Return a plugin REST URL from its router route name, so a path change cannot silently pass."""
+    """
+    Builds a REST URL from a namespaced router route and positional arguments.
+    
+    Parameters:
+        route: The router route name.
+        *args: Positional arguments used to resolve the route.
+    
+    Returns:
+        The resolved REST URL.
+    """
     return reverse(f"{API}:{route}", args=args)
 
 
@@ -470,6 +479,14 @@ class ImportProfileApiTest(TestCase):
         self.client.force_login(_superuser())
 
     def _post(self, payload):
+        """Send a JSON payload to the import-profile API endpoint.
+        
+        Parameters:
+        	payload (dict): Request data to encode as JSON.
+        
+        Returns:
+        	Response: The API response.
+        """
         return self.client.post(
             _api_url("importprofile-list"),
             data=json.dumps(payload),
@@ -794,7 +811,7 @@ class AdapterRuntimeSupportTest(TestCase):
         self.assertFalse(ImportProfile.objects.filter(name="YAML Trace").exists())
 
     def test_an_unsaved_profile_with_a_preset_pk_is_still_a_creation(self):
-        """A set pk is not proof the profile exists, so the rules must read the persisted row."""
+        """Validates an unsaved profile as a new profile even when its primary key is preset."""
         profile = ImportProfile(pk=999999, name="Preset PK Trace", source_adapter="trace_workbook", adapter_config={})
         with self.assertRaises(ValidationError) as caught:
             profile.full_clean()
@@ -849,7 +866,7 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         self.assertIn(response.status_code, (200, 302), response.content[:400])
 
     def _retire_the_adapter(self):
-        """Drop the adapter out of the registry the way an upgrade would."""
+        """Mark the profile's adapter as retired to simulate an adapter removed from the registry."""
         ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
 
     def test_the_preview_reports_the_stale_adapter_instead_of_raising(self):
@@ -938,6 +955,15 @@ class RequiredTargetKeyRestTest(TestCase):
         self.client.force_login(_superuser())
 
     def _post(self, route, payload):
+        """Post a JSON request for the current import profile.
+        
+        Parameters:
+        	route: The API route to call.
+        	payload: The request fields to include alongside the profile identifier.
+        
+        Returns:
+        	The HTTP response from the API request.
+        """
         return self.client.post(
             _api_url(route),
             data=json.dumps({"profile": self.profile.pk, **payload}),

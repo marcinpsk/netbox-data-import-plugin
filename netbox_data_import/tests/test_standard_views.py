@@ -66,6 +66,9 @@ class ImportProfileAPIViewTestCase(APIViewTestCases.APIViewTestCase):
 
     @classmethod
     def setUpTestData(cls):
+        """
+        Prepare standard API test records and request payloads for import profiles.
+        """
         ImportProfile.objects.bulk_create(
             [
                 ImportProfile(name="Standard API Profile 1"),

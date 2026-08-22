@@ -95,6 +95,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         }
 
     def _rack_profile(self, name="Rack Safety Profile"):
+        """Create an import profile configured to create racks from cabinet-class rows."""
         profile = ImportProfile.objects.create(
             name=name, adapter_config={"sheet_name": "Data", "update_existing": True}
         )
@@ -117,6 +118,14 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         }
 
     def _set_import_session(self, rows, result=None, location=None, tenant=None):
+        """
+        Store import rows, context, and preview results in the client session.
+        
+        Parameters:
+            result: Optional precomputed import result; when omitted, a dry-run result is generated.
+            location: Optional location associated with the import.
+            tenant: Optional tenant associated with the import.
+        """
         if result is None:
             result = run_import(
                 rows,

@@ -14,10 +14,23 @@ FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.
 
 @contextmanager
 def run_on_separate_connection(target):
-    """Run *target* in a thread with a fresh database connection."""
+    """Run a callback in a daemon thread using a separate database connection.
+    
+    Parameters:
+        target (callable): Callback to execute in the separate thread.
+    
+    Raises:
+        AssertionError: If the callback does not finish within 10 seconds.
+        BaseException: Any exception raised by the callback.
+    """
     errors = Queue()
 
     def runner():
+        """
+        Run the target callback using a freshly opened default database connection.
+        
+        Exceptions raised by the callback are captured for handling by the caller.
+        """
         connections["default"].close()
         try:
             target()
@@ -39,7 +52,16 @@ def run_on_separate_connection(target):
 
 
 def user_with_object_permission(username, grants):
-    """Create a user holding one real ObjectPermission per model grant."""
+    """
+    Create a user with object permissions for the specified model grants.
+    
+    Parameters:
+        username (str): Username for the created user.
+        grants (iterable): Permission grants as `(model, actions, constraints)` tuples.
+    
+    Returns:
+        User: The created user.
+    """
     from django.contrib.auth import get_user_model
     from django.contrib.contenttypes.models import ContentType
     from users.models import ObjectPermission

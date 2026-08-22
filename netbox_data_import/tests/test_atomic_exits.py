@@ -81,7 +81,12 @@ def _opens_atomic(node):
 
 
 def _sets_rollback(statement):
-    """Return True for a bare `transaction.set_rollback(...)` statement."""
+    """
+    Identifies direct `set_rollback(...)` call statements.
+    
+    Returns:
+        `True` if the statement is an expression calling a `set_rollback` attribute, `False` otherwise.
+    """
     return (
         isinstance(statement, ast.Expr)
         and isinstance(statement.value, ast.Call)
@@ -121,12 +126,28 @@ def _normal_exits(body, loop_depth, rolled_back, in_nested_atomic=False):
 
 
 def unaudited_atomic_exits(source, audited=None):
-    """Return one entry per normal atomic exit that no rollback dominates and no marker covers."""
+    """
+    Identify normal exits from atomic blocks that lack dominating rollback coverage or an approved audit marker.
+    
+    Parameters:
+    	source (str): Python source code to scan.
+    	audited (set, optional): Approved `(qualified function, marker)` pairs. Defaults to `AUDITED_EXITS`.
+    
+    Returns:
+    	list: Tuples containing the qualified scope, exit line number, and associated marker for each unaudited exit.
+    """
     audited = AUDITED_EXITS if audited is None else audited
     markers = _markers_by_line(source)
     reported = []
 
     def walk(node, scope):
+        """
+        Scan a syntax tree for unaudited normal exits from atomic blocks.
+        
+        Parameters:
+        	node (ast.AST): Syntax tree node to traverse.
+        	scope (list[str]): Qualified scope names containing the node.
+        """
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 walk(child, [*scope, child.name])
@@ -154,6 +175,13 @@ def used_markers(source):
     used = set()
 
     def walk(node, scope):
+        """
+        Collect audit markers associated with detected atomic-block exits within an AST scope.
+        
+        Parameters:
+            node (ast.AST): AST node to traverse.
+            scope (list[str]): Qualified name components for the current function or class scope.
+        """
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 walk(child, [*scope, child.name])
@@ -176,6 +204,15 @@ class AtomicExitScannerTest(SimpleTestCase):
     AUDITED = {("f", "reviewed"): "for the scanner tests"}
 
     def _report(self, source):
+        """
+        Find unaudited normal exits from atomic blocks in source code.
+        
+        Parameters:
+        	source (str): Python source code to scan.
+        
+        Returns:
+        	list: Detected atomic exits without approved audit coverage.
+        """
         return unaudited_atomic_exits(source, audited=self.AUDITED)
 
     def test_a_write_then_an_unguarded_return_is_reported(self):
@@ -301,6 +338,7 @@ class PackageAtomicExitsTest(SimpleTestCase):
     """The package itself must carry no unaudited atomic exit."""
 
     def _modules(self):
+        """Return package Python modules while excluding test files."""
         tests = PACKAGE / "tests"
         return sorted(path for path in PACKAGE.rglob("*.py") if not path.is_relative_to(tests))
 

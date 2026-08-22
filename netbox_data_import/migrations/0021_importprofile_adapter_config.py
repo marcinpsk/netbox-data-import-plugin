@@ -36,7 +36,12 @@ def move_columns_into_adapter_config(apps, schema_editor):
 
 
 def repair_empty_primary_contact_lookup_field(apps, schema_editor):
-    """Replace the two invalid stored lookup values with the default in effect at this release."""
+    """
+    Replace empty primary-contact lookup values with the release default.
+    
+    Configurations that are not dictionaries or do not contain the lookup setting
+    are left unchanged.
+    """
     ImportProfile = apps.get_model("netbox_data_import", "ImportProfile")
     profiles = ImportProfile.objects.filter(source_adapter=ADAPTER_KEY).only("pk", "adapter_config")
     for profile in profiles.iterator():

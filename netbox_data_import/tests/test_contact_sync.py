@@ -467,7 +467,9 @@ class NativeContactSyncTest(TestCase):
             PrimaryContactResolver.review(self.device, row, self.profile)
 
     def test_apply_refuses_a_role_deleted_after_the_review(self):
-        """One profile instance serves both calls, and it memoizes the role it resolved."""
+        """
+        Rejects applying a reviewed contact resolution when its contact role was deleted.
+        """
         from tenancy.models import ContactRole
 
         row = self._row(
@@ -654,7 +656,9 @@ class NativeContactSyncTest(TestCase):
         )
 
     def test_preview_can_save_a_contact_candidate_row_resolution(self):
-        """The preview ships every candidate value and the role proposed for it."""
+        """
+        Verify that the preview exposes contact candidates and role suggestions, then persists a valid field resolution.
+        """
         self._set_extra_columns({"depth": 750})
         row = self._row(
             _candidate_values={
@@ -1515,7 +1519,7 @@ class ConcurrentNativeContactSyncTest(TransactionTestCase):
     """Exercise Contact identity serialization with real database transactions."""
 
     def setUp(self):
-        """Create two devices that can synchronize the same new Contact."""
+        """Create two devices configured to synchronize with the same new contact."""
         self.user = get_user_model().objects.create_superuser(
             username="concurrent-contact-user",
             email="concurrent-contact-user@example.invalid",

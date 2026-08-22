@@ -35,7 +35,18 @@ class AdapterConfigForm(forms.Form):
 
     @classmethod
     def validate_config(cls, raw: dict | None) -> dict:
-        """Return the normalized configuration for *raw*, rejecting unknown keys and invalid values."""
+        """
+        Validate and normalize adapter configuration data.
+        
+        Parameters:
+            raw (dict | None): Configuration values to validate. A value of `None` is treated as an empty configuration.
+        
+        Returns:
+            dict: A normalized configuration containing all declared settings.
+        
+        Raises:
+            ValidationError: If the configuration is not a mapping, contains unknown keys, or has invalid values.
+        """
         if raw is None:
             raw = {}
         if not isinstance(raw, dict):
@@ -125,7 +136,15 @@ class FlatWorkbookConfigForm(AdapterConfigForm):
 
     @classmethod
     def normalize(cls, cleaned: dict) -> dict:
-        """Return the configuration with the Contact Role reduced to its natural key."""
+        """
+        Normalize the configuration by storing the primary contact role by name.
+        
+        Parameters:
+            cleaned (dict): Cleaned configuration values.
+        
+        Returns:
+            dict: Configuration with the primary contact role name, or None when no role is selected.
+        """
         config = super().normalize(cleaned)
         role = config.get("primary_contact_role")
         config["primary_contact_role"] = role.name if role is not None else None

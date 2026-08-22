@@ -27,6 +27,7 @@ class MigrateImportSourceCustomFieldTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
+        """Create shared test fixtures for the import-source migration tests."""
         from dcim.models import Device, Rack
 
         cls.site, _mfg, cls.device_type, cls.role = make_dcim_objects("Migrate")

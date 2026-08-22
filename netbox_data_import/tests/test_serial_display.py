@@ -149,7 +149,14 @@ class SearchDeviceSerialDisplayTest(TestCase):
         self.assertEqual(len(data["results"]), 0)
 
     def _make_preview_profile(self, name="SerialTestProfile"):
-        """Create an ImportProfile compatible with the test fixture file."""
+        """Create an import profile compatible with the serial-number test fixture.
+        
+        Parameters:
+        	name (str): Profile name to create.
+        
+        Returns:
+        	ImportProfile: The configured import profile.
+        """
         from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile
 
         profile = ImportProfile.objects.create(

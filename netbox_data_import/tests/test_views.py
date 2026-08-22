@@ -423,9 +423,14 @@ class PreviewSessionMixin:
     """Build the preview session state without dragging another class's test methods along."""
 
     def _setup_session(self, *, mutate_rows=None):
-        """Populate session with a valid import state.
-
-        `mutate_rows` edits the parsed rows so a caller can preview a state the workbook lacks.
+        """
+        Populate the test client session with a valid import preview state.
+        
+        Parameters:
+            mutate_rows (callable, optional): Modifies the parsed rows before the import preview is generated.
+        
+        Returns:
+            ImportProfile: The profile used to create the session state.
         """
         from dcim.models import Site
         from netbox_data_import.engine import parse_file, run_import
@@ -1282,6 +1287,14 @@ class QuickCreateManufacturerViewTest(BaseViewTestCase):
         self.profile = ImportProfile.objects.create(name="Quick Manufacturer Profile")
 
     def _post(self, payload):
+        """Submit a manufacturer quick-create request for the current profile.
+        
+        Parameters:
+            payload (dict): Form data to include in the request.
+        
+        Returns:
+            Response: The HTTP response from the quick-create endpoint.
+        """
         return self.client.post(
             reverse("plugins:netbox_data_import:quick_create_manufacturer"),
             {"profile_id": self.profile.pk, **payload},
@@ -1317,9 +1330,11 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         self.profile = ImportProfile.objects.create(name="Quick Role Profile")
 
     def _url(self):
+        """Build the URL for quick device-role creation."""
         return reverse("plugins:netbox_data_import:quick_create_role")
 
     def _post(self, payload):
+        """Submit a POST request for this test's import profile with the provided payload."""
         return self.client.post(self._url(), {"profile_id": self.profile.pk, **payload})
 
     def test_creates_role(self):
@@ -1423,6 +1438,14 @@ class QuickCreateDeviceRoleDatabaseFailureTest(TransactionTestCase):
         self.profile = ImportProfile.objects.create(name="Quick Role Database Failure Profile")
 
     def _post(self, payload):
+        """Submit a quick-create role request for the current import profile.
+        
+        Parameters:
+        	payload (dict): Form data to include in the request.
+        
+        Returns:
+        	The response from the quick-create role endpoint.
+        """
         return self.client.post(
             reverse("plugins:netbox_data_import:quick_create_role"),
             {"profile_id": self.profile.pk, **payload},
@@ -1440,6 +1463,14 @@ class QuickCreateDeviceRoleDatabaseFailureTest(TransactionTestCase):
         request_thread = current_thread()
 
         def pause_before_insert(sender, instance, **kwargs):
+            """
+            Coordinate the concurrent insertion test for the targeted role instance.
+            
+            Parameters:
+                sender: Signal sender.
+                instance: Role instance being inserted.
+                **kwargs: Additional signal arguments.
+            """
             if current_thread() is request_thread and instance.name == "Concurrent Role":
                 insert_started.set()
                 self.assertTrue(competing_insert_finished.wait(timeout=10))
@@ -1475,6 +1506,9 @@ class QuickCreateDeviceRoleDatabaseFailureTest(TransactionTestCase):
         release_lock = Event()
 
         def hold_device_role_table_lock():
+            """
+            Hold an exclusive lock on the device-role table until the release signal is set.
+            """
             with transaction.atomic():
                 with connection.cursor() as cursor:
                     table = connection.ops.quote_name(DeviceRole._meta.db_table)

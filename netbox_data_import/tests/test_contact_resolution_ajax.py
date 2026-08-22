@@ -29,7 +29,9 @@ class ContactResolutionAjaxTest(TestCase):
     """The save endpoint answers JSON for the modal and keeps the redirect for a plain form."""
 
     def setUp(self):
-        """Put one device row that needs a Contact decision into the preview session."""
+        """
+        Prepare a preview session containing a device row that requires a Contact resolution.
+        """
         self.site, self.manufacturer, self.device_type, self.role = make_dcim_objects("CtcAjax")
         self.profile = ImportProfile.objects.create(
             name="ContactAjaxProfile",
@@ -87,6 +89,15 @@ class ContactResolutionAjaxTest(TestCase):
         session.save()
 
     def _payload(self, **overrides):
+        """
+        Build the default Contact-resolution request payload for test submissions.
+        
+        Parameters:
+            **overrides: Values that replace the default payload fields.
+        
+        Returns:
+            dict: The request payload.
+        """
         payload = {
             "profile_id": self.profile.pk,
             "source_id": "AJAX-001",
@@ -106,6 +117,7 @@ class ContactResolutionAjaxTest(TestCase):
         return payload
 
     def _post(self, **overrides):
+        """Submit a Contact resolution payload to the resolution endpoint and request a JSON response."""
         return self.client.post(
             reverse("plugins:netbox_data_import:save_resolution"),
             self._payload(**overrides),
@@ -326,7 +338,9 @@ class ContactResolutionAjaxTest(TestCase):
         self.assertTrue(SourceResolution.objects.filter(source_id="STANDALONE-1").exists())
 
     def test_the_native_contact_form_carries_the_preview_revision(self):
-        """Without scripts the form is the only thing that can present a token to check."""
+        """
+        Verify that the native Contact form includes the preview revision required for stale-preview checks.
+        """
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         self.assertContains(response, 'name="preview_revision"')

@@ -32,10 +32,16 @@ class PermissionScopedSaveResult:
 
 
 def enforce_saved_object_permission(obj, user, action):
-    """Reject a saved object whose final state is outside the user's scope.
-
-    ``has_perm`` rather than ``restrict()``: the policy models derive from plain
-    ``django.db.models.Model``, whose manager has no ``restrict()``.
+    """
+    Ensure the saved object is within the user's permission scope.
+    
+    Parameters:
+        obj: The saved object to check.
+        user: The user whose permission is evaluated. If None, no check is performed.
+        action: The permission action to evaluate.
+    
+    Raises:
+        ObjectPermissionDenied: If the user lacks permission for the object.
     """
     if user is None:
         return
@@ -45,9 +51,15 @@ def enforce_saved_object_permission(obj, user, action):
 
 
 def reject_overlong_fields(instance, model):
-    """Reject a string the column cannot hold, before the database raises DataError.
-
-    Only length is checked. `full_clean` would also refuse a field that is legitimately blank.
+    """
+    Validate that string field values fit within their configured maximum lengths.
+    
+    Parameters:
+        instance: Model instance whose field values are checked.
+        model: Model class providing the concrete field definitions.
+    
+    Raises:
+        ValidationError: If a string value exceeds its field's maximum length.
     """
     for field in model._meta.concrete_fields:
         max_length = getattr(field, "max_length", None)
@@ -77,11 +89,19 @@ def save_permission_scoped_object(
     *,
     on_existing: Literal["update", "keep", "reject"] = "update",
 ) -> PermissionScopedSaveResult:
-    """Create or update one object within the user's NetBox permission scope.
-
-    ``on_existing`` decides what an already-present row means: ``update`` writes *values* under the
-    change permission, ``keep`` returns it untouched under the view permission, and ``reject``
-    refuses it. Raises ``ObjectPermissionDenied`` when any of those checks fails.
+    """
+    Create or update an object while enforcing the applicable NetBox object permissions.
+    
+    Parameters:
+        on_existing (Literal["update", "keep", "reject"]): Determines how to handle an existing
+            matching object: update it, return it unchanged, or raise ObjectPermissionDenied.
+    
+    Returns:
+        PermissionScopedSaveResult: The saved or reused object and whether it was created.
+    
+    Raises:
+        ObjectPermissionDenied: If the required permission is missing or an existing object is
+            rejected.
     """
     with transaction.atomic():
         instance = model.objects.select_for_update().filter(**lookup).first()

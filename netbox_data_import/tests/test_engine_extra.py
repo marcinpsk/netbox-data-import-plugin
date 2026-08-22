@@ -15,6 +15,16 @@ FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.
 
 
 def _make_profile(name="ExtraTest", capture_extra=False) -> ImportProfile:
+    """
+    Create an import profile with standard spreadsheet column mappings.
+    
+    Parameters:
+    	name (str): The profile name.
+    	capture_extra (bool): Whether to capture unmapped spreadsheet data.
+    
+    Returns:
+    	ImportProfile: The configured import profile.
+    """
     profile = ImportProfile.objects.create(
         name=name,
         adapter_config={

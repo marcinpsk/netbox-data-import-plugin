@@ -139,7 +139,12 @@ def _writer_database_state():
 
 
 def _permission_scoped_writer_url_names():
-    """Return deferred writers, excluding the quick actions covered by their own ratchet."""
+    """
+    Identify routed permission-scoped writer views used by deferred actions.
+    
+    Returns:
+        set: URL names for permission-scoped writer views, excluding quick-action routes.
+    """
     import ast
 
     from netbox_data_import import urls
@@ -192,6 +197,9 @@ class QuickActionInputBoundsTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
+        """
+        Create shared database fixtures for quick-action input-boundary tests.
+        """
         from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
 
         from netbox_data_import.models import ClassRoleMapping
@@ -274,7 +282,18 @@ class QuickActionInputBoundsTest(TestCase):
         session.save()
 
     def _prepare_row_action(self, url_name, payload, source_id, case_name):
-        """Create the real active-import state one deferred action requires."""
+        """
+        Create the active-import fixtures required by a deferred row action.
+        
+        Parameters:
+        	url_name (str): Name of the deferred action route.
+        	payload (dict): Request payload to prepare for the action.
+        	source_id: Identifier used to construct the import source row.
+        	case_name (str): Unique suffix for fixture object names and values.
+        
+        Returns:
+        	dict: A copy of the payload, updated with any action-specific values.
+        """
         from dcim.models import Device
 
         from netbox_data_import.engine import run_import

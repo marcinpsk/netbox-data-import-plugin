@@ -88,7 +88,15 @@ def _safe_next_url(request, fallback: str) -> str:
 
 
 def _navigation_response(request, url):
-    """Send an HTMX caller through a real page load, or redirect a standard browser."""
+    """Redirect an HTMX request or standard browser request to the specified URL.
+    
+    Parameters:
+    	request: The incoming Django request.
+    	url: The destination URL.
+    
+    Returns:
+    	A response that instructs HTMX to navigate or redirects the browser.
+    """
     if request.headers.get("HX-Request") == "true":
         response = HttpResponse(status=204)
         response["HX-Redirect"] = url
@@ -97,7 +105,15 @@ def _navigation_response(request, url):
 
 
 def _name_resolution_response(request, url):
-    """Return an updated preview for HTMX or redirect a standard browser."""
+    """
+    Handle navigation after a name-resolution action.
+    
+    Parameters:
+        url (str): Destination URL for the preview or redirect response.
+    
+    Returns:
+        HttpResponse: The rendered preview response or navigation response.
+    """
     if request.headers.get("HX-Request") == "true":
         preview_path = reverse("plugins:netbox_data_import:import_preview")
         if urlsplit(url).path == preview_path:
@@ -117,7 +133,16 @@ def _parse_posted_profile_id(request):
 
 
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
-    """Persist the confirmed source-to-device identity for a field review."""
+    """
+    Persist a confirmed source-to-device match for a field review.
+    
+    Parameters:
+        source_asset_tag (str): Asset tag reported by the source data.
+    
+    Returns:
+        tuple: A success flag and an error code. The error code is empty on
+        success, or identifies a ``conflict`` or ``permission`` failure.
+    """
     existing_match = (
         DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
     )
@@ -306,7 +331,16 @@ _PROFILE_FIELDS = ("description", "source_adapter")
 
 
 def _validate_model_instance(instance, label):
-    """Call full_clean() and surface ValidationErrors as ValueError so the atomic block rolls back."""
+    """
+    Validate a model instance and expose validation failures as ``ValueError``.
+    
+    Parameters:
+        instance: The model instance to validate.
+        label: A descriptive label included in the error message.
+    
+    Raises:
+        ValueError: If model validation fails.
+    """
     from django.core.exceptions import ValidationError as DjangoValidationError
 
     try:
@@ -355,13 +389,20 @@ def _save_or_refetch(instance, model_class, **lookup):
 
 
 def _iter_yaml_section(data, section_name, required_keys=()):
-    """Yield mapping items for a named section in a parsed YAML dict.
-
-    - Absent key → yields nothing (caller skips reconciliation).
-    - Explicit null or non-list value → raises ValueError.
-    - Explicit empty list → yields nothing (caller reconcile-deletes all).
-    - Item missing a required key → raises ValueError with index and key name(s),
-      preventing a bare KeyError from bubbling up with no context.
+    """
+    Iterate over mapping entries in a named YAML section.
+    
+    Parameters:
+        data (dict): Parsed YAML data.
+        section_name (str): Name of the section to read.
+        required_keys (tuple): Keys required in each section entry.
+    
+    Yields:
+        dict: Each mapping entry in the section.
+    
+    Raises:
+        ValueError: If the section is present but is not a list of mappings, or
+            an entry is missing a required key.
     """
     if section_name not in data:
         return
@@ -828,7 +869,13 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         )
 
     def render_preview(self, request, preview_url, *, use_materialized_result=False):
-        """Re-run the dry-run import and render the preview template."""
+        """
+        Render the import preview using the current session state or a stored materialized result.
+        
+        Parameters:
+            preview_url (str): URL used to determine the preview view mode.
+            use_materialized_result (bool): Whether to reuse the stored preview result instead of recalculating it.
+        """
         rows = request.session.get("import_rows")
         ctx = request.session.get("import_context", {})
         if not rows or not ctx:
@@ -1138,7 +1185,15 @@ def _import_job_progress(job, preview_blocked=False, source_rows_available=False
 
 
 def _restore_import_session(request, job):
-    """Restore preview or result data when a user returns to a Job URL."""
+    """Restore preview or completed import data from a background job into the user's session.
+    
+    Parameters:
+    	request: The current Django request whose session is updated.
+    	job: The import job containing preview or result data.
+    
+    Returns:
+    	dict: The job's stored data.
+    """
     data = job.data or {}
     if request.session.get("import_background_job_id") != job.pk:
         request.session["import_background_job_id"] = job.pk
@@ -1173,7 +1228,11 @@ class ImportRunView(PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Queue the real import and redirect to its progress page."""
+        """Queue the validated import for background execution and redirect to its progress page.
+        
+        Parameters:
+        	request: The HTTP request containing the saved import preview and session context.
+        """
         rows = request.session.get("import_rows")
         ctx_data = request.session.get("import_context")
         if not rows or not ctx_data:
@@ -1366,6 +1425,12 @@ class _PermissionScopedWriteMixin:
     """Mark preview writers and render their object-scope refusals in one place."""
 
     def dispatch(self, request, *args, **kwargs):
+        """
+        Dispatch the request, converting object-permission failures into a JSON response or redirect.
+        
+        Returns:
+        	HttpResponse: The delegated view response, or a permission-denied response.
+        """
         try:
             return super().dispatch(request, *args, **kwargs)
         except ObjectPermissionDenied as exc:
@@ -1384,7 +1449,15 @@ class IgnoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, Vie
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Add the specified device to the profile's ignore list."""
+        """
+        Add a source device to an import profile's ignore list.
+        
+        Parameters:
+        	request (HttpRequest): The request containing the profile ID, source ID, device name, and redirect target.
+        
+        Returns:
+        	HttpResponseRedirect: A redirect to the safe next URL after processing the request.
+        """
         from .models import IgnoredDevice
 
         profile_id = _parse_posted_profile_id(request)
@@ -1449,7 +1522,11 @@ def _wants_json(request) -> bool:
 
 
 def _session_holds_a_preview(request) -> bool:
-    """Answer whether this save belongs to a preview at all, rather than standing alone."""
+    """Determine whether the session contains import preview data.
+    
+    Returns:
+    	bool: `True` if the session contains imported rows or context, `False` otherwise.
+    """
     return bool(request.session.get("import_rows") or request.session.get("import_context"))
 
 
@@ -1466,16 +1543,27 @@ def _preview_accepts_decisions(request) -> bool:
 
 
 def _revision_is_checkable(request) -> bool:
-    """Answer whether the caller presented a token to compare.
-
-    A JSON caller always stamps one. A rendered form only carries one where the template puts
-    it there, so a form without it keeps the behaviour it had before.
+    """
+    Determines whether the request should validate a preview revision.
+    
+    Returns:
+    	bool: `true` if the request expects JSON or includes a preview revision token, `false` otherwise.
     """
     return _wants_json(request) or bool(request.POST.get("preview_revision"))
 
 
 def _preview_action_error(request, next_url, message, *, status=409):
-    """Return one preview-action error through JSON or the form fallback."""
+    """
+    Return a preview-action error as JSON or redirect with a form error message.
+    
+    Parameters:
+        next_url (str): URL for the form fallback redirect.
+        message (str): Error message to return or display.
+        status (int): HTTP status code for JSON responses.
+    
+    Returns:
+        JsonResponse or HttpResponseRedirect: A JSON error response for JSON requests, or a redirect after queuing the error message.
+    """
     if _wants_json(request):
         # A JSON caller renders the reason itself, so a queued message would surface later
         # on an unrelated page.
@@ -1485,7 +1573,12 @@ def _preview_action_error(request, next_url, message, *, status=409):
 
 
 def _stale_preview_reason(request):
-    """Return why the preview can no longer take a decision, or None."""
+    """
+    Determine whether the current preview can accept a decision.
+    
+    Returns:
+        str | None: A user-facing reason when the preview is unavailable for decisions; otherwise, `None`.
+    """
     if not _session_holds_a_preview(request):
         return None
     if not _preview_is_active(request):
@@ -1640,7 +1733,9 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.add_ignoredfielddifference"
 
     def post(self, request):
-        """Save current snapshots from a fresh active preview."""
+        """
+        Record the current field difference as ignored after verifying the matched device is unchanged.
+        """
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
         review = _field_review_row(request)
         if review is None:
@@ -1745,7 +1840,7 @@ class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.delete_ignoredfielddifference"
 
     def post(self, request):
-        """Delete only the review represented by the fresh active preview."""
+        """Restores a previously ignored field difference for the selected device."""
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
         review = _field_review_row(request)
         if review is None:
@@ -1893,6 +1988,15 @@ class _AjaxPermissionView(ConditionalLoginRequiredMixin, View):
     permission_denied_response_format = "json"
 
     def dispatch(self, request, *args, **kwargs):
+        """
+        Dispatch the request after checking authentication and the configured permission.
+        
+        Parameters:
+        	request: The incoming HTTP request.
+        
+        Returns:
+        	HttpResponse: A JSON error response with status 401 or 403 when access is denied; otherwise, the response from the parent view.
+        """
         from django.http import JsonResponse
 
         if not request.user.is_authenticated:
@@ -2251,7 +2355,11 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Validate and persist the replacement device name."""
+        """Validate and save a replacement device name for an active import row.
+        
+        Parameters:
+        	request: The HTTP request containing the active profile, source row, and replacement name.
+        """
         from dcim.models import Device
 
         ctx_data = request.session.get("import_context") or {}
@@ -2366,7 +2474,14 @@ class SaveResolutionView(_AjaxPermissionView):
         )
 
     def post(self, request):
-        """Persist a manual field resolution for rerere replay."""
+        """Persist a manual field resolution for replay during import preview recalculation.
+        
+        Parameters:
+        	request (HttpRequest): The request containing the source row, column, original value, and resolved fields.
+        
+        Returns:
+        	HttpResponse: A JSON response or redirect indicating whether the resolution was saved.
+        """
         import json
 
         profile_id = _parse_posted_profile_id(request)
@@ -2672,7 +2787,16 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.change_importprofile"
 
     def get(self, request, pk):
-        """Serialize the profile and all its mappings to YAML and return as a file download."""
+        """
+        Export the profile and its mappings as a downloadable YAML file.
+        
+        Parameters:
+        	request: The HTTP request.
+        	pk: The primary key of the profile to export.
+        
+        Returns:
+        	A YAML file containing the profile configuration and mappings.
+        """
         import yaml
         from django.http import HttpResponse
 
@@ -2874,7 +2998,7 @@ class QuickCreateManufacturerView(_PermissionScopedWriteMixin, PermissionRequire
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Create the manufacturer in NetBox and redirect back to preview."""
+        """Create or retrieve a manufacturer and redirect to the import preview."""
         from dcim.models import Manufacturer
 
         profile_id = _parse_posted_profile_id(request)
@@ -2921,7 +3045,12 @@ class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequir
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the manufacturer mapping and redirect back to preview."""
+        """
+        Save a manufacturer mapping for an import profile and return to the import preview.
+        
+        Parameters:
+            request: The HTTP request containing the profile ID and manufacturer mapping values.
+        """
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
             messages.error(request, "A valid import profile is required. Reload the preview and try again.")
@@ -2960,7 +3089,9 @@ class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequired
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the device type mapping (and optionally create objects) then redirect."""
+        """
+        Save a source device type mapping and optionally create its manufacturer and device type in NetBox.
+        """
         from dcim.models import DeviceType, Manufacturer
         from django.utils.text import slugify
 
@@ -3066,7 +3197,7 @@ class QuickAddClassRoleMappingView(_PermissionScopedWriteMixin, PermissionRequir
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the class→role mapping and redirect back to preview."""
+        """Save a source class-to-role or rack mapping for an import profile and redirect to the import preview."""
         from dcim.models import RackType
 
         profile_id = _parse_posted_profile_id(request)
@@ -3143,7 +3274,12 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the column mapping and redirect back to preview."""
+        """
+        Save a column mapping for the selected import profile and apply it to the current preview rows.
+        
+        Returns:
+            HttpResponseRedirect: Redirects to the import preview.
+        """
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
             messages.error(request, "A valid import profile is required. Reload the preview and try again.")
@@ -3223,7 +3359,7 @@ class MatchExistingDeviceView(PermissionRequiredMixin, View):
     )
 
     def post(self, request):
-        """Save the device match and redirect back to preview."""
+        """Link an import source row to an existing device and return to the import preview."""
         from dcim.models import Device
 
         profile_id = _parse_posted_profile_id(request)
@@ -3403,11 +3539,13 @@ class SearchNetBoxObjectsView(_AjaxPermissionView):
         return JsonResponse({"results": results})
 
     def _search_devices(self, request, q, limit, results):
-        """Two-phase device search: full-string matches first, then token matches.
-
-        This prevents a relevant exact-substring match (e.g. "example-zone03d-rc1")
-        from being pushed off the result list by noisy short tokens like "rc1"
-        or "prod" that match many devices.
+        """
+        Searches visible devices by full query text first, then by separator-delimited query tokens.
+        
+        Parameters:
+            q (str): Search text.
+            limit (int): Maximum number of devices to append to `results`.
+            results (list): Collection receiving serialized device matches.
         """
         from dcim.models import Device
 
@@ -3456,7 +3594,14 @@ class QuickCreateDeviceRoleView(_PermissionScopedWriteMixin, _AjaxPermissionView
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Create the DeviceRole and return JSON {id, name, slug}."""
+        """Create or retrieve a device role and return its identifier, name, slug, and creation status as JSON.
+        
+        Parameters:
+            request: The HTTP request containing the import profile, role name, slug, and optional color.
+        
+        Returns:
+            A JSON response containing the device role details, or an error response when the profile or role data is invalid.
+        """
         from dcim.models import DeviceRole
         from django.http import JsonResponse
 
@@ -3602,7 +3747,15 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
     )
 
     def post(self, request):  # noqa: C901
-        """Run auto-matching and redirect back to preview with a summary message."""
+        """
+        Automatically match eligible import rows to visible existing devices and redirect to the preview with a result summary.
+        
+        Parameters:
+        	request: The request containing the active import profile and preview state.
+        
+        Returns:
+        	A redirect response to the import preview.
+        """
         from dcim.models import Device
 
         profile_id = _parse_posted_profile_id(request)
@@ -3774,7 +3927,15 @@ class SyncSingleRowView(_AjaxPermissionView):
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Execute a single import row identified by ``row_number`` and return JSON."""
+        """
+        Execute a single create row from the current import preview.
+        
+        Parameters:
+        	request (HttpRequest): Request containing the session import state and submitted ``row_number``.
+        
+        Returns:
+        	JsonResponse: JSON describing the created object, or an error response if the row cannot be synchronized.
+        """
         from django.db import transaction
         from django.http import JsonResponse
         from dcim.models import Location, Site

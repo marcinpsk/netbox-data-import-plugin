@@ -29,14 +29,27 @@ def record_recalculated_preview(session, result) -> str:
 
 
 def retire_preview_revision(session) -> str:
-    """Invalidate the token any open preview is holding, without storing a new result."""
+    """
+    Invalidate existing preview revision tokens without changing the stored preview result.
+    
+    Returns:
+        str: The newly assigned preview revision token.
+    """
     revision = secrets.token_urlsafe(18)
     session[PREVIEW_REVISION_SESSION_KEY] = revision
     return revision
 
 
 def load_cached_preview(request):
-    """Return the active Import Profile and materialized preview result."""
+    """
+    Load the authorized import profile and cached materialized preview result.
+    
+    Parameters:
+    	request: The request containing session, user, header, and preview revision data.
+    
+    Returns:
+    	A tuple containing the import profile and materialized preview result, or `None` when no valid cached preview is available.
+    """
     from .engine import ImportResult
     from .models import ImportProfile
 

@@ -65,6 +65,7 @@ class SavePermissionScopedObjectTest(TestCase):
         self.other = ImportProfile.objects.create(name="Writer Other Profile")
 
     def _lookup(self, profile=None):
+        """Build lookup values for an Acme Widget using the specified or default profile."""
         return {"profile": profile or self.profile, "source_make": "Acme", "source_model": "Widget"}
 
     def test_a_create_inside_the_scope_is_saved(self):

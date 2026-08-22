@@ -12,6 +12,7 @@ from netbox_data_import.tests.helpers import set_import_source
 
 
 def _make_profile(name="MiscTest") -> ImportProfile:
+    """Create an import profile configured for the test data sheet and source ID column."""
     return ImportProfile.objects.create(name=name, adapter_config={"sheet_name": "Data", "source_id_column": "Id"})
 
 

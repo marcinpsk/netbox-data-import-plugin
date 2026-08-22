@@ -51,7 +51,11 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
             schema_migration.unapply(before_state, schema_editor)
 
     def _unapply_the_irreversible_data_migrations(self):
-        """Step past each data operation without attempting to reconstruct its old values."""
+        """
+        Reverses migration state past irreversible data migrations while preserving their schema changes.
+        
+        The migrations are faked after any reversible schema operations have been unapplied, so historical data values are not reconstructed.
+        """
         for step, below in self.irreversible_data_steps:
             MigrationExecutor(connection).migrate([("netbox_data_import", step)])
             if step == self.squashed_data_and_schema_step:
@@ -72,6 +76,11 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
             executor.migrate([("netbox_data_import", below)], fake=True)
 
     def setUp(self):
+        """
+        Prepare the database with duplicate legacy device bindings for migration testing.
+        
+        Registers cleanup to restore the leaf migrations and removes the test profile afterward.
+        """
         super().setUp()
         self.profile_pk = None
         # Register before the first walk down: a failure inside setUp skips tearDown, and a worker
@@ -101,7 +110,7 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
             self.profile_pk = profile.pk
 
     def _restore_the_leaf_migrations(self):
-        """Walk back up to the leaf and drop the legacy profile the walk down created."""
+        """Restore the application to its leaf migrations and remove the profile created for the test."""
         with self._migration_apps():
             executor = MigrationExecutor(connection)
             executor.migrate(executor.loader.graph.leaf_nodes("netbox_data_import"))
@@ -112,6 +121,9 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         ImportProfile.objects.filter(pk=self.profile_pk).delete()
 
     def test_migration_removes_all_ambiguous_bindings(self):
+        """
+        Verify that migration removes ambiguous device bindings and logs their legacy source IDs.
+        """
         with self._migration_apps():
             executor = MigrationExecutor(connection)
 

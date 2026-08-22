@@ -54,7 +54,7 @@ class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase
         self.assertIn("preview_row_controls.js", self._rendered_body())
 
     def test_the_preview_stylesheet_renders_inside_the_body(self):
-        """The status badges read as plain grey text without it, so the rule must survive."""
+        """Verify that the preview stylesheet is rendered inside the document body."""
         body = self._rendered_body()
         self.assertIn("<style", body)
         self.assertIn(".ndi-badge-create", body)
@@ -105,7 +105,7 @@ class DetailRowIdsAreUniqueTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertEqual(sorted(ids), sorted(set(ids)), "detail row ids must be unique per render")
 
     def test_every_diff_toggle_points_at_an_existing_detail_row(self):
-        """A toggle whose target is missing silently does nothing."""
+        """Ensures every diff toggle targets an existing detail row."""
         self._setup_session()
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         html = response.content.decode()
@@ -198,7 +198,12 @@ class ResolvedContactRowIsMarkedTest(BaseViewTestCase):
         return buffer
 
     def _setup_session(self):
-        """Populate the session from a workbook that carries contact candidates."""
+        """
+        Populate the test client session with a dry-run import based on workbook contact candidates.
+        
+        Returns:
+            Profile: The configured import profile used to create the session data.
+        """
         from dcim.models import Site
 
         from netbox_data_import.engine import parse_file, run_import
@@ -229,15 +234,25 @@ class ResolvedContactRowIsMarkedTest(BaseViewTestCase):
         return profile
 
     def _preview_html(self):
-        """Return the rendered preview page."""
+        """
+        Render the import preview page.
+        
+        Returns:
+            str: The rendered preview page HTML.
+        """
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         self.assertEqual(response.status_code, 200)
         return response.content.decode()
 
     def _contact_button(self, html):
-        """Return the (class, source id) of the row's contact button.
-
-        The stylesheet now renders in the body, so its rule names would match a raw string search.
+        """
+        Extracts the contact button's CSS classes and source ID from rendered HTML.
+        
+        Parameters:
+            html (str): Rendered HTML containing the contact button.
+        
+        Returns:
+            tuple[str, str]: The button's CSS classes and source ID.
         """
         match = re.search(
             r'<button[^>]*class="([^"]*)"[^>]*data-ndi-modal="#contactCandidateModal"'
@@ -317,7 +332,15 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
     NO_WRITE_MESSAGE = "This row writes nothing to NetBox"
 
     def _detail_for(self, match):
-        """Return (action, detail-row HTML) for the first preview row `match` accepts."""
+        """
+        Finds the first preview row accepted by the predicate.
+        
+        Parameters:
+            match: Predicate used to select a preview row.
+        
+        Returns:
+            tuple: The row action and its detail-row HTML.
+        """
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         rows = list(response.context["result"].rows)
         index = next(i for i, row in enumerate(rows, start=1) if match(row))
@@ -359,6 +382,12 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
 
         def blank_the_server_name(rows):
             # The Cabinet row creates the rack, so only a device row can miss a device name.
+            """
+            Clear the server name and asset tag in the server row.
+            
+            Parameters:
+                rows: Iterable of row mappings containing device data.
+            """
             target = next(row for row in rows if row.get("device_class") == "Server")
             target["device_name"] = ""
             target["asset_tag"] = ""

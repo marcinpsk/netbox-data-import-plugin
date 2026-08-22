@@ -25,6 +25,7 @@ User = get_user_model()
 
 
 def _make_profile(name="VCov2Test") -> ImportProfile:
+    """Create and return an import profile configured for test data."""
     return ImportProfile.objects.create(
         name=name,
         adapter_config={

@@ -37,6 +37,14 @@ _PHONE_SHAPE = re.compile(r"\+?\d{7,}")
 
 
 def _looks_like_email(value: str) -> bool:
+    """Determine whether a value has a valid email address format.
+    
+    Parameters:
+        value (str): The value to validate.
+    
+    Returns:
+        bool: `true` if the value is a valid email address, `false` otherwise.
+    """
     try:
         validate_email(value)
     except ValidationError:
@@ -45,10 +53,27 @@ def _looks_like_email(value: str) -> bool:
 
 
 def _looks_like_phone(value: str) -> bool:
+    """Determine whether a value has the expected shape of a phone number.
+    
+    Parameters:
+    	value (str): The value to evaluate.
+    
+    Returns:
+    	bool: `true` if the value matches the expected phone-number shape, `false` otherwise.
+    """
     return bool(_PHONE_SHAPE.fullmatch(_PHONE_PUNCTUATION.sub("", value)))
 
 
 def _header_hints_at(source_column: str, role: str) -> bool:
+    """Determine whether a source column name contains a header hint for the specified contact role.
+    
+    Parameters:
+    	source_column (str): Source column name to inspect.
+    	role (str): Contact role whose header hints should be checked.
+    
+    Returns:
+    	bool: `True` if the column name contains a matching hint, `False` otherwise.
+    """
     lowered = source_column.lower()
     return any(hint in lowered for hint in _ROLE_HEADER_HINTS[role])
 
@@ -153,6 +178,21 @@ class PrimaryContactResolver:
 
     @classmethod
     def _selection(cls, row, profile, candidate_values, legacy_primary_contact) -> ContactSelection | None:
+        """
+        Resolve contact candidate values into a contact selection.
+        
+        Parameters:
+            row: Import row containing a previously applied contact resolution.
+            profile: Import profile providing contact lookup configuration.
+            candidate_values: Candidate contact values available for resolution.
+            legacy_primary_contact: Legacy primary contact value, if present.
+        
+        Returns:
+            A resolved ContactSelection, or None when no contact data is available.
+        
+        Raises:
+            ContactResolutionRequired: If candidate values exist without a resolved selection.
+        """
         if row.get("contact_resolution_applied") is True:
             normalized = validate_contact_candidate_resolution(
                 {
@@ -234,7 +274,13 @@ class PrimaryContactResolver:
 
     @classmethod
     def suggest(cls, candidate_values: dict[str, str], profile, user=None) -> dict | None:
-        """Return one visible Contact whose configured identity occurs in the row."""
+        """
+        Find a visible Contact matching exactly one configured identity value from the row.
+        
+        Returns:
+            dict | None: The Contact's ID, name, email, and phone when exactly one match
+            is found; otherwise, `None`.
+        """
         from tenancy.models import Contact
 
         lookup_field = profile.adapter_settings.primary_contact_lookup_field
@@ -271,6 +317,20 @@ class PrimaryContactResolver:
 
     @classmethod
     def _plan_assignment(cls, obj, role, contact, user, lock):
+        """
+        Determine the assignment action needed to make a Contact primary for an object and role.
+        
+        Parameters:
+            obj: Object whose Contact assignment is being planned.
+            role: Contact role to evaluate.
+            contact: Contact to assign or promote.
+            user: User whose permissions are checked.
+            lock: Whether assignment queries should lock matching rows.
+        
+        Returns:
+            A tuple containing the existing primary assignment, the matching assignment for
+            the selected Contact, and the action to apply.
+        """
         from tenancy.models import ContactAssignment
 
         if obj is None:
@@ -309,6 +369,21 @@ class PrimaryContactResolver:
 
     @classmethod
     def _plan(cls, obj, profile, selection: ContactSelection | None, user=None, lock=False) -> dict | None:
+        """
+        Build a validated plan for creating or reusing a Contact and assigning it as the primary Contact.
+        
+        Parameters:
+        	selection (ContactSelection | None): The selected or proposed Contact details.
+        	user: The user whose permissions apply to Contact access and creation.
+        	lock (bool): Whether to lock relevant records while building the plan.
+        
+        Returns:
+        	dict | None: The Contact and assignment actions to apply, or `None` when no Contact is selected.
+        
+        Raises:
+        	ValidationError: If the configured role, selected Contact, lookup value, or assignment data is invalid.
+        	ObjectPermissionDenied: If the user lacks permission to view or create the required Contact.
+        """
         if selection is None:
             return None
         role_name = profile.adapter_settings.primary_contact_role

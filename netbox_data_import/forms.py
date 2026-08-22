@@ -20,7 +20,12 @@ from .models import (
 
 
 def _profile_output_kinds(form):
-    """Return the output kinds of the profile this row belongs to, or None when unknown."""
+    """
+    Determine the output kinds associated with the profile selected for a form row.
+    
+    Returns:
+        The profile's output kinds, or None when no valid profile is selected.
+    """
     profile = form.initial.get("profile") or form.instance.profile_id
     if form.is_bound:
         profile = form.data.get(form.add_prefix("profile")) or profile
@@ -38,11 +43,17 @@ def _profile_output_kinds(form):
 
 
 def _with_stored_target(choices, stored, output_kinds, *, allow_candidates=True):
-    """Keep a stored key-family target selectable, so an existing row can be re-saved.
-
-    CATALOG.choices lists fixed keys only, so a stored family key such as `extra_json:asset_id` is
-    never among them. Re-offer it only when the model would still accept it: the row's clean()
-    runs the same check, and offering more would put a choice in the list that saving rejects.
+    """
+    Ensure a valid stored catalog target remains available among the choices.
+    
+    Parameters:
+        choices: Existing target choices.
+        stored: Previously stored target key.
+        output_kinds: Output kinds supported by the selected profile.
+        allow_candidates: Whether candidate catalog targets are valid.
+    
+    Returns:
+        The original choices, optionally with the valid stored target appended.
     """
     if not stored or stored in {key for key, _label in choices}:
         return choices
@@ -63,6 +74,10 @@ class ImportProfileForm(NetBoxModelForm):
         fields = ["name", "description", "source_adapter", "tags"]
 
     def __init__(self, *args, **kwargs):
+        """Initialize the form with adapter-specific configuration fields and stored values.
+        
+        The source adapter remains fixed for existing profiles and is selectable for new profiles.
+        """
         super().__init__(*args, **kwargs)
         self._config_form_class = None
         adapter = get_adapter(self._selected_adapter_key())
@@ -88,7 +103,12 @@ class ImportProfileForm(NetBoxModelForm):
         return self.instance.source_adapter
 
     def clean(self):
-        """Collect the adapter-declared fields into ``adapter_config``."""
+        """
+        Collect adapter-specific fields into the instance's adapter configuration.
+        
+        Returns:
+            dict: The cleaned form data.
+        """
         cleaned = super().clean()
         if cleaned is None:
             cleaned = self.cleaned_data
@@ -134,6 +154,9 @@ class ColumnMappingForm(forms.ModelForm):
         widgets = {"profile": forms.HiddenInput()}
 
     def __init__(self, *args, **kwargs):
+        """
+        Initialize the form with target-field choices filtered by the selected profile's output kinds while preserving a valid stored target.
+        """
         super().__init__(*args, **kwargs)
         output_kinds = _profile_output_kinds(self)
         choices = CATALOG.choices(output_kinds=output_kinds)
@@ -189,6 +212,11 @@ class ColumnTransformRuleForm(forms.ModelForm):
         widgets = {"profile": forms.HiddenInput()}
 
     def __init__(self, *args, **kwargs):
+        """
+        Initialize transform-target fields with catalog choices compatible with the selected profile.
+        
+        Capture-group targets are excluded, while valid stored targets remain selectable.
+        """
         super().__init__(*args, **kwargs)
         # A capture group yields text, so the candidate targets are not offered.
         output_kinds = _profile_output_kinds(self)
@@ -231,6 +259,12 @@ class ImportSetupForm(forms.Form):
     )
 
     def __init__(self, *args, user=None, **kwargs):
+        """
+        Initialize the form and restrict selectable profiles and tenancy-related objects according to the user's permissions.
+        
+        Parameters:
+        	user: The user whose permissions determine the available profiles, sites, locations, and tenants.
+        """
         super().__init__(*args, **kwargs)
         if user is None:
             return

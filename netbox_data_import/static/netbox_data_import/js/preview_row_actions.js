@@ -20,6 +20,11 @@
     button.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> ' + label;
   }
 
+  /**
+   * Restore a failed action button and display its error message.
+   * @param {HTMLElement} button - The action button to restore.
+   * @param {string} message - The error message to display.
+   */
   function restore(button, message) {
     button.disabled = false;
     button.innerHTML = button.dataset.originalHtml || button.textContent;
@@ -35,8 +40,9 @@
     }
   }
 
-  /* Every deferred row action leaves the rendered row showing the state it had before, so the
-   * page reports that a recalculation is due and refuses an import until it happens. */
+  /**
+   * Marks the preview as requiring recalculation before import.
+   */
   function markPreviewStale() {
     var staleNotice = document.getElementById('ndi-preview-stale');
     if (staleNotice) staleNotice.hidden = false;
@@ -47,6 +53,11 @@
     }
   }
 
+  /**
+   * Marks an action as saved and indicates that the preview requires recalculation.
+   * @param {HTMLElement} button - The action button to disable and update.
+   * @param {string} [message] - The status message to display for the button.
+   */
   function markSaved(button, message) {
     button.disabled = true;
     button.innerHTML = '<i class="mdi mdi-check"></i> Saved';
@@ -54,8 +65,13 @@
     markPreviewStale();
   }
 
-  /* The one place that states the deferred row action contract, so the modal and the row
-   * buttons cannot drift over the envelope or the revision guard. */
+  /**
+   * Submits a deferred preview action with the current preview revision.
+   * @param {string} url - The action endpoint.
+   * @param {FormData} body - The request form data.
+   * @return {Promise<Object>} The successful action response payload.
+   * @throws {Error} If the response is malformed, unsuccessful, or reports an invalid preview state.
+   */
   function requestAction(url, body) {
     body.set('preview_revision', previewRevision());
     return fetch(url, {
@@ -85,6 +101,15 @@
   window.ndiPostPreviewAction = requestAction;
   window.ndiMarkPreviewStale = markPreviewStale;
 
+  /**
+   * Submit a preview row action and update the associated button based on the result.
+   * @param {string} url - The action endpoint.
+   * @param {Object} body - The request parameters.
+   * @param {HTMLElement} button - The action button to update.
+   * @param {string} pendingLabel - The label displayed while the action is pending.
+   * @param {boolean} placementError - Whether to display an alert when the action fails.
+   * @return {Promise<Object|undefined>} The successful response payload, or `undefined` when the action fails.
+   */
   function postAction(url, body, button, pendingLabel, placementError) {
     setPending(button, pendingLabel);
     return requestAction(url, body)

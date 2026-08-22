@@ -17,6 +17,11 @@
   ];
   var ROLE_LABELS = {name: 'Name', email: 'Email', phone: 'Phone'};
 
+  /**
+   * Reads JSON content from a page element.
+   * @param {string} id - The identifier of the element containing the JSON.
+   * @return {Object} The parsed JSON value, or an empty object when the element is missing.
+   */
   function readJson(id) {
     var node = document.getElementById(id);
     return node ? JSON.parse(node.textContent) : {};
@@ -70,6 +75,11 @@
     return instance;
   }
 
+  /**
+   * Converts contact data into an option for the existing contact picker.
+   * @param {Object} contact - Contact data containing an identifier and optional name, email, and phone.
+   * @return {Object} A contact picker option with normalized fields and a combined display label.
+   */
   function contactOption(contact) {
     var instance = existingContact.tomselect;
     var option = {
@@ -85,6 +95,11 @@
     return option;
   }
 
+  /**
+   * Creates a role selector for assigning a candidate value.
+   * @param {string} selected - The initially selected role value.
+   * @return {HTMLSelectElement} The configured role selector.
+   */
   function roleSelect(selected) {
     var select = document.createElement('select');
     select.className = 'form-select form-select-sm ndi-contact-role';
@@ -106,7 +121,10 @@
     return select;
   }
 
-  /* A Contact field takes one value, so claiming a role releases whichever row held it. */
+  /**
+   * Ensures a contact role is assigned to at most one value row.
+   * @param {HTMLSelectElement} changed - The role selector whose assignment takes precedence.
+   */
   function releaseRole(changed) {
     if (!changed.value) return;
     valueRows.querySelectorAll('.ndi-contact-role').forEach(function (other) {
@@ -114,6 +132,13 @@
     });
   }
 
+  /**
+   * Creates a row for assigning a source value to a contact role.
+   * @param {string} sourceColumn - The source column containing the value.
+   * @param {string} value - The candidate value to display.
+   * @param {string} selectedRole - The initially selected contact role.
+   * @return {HTMLElement} The candidate value row.
+   */
   function candidateRow(sourceColumn, value, selectedRole) {
     var row = document.createElement('div');
     row.className = 'ndi-contact-value-row';
@@ -135,6 +160,12 @@
     return row;
   }
 
+  /**
+   * Creates an editable row for a literal contact value and its assigned role.
+   * @param {string} role - The contact role assigned to the value.
+   * @param {string} value - The initial literal value.
+   * @return {HTMLElement} The constructed contact value row.
+   */
   function literalRow(role, value) {
     var row = document.createElement('div');
     row.className = 'ndi-contact-value-row';
@@ -160,7 +191,10 @@
     return row;
   }
 
-  /* The selections, read back as {role: value} plus the split the server expects. */
+  /**
+   * Reads selected contact values and separates source columns, literal values, and display values.
+   * @return {Object} The selected values grouped as `sources`, `values`, and `resolved`.
+   */
   function readSelection() {
     var sources = {};
     var values = {};
@@ -181,6 +215,9 @@
     return {sources: sources, values: values, resolved: resolved};
   }
 
+  /**
+   * Updates the contact resolution summary and its source provenance.
+   */
   function refreshSummary() {
     if (noContact.checked) {
       summary.name.hidden = false;
@@ -226,6 +263,9 @@
     provenance.textContent = parts.join(' ');
   }
 
+  /**
+   * Clears the selected existing contact.
+   */
   function clearSelectedContact() {
     if (!contactId.value) return;
     contactId.value = '';
@@ -233,6 +273,10 @@
     if (instance && instance.getValue()) instance.clear(true);
   }
 
+  /**
+   * Applies a selected existing contact as the authoritative contact resolution.
+   * @param {string} value - The selected contact option value.
+   */
   function applyExistingContact(value) {
     var instance = existingContact.tomselect;
     if (!value || !instance) {
@@ -250,11 +294,20 @@
     refreshSummary();
   }
 
+  /**
+   * Updates an expandable panel and its control to reflect the requested state.
+   * @param {HTMLElement} button - The control associated with the panel.
+   * @param {HTMLElement} panel - The panel to expand or collapse.
+   * @param {boolean} expanded - Whether the panel should be expanded.
+   */
   function setExpanded(button, panel, expanded) {
     panel.hidden = !expanded;
     button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   }
 
+  /**
+   * Updates contact-related controls to reflect whether the no-contact option is selected.
+   */
   function toggleContactFields() {
     var disabled = noContact.checked;
     var instance = picker();
@@ -386,6 +439,9 @@
     saveDeferred();
   });
 
+  /**
+   * Restores the save button to its enabled, original state when no save request is in progress.
+   */
   function resetSaveButton() {
     var save = form.querySelector('button[type=submit]');
     // A request still in flight owns the button, or reopening the modal would arm a second one.
@@ -394,6 +450,10 @@
     if (save.dataset.ndiOriginalHtml) save.innerHTML = save.dataset.ndiOriginalHtml;
   }
 
+  /**
+   * Displays or clears the contact candidate modal error message.
+   * @param {string} message - The error message to display, or an empty value to clear the existing message.
+   */
   function modalError(message) {
     var existing = document.getElementById('contactCandidateError');
     if (!message) {
@@ -408,6 +468,12 @@
     if (!existing) form.querySelector('.modal-body').prepend(alert);
   }
 
+  /**
+   * Saves the current contact resolution without reloading the page.
+   *
+   * Updates the preview and row state on success, closes the modal, and reports
+   * errors while restoring the save control when the request fails.
+   */
   function saveDeferred() {
     var save = form.querySelector('button[type=submit]');
     if (!save.dataset.ndiOriginalHtml) save.dataset.ndiOriginalHtml = save.innerHTML;
@@ -452,9 +518,11 @@
       });
   }
 
-  /* The page no longer reloads after a save, so the map the modal reads on open has to record
-   * the decision here. Without this the next open shows the proposal and a second save
-   * overwrites what the operator chose. */
+  /**
+   * Persists a contact resolution for reuse when the source row is reopened.
+   * @param {string|number} sourceId - Identifier of the source row.
+   * @param {Object} snapshot - Saved resolution data, including resolved fields and any linked contact option.
+   */
   function rememberResolution(sourceId, snapshot) {
     if (!window.EXISTING_RESOLUTIONS) window.EXISTING_RESOLUTIONS = {};
     var forSource = window.EXISTING_RESOLUTIONS[sourceId] || {};
@@ -469,8 +537,10 @@
     if (snapshot.linkedOption) linkedContacts[snapshot.contactId] = snapshot.linkedOption;
   }
 
-  /* The row keeps the action it was rendered with until the preview is recalculated. Only the
-   * Contact button answers now, so the operator can see which rows are still open. */
+  /**
+   * Marks the contact-resolution action for a source row as resolved.
+   * @param {string} sourceId - The identifier of the source row to update.
+   */
   function markRowResolved(sourceId) {
     var button = document.querySelector(
       '[data-ndi-modal="#contactCandidateModal"][data-source-id="' + CSS.escape(sourceId) + '"]'
@@ -482,20 +552,28 @@
     button.title = "This row's Contact fields are resolved. Open to review or change them.";
   }
 
-  /* The modal is shared. A response that arrives after the operator moved on still records its
-   * decision, but it must not close or write over the row now on screen. */
+  /**
+   * Determines whether the modal is still displaying the specified source row.
+   * @param {string} sourceId - The source row identifier to compare with the modal's current row.
+   * @return {boolean} `true` if the modal displays the specified source row, `false` otherwise.
+   */
   function stillShowing(sourceId) {
     return document.getElementById('contactCandidateSourceId').value === sourceId;
   }
 
+  /**
+   * Clears custom validation messages from literal contact value inputs.
+   */
   function clearLiteralValidity() {
     valueRows.querySelectorAll('.ndi-contact-literal').forEach(function (input) {
       input.setCustomValidity('');
     });
   }
 
-  /* A saved literal is rendered as its own row, so the first literal on screen is often a
-   * filled one belonging to another field. */
+  /**
+   * Finds the first blank literal value input.
+   * @return {HTMLInputElement|null} The first empty literal input, or `null` if none exists.
+   */
   function emptyLiteral() {
     var found = null;
     valueRows.querySelectorAll('.ndi-contact-value-row[data-literal]').forEach(function (row) {
@@ -505,6 +583,11 @@
     return found;
   }
 
+  /**
+   * Adds an empty literal value row for a contact role.
+   * @param {string} role - The contact role assigned to the new row.
+   * @return {HTMLElement} The new literal value input.
+   */
   function addBlankFor(role) {
     var row = literalRow(role, '');
     valueRows.appendChild(row);

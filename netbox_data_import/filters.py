@@ -15,5 +15,13 @@ class ImportProfileFilterSet(NetBoxModelFilterSet):
         fields = ["name", "source_adapter"]
 
     def search(self, queryset, name, value):
-        """Filter profiles by name substring."""
+        """
+        Filter profiles by a case-insensitive name substring.
+        
+        Parameters:
+            value: The substring to search for in profile names.
+        
+        Returns:
+            The filtered profile queryset.
+        """
         return queryset.filter(name__icontains=value)

@@ -13,6 +13,15 @@ User = get_user_model()
 
 
 def _make_profile(name="QMapTest") -> ImportProfile:
+    """
+    Create an import profile with the standard quick-mapping test configuration.
+    
+    Parameters:
+    	name (str): Name assigned to the import profile.
+    
+    Returns:
+    	ImportProfile: The newly created import profile.
+    """
     return ImportProfile.objects.create(
         name=name,
         adapter_config={
@@ -307,6 +316,15 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
         self.preview = reverse("plugins:netbox_data_import:import_preview")
 
     def _payload(self, **overrides):
+        """
+        Build the default payload used for device-type resolution requests.
+        
+        Parameters:
+        	overrides: Field values that replace the default payload values.
+        
+        Returns:
+        	dict: The request payload with the supplied overrides applied.
+        """
         payload = {
             "profile_id": self.profile.pk,
             "source_make": "Acme",
@@ -318,12 +336,19 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
         return payload
 
     def _post(self, **overrides):
+        """Submit a POST request using the default payload with optional field overrides."""
         return self.client.post(self.url, self._payload(**overrides))
 
     def _client_holding_only_the_mapping_permission(self, username, *, also_add_manufacturer=False):
-        """Log in a user who may save the mapping but may not create every NetBox object.
-
-        NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants nothing.
+        """
+        Create and log in a user with permission to save the mapping and optionally create manufacturers.
+        
+        Parameters:
+            username (str): Username for the test user.
+            also_add_manufacturer (bool): Whether to grant permission to create manufacturers.
+        
+        Returns:
+            Client: An authenticated test client.
         """
         from dcim.models import Manufacturer
         from django.contrib.contenttypes.models import ContentType

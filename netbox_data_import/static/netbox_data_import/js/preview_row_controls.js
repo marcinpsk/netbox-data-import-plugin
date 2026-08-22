@@ -14,6 +14,11 @@
   if (window.ndiPreviewRowControls) return;
   window.ndiPreviewRowControls = true;
 
+  /**
+   * Shows or hides a difference row and updates its associated toggle controls.
+   * @param {HTMLElement} diffRow - The difference row to expand or collapse.
+   * @param {boolean} expanded - Whether the difference row should be shown.
+   */
   function setDiffExpanded(diffRow, expanded) {
     if (!diffRow) return;
     diffRow.hidden = !expanded;

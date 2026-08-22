@@ -132,7 +132,7 @@ class MultiColumnMergeTest(TestCase):
     """Tests for multi-source column merging in parse_file."""
 
     def _make_merge_profile(self) -> ImportProfile:
-        """Profile with 'Serial Number' and 'Service Tag' both mapping to 'serial'."""
+        """Create an import profile that maps both serial-number source columns to the serial field."""
         profile = ImportProfile.objects.create(
             name="MergeTest",
             adapter_config={"sheet_name": "Data", "update_existing": True, "create_missing_device_types": True},
@@ -217,6 +217,16 @@ class ApplyColumnMappingsTest(TestCase):
     """Tests for apply_column_mappings — re-applying mappings to already-parsed rows."""
 
     def _make_profile_with_mapping(self, source: str, target: str) -> ImportProfile:
+        """
+        Create an import profile with a single source-to-target column mapping.
+        
+        Parameters:
+        	source (str): Source column name.
+        	target (str): Target field name.
+        
+        Returns:
+        	ImportProfile: The configured import profile.
+        """
         profile = ImportProfile.objects.create(
             name="ApplyMapTest",
             adapter_config={"sheet_name": "Data", "update_existing": True, "create_missing_device_types": True},

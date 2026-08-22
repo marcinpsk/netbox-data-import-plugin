@@ -21,6 +21,9 @@ class QuickActionObjectPermissionTest(TestCase):
     """Exercise each authorization decision through a real HTTP request and database."""
 
     def setUp(self):
+        """
+        Create the import profile and resolve the preview URL used by the test cases.
+        """
         self.profile = ImportProfile.objects.create(
             name="Quick Action Scope Profile",
             adapter_config={"sheet_name": "Data", "source_id_column": "Id"},
@@ -28,6 +31,16 @@ class QuickActionObjectPermissionTest(TestCase):
         self.preview_url = reverse("plugins:netbox_data_import:import_preview")
 
     def _client_with(self, username, *grants):
+        """
+        Create an authenticated test client for a user with profile-change permission and the specified object permissions.
+        
+        Parameters:
+        	username (str): Username for the test user.
+        	*grants: Object permission grants assigned to the user.
+        
+        Returns:
+        	Client: An authenticated Django test client.
+        """
         user = user_with_object_permission(
             username,
             [
@@ -40,12 +53,26 @@ class QuickActionObjectPermissionTest(TestCase):
         return client
 
     def _post(self, client, url_name, payload):
+        """
+        Submit a quick-action request for the configured import profile.
+        
+        Parameters:
+        	client: Authenticated test client used to submit the request.
+        	url_name: Quick-action URL name.
+        	payload: Additional request data.
+        
+        Returns:
+        	The HTTP response from the quick-action endpoint.
+        """
         return client.post(
             reverse(f"plugins:netbox_data_import:{url_name}"),
             {"profile_id": self.profile.pk, **payload},
         )
 
     def _assert_preview_redirect(self, response):
+        """
+        Assert that a response redirects to the profile preview URL.
+        """
         self.assertRedirects(response, self.preview_url, fetch_redirect_response=False)
 
     def test_a_constrained_manufacturer_slug_is_refused(self):
