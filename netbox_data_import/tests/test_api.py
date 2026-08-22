@@ -506,7 +506,8 @@ class ImportExecutionAPITest(BaseAPITestCase):
         from netbox_data_import.tests.helpers import user_with_object_permission
 
         client = APIClient()
-        client.force_authenticate(user=user_with_object_permission(username, ImportExecution, granted=granted))
+        grants = [(ImportExecution, ["view"], None)] if granted else []
+        client.force_authenticate(user=user_with_object_permission(username, grants))
         return client
 
     def test_a_regular_user_holding_the_view_permission_is_allowed(self):
