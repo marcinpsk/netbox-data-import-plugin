@@ -177,24 +177,6 @@ def set_import_source(device, profile, source_id="", extra_columns=None, unassig
     return record
 
 
-def user_with_object_permission(username, model, *, granted, password="testpass", actions=("view",)):
-    """Create a user and, when *granted*, the ObjectPermission that opens *model*.
-
-    NetBox runs only ObjectPermissionBackend, so a Django ``user_permissions`` row grants nothing.
-    An ObjectPermission is how an operator actually issues the permission.
-    """
-    from core.models import ObjectType
-    from django.contrib.auth import get_user_model
-    from users.models import ObjectPermission
-
-    user = get_user_model().objects.create_user(username=username, password=password)
-    if granted:
-        permission = ObjectPermission.objects.create(name=f"{username} {model.__name__}", actions=list(actions))
-        permission.users.add(user)
-        permission.object_types.add(ObjectType.objects.get_for_model(model))
-    return user
-
-
 def client_with_object_permission(username, model, *, granted, actions=("view",)):
     """Return a logged-in client for a user created by :func:`user_with_object_permission`.
 
@@ -204,7 +186,8 @@ def client_with_object_permission(username, model, *, granted, actions=("view",)
     from django.test import Client
 
     password = "testpass"
-    user_with_object_permission(username, model, granted=granted, password=password, actions=actions)
+    grants = [(model, actions, None)] if granted else []
+    user_with_object_permission(username, grants)
     client = Client()
     if not client.login(username=username, password=password):
         raise AssertionError(f"the test client could not log in as '{username}'")
