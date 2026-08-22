@@ -104,7 +104,7 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         """Walk back up to the leaf and drop the legacy profile the walk down created."""
         with self._migration_apps():
             executor = MigrationExecutor(connection)
-            executor.migrate(executor.loader.graph.leaf_nodes())
+            executor.migrate(executor.loader.graph.leaf_nodes("netbox_data_import"))
         if self.profile_pk is None:
             return
         from netbox_data_import.models import ImportProfile
