@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from utilities.permissions import get_permission_for_model
 
 
@@ -56,6 +56,19 @@ def reject_overlong_fields(instance, model):
             raise ValidationError(f"{model._meta.verbose_name} {field.name} holds {max_length} characters.")
 
 
+def save_or_refetch(instance, model, lookup):
+    """Save *instance*, or refetch a row that won the same concurrent insert."""
+    try:
+        with transaction.atomic():
+            instance.save()
+    except IntegrityError:
+        existing = model.objects.filter(**lookup).first()
+        if existing is None:
+            raise
+        return existing, False
+    return instance, True
+
+
 def save_permission_scoped_object(
     user,
     model,
@@ -78,23 +91,26 @@ def save_permission_scoped_object(
                 raise ObjectPermissionDenied(permission)
             instance = model(**lookup, **values)
             reject_overlong_fields(instance, model)
-            instance.save()
-            created = True
-        elif on_existing == "keep":
-            # Reusing someone else's row still exposes it, so it needs the view permission.
-            enforce_saved_object_permission(instance, user, "view")
-            # atomic-exit-safe: existing-row-kept-unwritten
-            return PermissionScopedSaveResult(instance=instance, created=False)
-        elif on_existing == "reject":
-            raise ObjectPermissionDenied(get_permission_for_model(model, "add"))
+            instance, created = save_or_refetch(instance, model, lookup)
+            if not created:
+                instance = model.objects.select_for_update().get(pk=instance.pk)
         else:
+            created = False
+
+        if not created:
+            if on_existing == "keep":
+                # Reusing someone else's row still exposes it, so it needs the view permission.
+                enforce_saved_object_permission(instance, user, "view")
+                # atomic-exit-safe: existing-row-kept-unwritten
+                return PermissionScopedSaveResult(instance=instance, created=False)
+            if on_existing == "reject":
+                raise ObjectPermissionDenied(get_permission_for_model(model, "add"))
             # Before, so a row outside the user's scope cannot be taken over.
             enforce_saved_object_permission(instance, user, "change")
             for field_name, value in values.items():
                 setattr(instance, field_name, value)
             reject_overlong_fields(instance, model)
             instance.save(update_fields=list(values))
-            created = False
         # After, so the new state cannot be moved outside the user's scope.
         enforce_saved_object_permission(instance, user, "add" if created else "change")
         # atomic-exit-safe: scoped-write-committed

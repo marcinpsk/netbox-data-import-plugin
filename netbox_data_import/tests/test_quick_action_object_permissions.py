@@ -3,12 +3,9 @@
 """Preview quick actions enforce constrained ObjectPermission rows at their write seam."""
 
 from dcim.models import DeviceRole, DeviceType, Manufacturer
-from django.contrib.auth import get_user_model
-from django.contrib.contenttypes.models import ContentType
 from django.contrib.messages import get_messages
 from django.test import Client, TestCase
 from django.urls import reverse
-from users.models import ObjectPermission
 
 from netbox_data_import.models import (
     ColumnMapping,
@@ -17,20 +14,7 @@ from netbox_data_import.models import (
     ImportProfile,
     ManufacturerMapping,
 )
-
-
-def _user_with(username, grants):
-    """Create a user holding one real ObjectPermission per model grant."""
-    user = get_user_model().objects.create_user(username=username, password="testpass")
-    for model, actions, constraints in grants:
-        permission = ObjectPermission.objects.create(
-            name=f"{username} {model.__name__} {'-'.join(actions)}",
-            actions=list(actions),
-            constraints=constraints,
-        )
-        permission.object_types.add(ContentType.objects.get_for_model(model))
-        permission.users.add(user)
-    return user
+from netbox_data_import.tests.helpers import user_with_object_permission
 
 
 class QuickActionObjectPermissionTest(TestCase):
@@ -44,7 +28,7 @@ class QuickActionObjectPermissionTest(TestCase):
         self.preview_url = reverse("plugins:netbox_data_import:import_preview")
 
     def _client_with(self, username, *grants):
-        user = _user_with(
+        user = user_with_object_permission(
             username,
             [
                 (ImportProfile, ["change"], {"pk": self.profile.pk}),

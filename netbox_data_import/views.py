@@ -59,6 +59,7 @@ from .device_field_review import DeviceFieldReviewer
 from .object_permissions import (
     ObjectPermissionDenied,
     delete_permission_scoped_objects,
+    save_or_refetch,
     save_permission_scoped_object,
 )
 from .preview_row_actions import (
@@ -348,18 +349,9 @@ def _set_if_present(instance, data, fields):
 
 
 def _save_or_refetch(instance, model_class, **lookup):
-    """Persist *instance*; on IntegrityError from a concurrent insert, refetch the winner.
-
-    Uses a savepoint so the IntegrityError does not abort the outer transaction.
-    """
-    from django.db import IntegrityError, transaction
-
-    try:
-        with transaction.atomic():
-            instance.save()
-    except IntegrityError:
-        instance = model_class.objects.filter(**lookup).first()
-    return instance
+    """Persist *instance*, or return the row that won the concurrent insert."""
+    resolved, _saved = save_or_refetch(instance, model_class, lookup)
+    return resolved
 
 
 def _iter_yaml_section(data, section_name, required_keys=()):
