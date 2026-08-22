@@ -238,19 +238,34 @@ class ImportPreviewViewExistingResolutionsTest(TestCase):
         )
 
 
-class ImportJobListViewPermissionTest(TestCase):
-    """Tests for ImportJobListView.get_required_permission — line 861."""
+class ImportExecutionListViewPermissionTest(TestCase):
+    """The history page opens for the Import Execution view permission and for nothing else."""
 
     def setUp(self):
         self.user = _make_superuser("vcov2_joblist_user")
         self.client = Client()
         self.client.login(username="vcov2_joblist_user", password="testpass")
 
-    def test_import_job_list_returns_200(self):
-        """GET importjob_list with view_importjob perm returns 200 — line 861."""
-        url = reverse("plugins:netbox_data_import:importjob_list")
+    def test_import_execution_list_returns_200(self):
+        url = reverse("plugins:netbox_data_import:importexecution_list")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
+
+    def _regular_client(self, username, *, granted):
+        from netbox_data_import.models import ImportExecution
+        from netbox_data_import.tests.helpers import client_with_object_permission
+
+        return client_with_object_permission(username, ImportExecution, granted=granted)
+
+    def test_a_regular_user_holding_the_view_permission_reaches_the_history(self):
+        """A superuser bypasses the check, so the permission needs a non-superuser to prove it."""
+        url = reverse("plugins:netbox_data_import:importexecution_list")
+        self.assertEqual(self._regular_client("vcov2_exec_granted", granted=True).get(url).status_code, 200)
+
+    def test_a_regular_user_without_the_view_permission_is_denied(self):
+        """A user holding no ObjectPermission must be refused the page, not served an empty history."""
+        url = reverse("plugins:netbox_data_import:importexecution_list")
+        self.assertIn(self._regular_client("vcov2_exec_denied", granted=False).get(url).status_code, (302, 403))
 
 
 class RemoveExtraIpValidNextTest(TestCase):

@@ -37,7 +37,7 @@ from .models import (
     DeviceExistingMatch,
     DeviceTypeMapping,
     IgnoredFieldDifference,
-    ImportJob,
+    ImportExecution,
     ImportProfile,
     ManufacturerMapping,
     SourceResolution,
@@ -50,7 +50,7 @@ from .tables import (
     ColumnMappingTable,
     ColumnTransformRuleTable,
     DeviceTypeMappingTable,
-    ImportJobTable,
+    ImportExecutionTable,
     ImportProfileTable,
 )
 from . import engine
@@ -1305,22 +1305,17 @@ class ImportResultsView(PermissionRequiredMixin, View):
         return render(request, "netbox_data_import/import_results.html", {"result": result, "job_id": job_id})
 
 
-# ---------------------------------------------------------------------------
-# Import Job history
-# ---------------------------------------------------------------------------
+class ImportExecutionListView(PermissionRequiredMixin, generic.ObjectListView):
+    """List every past Import Execution, including the retained legacy rows."""
 
-
-class ImportJobListView(PermissionRequiredMixin, generic.ObjectListView):
-    """List all past import jobs for audit / history."""
-
-    queryset = ImportJob.objects.select_related("profile").all()
-    table = ImportJobTable
-    template_name = "netbox_data_import/importjob_list.html"
-    permission_required = "netbox_data_import.view_importjob"
+    queryset = ImportExecution.objects.select_related("profile").all()
+    table = ImportExecutionTable
+    template_name = "netbox_data_import/importexecution_list.html"
+    permission_required = "netbox_data_import.view_importexecution"
 
     def get_required_permission(self):
-        """Return the permission string required to view the import job list."""
-        return "netbox_data_import.view_importjob"
+        """Answer NetBox's own permission hook, which it checks separately from permission_required."""
+        return "netbox_data_import.view_importexecution"
 
 
 # ---------------------------------------------------------------------------

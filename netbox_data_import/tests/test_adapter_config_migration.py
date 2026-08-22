@@ -45,10 +45,23 @@ def _applied_steps():
 
 
 def _rewind_to_before_the_squash():
-    """Reverse only the squash's schema so its real forward data operations can run again."""
+    """Reverse every descendant, then only the squash's schema, so it can run again."""
+    _migrate(SQUASHED)
     executor = MigrationExecutor(connection)
     reverse_squashed_schema_operations(executor, APP, SQUASHED, BEFORE, expected_data_operations=2)
     return _migrate(BEFORE, fake=True)
+
+
+def _restore_every_leaf():
+    """Migrate the plugin app forward to every leaf of its migration graph.
+
+    tearDown restores these rather than AFTER: a later migration would otherwise leave the worker
+    database short of its newest tables for every test that follows. A merge can leave two leaves,
+    so the executor gets all of them instead of one name picked by sort order.
+    """
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    executor.migrate(list(executor.loader.graph.leaf_nodes(APP)))
 
 
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
@@ -58,7 +71,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         super().setUp()
         # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
         # skips tearDown. Register before walking down, so a rewound worker always recovers.
-        self.addCleanup(_migrate, SQUASHED)
+        self.addCleanup(_restore_every_leaf)
         _rewind_to_before_the_squash()
 
     def test_it_moves_every_column_and_repairs_blank_required_settings(self):
