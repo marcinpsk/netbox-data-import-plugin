@@ -20,6 +20,9 @@ os.environ["NETBOX_CONFIGURATION"] = "netbox_data_import.tests.netbox_configurat
 from netbox.settings import *  # noqa: E402, F403
 
 
+# NetBox API test cases create v2 tokens and require one HMAC pepper.
+API_TOKEN_PEPPERS = {1: "netbox-data-import-test-pepper"}
+
 _test_database_name = os.environ["TEST_DB_NAME"]
 if not _test_database_name.startswith("test_"):
     raise ValueError("TEST_DB_NAME must start with 'test_'.")

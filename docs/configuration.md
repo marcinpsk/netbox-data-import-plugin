@@ -39,5 +39,39 @@ upgrade migration copies every payload into the new table, clears the key from D
 and deletes the custom field. The migration does not reverse. A payload that names a deleted import
 profile is dropped, and the migration logs how many.
 
-The per-profile custom field (**Custom Field Name** on the Import Profile, for example `cans_id`)
-is separate. The plugin still writes the source ID to it and never deletes it.
+The per-profile custom field (**Custom field name** in the Import Profile's adapter configuration,
+for example `cans_id`) is separate. The plugin still writes the source ID to it and never deletes it.
+
+## Source Adapter
+
+An Import Profile selects a **Source Adapter**: the source format it reads. The adapter is required
+and cannot change after the profile is created, because every mapping and policy row on the profile
+belongs to that format. A different source format needs a new Import Profile.
+
+The selected adapter declares the profile's remaining settings, which the profile stores together as
+its adapter configuration. The flat workbook adapter declares the sheet name, the source ID column,
+the custom field name, the update and create switches, the extra-data switch, the primary contact
+role and lookup field, and the preview view mode. The trace workbook adapter declares no settings.
+
+Only the flat workbook adapter is selectable today. An adapter becomes selectable when a Target
+Module that consumes its output ships, so the plugin never offers a source format it cannot import.
+
+An object reference inside the adapter configuration uses a natural key, never a database id. The
+primary contact role is referenced by its name, so a profile exported as YAML imports into a
+different NetBox instance.
+
+Releases before 1.6 kept these settings as separate Import Profile columns. The upgrade migration
+stamps the flat workbook adapter on every existing profile, copies each column into the adapter
+configuration, and drops the columns.
+
+The exported profile YAML carries the adapter and its configuration:
+
+```yaml
+profile:
+  name: My Profile
+  source_adapter: flat_workbook
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
+    primary_contact_role: Primary Contact
+```

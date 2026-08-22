@@ -35,10 +35,9 @@
     }
   }
 
-  function markSaved(button, message) {
-    button.disabled = true;
-    button.innerHTML = '<i class="mdi mdi-check"></i> Saved';
-    button.title = message || 'Saved. Recalculate the preview to refresh this row.';
+  /* Every deferred row action leaves the rendered row showing the state it had before, so the
+   * page reports that a recalculation is due and refuses an import until it happens. */
+  function markPreviewStale() {
     var staleNotice = document.getElementById('ndi-preview-stale');
     if (staleNotice) staleNotice.hidden = false;
     var runImport = document.getElementById('ndi-run-import');
@@ -48,8 +47,16 @@
     }
   }
 
-  function postAction(url, body, button, pendingLabel, placementError) {
-    setPending(button, pendingLabel);
+  function markSaved(button, message) {
+    button.disabled = true;
+    button.innerHTML = '<i class="mdi mdi-check"></i> Saved';
+    button.title = message || 'Saved. Recalculate the preview to refresh this row.';
+    markPreviewStale();
+  }
+
+  /* The one place that states the deferred row action contract, so the modal and the row
+   * buttons cannot drift over the envelope or the revision guard. */
+  function requestAction(url, body) {
     body.set('preview_revision', previewRevision());
     return fetch(url, {
       method: 'POST',
@@ -67,13 +74,21 @@
           if (!response.ok || !payload.ok) {
             throw new Error(payload.error || 'The preview action failed.');
           }
+          if (payload.preview_state !== 'recalculation_required') {
+            throw new Error('The preview action returned an invalid state.');
+          }
           return payload;
         });
-      })
+      });
+  }
+
+  window.ndiPostPreviewAction = requestAction;
+  window.ndiMarkPreviewStale = markPreviewStale;
+
+  function postAction(url, body, button, pendingLabel, placementError) {
+    setPending(button, pendingLabel);
+    return requestAction(url, body)
       .then(function (payload) {
-        if (payload.preview_state !== 'recalculation_required') {
-          throw new Error('The preview action returned an invalid state.');
-        }
         markSaved(button, payload.message);
         return payload;
       })

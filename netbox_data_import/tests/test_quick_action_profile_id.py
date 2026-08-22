@@ -9,13 +9,15 @@ from django.urls import reverse
 
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile
 
-# The preview posts these actions from a modal that fills its profile ID with JavaScript.
+# The preview posts these form actions with the active profile ID.
 QUICK_ACTIONS = {
     "quick_add_class_mapping": {"source_class": "Controller", "mapping_action": "ignore"},
     "quick_add_column_mapping": {"source_column": "Depth", "target_field": "serial"},
+    "quick_create_manufacturer": {"mfg_name": "Acme", "mfg_slug": "acme"},
     "quick_resolve_manufacturer": {"source_make": "Acme", "netbox_mfg_slug": "acme"},
     "quick_resolve_device_type": {"source_make": "Acme", "source_model": "Widget"},
     "ignore_device": {"source_id": "SRC-1", "device_name": "widget-1"},
+    "unignore_device": {"source_id": "SRC-1"},
 }
 
 
@@ -28,7 +30,7 @@ class QuickActionProfileIdTest(TestCase):
             username="quick-action-user", email="quick@example.invalid", password="testpass"
         )
         cls.profile = ImportProfile.objects.create(
-            name="Quick Action Profile", sheet_name="Data", source_id_column="Id"
+            name="Quick Action Profile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
         )
 
     def setUp(self):

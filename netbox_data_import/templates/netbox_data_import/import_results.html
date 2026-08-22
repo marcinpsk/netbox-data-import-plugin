@@ -4,7 +4,8 @@
 
 {% block title %}Import Results{% endblock %}
 
-{% block head %}
+{% block content %}
+{# htmx boost swaps the body and discards the response head, so these render here. #}
 <style>
   /* Badge colors using Tabler CSS variables (NetBox uses --tblr-* not --bs-*) */
   .ndi-badge-create  { background-color: var(--tblr-success) !important; color: #fff !important; }
@@ -21,9 +22,6 @@
   [data-bs-theme="dark"] .ndi-badge-update  { color: #000 !important; }
   [data-bs-theme="dark"] .ndi-badge-dt      { background-color: #d4a017 !important; }
 </style>
-{% endblock %}
-
-{% block content %}
 <div class="row">
   <div class="col">
 

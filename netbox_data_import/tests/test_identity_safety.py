@@ -26,9 +26,17 @@ from netbox_data_import.engine import (
 )
 from netbox_data_import.forms import ImportSetupForm
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile, SourceResolution
+from netbox_data_import.preview_row_actions import (
+    PREVIEW_REVISION_SESSION_KEY,
+    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+)
 from netbox_data_import.tests.helpers import set_import_source
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
-from netbox_data_import.views import _import_intents, _save_permission_scoped_object, _serialize_rows
+from netbox_data_import.object_permissions import (
+    ObjectPermissionDenied,
+    save_permission_scoped_object,
+)
+from netbox_data_import.views import _import_intents, _serialize_rows
 
 
 class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
@@ -56,9 +64,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         cls.rack_b = Rack.objects.create(site=cls.site, name="IDENTITY-RACK-B", u_height=42)
         cls.profile = ImportProfile.objects.create(
             name="Identity Safety Profile",
-            sheet_name="Data",
-            update_existing=True,
-            create_missing_device_types=False,
+            adapter_config={"sheet_name": "Data", "update_existing": True, "create_missing_device_types": False},
         )
         ClassRoleMapping.objects.create(
             profile=cls.profile,
@@ -90,9 +96,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
     def _rack_profile(self, name="Rack Safety Profile"):
         profile = ImportProfile.objects.create(
-            name=name,
-            sheet_name="Data",
-            update_existing=True,
+            name=name, adapter_config={"sheet_name": "Data", "update_existing": True}
         )
         ClassRoleMapping.objects.create(
             profile=profile,
@@ -130,6 +134,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             "filename": "identity-safety.xlsx",
         }
         session["import_result"] = result.to_session_dict() if hasattr(result, "to_session_dict") else result
+        session["import_preview_pending"] = True
         session.save()
 
     def _grant_object_permission(self, user, name, model, actions, constraints=None):
@@ -407,6 +412,54 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         result = run_import(resolved_rows, self.profile, {"site": self.site}, dry_run=True)
         device_rows = [row for row in result.rows if row.object_type == "device"]
         self.assertEqual([row.action for row in device_rows], ["create", "create"])
+
+    def test_duplicate_name_form_refuses_a_stale_preview_revision(self):
+        """A name from a retired rendered preview cannot become a row resolution."""
+        rows = [
+            self._device_row(2, "STALE-NAME-A", "stale-shared", self.rack_a, 1),
+            self._device_row(3, "STALE-NAME-B", "stale-shared", self.rack_b, 2),
+        ]
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        suggestion = next(row for row in preview.rows if row.row_number == 3 and row.object_type == "device")
+        self._set_import_session(rows, preview)
+        session = self.client.session
+        session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "rendered-name-preview"
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        session.save()
+        preview_url = reverse("plugins:netbox_data_import:import_preview")
+        resolve_url = reverse("plugins:netbox_data_import:resolve_duplicate_name")
+
+        preview_response = self.client.get(preview_url)
+
+        html = preview_response.content.decode()
+        form_start = html.index(f'action="{resolve_url}"')
+        form_end = html.index("</form>", form_start)
+        name_form = html[form_start:form_end]
+        self.assertIn(
+            'name="preview_revision" value="rendered-name-preview"',
+            name_form,
+        )
+
+        session = self.client.session
+        session[PREVIEW_REVISION_SESSION_KEY] = "current-name-preview"
+        session.save()
+        response = self.client.post(
+            resolve_url,
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "STALE-NAME-B",
+                "row_number": 3,
+                "new_name": suggestion.extra_data["suggested_name"],
+                "preview_revision": "rendered-name-preview",
+                "next": preview_url,
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.headers["HX-Redirect"], preview_url)
+        self.assertFalse(SourceResolution.objects.filter(source_id="STALE-NAME-B").exists())
 
     def test_single_row_sync_rechecks_full_batch_and_does_not_update_same_name_device(self):
         from dcim.models import Device
@@ -795,9 +848,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         location_b = Location.objects.create(name="Identity Location B", slug="identity-location-b", site=self.site)
         existing = Rack.objects.create(site=self.site, location=location_a, name="SHARED-RACK", u_height=42)
         rack_profile = ImportProfile.objects.create(
-            name="Rack Identity Profile",
-            sheet_name="Data",
-            update_existing=True,
+            name="Rack Identity Profile", adapter_config={"sheet_name": "Data", "update_existing": True}
         )
         ClassRoleMapping.objects.create(
             profile=rack_profile,
@@ -847,9 +898,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
     def test_derived_slug_collisions_are_rejected_for_each_source_row(self):
         collision_profile = ImportProfile.objects.create(
             name="Slug Collision Profile",
-            sheet_name="Data",
-            update_existing=True,
-            create_missing_device_types=True,
+            adapter_config={"sheet_name": "Data", "update_existing": True, "create_missing_device_types": True},
         )
         ClassRoleMapping.objects.create(
             profile=collision_profile,
@@ -882,8 +931,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         Manufacturer.objects.create(name="Existing Slug Vendor", slug="slug-vendor")
         collision_profile = ImportProfile.objects.create(
             name="Existing Manufacturer Slug Profile",
-            sheet_name="Data",
-            create_missing_device_types=True,
+            adapter_config={"sheet_name": "Data", "create_missing_device_types": True},
         )
         ClassRoleMapping.objects.create(
             profile=collision_profile,
@@ -915,8 +963,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         )
         collision_profile = ImportProfile.objects.create(
             name="Existing Device Type Slug Profile",
-            sheet_name="Data",
-            create_missing_device_types=True,
+            adapter_config={"sheet_name": "Data", "create_missing_device_types": True},
         )
         ClassRoleMapping.objects.create(
             profile=collision_profile,
@@ -962,9 +1009,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             serial="DUPLICATE-MAPPING-ACTION",
         )
         profile = ImportProfile.objects.create(
-            name="Mapping Action Profile",
-            sheet_name="Data",
-            create_missing_device_types=True,
+            name="Mapping Action Profile", adapter_config={"sheet_name": "Data", "create_missing_device_types": True}
         )
         ClassRoleMapping.objects.create(
             profile=profile,
@@ -1399,12 +1444,12 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         )
         row = self._device_row(2, "STALE-SKIP-SRC", existing.name, self.rack_a, 1)
         row["serial"] = "NEW-SERIAL"
-        self.profile.update_existing = False
-        self.profile.save(update_fields=["update_existing"])
+        self.profile.adapter_config["update_existing"] = False
+        self.profile.save(update_fields=["adapter_config"])
         preview = run_import([row], self.profile, {"site": self.site}, dry_run=True)
         self._set_import_session([row], preview)
-        self.profile.update_existing = True
-        self.profile.save(update_fields=["update_existing"])
+        self.profile.adapter_config["update_existing"] = True
+        self.profile.save(update_fields=["adapter_config"])
 
         job, _ = self._run_background_import()
 
@@ -1580,8 +1625,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         from dcim.models import Manufacturer
 
         Manufacturer.objects.create(name="Existing Write Identity", slug="write-race-slug")
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         ctx = ImportContext(
             profile=self.profile,
             site=self.site,
@@ -1651,8 +1696,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             position=10,
             face="front",
         )
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         row = self._device_row(2, "PENDING-TYPE", "pending-type-device", self.rack_a, 10)
         row.update({"make": "Pending Vendor", "model": "Pending Model", "u_height": "2"})
 
@@ -1663,8 +1708,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertEqual(device_row.extra_data.get("identity_conflict"), "rack_position_occupied")
 
     def test_pending_device_type_claim_uses_netbox_full_depth_default(self):
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         rows = [
             self._device_row(2, "PENDING-FULL-A", "pending-full-depth-a", self.rack_a, 12),
             self._device_row(3, "PENDING-FULL-B", "pending-full-depth-b", self.rack_a, 12),
@@ -1778,8 +1823,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
     def test_individually_ignored_device_does_not_preview_type_side_effects(self):
         from netbox_data_import.models import IgnoredDevice
 
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         IgnoredDevice.objects.create(profile=self.profile, source_id="IGNORED-TYPE")
         row = self._device_row(2, "IGNORED-TYPE", "ignored-type-device", self.rack_a, 1)
         row.update({"make": "Ignored Vendor", "model": "Ignored Model"})
@@ -1805,8 +1850,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
     def test_ignored_row_does_not_create_slug_conflict_for_active_row(self):
         from netbox_data_import.models import IgnoredDevice
 
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         IgnoredDevice.objects.create(profile=self.profile, source_id="IGNORED-SLUG")
         ignored = self._device_row(2, "IGNORED-SLUG", "ignored-slug-device", self.rack_a, 1)
         ignored.update({"make": "Slug Vendor", "model": "Model A"})
@@ -1917,8 +1962,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             slug="shared-model",
             u_height=1,
         )
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         ctx = ImportContext(
             profile=self.profile,
             site=self.site,
@@ -2102,7 +2147,9 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertEqual(device_row.extra_data.get("identity_conflict"), "ambiguous_serial")
 
     def test_import_setup_limits_profiles_to_change_scope(self):
-        denied_profile = ImportProfile.objects.create(name="Denied Setup Profile", sheet_name="Data")
+        denied_profile = ImportProfile.objects.create(
+            name="Denied Setup Profile", adapter_config={"sheet_name": "Data"}
+        )
         user = get_user_model().objects.create_user(username="scoped-setup-user", password="testpass")
         self._grant_object_permission(
             user,
@@ -2118,7 +2165,9 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertNotIn(denied_profile, form.fields["profile"].queryset)
 
     def test_import_preview_rejects_profile_outside_change_scope(self):
-        denied_profile = ImportProfile.objects.create(name="Denied Preview Profile", sheet_name="Data")
+        denied_profile = ImportProfile.objects.create(
+            name="Denied Preview Profile", adapter_config={"sheet_name": "Data"}
+        )
         user = get_user_model().objects.create_user(username="scoped-preview-user", password="testpass")
         self._grant_object_permission(
             user,
@@ -2141,7 +2190,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
     def test_single_row_sync_rejects_profile_outside_change_scope(self):
         from dcim.models import Device
 
-        denied_profile = ImportProfile.objects.create(name="Denied Sync Profile", sheet_name="Data")
+        denied_profile = ImportProfile.objects.create(name="Denied Sync Profile", adapter_config={"sheet_name": "Data"})
         ClassRoleMapping.objects.create(
             profile=denied_profile,
             source_class="Server",
@@ -2471,7 +2520,9 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             netbox_device_id=device.pk,
             device_name=device.name,
         )
-        allowed_profile = ImportProfile.objects.create(name="Allowed Unlink Profile", sheet_name="Data")
+        allowed_profile = ImportProfile.objects.create(
+            name="Allowed Unlink Profile", adapter_config={"sheet_name": "Data"}
+        )
         allowed_binding = DeviceExistingMatch.objects.create(
             profile=allowed_profile,
             source_id="UNLINK-ALLOWED",
@@ -2721,7 +2772,9 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
     def test_auto_match_enforces_constrained_binding_add_permission(self):
         from dcim.models import Device
 
-        allowed_profile = ImportProfile.objects.create(name="Allowed Binding Profile", sheet_name="Data")
+        allowed_profile = ImportProfile.objects.create(
+            name="Allowed Binding Profile", adapter_config={"sheet_name": "Data"}
+        )
         existing = Device.objects.create(
             name="constrained-binding-device",
             site=self.site,
@@ -3501,15 +3554,15 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             device_name=first_device.name,
         )
 
-        allowed = _save_permission_scoped_object(
-            self.user,
-            DeviceExistingMatch,
-            {"profile": self.profile, "source_id": binding.source_id},
-            {"netbox_device_id": second_device.pk, "device_name": second_device.name},
-            allow_update=False,
-        )
+        with self.assertRaises(ObjectPermissionDenied):
+            save_permission_scoped_object(
+                self.user,
+                DeviceExistingMatch,
+                {"profile": self.profile, "source_id": binding.source_id},
+                {"netbox_device_id": second_device.pk, "device_name": second_device.name},
+                on_existing="reject",
+            )
 
-        self.assertFalse(allowed)
         binding.refresh_from_db()
         self.assertEqual(binding.netbox_device_id, first_device.pk)
 
@@ -3678,19 +3731,25 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         )
         self._grant_object_permission(
             limited_user,
-            "View profiles without adding roles",
+            "Change profiles without adding roles",
             ImportProfile,
-            ["view"],
+            ["change"],
         )
         self.client.force_login(limited_user)
 
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:quick_create_role"),
-            {"name": "Boundary Role", "slug": "boundary-role"},
-        )
+        from dcim.models import DeviceRole
+
+        with self.assertLogs("netbox_data_import.views", level="WARNING") as logs:
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:quick_create_role"),
+                {"profile_id": self.profile.pk, "name": "Boundary Role", "slug": "boundary-role"},
+            )
 
         self.assertEqual(response.status_code, 403)
-        self.assertIn("dcim.add_devicerole", response.json()["error"])
+        self.assertFalse(DeviceRole.objects.filter(slug="boundary-role").exists())
+        # The permission names an object the caller may not know exists, so it goes to the log only.
+        self.assertNotIn("dcim.add_devicerole", response.json()["error"])
+        self.assertIn("dcim.add_devicerole", "\n".join(logs.output))
 
     def test_single_row_sync_validates_row_number_and_active_site(self):
         row = self._device_row(2, "SYNC-BOUNDARY", "sync-boundary-device", self.rack_a, 1)
@@ -3754,8 +3813,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
     def test_write_time_manufacturer_identity_change_stops_type_creation(self):
         from dcim.models import DeviceType, Manufacturer
 
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         Manufacturer.objects.create(name="Different Race Vendor", slug="race-vendor")
         row = self._device_row(2, "RACE-VENDOR", "race-vendor-device", self.rack_a, 1)
         row.update({"make": "Race Vendor", "model": "Race Model"})

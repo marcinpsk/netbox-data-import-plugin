@@ -19,7 +19,7 @@ User = get_user_model()
 
 def _make_profile(name="APITest") -> ImportProfile:
     """Create a minimal ImportProfile."""
-    return ImportProfile.objects.create(name=name, sheet_name="Data", source_id_column="Id")
+    return ImportProfile.objects.create(name=name, adapter_config={"sheet_name": "Data", "source_id_column": "Id"})
 
 
 class BaseAPITestCase(TestCase):
@@ -51,7 +51,9 @@ class ImportProfileAPITest(BaseAPITestCase):
 
         resp = self.client.post(
             "/api/plugins/data-import/profiles/",
-            data=json.dumps({"name": "APICreatedProfile", "sheet_name": "Data", "source_id_column": "Id"}),
+            data=json.dumps(
+                {"name": "APICreatedProfile", "adapter_config": {"sheet_name": "Data", "source_id_column": "Id"}}
+            ),
             content_type="application/json",
             HTTP_ACCEPT="application/json",
         )
@@ -72,8 +74,10 @@ class ImportProfileAPITest(BaseAPITestCase):
             data=json.dumps(
                 {
                     "name": "API Contact Profile",
-                    "primary_contact_role": role.pk,
-                    "primary_contact_lookup_field": "name",
+                    "adapter_config": {
+                        "primary_contact_role": role.name,
+                        "primary_contact_lookup_field": "name",
+                    },
                 }
             ),
             content_type="application/json",
@@ -82,8 +86,8 @@ class ImportProfileAPITest(BaseAPITestCase):
 
         self.assertEqual(response.status_code, 201, response.content)
         profile = ImportProfile.objects.get(name="API Contact Profile")
-        self.assertEqual(profile.primary_contact_role, role)
-        self.assertEqual(profile.primary_contact_lookup_field, "name")
+        self.assertEqual(profile.resolved_primary_contact_role, role)
+        self.assertEqual(profile.adapter_settings.primary_contact_lookup_field, "name")
 
 
 class ColumnMappingAPITest(BaseAPITestCase):

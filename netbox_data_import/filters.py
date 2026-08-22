@@ -12,7 +12,7 @@ class ImportProfileFilterSet(NetBoxModelFilterSet):
 
     class Meta:
         model = ImportProfile
-        fields = ["name", "sheet_name", "update_existing", "create_missing_device_types"]
+        fields = ["name", "source_adapter"]
 
     def search(self, queryset, name, value):
         """Filter profiles by name substring."""

@@ -58,9 +58,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             status="active",
         )
         self.profile = ImportProfile.objects.create(
-            name="Field Review Profile",
-            update_existing=True,
-            create_missing_device_types=False,
+            name="Field Review Profile", adapter_config={"update_existing": True, "create_missing_device_types": False}
         )
         ClassRoleMapping.objects.create(
             profile=self.profile,
@@ -145,6 +143,61 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
     def _cached_device_row(self, session):
         """Return the Device row stored in one materialized preview session."""
         return next(row for row in session["import_result"]["rows"] if row["object_type"] == "device")
+
+    def _constrained_review_client(self):
+        """A client that may bind the device but whose review permission excludes this field.
+
+        That is the only way to reach the refusal: the view's own mixin already requires
+        add_ignoredfielddifference, so a user without it never enters the transaction.
+        """
+        from dcim.models import Device
+        from django.contrib.contenttypes.models import ContentType
+        from users.models import ObjectPermission
+
+        user = get_user_model().objects.create_user(username="constrained-review-user", password="testpass")
+        grants = [
+            (IgnoredFieldDifference, ["add"], {"target_field": "serial"}),
+            (DeviceExistingMatch, ["add"], None),
+            (Device, ["view"], None),
+            (ImportProfile, ["view", "change"], None),
+        ]
+        for model, actions, constraints in grants:
+            permission = ObjectPermission.objects.create(
+                name=f"constrained {model.__name__}", actions=actions, constraints=constraints
+            )
+            permission.object_types.add(ContentType.objects.get_for_model(model))
+            permission.users.add(user)
+
+        client = Client()
+        self.assertTrue(client.login(username="constrained-review-user", password="testpass"))
+        session = client.session
+        for key in ("import_rows", "import_context", "import_result", "import_preview_revision"):
+            session[key] = self.client.session[key]
+        session["import_preview_pending"] = True
+        session.save()
+        return client
+
+    def test_a_refused_review_leaves_no_device_binding_behind(self):
+        """The binding is written first, so refusing the review has to take it back."""
+        DeviceExistingMatch.objects.filter(profile=self.profile).delete()
+        client = self._constrained_review_client()
+
+        response = client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            {
+                "profile_id": self.profile.pk,
+                "row_number": 1,
+                "target_field": "u_position",
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+        self.assertFalse(
+            DeviceExistingMatch.objects.filter(profile=self.profile).exists(),
+            "a refused field review must not leave the device binding behind",
+        )
 
     def test_user_can_ignore_the_exact_current_field_difference(self):
         """A reviewed value pair moves from Fields Differ to Fields Ignored."""
@@ -1061,8 +1114,8 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             slug="field-review-deleted-type-manufacturer-deleted-type-model",
             u_height=1,
         )
-        self.profile.create_missing_device_types = True
-        self.profile.save(update_fields=["create_missing_device_types"])
+        self.profile.adapter_config["create_missing_device_types"] = True
+        self.profile.save(update_fields=["adapter_config"])
         self.rows[0].update(make=source_manufacturer.name, model=source_type.model)
         self._save_rows(self.rows)
 

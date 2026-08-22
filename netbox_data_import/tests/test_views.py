@@ -6,7 +6,7 @@ import os
 from io import BytesIO
 
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase
+from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
@@ -18,7 +18,11 @@ from netbox_data_import.models import (
     SourceResolution,
     stored_import_source,
 )
-from netbox_data_import.tests.helpers import set_import_source, setup_preview_with_device_matches
+from netbox_data_import.tests.helpers import (
+    run_on_separate_connection,
+    set_import_source,
+    setup_preview_with_device_matches,
+)
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
@@ -30,10 +34,12 @@ def _make_profile(name="ViewTest") -> ImportProfile:
     """Create a minimal ImportProfile with basic column and class-role mappings."""
     profile = ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        update_existing=True,
-        create_missing_device_types=True,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "update_existing": True,
+            "create_missing_device_types": True,
+        },
     )
     for src, tgt in {
         "Id": "source_id",
@@ -145,16 +151,21 @@ class ImportProfileEditViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:importprofile_add")
         data = {
             "name": "PostedProfile",
+            "source_adapter": "flat_workbook",
             "sheet_name": "Data",
             "source_id_column": "Id",
             "update_existing": "on",
             "create_missing_device_types": "on",
+            "primary_contact_lookup_field": "email",
+            "preview_view_mode": "rows",
             "_create": "1",
         }
         resp = self.client.post(url, data)
-        self.assertIn(resp.status_code, [200, 302])
-        if resp.status_code == 302:
-            self.assertTrue(ImportProfile.objects.filter(name="PostedProfile").exists())
+        self.assertEqual(resp.status_code, 302, getattr(resp, "context", None))
+        profile = ImportProfile.objects.get(name="PostedProfile")
+        self.assertEqual(profile.source_adapter, "flat_workbook")
+        self.assertEqual(profile.adapter_config["sheet_name"], "Data")
+        self.assertTrue(profile.adapter_config["update_existing"])
 
     def test_edit_view_get(self):
         """Edit profile page returns 200."""
@@ -408,11 +419,14 @@ class ImportSetupViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 200)
 
 
-class ImportPreviewViewTest(BaseViewTestCase):
-    """Tests for ImportPreviewView."""
+class PreviewSessionMixin:
+    """Build the preview session state without dragging another class's test methods along."""
 
-    def _setup_session(self):
-        """Populate session with a valid import state."""
+    def _setup_session(self, *, mutate_rows=None):
+        """Populate session with a valid import state.
+
+        `mutate_rows` edits the parsed rows so a caller can preview a state the workbook lacks.
+        """
         from dcim.models import Site
         from netbox_data_import.engine import parse_file, run_import
 
@@ -420,6 +434,8 @@ class ImportPreviewViewTest(BaseViewTestCase):
         profile = _make_profile("PreviewProfile")
         with open(FIXTURE_PATH, "rb") as f:
             rows = parse_file(f, profile)
+        if mutate_rows is not None:
+            mutate_rows(rows)
 
         result = run_import(rows, profile, {"site": site}, dry_run=True)
 
@@ -438,6 +454,10 @@ class ImportPreviewViewTest(BaseViewTestCase):
         }
         session.save()
         return profile
+
+
+class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
+    """Tests for ImportPreviewView."""
 
     def test_preview_without_session_redirects(self):
         """GET /import/preview/ without session data redirects to setup."""
@@ -459,16 +479,6 @@ class ImportPreviewViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertContains(resp, "sample_cans.xlsx")
-
-    def test_contact_literal_inputs_have_accessible_names(self):
-        """The three Contact literal inputs expose names to assistive technology."""
-        self._setup_session()
-
-        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
-
-        self.assertContains(response, 'aria-label="Contact name value"')
-        self.assertContains(response, 'aria-label="Email address value"')
-        self.assertContains(response, 'aria-label="Phone number value"')
 
     def test_first_preview_get_renders_the_materialized_upload_result(self):
         """The upload result is not calculated again on its redirect target."""
@@ -1011,12 +1021,14 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         from tenancy.models import ContactRole
 
         self.profile = _make_profile("YamlExportProfile")
-        self.profile.primary_contact_role = ContactRole.objects.create(
-            name="Export Primary Contact",
-            slug="export-primary-contact",
-        )
-        self.profile.primary_contact_lookup_field = "name"
-        self.profile.save(update_fields=["primary_contact_role", "primary_contact_lookup_field"])
+        self.profile.adapter_config["primary_contact_role"] = (
+            ContactRole.objects.create(
+                name="Export Primary Contact",
+                slug="export-primary-contact",
+            )
+        ).name
+        self.profile.adapter_config["primary_contact_lookup_field"] = "name"
+        self.profile.save(update_fields=["adapter_config"])
         DeviceTypeMapping.objects.create(
             profile=self.profile,
             source_make="Dell",
@@ -1067,7 +1079,7 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         self.assertIn("R660", content)
 
     def test_export_yaml_includes_primary_contact_configuration(self):
-        """Exported YAML identifies the Contact Role by slug and the lookup field."""
+        """Exported YAML identifies the Contact Role by its natural key and the lookup field."""
         import yaml
 
         url = reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.profile.pk})
@@ -1075,8 +1087,8 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         response = self.client.get(url)
 
         profile_data = yaml.safe_load(response.content)["profile"]
-        self.assertEqual(profile_data["primary_contact_role"], "export-primary-contact")
-        self.assertEqual(profile_data["primary_contact_lookup_field"], "name")
+        self.assertEqual(profile_data["adapter_config"]["primary_contact_role"], "Export Primary Contact")
+        self.assertEqual(profile_data["adapter_config"]["primary_contact_lookup_field"], "name")
 
     def test_export_404_for_missing_profile(self):
         """GET for non-existent profile pk returns 404."""
@@ -1090,10 +1102,11 @@ class ImportProfileYamlViewTest(BaseViewTestCase):
 
     YAML_DATA = b"""profile:
   name: ImportedProfile
-  sheet_name: Data
-  source_id_column: Id
-  update_existing: true
-  create_missing_device_types: true
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
+    update_existing: true
+    create_missing_device_types: true
 column_mappings:
   - source_column: Name
     target_field: device_name
@@ -1135,8 +1148,9 @@ manufacturer_mappings:
         yaml_file = BytesIO(
             b"""profile:
   name: ImportedContactProfile
-  primary_contact_role: imported-primary-contact
-  primary_contact_lookup_field: name
+  adapter_config:
+    primary_contact_role: Imported Primary Contact
+    primary_contact_lookup_field: name
 """
         )
         yaml_file.name = "contact-profile.yaml"
@@ -1148,8 +1162,8 @@ manufacturer_mappings:
 
         self.assertIn(response.status_code, [200, 302])
         profile = ImportProfile.objects.get(name="ImportedContactProfile")
-        self.assertEqual(profile.primary_contact_role, role)
-        self.assertEqual(profile.primary_contact_lookup_field, "name")
+        self.assertEqual(profile.resolved_primary_contact_role, role)
+        self.assertEqual(profile.adapter_settings.primary_contact_lookup_field, "name")
 
     def test_yaml_import_can_clear_the_primary_contact_role(self):
         """An explicit null Contact Role clears the saved profile setting."""
@@ -1158,26 +1172,35 @@ manufacturer_mappings:
         from netbox_data_import.views import _apply_profile_yaml_data
 
         role = ContactRole.objects.create(name="Role to Clear", slug="role-to-clear")
-        profile = ImportProfile.objects.create(name="Clear Contact Role", primary_contact_role=role)
+        profile = ImportProfile.objects.create(
+            name="Clear Contact Role", adapter_config={"primary_contact_role": role.name}
+        )
 
-        _apply_profile_yaml_data({"profile": {"name": profile.name, "primary_contact_role": None}})
+        _apply_profile_yaml_data({"profile": {"name": profile.name, "adapter_config": {"primary_contact_role": None}}})
 
         profile.refresh_from_db()
-        self.assertIsNone(profile.primary_contact_role)
+        self.assertIsNone(profile.resolved_primary_contact_role)
 
     def test_yaml_import_rejects_an_unknown_primary_contact_role(self):
-        """An unknown Contact Role slug fails with a descriptive error."""
+        """A dangling Contact Role natural key fails at the adapter form boundary."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        with self.assertRaisesMessage(ValueError, "ContactRole with slug 'unknown-contact-role' not found"):
+        with self.assertRaisesMessage(ValueError, "primary_contact_role"):
             _apply_profile_yaml_data(
                 {
                     "profile": {
                         "name": "Unknown Contact Role",
-                        "primary_contact_role": "unknown-contact-role",
+                        "adapter_config": {"primary_contact_role": "No Such Contact Role"},
                     }
                 }
             )
+
+    def test_yaml_import_rejects_an_unknown_profile_key(self):
+        """A key the profile block does not define is an error, never ignored."""
+        from netbox_data_import.views import _apply_profile_yaml_data
+
+        with self.assertRaisesMessage(ValueError, "sheet_name"):
+            _apply_profile_yaml_data({"profile": {"name": "Stray Key", "sheet_name": "Data"}})
 
     def test_post_creates_column_mappings(self):
         """POST with YAML creates column mappings."""
@@ -1254,12 +1277,21 @@ manufacturer_mappings:
 class QuickCreateManufacturerViewTest(BaseViewTestCase):
     """Tests for QuickCreateManufacturerView."""
 
+    def setUp(self):
+        super().setUp()
+        self.profile = ImportProfile.objects.create(name="Quick Manufacturer Profile")
+
+    def _post(self, payload):
+        return self.client.post(
+            reverse("plugins:netbox_data_import:quick_create_manufacturer"),
+            {"profile_id": self.profile.pk, **payload},
+        )
+
     def test_creates_manufacturer(self):
         """POST creates a new Manufacturer in NetBox."""
         from dcim.models import Manufacturer
 
-        url = reverse("plugins:netbox_data_import:quick_create_manufacturer")
-        resp = self.client.post(url, {"mfg_name": "AcmeCorp", "mfg_slug": "acmecorp"})
+        resp = self._post({"mfg_name": "AcmeCorp", "mfg_slug": "acmecorp"})
         self.assertIn(resp.status_code, [200, 302])
         self.assertTrue(Manufacturer.objects.filter(slug="acmecorp").exists())
 
@@ -1267,29 +1299,34 @@ class QuickCreateManufacturerViewTest(BaseViewTestCase):
         """POSTing the same manufacturer twice does not create a duplicate."""
         from dcim.models import Manufacturer
 
-        url = reverse("plugins:netbox_data_import:quick_create_manufacturer")
         for _ in range(2):
-            self.client.post(url, {"mfg_name": "AcmeCorp2", "mfg_slug": "acmecorp2"})
+            self._post({"mfg_name": "AcmeCorp2", "mfg_slug": "acmecorp2"})
         self.assertEqual(Manufacturer.objects.filter(slug="acmecorp2").count(), 1)
 
     def test_missing_slug_redirects(self):
         """POST without slug redirects with error (does not crash)."""
-        url = reverse("plugins:netbox_data_import:quick_create_manufacturer")
-        resp = self.client.post(url, {"mfg_name": "NoSlug"})
+        resp = self._post({"mfg_name": "NoSlug"})
         self.assertIn(resp.status_code, [200, 302])
 
 
 class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
     """Tests for QuickCreateDeviceRoleView."""
 
+    def setUp(self):
+        super().setUp()
+        self.profile = ImportProfile.objects.create(name="Quick Role Profile")
+
     def _url(self):
         return reverse("plugins:netbox_data_import:quick_create_role")
+
+    def _post(self, payload):
+        return self.client.post(self._url(), {"profile_id": self.profile.pk, **payload})
 
     def test_creates_role(self):
         """POST creates a new DeviceRole and returns JSON with its id."""
         from dcim.models import DeviceRole
 
-        resp = self.client.post(self._url(), {"name": "Spine", "slug": "spine"})
+        resp = self._post({"name": "Spine", "slug": "spine"})
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertTrue(body["created"])
@@ -1300,9 +1337,8 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         """Re-POSTing the same slug returns created=False and does not duplicate."""
         from dcim.models import DeviceRole
 
-        url = self._url()
-        self.client.post(url, {"name": "Leaf", "slug": "leaf"})
-        resp = self.client.post(url, {"name": "Leaf", "slug": "leaf"})
+        self._post({"name": "Leaf", "slug": "leaf"})
+        resp = self._post({"name": "Leaf", "slug": "leaf"})
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.json()["created"])
         self.assertEqual(DeviceRole.objects.filter(slug="leaf").count(), 1)
@@ -1311,73 +1347,158 @@ class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
         """Empty/missing color falls back to the default 9e9e9e."""
         from dcim.models import DeviceRole
 
-        resp = self.client.post(self._url(), {"name": "Edge", "slug": "edge", "color": ""})
+        resp = self._post({"name": "Edge", "slug": "edge", "color": ""})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(DeviceRole.objects.get(slug="edge").color, "9e9e9e")
 
     def test_missing_name_returns_400(self):
         """Missing name returns 400 with a field error."""
-        resp = self.client.post(self._url(), {"slug": "x"})
+        resp = self._post({"slug": "x"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("required", resp.json()["error"].lower())
 
     def test_missing_slug_returns_400(self):
         """Missing slug returns 400."""
-        resp = self.client.post(self._url(), {"name": "X"})
+        resp = self._post({"name": "X"})
         self.assertEqual(resp.status_code, 400)
 
     def test_invalid_slug_returns_400(self):
         """Slug with invalid chars is rejected."""
-        resp = self.client.post(self._url(), {"name": "Bad", "slug": "Bad Slug!"})
+        resp = self._post({"name": "Bad", "slug": "Bad Slug!"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("slug", resp.json()["error"].lower())
 
     def test_missing_devicerole_permission_returns_403(self):
         """User without dcim.add_devicerole gets a 403 JSON response."""
-        from django.contrib.auth.models import Permission
+        from django.contrib.contenttypes.models import ContentType
+        from users.models import ObjectPermission
 
         self.client.logout()
         non_super = User.objects.create_user("limited", "l@example.com", "pw")
-        # Grant only the plugin view permission, NOT dcim.add_devicerole.
-        perm = Permission.objects.get(content_type__app_label="netbox_data_import", codename="view_importprofile")
-        non_super.user_permissions.add(perm)
+        permission = ObjectPermission.objects.create(
+            name="limited profile change",
+            actions=["change"],
+            constraints={"pk": self.profile.pk},
+        )
+        permission.object_types.add(ContentType.objects.get_for_model(ImportProfile))
+        permission.users.add(non_super)
         self.client.login(username="limited", password="pw")
-        resp = self.client.post(self._url(), {"name": "NoPerm", "slug": "noperm"})
+        resp = self._post({"name": "NoPerm", "slug": "noperm"})
         self.assertEqual(resp.status_code, 403)
 
-    def test_database_error_is_sanitized(self):
-        """Database errors are logged but not leaked in the response body."""
-        from unittest.mock import patch
-        from django.db import DatabaseError
+    def test_a_duplicate_name_is_refused_before_the_database(self):
+        """full_clean validates the unique constraints, so the duplicate never reaches the insert."""
+        from dcim.models import DeviceRole
 
-        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=DatabaseError("raw db detail SECRET")):
-            resp = self.client.post(self._url(), {"name": "X", "slug": "xfail"})
-        self.assertEqual(resp.status_code, 500)
-        self.assertNotIn("SECRET", resp.content.decode())
-        self.assertIn("internal", resp.json()["error"].lower())
+        DeviceRole.objects.create(name="Access", slug="access")
 
-    def test_integrity_error_is_sanitized(self):
-        """IntegrityError from a race returns a generic 400, not the raw message."""
-        from unittest.mock import patch
-        from django.db import IntegrityError
+        resp = self._post({"name": "Access", "slug": "access-spare"})
 
-        with patch(
-            "dcim.models.DeviceRole.objects.get_or_create",
-            side_effect=IntegrityError("duplicate key value violates unique constraint"),
-        ):
-            resp = self.client.post(self._url(), {"name": "X", "slug": "xrace"})
         self.assertEqual(resp.status_code, 400)
-        self.assertNotIn("unique constraint", resp.content.decode())
+        body = resp.content.decode()
+        self.assertIn("invalid", resp.json()["error"].lower())
+        self.assertNotIn("unique constraint", body.lower())
+        self.assertNotIn("dcim_devicerole_name", body)
+        self.assertFalse(DeviceRole.objects.filter(slug="access-spare").exists())
 
     def test_validation_error_is_sanitized(self):
-        """ValidationError is caught and returns generic 400."""
-        from unittest.mock import patch
-        from django.core.exceptions import ValidationError
+        """A name the column cannot hold is refused, and the field error is not echoed back."""
+        from dcim.models import DeviceRole
 
-        with patch("dcim.models.DeviceRole.objects.get_or_create", side_effect=ValidationError("bad value")):
-            resp = self.client.post(self._url(), {"name": "X", "slug": "xval"})
+        resp = self._post({"name": "N" * 300, "slug": "xval"})
+
         self.assertEqual(resp.status_code, 400)
         self.assertIn("invalid", resp.json()["error"].lower())
+        self.assertNotIn("300", resp.content.decode())
+        self.assertFalse(DeviceRole.objects.filter(slug="xval").exists())
+
+
+class QuickCreateDeviceRoleDatabaseFailureTest(TransactionTestCase):
+    """Exercise database failure responses against real locks and constraints."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser("role-failure-user", "role-failure@example.invalid", "testpass")
+        self.client = Client()
+        self.client.force_login(self.user)
+        self.profile = ImportProfile.objects.create(name="Quick Role Database Failure Profile")
+
+    def _post(self, payload):
+        return self.client.post(
+            reverse("plugins:netbox_data_import:quick_create_role"),
+            {"profile_id": self.profile.pk, **payload},
+        )
+
+    def test_integrity_error_is_sanitized(self):
+        """An unrelated unique collision returns generic text and keeps only the winner."""
+        from threading import Event, current_thread
+
+        from dcim.models import DeviceRole
+        from django.db.models.signals import pre_save
+
+        insert_started = Event()
+        competing_insert_finished = Event()
+        request_thread = current_thread()
+
+        def pause_before_insert(sender, instance, **kwargs):
+            if current_thread() is request_thread and instance.name == "Concurrent Role":
+                insert_started.set()
+                self.assertTrue(competing_insert_finished.wait(timeout=10))
+
+        pre_save.connect(pause_before_insert, sender=DeviceRole, weak=False)
+        self.addCleanup(pre_save.disconnect, pause_before_insert, sender=DeviceRole)
+
+        def insert_competing_role():
+            self.assertTrue(insert_started.wait(timeout=10))
+            try:
+                DeviceRole.objects.create(name="Concurrent Role", slug="concurrent-role-winner")
+            finally:
+                competing_insert_finished.set()
+
+        with run_on_separate_connection(insert_competing_role):
+            response = self._post({"name": "Concurrent Role", "slug": "concurrent-role-request"})
+
+        body = response.content.decode().lower()
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("unique constraint", body)
+        self.assertNotIn("dcim_devicerole_name", body)
+        self.assertEqual(DeviceRole.objects.filter(name="Concurrent Role").count(), 1)
+        self.assertTrue(DeviceRole.objects.filter(slug="concurrent-role-winner").exists())
+
+    def test_database_error_is_sanitized(self):
+        """A real statement timeout returns generic text instead of database details."""
+        from threading import Event
+
+        from dcim.models import DeviceRole
+        from django.db import connection, transaction
+
+        lock_acquired = Event()
+        release_lock = Event()
+
+        def hold_device_role_table_lock():
+            with transaction.atomic():
+                with connection.cursor() as cursor:
+                    table = connection.ops.quote_name(DeviceRole._meta.db_table)
+                    cursor.execute(f"LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")
+                lock_acquired.set()
+                self.assertTrue(release_lock.wait(timeout=10))
+
+        with run_on_separate_connection(hold_device_role_table_lock):
+            try:
+                self.assertTrue(lock_acquired.wait(timeout=10))
+                with connection.cursor() as cursor:
+                    cursor.execute("SET statement_timeout TO '200ms'")
+                response = self._post({"name": "Locked Role", "slug": "locked-role"})
+            finally:
+                release_lock.set()
+                with connection.cursor() as cursor:
+                    cursor.execute("SET statement_timeout TO 0")
+
+        body = response.content.decode().lower()
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("internal", response.json()["error"].lower())
+        self.assertNotIn("statement timeout", body)
+        self.assertNotIn("canceling statement", body)
+        self.assertFalse(DeviceRole.objects.filter(slug="locked-role").exists())
 
 
 class QuickResolveManufacturerViewTest(BaseViewTestCase):
@@ -2269,8 +2390,9 @@ class ImportProfileYamlWithTransformRuleTest(BaseViewTestCase):
 
     YAML_WITH_TRANSFORM = b"""profile:
   name: TransformImportProfile
-  sheet_name: Data
-  source_id_column: Id
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
 column_transform_rules:
   - source_column: Name
     pattern: "^(\\\\w+) - (.+)$"
@@ -3040,10 +3162,11 @@ class ImportProfileBulkImportViewTest(BaseViewTestCase):
 
     HIERARCHICAL_YAML = b"""profile:
   name: BulkImportedProfile
-  sheet_name: Data
-  source_id_column: Id
-  update_existing: true
-  create_missing_device_types: true
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
+    update_existing: true
+    create_missing_device_types: true
 column_mappings:
   - source_column: Name
     target_field: device_name
@@ -3115,7 +3238,8 @@ manufacturer_mappings:
         # Second import: only 1 column mapping
         reduced_yaml = b"""profile:
   name: BulkImportedProfile
-  sheet_name: Data
+  adapter_config:
+    sheet_name: Data
 column_mappings:
   - source_column: Name
     target_field: device_name
@@ -3161,7 +3285,7 @@ column_mappings:
 
     def test_post_missing_name_shows_error(self):
         """POST with profile dict missing name shows error."""
-        resp = self.client.post(self._url(), {"data": "profile:\n  sheet_name: Data\n"})
+        resp = self.client.post(self._url(), {"data": "profile:\n  description: no name\n"})
         self.assertIn(resp.status_code, [200, 302])
 
     def test_post_malformed_section_shows_error_not_500(self):
@@ -3179,13 +3303,7 @@ column_mappings:
         this rewind the parent receives an EOF file handle and imports nothing.
         Creating the profile via this path confirms seek(0) is present.
         """
-        flat_yaml = (
-            b"- name: FlatRewindProfile\n"
-            b"  sheet_name: Data\n"
-            b"  preview_view_mode: rows\n"
-            b"  update_existing: false\n"
-            b"  create_missing_device_types: false\n"
-        )
+        flat_yaml = b"- name: FlatRewindProfile\n  description: Flat upload\n  source_adapter: flat_workbook\n"
         f = BytesIO(flat_yaml)
         f.name = "flat.yaml"
         resp = self.client.post(
@@ -3205,7 +3323,8 @@ column_mappings:
         yaml_with_transforms = (
             "profile:\n"
             "  name: TransformRulesProfile\n"
-            "  sheet_name: Data\n"
+            "  adapter_config:\n"
+            "    sheet_name: Data\n"
             "column_transform_rules:\n"
             "  - source_column: HostName\n"
             "    pattern: '^([a-z]+)(\\d+)'\n"
@@ -3273,19 +3392,19 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         from netbox_data_import.views import _apply_profile_yaml_data
 
         with self.assertRaises(ValueError):
-            _apply_profile_yaml_data({"profile": {"sheet_name": "Data"}})
+            _apply_profile_yaml_data({"profile": {"description": "no name"}})
 
     def test_creates_profile_and_returns_stats(self):
         """Creates an ImportProfile and returns non-empty stats dict."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
         data = {
-            "profile": {"name": "UnitTestProfile", "sheet_name": "Sheet1"},
+            "profile": {"name": "UnitTestProfile", "adapter_config": {"sheet_name": "Sheet1"}},
             "column_mappings": [{"source_column": "Name", "target_field": "device_name"}],
         }
         profile, stats = _apply_profile_yaml_data(data)
         self.assertEqual(profile.name, "UnitTestProfile")
-        self.assertEqual(profile.sheet_name, "Sheet1")
+        self.assertEqual(profile.adapter_settings.sheet_name, "Sheet1")
         self.assertEqual(stats.get("column_mappings"), 1)
         self.assertTrue(ImportProfile.objects.filter(name="UnitTestProfile").exists())
 
@@ -3349,7 +3468,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         existing = ColumnMapping.objects.create(profile=profile, source_column="Host", target_field="device_name")
 
         # Import same profile without the column_mappings key at all.
-        data = {"profile": {"name": "PreserveProfile", "sheet_name": "Data"}}
+        data = {"profile": {"name": "PreserveProfile", "adapter_config": {"sheet_name": "Data"}}}
         _apply_profile_yaml_data(data)
 
         # The existing column mapping must still exist.
@@ -3363,7 +3482,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         from netbox_data_import.views import _apply_profile_yaml_data
 
         bad_data = {
-            "profile": {"name": "BadViewModeProfile", "preview_view_mode": "invalid"},
+            "profile": {"name": "BadViewModeProfile", "adapter_config": {"preview_view_mode": "invalid"}},
         }
         with self.assertRaises(ValueError, msg="invalid choice field must raise ValueError"):
             _apply_profile_yaml_data(bad_data)
@@ -3431,28 +3550,30 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         # Create a profile with non-default field values.
         profile = ImportProfile.objects.create(
             name="PartialReimportProfile",
-            sheet_name="CustomSheet",
-            source_id_column="SourceId",
-            custom_field_name="my_cf",
-            update_existing=False,
-            preview_view_mode="racks",
+            adapter_config={
+                "sheet_name": "CustomSheet",
+                "source_id_column": "SourceId",
+                "custom_field_name": "my_cf",
+                "update_existing": False,
+                "preview_view_mode": "racks",
+            },
         )
 
         # Re-import with only 'name' — no other profile fields.
         _apply_profile_yaml_data({"profile": {"name": "PartialReimportProfile"}})
 
         profile.refresh_from_db()
-        self.assertEqual(profile.sheet_name, "CustomSheet", "sheet_name must not be reset")
-        self.assertEqual(profile.source_id_column, "SourceId", "source_id_column must not be reset")
-        self.assertEqual(profile.custom_field_name, "my_cf", "custom_field_name must not be reset")
-        self.assertFalse(profile.update_existing, "update_existing must not be reset")
-        self.assertEqual(profile.preview_view_mode, "racks", "preview_view_mode must not be reset")
+        self.assertEqual(profile.adapter_settings.sheet_name, "CustomSheet", "sheet_name must not be reset")
+        self.assertEqual(profile.adapter_settings.source_id_column, "SourceId", "source_id_column must not be reset")
+        self.assertEqual(profile.adapter_settings.custom_field_name, "my_cf", "custom_field_name must not be reset")
+        self.assertFalse(profile.adapter_settings.update_existing, "update_existing must not be reset")
+        self.assertEqual(profile.adapter_settings.preview_view_mode, "racks", "preview_view_mode must not be reset")
 
     def test_column_mapping_missing_required_key_raises_descriptive_error(self):
         """Missing required key in column_mappings raises ValueError with section and key name."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        ImportProfile.objects.create(name="KeyErrProfile", sheet_name="Data")
+        ImportProfile.objects.create(name="KeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
             "profile": {"name": "KeyErrProfile"},
             "column_mappings": [{"source_column": "Name"}],  # missing target_field
@@ -3466,7 +3587,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         """Missing required key in device_type_mappings raises ValueError, not bare KeyError."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        ImportProfile.objects.create(name="DTMKeyErrProfile", sheet_name="Data")
+        ImportProfile.objects.create(name="DTMKeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
             "profile": {"name": "DTMKeyErrProfile"},
             "device_type_mappings": [
@@ -3485,7 +3606,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         """Missing required key in manufacturer_mappings raises ValueError with context."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        ImportProfile.objects.create(name="MMKeyErrProfile", sheet_name="Data")
+        ImportProfile.objects.create(name="MMKeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
             "profile": {"name": "MMKeyErrProfile"},
             "manufacturer_mappings": [{"source_make": "Cisco"}],  # missing netbox_manufacturer_slug

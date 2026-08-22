@@ -27,7 +27,8 @@ import openpyxl
 
 from .contact_resolution import ContactResolutionRequired, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
-from .models import CANDIDATE_TARGET_PREFIX, DeviceImportSource, ImportProfile
+from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
+from .models import DeviceImportSource, ImportProfile
 from .object_permissions import (
     ObjectPermissionDenied as _ObjectPermissionDenied,
     enforce_saved_object_permission as _enforce_saved_object_permission,
@@ -517,17 +518,20 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
 
     Raises ParseError if the file or sheet is invalid.
     """
+    if not has_implemented_module(profile.output_kinds):
+        raise ParseError(f"This release has no Target Module for the '{profile.source_adapter}' source adapter.")
+
     try:
         content = file_obj.read()
         wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
     except Exception as exc:
         raise ParseError(f"Cannot open Excel file: {exc}") from exc
 
-    if profile.sheet_name not in wb.sheetnames:
+    if profile.adapter_settings.sheet_name not in wb.sheetnames:
         available = ", ".join(wb.sheetnames)
-        raise ParseError(f"Sheet '{profile.sheet_name}' not found. Available sheets: {available}")
+        raise ParseError(f"Sheet '{profile.adapter_settings.sheet_name}' not found. Available sheets: {available}")
 
-    ws = wb[profile.sheet_name]
+    ws = wb[profile.adapter_settings.sheet_name]
     raw_headers = _build_header_index_map(ws)
 
     # Build grouped source-column map from profile
@@ -547,7 +551,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     source_to_targets = _build_source_to_targets_map(profile)
 
     unused_stats: dict[str, dict] = {}
-    capture_extra = profile.capture_extra_data
+    capture_extra = profile.adapter_settings.capture_extra_data
 
     rows = []
     for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
@@ -764,7 +768,7 @@ def _ensure_manufacturer(
         return
     seen_manufacturers.add(mfg_slug)
     if not ctx.dry_run:
-        if ctx.profile.create_missing_device_types:
+        if ctx.profile.adapter_settings.create_missing_device_types:
             if not Manufacturer.objects.filter(slug=mfg_slug).exists():
                 if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
                     ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
@@ -775,7 +779,10 @@ def _ensure_manufacturer(
                     f"Manufacturer '{make}' derives slug '{mfg_slug}', which now belongs to "
                     f"'{manufacturer.name}' in NetBox. Refresh the preview and add an explicit manufacturer mapping."
                 )
-    elif not Manufacturer.objects.filter(slug=mfg_slug).exists() and ctx.profile.create_missing_device_types:
+    elif (
+        not Manufacturer.objects.filter(slug=mfg_slug).exists()
+        and ctx.profile.adapter_settings.create_missing_device_types
+    ):
         if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
             ctx.result.rows.append(_perm_denied_row("dcim.add_manufacturer", row, make, "manufacturer"))
         else:
@@ -812,7 +819,7 @@ def _ensure_device_type(
         return
     seen_device_types.add(dt_key)
     if not ctx.dry_run:
-        if ctx.profile.create_missing_device_types:
+        if ctx.profile.adapter_settings.create_missing_device_types:
             if not DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists():
                 if not Manufacturer.objects.filter(slug=mfg_slug).exists():
                     if ctx.user is not None and not ctx.user.has_perm("dcim.add_manufacturer"):
@@ -844,7 +851,7 @@ def _ensure_device_type(
     exists = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).exists()
     if exists:
         return
-    if ctx.profile.create_missing_device_types:
+    if ctx.profile.adapter_settings.create_missing_device_types:
         if ctx.user is not None and not ctx.user.has_perm("dcim.add_devicetype"):
             ctx.result.rows.append(_perm_denied_row("dcim.add_devicetype", row, f"{make} / {model}", "device_type"))
         else:
@@ -1220,7 +1227,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
         ctx.result.rows.append(_ambiguous_rack_row(row, source_id, rack_name, rack_name, ctx, "rack"))
         return
     if rack is not None:
-        action = "update" if ctx.profile.update_existing else "skip"
+        action = "update" if ctx.profile.adapter_settings.update_existing else "skip"
         if not _intent_matches(ctx, row, "rack", action, rack.pk, _rack_identity_state(rack)):
             ctx.result.rows.append(
                 _identity_state_error(
@@ -1232,7 +1239,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
                 )
             )
             return
-        if ctx.profile.update_existing:
+        if ctx.profile.adapter_settings.update_existing:
             if ctx.user is not None and not Rack.objects.restrict(ctx.user, "change").filter(pk=rack.pk).exists():
                 ctx.result.rows.append(_perm_denied_row("dcim.change_rack", row, rack_name, "rack"))
                 return
@@ -1395,9 +1402,9 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                 ctx.result.rows.append(_ambiguous_rack_row(row, source_id, rack_name, rack_name, ctx, "rack"))
                 continue
             if rack is not None:
-                action = "update" if ctx.profile.update_existing else "skip"
+                action = "update" if ctx.profile.adapter_settings.update_existing else "skip"
                 detail = f"Rack '{rack_name}' already exists"
-                if ctx.profile.update_existing:
+                if ctx.profile.adapter_settings.update_existing:
                     candidate = copy(rack)
                     _set_rack_import_fields(candidate, u_height, serial, crm.rack_type, ctx)
                     try:
@@ -2385,7 +2392,7 @@ def _preview_device_row(  # noqa: C901
             device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
             dt_exists = device_type is not None
             source_type_missing = False
-        can_create_type = ctx.profile.create_missing_device_types and (
+        can_create_type = ctx.profile.adapter_settings.create_missing_device_types and (
             ctx.user is None or ctx.user.has_perm("dcim.add_devicetype")
         )
         if source_type_missing and not can_create_type and not (review is not None and "device_type" in review.ignored):
@@ -2431,7 +2438,7 @@ def _preview_device_row(  # noqa: C901
                 },
             )
         ctx.claimed_device_ids[matched_device.pk] = (row.get("_row_number"), source_id)
-        action = "update" if ctx.profile.update_existing else "skip"
+        action = "update" if ctx.profile.adapter_settings.update_existing else "skip"
         if relation_error is not None:
             action = "error"
             detail = relation_error
@@ -2475,14 +2482,14 @@ def _preview_device_row(  # noqa: C901
                 name_note = f"; name stays '{matched_device.name}' (source: '{device_name}')"
             else:
                 name_note = "; name unchanged"
-            if ctx.profile.update_existing and not zero_u_conflict and relation_error is None:
+            if ctx.profile.adapter_settings.update_existing and not zero_u_conflict and relation_error is None:
                 detail = f"Will update '{matched_device.name}' (matched by {match_method}{name_note})"
             elif not zero_u_conflict and relation_error is None:
                 detail = (
                     f"Matched to '{matched_device.name}' (by {match_method}{name_note}, skip — update_existing off)"
                 )
     else:
-        if source_type_missing and not ctx.profile.create_missing_device_types:
+        if source_type_missing and not ctx.profile.adapter_settings.create_missing_device_types:
             return RowResult(
                 row_number=row["_row_number"],
                 source_id=source_id,
@@ -3065,7 +3072,7 @@ def _write_device_row(  # noqa: C901
             )
             if placement_error is not None:
                 return placement_error
-        actual_action = "update" if ctx.profile.update_existing else "skip"
+        actual_action = "update" if ctx.profile.adapter_settings.update_existing else "skip"
         if not _intent_matches(ctx, row, "device", actual_action, device.pk, _device_identity_state(device)):
             return _identity_state_error(
                 row,
@@ -3090,7 +3097,7 @@ def _write_device_row(  # noqa: C901
                 rack_name=rack_name,
                 extra_data={"identity_conflict": "device_already_bound", "netbox_device_id": device.pk},
             )
-        if ctx.profile.update_existing:
+        if ctx.profile.adapter_settings.update_existing:
             if (
                 ctx.user is not None
                 and not _device_queryset_for_user(Device, ctx.user, "change").filter(pk=device.pk).exists()
@@ -3948,8 +3955,13 @@ def run_import(
     context keys: site, location (optional), tenant (optional)
     dry_run=True  → no DB writes, returns what *would* happen
     dry_run=False → writes to DB; pass user to enforce DCIM object permissions
+
+    Raises ValidationError when the profile names an adapter this release does not register.
     """
-    from .models import IgnoredDevice
+    from .models import IgnoredDevice, validate_registered_adapter
+
+    # Every adapter setting is read from deep inside the passes, so reject the profile up front.
+    validate_registered_adapter(profile)
 
     class_role_map: dict[str, object] = {
         crm.source_class: crm for crm in profile.class_role_mappings.select_related("rack_type").all()
@@ -4012,7 +4024,7 @@ def run_import(
         _pass3_process_devices(rows, ctx, class_role_map)
     else:
         with transaction.atomic():
-            if profile.primary_contact_role_id is not None:
+            if profile.adapter_settings.primary_contact_role:
                 PrimaryContactResolver.lock_imports()
             _pass1_ensure_types(rows, ctx, class_role_map)
             _pass2_process_racks(rows, ctx, class_role_map)
@@ -4047,12 +4059,12 @@ def _store_source_id(
     The import record covers Devices. A Rack keeps only the operator-configured custom field.
     """
     # Per-profile custom field (e.g. cans_id → plain string)
-    if profile.custom_field_name and source_id:
+    if profile.adapter_settings.custom_field_name and source_id:
         try:
-            obj.custom_field_data[profile.custom_field_name] = source_id
+            obj.custom_field_data[profile.adapter_settings.custom_field_name] = source_id
             obj.save(update_fields=["custom_field_data"])
         except (AttributeError, KeyError):  # pragma: no cover
-            logger.warning("Failed to set custom field '%s' on %s", profile.custom_field_name, obj)
+            logger.warning("Failed to set custom field '%s' on %s", profile.adapter_settings.custom_field_name, obj)
 
     from dcim.models import Device
 

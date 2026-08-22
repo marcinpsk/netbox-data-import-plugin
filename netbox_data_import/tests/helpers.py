@@ -3,8 +3,79 @@
 """Shared test helpers for netbox_data_import tests."""
 
 import os
+from contextlib import contextmanager
+from queue import Queue
+from threading import Thread
+
+from django.db import connections
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
+
+
+@contextmanager
+def run_on_separate_connection(target):
+    """Run *target* in a thread with a fresh database connection."""
+    errors = Queue()
+
+    def runner():
+        connections["default"].close()
+        try:
+            target()
+        except BaseException as exc:
+            errors.put(exc)
+        finally:
+            connections["default"].close()
+
+    thread = Thread(target=runner, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        thread.join(timeout=10)
+        if thread.is_alive():
+            raise AssertionError("The separate database connection did not finish.")
+        if not errors.empty():
+            raise errors.get()
+
+
+def user_with_object_permission(username, grants):
+    """Create a user holding one real ObjectPermission per model grant."""
+    from django.contrib.auth import get_user_model
+    from django.contrib.contenttypes.models import ContentType
+    from users.models import ObjectPermission
+
+    user = get_user_model().objects.create_user(username=username, password="testpass")
+    for model, actions, constraints in grants:
+        permission = ObjectPermission.objects.create(
+            name=f"{username} {model.__name__} {'-'.join(actions)}",
+            actions=list(actions),
+            constraints=constraints,
+        )
+        permission.object_types.add(ContentType.objects.get_for_model(model))
+        permission.users.add(user)
+    return user
+
+
+def reverse_squashed_schema_operations(executor, app_label, step, below, *, expected_data_operations):
+    """Reverse a squash's schema operations without running its irreversible data operations."""
+    from django.db import connection
+    from django.db.migrations import Migration, RunPython
+
+    squashed_migration = executor.loader.get_migration(app_label, step)
+    data_operations = [operation for operation in squashed_migration.operations if isinstance(operation, RunPython)]
+    if len(data_operations) != expected_data_operations:
+        raise AssertionError(
+            f"Expected {expected_data_operations} RunPython operations in {step}, found {len(data_operations)}"
+        )
+
+    schema_migration = Migration(step, app_label)
+    schema_migration.atomic = squashed_migration.atomic
+    schema_migration.operations = [
+        operation for operation in squashed_migration.operations if not isinstance(operation, RunPython)
+    ]
+    before_state = executor.loader.project_state([(app_label, below)])
+    with connection.schema_editor(atomic=schema_migration.atomic) as schema_editor:
+        schema_migration.unapply(before_state, schema_editor)
 
 
 def make_dcim_objects(name_prefix=""):

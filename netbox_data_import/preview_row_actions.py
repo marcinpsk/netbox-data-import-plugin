@@ -28,6 +28,13 @@ def record_recalculated_preview(session, result) -> str:
     return revision
 
 
+def retire_preview_revision(session) -> str:
+    """Invalidate the token any open preview is holding, without storing a new result."""
+    revision = secrets.token_urlsafe(18)
+    session[PREVIEW_REVISION_SESSION_KEY] = revision
+    return revision
+
+
 def load_cached_preview(request):
     """Return the active Import Profile and materialized preview result."""
     from .engine import ImportResult
