@@ -210,8 +210,10 @@
       provenance.textContent = 'Linked to an existing NetBox Contact.';
       return;
     }
-    var used = Object.keys(selection.sources).map(function (role) {
-      return selection.sources[role];
+    var used = [];
+    Object.keys(selection.sources).forEach(function (role) {
+      var source = selection.sources[role];
+      if (used.indexOf(source) === -1) used.push(source);
     });
     var unused = [];
     valueRows.querySelectorAll('.ndi-contact-value-row[data-source-column]').forEach(function (row) {

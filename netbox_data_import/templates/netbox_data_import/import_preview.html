@@ -897,6 +897,7 @@
         {% csrf_token %}
         <div class="modal-body">
           <input type="hidden" name="profile_id" id="res_profile_id" value="{{ profile_id }}">
+          <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
           <input type="hidden" name="source_id" id="res_source_id">
           <input type="hidden" name="source_column" id="res_source_column">
           <input type="hidden" name="original_value" id="res_original_value">
@@ -964,6 +965,7 @@
       <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}" id="conflictForm">
         {% csrf_token %}
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <input type="hidden" name="source_id" id="conf_source_id">
         <input type="hidden" name="source_column" id="conf_source_column">
         <input type="hidden" name="original_value" id="conf_original_value" value="">

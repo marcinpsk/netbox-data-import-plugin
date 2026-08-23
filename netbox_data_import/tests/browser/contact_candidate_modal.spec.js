@@ -227,6 +227,7 @@ test("a saved source column can supply more than one Contact field", async ({ pa
     email: "Primary Contact",
     name: "Primary Contact",
   });
+  await expect(page.locator("#contactCandidateProvenance")).toContainText("Read from Primary Contact.");
 });
 
 test("a source column matching an inherited object property still opens", async ({ page }) => {

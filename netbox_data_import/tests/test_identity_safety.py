@@ -446,6 +446,13 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             'name="preview_revision" value="rendered-name-preview"',
             name_form,
         )
+        for form_id in ("splitForm", "conflictForm"):
+            form_start = html.index(f'id="{form_id}"')
+            form_end = html.index("</form>", form_start)
+            self.assertIn(
+                'name="preview_revision" value="rendered-name-preview"',
+                html[form_start:form_end],
+            )
 
         session = self.client.session
         session[PREVIEW_REVISION_SESSION_KEY] = "current-name-preview"
