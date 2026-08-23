@@ -19,6 +19,15 @@ class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
     def _get_base_url(self):
         return BASE_URL
 
+    def test_create_object_with_permission(self):
+        """The profile view stores every submitted adapter setting."""
+        super().test_create_object_with_permission()
+        profile = ImportProfile.objects.get(name=self.form_data["name"])
+        submitted_config = {
+            name: self.form_data[name] for name in FlatWorkbookConfigForm.base_fields if name in self.form_data
+        }
+        self.assertEqual(profile.adapter_config, FlatWorkbookConfigForm.validate_config(submitted_config))
+
     @classmethod
     def setUpTestData(cls):
         ImportProfile.objects.bulk_create(
