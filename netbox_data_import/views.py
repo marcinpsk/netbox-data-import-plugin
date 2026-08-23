@@ -1465,15 +1465,6 @@ def _preview_accepts_decisions(request) -> bool:
     )
 
 
-def _revision_is_checkable(request) -> bool:
-    """Answer whether the caller presented a token to compare.
-
-    A JSON caller always stamps one. A rendered form only carries one where the template puts
-    it there, so a form without it keeps the behaviour it had before.
-    """
-    return _wants_json(request) or bool(request.POST.get("preview_revision"))
-
-
 def _preview_action_error(request, next_url, message, *, status=409):
     """Return one preview-action error through JSON or the form fallback."""
     if _wants_json(request):
@@ -1491,7 +1482,7 @@ def _stale_preview_reason(request):
     if not _preview_is_active(request):
         return "The import already started, so this preview can no longer take a decision."
     # A second tab can recalculate between opening the modal and saving it.
-    if _revision_is_checkable(request) and not _preview_accepts_decisions(request):
+    if not _preview_accepts_decisions(request):
         return "This preview is no longer the current one. Reload the preview and choose again."
     return None
 

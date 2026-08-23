@@ -336,6 +336,19 @@ class ContactResolutionAjaxTest(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
+    def test_an_active_preview_refuses_a_form_post_without_a_revision(self):
+        """An incomplete active-preview form cannot bypass the revision check."""
+        payload = self._payload()
+        payload.pop("preview_revision")
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            payload,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
     def test_a_plain_form_post_still_redirects(self):
         """The form works without scripts, so the browser path must keep its redirect."""
         response = self.client.post(
