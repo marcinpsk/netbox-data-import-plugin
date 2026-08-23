@@ -136,6 +136,23 @@ class ImportProfileDetailViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertContains(resp, f"?profile={self.profile.pk}")
 
+    def test_detail_renders_adapter_settings(self):
+        """Profile detail shows scalar and boolean settings declared by its adapter."""
+        url = reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk})
+
+        response = self.client.get(url)
+
+        self.assertContains(
+            response,
+            '<tr><th scope="row">Sheet name</th><td>Data</td></tr>',
+            html=True,
+        )
+        self.assertContains(
+            response,
+            '<tr><th scope="row">Update existing</th><td><span class="badge text-bg-success">Yes</span></td></tr>',
+            html=True,
+        )
+
 
 class ImportProfileEditViewTest(BaseViewTestCase):
     """Tests for ImportProfileEditView (add/edit)."""

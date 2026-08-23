@@ -6,6 +6,7 @@ Every payload here is longer than the column it reaches. The view must refuse it
 value through raises `DataError: value too long` from the database, which is an HTTP 500.
 """
 
+import ast
 import pathlib
 
 from django.contrib.auth import get_user_model
@@ -192,14 +193,23 @@ def _quick_action_url_names():
     return set(_quick_action_routes())
 
 
+def _orm_receiver(call):
+    """Return whether a call targets a model manager or its queryset chain."""
+    node = call.func.value if isinstance(call.func, ast.Attribute) else None
+    while isinstance(node, (ast.Attribute, ast.Call)):
+        if isinstance(node, ast.Attribute):
+            if node.attr in {"objects", "_default_manager"}:
+                return True
+            node = node.value
+        else:
+            node = node.func.value if isinstance(node.func, ast.Attribute) else None
+    return False
+
+
 def _quick_action_write_seam_errors(source, routes):
     """Return quick-action classes that bypass the permission-scoped write seam."""
-    import ast
-
     classes = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)}
-    direct_mutations = {
-        "save",
-        "delete",
+    manager_mutations = {
         "create",
         "update",
         "get_or_create",
@@ -228,7 +238,7 @@ def _quick_action_write_seam_errors(source, routes):
             errors.append(f"{url_name}: {class_name}.post() does not call a scoped writer")
         for call in (node for node in ast.walk(view) if isinstance(node, ast.Call)):
             method = getattr(call.func, "attr", None)
-            if method in direct_mutations:
+            if method in {"save", "delete"} or method in manager_mutations and _orm_receiver(call):
                 errors.append(f"{url_name}: {class_name} calls direct .{method}() at line {call.lineno}")
 
     return errors
@@ -420,6 +430,22 @@ class DeleteThroughHelper(_PermissionScopedWriteMixin):
         self.assertTrue(
             any("DeleteThroughHelper calls direct .create()" in error for error in errors),
             errors,
+        )
+
+    def test_the_write_seam_scanner_ignores_non_orm_update_methods(self):
+        source = """
+class UpdatesMetadata(_PermissionScopedWriteMixin):
+    def post(self):
+        payload.update({"status": "ready"})
+        Widget.objects.filter(active=True).update(status="ready")
+        save_permission_scoped_object(user, widget)
+"""
+
+        errors = _quick_action_write_seam_errors(source, {"update_widget": "UpdatesMetadata"})
+
+        self.assertEqual(
+            errors,
+            ["update_widget: UpdatesMetadata calls direct .update() at line 5"],
         )
 
     def test_every_quick_action_uses_only_the_permission_scoped_write_seam(self):

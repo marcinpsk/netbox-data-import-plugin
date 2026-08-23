@@ -37,7 +37,9 @@ class ModelBaseConventionTest(SimpleTestCase):
         )
 
         for module, framework_base, netbox_bases in configurations:
-            for candidate, model in _classes_with_models(module, framework_base):
+            inspected = list(_classes_with_models(module, framework_base))
+            self.assertTrue(inspected, f"{module.__name__} declares no {framework_base.__name__} with a model")
+            for candidate, model in inspected:
                 with self.subTest(class_name=candidate.__name__, model=model._meta.label):
                     self.assertTrue(issubclass(model, models.Model))
                     self.assertEqual(
