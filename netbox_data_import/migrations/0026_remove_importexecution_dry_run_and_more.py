@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("core", "0024_job_notifications"),
-        ("netbox_data_import", "0024_rename_importjob_importexecution"),
+        ("netbox_data_import", "0025_rename_importjob_importexecution"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

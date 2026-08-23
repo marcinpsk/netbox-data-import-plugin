@@ -15,6 +15,7 @@ from django.test import SimpleTestCase, TransactionTestCase
 
 APP = "netbox_data_import"
 
+
 class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     """Verify that legacy duplicate bindings do not block an upgrade."""
 
