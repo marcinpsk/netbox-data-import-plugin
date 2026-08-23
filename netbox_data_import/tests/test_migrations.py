@@ -9,8 +9,6 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
-from netbox_data_import.tests.helpers import reverse_squashed_schema_operations
-
 
 class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     """Verify that legacy duplicate bindings do not block an upgrade."""
@@ -19,13 +17,12 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     migrate_from = ("netbox_data_import", "0014_alter_columnmapping_target_field_and_more")
     migrate_to = ("netbox_data_import", "0016_deviceexistingmatch_ndi_devicematch_profile_device")
     # Django refuses to reverse these data migrations, so the walk back fakes each one, newest
-    # first. A test-only Migration reverses the squash's real schema operations, then its recorder
-    # state is faked down. Faking the older data-only migration is safe because it changes no schema.
+    # first. The generated schema migrations between them still run their real reverse operations.
     irreversible_data_steps = (
-        ("0021_importprofile_adapter_config", "0020_migrate_import_source_custom_field"),
+        ("0024_repair_empty_required_adapter_settings", "0023_drop_moved_profile_columns"),
+        ("0022_migrate_profile_adapter_config", "0021_importprofile_adapter_config"),
         ("0020_migrate_import_source_custom_field", "0019_deviceimportsource"),
     )
-    squashed_data_and_schema_step = "0021_importprofile_adapter_config"
 
     @contextmanager
     def _migration_apps(self):
@@ -40,20 +37,6 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         """Step past each data operation without attempting to reconstruct its old values."""
         for step, below in self.irreversible_data_steps:
             MigrationExecutor(connection).migrate([("netbox_data_import", step)])
-            if step == self.squashed_data_and_schema_step:
-                executor = MigrationExecutor(connection)
-                plan = executor.migration_plan([("netbox_data_import", below)])
-                self.assertEqual([migration.name for migration, _backwards in plan], [step])
-                reverse_squashed_schema_operations(
-                    executor,
-                    "netbox_data_import",
-                    step,
-                    below,
-                    expected_data_operations=2,
-                )
-                executor.migrate([("netbox_data_import", below)], fake=True)
-                continue
-
             executor = MigrationExecutor(connection)
             plan = executor.migration_plan([("netbox_data_import", below)])
             self.assertEqual(

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Run the squashed Import Profile cutover against the real migration executor."""
+"""Run the Import Profile cutover against the real migration executor."""
 
 from importlib import import_module
 
@@ -8,14 +8,15 @@ from django.db import connection
 from django.db.migrations import AddField, RemoveField, RunPython
 from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
-from django.db.migrations.recorder import MigrationRecorder
-from django.test import TransactionTestCase
-
-from netbox_data_import.tests.helpers import reverse_squashed_schema_operations
+from django.test import SimpleTestCase, TransactionTestCase
 
 APP = "netbox_data_import"
 BEFORE = "0020_migrate_import_source_custom_field"
-SQUASHED = "0021_importprofile_adapter_config"
+ADD_CONFIG_FIELDS = "0021_importprofile_adapter_config"
+MOVE_CONFIG_DATA = "0022_migrate_profile_adapter_config"
+DROP_MOVED_COLUMNS = "0023_drop_moved_profile_columns"
+REPAIR_REQUIRED_SETTINGS = "0024_repair_empty_required_adapter_settings"
+LEAF = REPAIR_REQUIRED_SETTINGS
 
 MOVED_COLUMNS = (
     "sheet_name",
@@ -30,6 +31,11 @@ MOVED_COLUMNS = (
 REMOVED_FIELDS = (*MOVED_COLUMNS, "primary_contact_role")
 
 
+def _migration(step):
+    """Return one Import Profile cutover migration class."""
+    return import_module(f"{APP}.migrations.{step}").Migration
+
+
 def _migrate(target, *, fake=False):
     """Migrate the plugin app to *target* and return the resulting historical app registry."""
     executor = MigrationExecutor(connection)
@@ -39,27 +45,68 @@ def _migrate(target, *, fake=False):
     return executor.loader.project_state([(APP, target)]).apps
 
 
-def _applied_steps():
-    """Return the plugin migration names currently held by the recorder."""
-    return {name for app, name in MigrationRecorder(connection).applied_migrations() if app == APP}
+def _rewind_to_before_the_cutover():
+    """Reverse schema operations and fake only the two irreversible data operations."""
+    _migrate(DROP_MOVED_COLUMNS, fake=True)
+    _migrate(MOVE_CONFIG_DATA)
+    _migrate(ADD_CONFIG_FIELDS, fake=True)
+    return _migrate(BEFORE)
 
 
-def _rewind_to_before_the_squash():
-    """Reverse only the squash's schema so its real forward data operations can run again."""
-    executor = MigrationExecutor(connection)
-    reverse_squashed_schema_operations(executor, APP, SQUASHED, BEFORE, expected_data_operations=2)
-    return _migrate(BEFORE, fake=True)
+class ProfileAdapterConfigMigrationStructureTest(SimpleTestCase):
+    """The generated schema steps and hand-written data steps stay separate and ordered."""
+
+    def test_generated_schema_migration_contains_no_data_operations(self):
+        """Keep generated schema operations separate from hand-written data operations."""
+        for step in (ADD_CONFIG_FIELDS, DROP_MOVED_COLUMNS):
+            operations = _migration(step).operations
+            self.assertTrue(operations)
+            self.assertFalse(any(isinstance(operation, RunPython) for operation in operations))
+
+        for step in (MOVE_CONFIG_DATA, REPAIR_REQUIRED_SETTINGS):
+            operations = _migration(step).operations
+            self.assertTrue(operations)
+            self.assertTrue(all(isinstance(operation, RunPython) for operation in operations))
+
+    def test_the_cutover_preserves_the_operation_order(self):
+        """Data moves only after its targets exist and before its source columns disappear."""
+        add_operations = _migration(ADD_CONFIG_FIELDS).operations
+        move_operations = _migration(MOVE_CONFIG_DATA).operations
+        remove_operations = _migration(DROP_MOVED_COLUMNS).operations
+        repair_operations = _migration(REPAIR_REQUIRED_SETTINGS).operations
+
+        self.assertEqual(
+            {operation.name for operation in add_operations if isinstance(operation, AddField)},
+            {"adapter_config", "source_adapter"},
+        )
+        self.assertEqual(
+            [operation.code.__name__ for operation in move_operations],
+            ["move_columns_into_adapter_config"],
+        )
+        self.assertEqual(
+            {operation.name for operation in remove_operations if isinstance(operation, RemoveField)},
+            set(REMOVED_FIELDS),
+        )
+        self.assertEqual(
+            [operation.code.__name__ for operation in repair_operations],
+            ["repair_empty_required_settings"],
+        )
+        self.assertIsNone(move_operations[0].reverse_code)
+        self.assertIsNone(repair_operations[0].reverse_code)
+        self.assertIn((APP, ADD_CONFIG_FIELDS), _migration(MOVE_CONFIG_DATA).dependencies)
+        self.assertIn((APP, MOVE_CONFIG_DATA), _migration(DROP_MOVED_COLUMNS).dependencies)
+        self.assertIn((APP, DROP_MOVED_COLUMNS), _migration(REPAIR_REQUIRED_SETTINGS).dependencies)
 
 
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
-    """The squash moves the legacy settings, repairs them, and drops their columns in order."""
+    """The migration chain moves legacy settings, repairs them, and drops their columns."""
 
     def setUp(self):
         super().setUp()
         # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
         # skips tearDown. Register before walking down, so a rewound worker always recovers.
-        self.addCleanup(_migrate, SQUASHED)
-        _rewind_to_before_the_squash()
+        self.addCleanup(_migrate, LEAF)
+        _rewind_to_before_the_cutover()
 
     def test_it_moves_every_column_and_repairs_blank_required_settings(self):
         """A fresh upgrade preserves legacy values and repairs invalid values 0020 can store."""
@@ -87,7 +134,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
             preview_view_mode="",
         )
 
-        migrated_apps = _migrate(SQUASHED)
+        migrated_apps = _migrate(LEAF)
         MigratedProfile = migrated_apps.get_model(APP, "ImportProfile")
 
         full = MigratedProfile.objects.get(name="Legacy Full")
@@ -120,8 +167,8 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         self.assertEqual(blank.adapter_config["preview_view_mode"], "rows")
 
     def test_the_moved_columns_are_gone_afterwards(self):
-        """No dual read path survives the squash."""
-        _migrate(SQUASHED)
+        """No dual read path survives the cutover."""
+        _migrate(LEAF)
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
@@ -133,40 +180,9 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
         self.assertIn("adapter_config", columns)
         self.assertIn("source_adapter", columns)
 
-    def test_the_squash_refuses_a_rollback(self):
+    def test_the_cutover_refuses_a_rollback(self):
         """Neither frozen data transformation has a safe reverse operation."""
-        _migrate(SQUASHED)
+        _migrate(LEAF)
 
         with self.assertRaises(IrreversibleError):
             _migrate(BEFORE)
-
-        migration = import_module(f"{APP}.migrations.{SQUASHED}").Migration
-        replaced_steps = {name for app, name in migration.replaces if app == APP}
-        self.assertTrue(replaced_steps.issubset(_applied_steps()))
-
-    def test_the_squash_preserves_the_cutover_operation_order(self):
-        """Data moves only after its targets exist and before its source columns disappear."""
-        migration = import_module(f"{APP}.migrations.{SQUASHED}").Migration
-        operations = migration.operations
-        add_indices = {
-            operation.name: index for index, operation in enumerate(operations) if isinstance(operation, AddField)
-        }
-        remove_indices = {
-            operation.name: index for index, operation in enumerate(operations) if isinstance(operation, RemoveField)
-        }
-        data_indices = {
-            operation.code.__name__: index
-            for index, operation in enumerate(operations)
-            if isinstance(operation, RunPython)
-        }
-
-        move_index = data_indices["move_columns_into_adapter_config"]
-        repair_index = data_indices["repair_empty_required_settings"]
-        self.assertEqual(set(add_indices), {"adapter_config", "source_adapter"})
-        self.assertLess(max(add_indices.values()), move_index)
-        self.assertEqual(set(remove_indices), set(REMOVED_FIELDS))
-        self.assertLess(move_index, min(remove_indices.values()))
-        self.assertLess(max(remove_indices.values()), repair_index)
-        self.assertEqual(repair_index, len(operations) - 1)
-        self.assertIsNone(operations[move_index].reverse_code)
-        self.assertIsNone(operations[repair_index].reverse_code)
