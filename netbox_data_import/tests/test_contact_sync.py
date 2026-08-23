@@ -34,6 +34,7 @@ from netbox_data_import.models import (
     stored_import_source,
 )
 from netbox_data_import.object_permissions import ObjectPermissionDenied
+from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
 from netbox_data_import.tests.helpers import set_import_source
 
 
@@ -386,8 +387,12 @@ class NativeContactSyncTest(TestCase):
             "filename": "contact-candidates.xlsx",
         }
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "contact-sync-preview"
         session.save()
         return user
+
+    def _preview_revision(self):
+        return self.client.session[PREVIEW_REVISION_SESSION_KEY]
 
     def test_sync_migrates_legacy_primary_contact_to_native_assignment(self):
         """An update sync moves only the legacy contact value out of JSON."""
@@ -683,6 +688,7 @@ class NativeContactSyncTest(TestCase):
             "filename": "contact-candidates.xlsx",
         }
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "contact-sync-preview"
         session.save()
 
         preview_response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
@@ -713,6 +719,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": json.dumps(row["_candidate_values"]["contact"]),
                 "resolved_fields": json.dumps(
                     {
@@ -809,6 +816,7 @@ class NativeContactSyncTest(TestCase):
             "filename": "contact-candidates.xlsx",
         }
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "contact-sync-preview"
         session.save()
 
         response = self.client.post(
@@ -817,6 +825,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -955,6 +964,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -987,6 +997,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -1021,6 +1032,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -1057,6 +1069,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -1100,6 +1113,7 @@ class NativeContactSyncTest(TestCase):
             "filename": "contact-candidates.xlsx",
         }
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "contact-sync-preview"
         session.save()
 
         response = self.client.post(
@@ -1108,6 +1122,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {

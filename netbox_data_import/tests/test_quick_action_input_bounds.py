@@ -13,6 +13,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ImportProfile, ManufacturerMapping
+from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
 
 LONG = "L" * 300
 LONG_SLUG = "l" * 300
@@ -317,6 +318,7 @@ class QuickActionInputBoundsTest(TestCase):
         else:
             session.pop("import_result", None)
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "quick-bounds-preview"
         session.save()
 
     def _prepare_row_action(self, url_name, payload, source_id, case_name):
@@ -371,6 +373,7 @@ class QuickActionInputBoundsTest(TestCase):
             self._store_active_import([row], result)
         else:  # pragma: no cover - the coverage ratchet keeps this branch unreachable
             self.fail(f"No active-import fixture for {url_name}")
+        payload["preview_revision"] = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         return payload
 
     def test_every_quick_action_is_covered(self):

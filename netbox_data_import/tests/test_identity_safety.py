@@ -135,7 +135,11 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         }
         session["import_result"] = result.to_session_dict() if hasattr(result, "to_session_dict") else result
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "identity-safety-preview"
         session.save()
+
+    def _preview_revision(self):
+        return self.client.session[PREVIEW_REVISION_SESSION_KEY]
 
     def _grant_object_permission(self, user, name, model, actions, constraints=None):
         from users.models import ObjectPermission
@@ -398,6 +402,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "source_id": "SRC-B",
                 "row_number": 3,
                 "new_name": suggestion.extra_data["suggested_name"],
+                "preview_revision": self._preview_revision(),
             },
         )
 
@@ -1134,6 +1139,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "source_id": row["source_id"],
                 "row_number": row["_row_number"],
                 "new_name": device_row.extra_data["suggested_name"],
+                "preview_revision": self._preview_revision(),
                 "next": preview_url,
             },
         )
@@ -1147,6 +1153,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "source_id": row["source_id"],
                 "row_number": row["_row_number"],
                 "new_name": device_row.extra_data["suggested_name"],
+                "preview_revision": self._preview_revision(),
                 "next": preview_url,
             },
             HTTP_HX_REQUEST="true",
@@ -1550,6 +1557,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "source_id": "RESOLVE-CASE-B",
                 "row_number": 3,
                 "new_name": "case-target",
+                "preview_revision": self._preview_revision(),
             },
         )
 
@@ -2632,6 +2640,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "row_number": 2,
                 "source_id": "RESOLUTION-AUTH",
                 "new_name": "replacement-resolution-name",
+                "preview_revision": self._preview_revision(),
             },
         )
 
@@ -2900,6 +2909,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "source_id": "NEXT-B",
                 "row_number": 3,
                 "new_name": suggestion.extra_data["suggested_name"],
+                "preview_revision": self._preview_revision(),
                 "next": next_url,
             },
         )
@@ -2919,6 +2929,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "source_id": "RESOLVE-TARGET",
                 "row_number": 2,
                 "new_name": fallback["asset_tag"],
+                "preview_revision": self._preview_revision(),
             },
             follow=True,
         )
@@ -2944,6 +2955,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "source_id": row["source_id"],
                 "row_number": row["_row_number"],
                 "new_name": "resolve-null-name",
+                "preview_revision": self._preview_revision(),
             },
         )
 
@@ -3472,6 +3484,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             "source_id": row["source_id"],
             "row_number": row["_row_number"],
             "new_name": "resolved-boundary-name",
+            "preview_revision": self._preview_revision(),
         }
 
         invalid_requests = (
@@ -3526,6 +3539,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
                 "source_id": row["source_id"],
                 "row_number": row["_row_number"],
                 "new_name": "resolution-permission-unique",
+                "preview_revision": self._preview_revision(),
             },
         )
 
