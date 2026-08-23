@@ -170,6 +170,24 @@ class ImportProfileAdapterTest(TestCase):
             profile.full_clean()
         self.assertIn("source_adapter", ctx.exception.message_dict)
 
+    def test_save_cannot_bypass_adapter_immutability(self):
+        for index, update_fields in enumerate((None, ["source_adapter"], ["adapter_config"])):
+            with self.subTest(update_fields=update_fields):
+                profile = ImportProfile.objects.create(name=f"Immutable Save {index}", adapter_config={})
+                stored_config = profile.adapter_config.copy()
+                profile.source_adapter = "trace_workbook"
+                profile.adapter_config = {}
+
+                with self.assertRaisesMessage(ValidationError, "cannot change after the profile is created"):
+                    if update_fields is None:
+                        profile.save()
+                    else:
+                        profile.save(update_fields=update_fields)
+
+                profile.refresh_from_db()
+                self.assertEqual(profile.source_adapter, "flat_workbook")
+                self.assertEqual(profile.adapter_config, stored_config)
+
     def test_full_clean_normalizes_the_stored_configuration(self):
         """Saving through validation fills every declared key."""
         profile = ImportProfile(name="Normalized", adapter_config={"sheet_name": "Inventory"})

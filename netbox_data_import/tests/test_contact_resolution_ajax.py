@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Saving a Contact resolution answers the row action contract instead of re-rendering.
-
-A full preview render costs about six times the engine run it wraps, and it drops the operator
-back at the top of the page. The Contact save now joins the deferred row actions: it stores the
-decision, marks the preview stale, and leaves the recalculation to the operator.
-"""
+"""Tests for Contact resolution through the deferred row-action endpoint."""
 
 import json
 

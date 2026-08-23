@@ -16,6 +16,7 @@ from netbox_data_import.models import ImportProfile, ManufacturerMapping
 
 LONG = "L" * 300
 LONG_SLUG = "l" * 300
+SCOPED_WRITERS = {"delete_permission_scoped_objects", "save_permission_scoped_object"}
 
 # One entry per posted value that reaches a bounded column, keyed by URL name.
 OVERLENGTH_PAYLOADS = {
@@ -156,13 +157,12 @@ def _permission_scoped_writer_class_names(source):
     """Return classes whose methods call either permission-scoped write helper."""
     import ast
 
-    helper_names = {"delete_permission_scoped_objects", "save_permission_scoped_object"}
     writers = set()
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.ClassDef):
             continue
         if any(
-            isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in helper_names
+            isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in SCOPED_WRITERS
             for sub in ast.walk(node)
         ):
             writers.add(node.name)
@@ -196,7 +196,6 @@ def _quick_action_write_seam_errors(source, routes):
     import ast
 
     classes = {node.name: node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)}
-    scoped_writers = {"save_permission_scoped_object", "delete_permission_scoped_objects"}
     direct_mutations = {
         "save",
         "delete",
@@ -224,7 +223,7 @@ def _quick_action_write_seam_errors(source, routes):
             continue
 
         post_calls = [node for node in ast.walk(post) if isinstance(node, ast.Call)]
-        if not any(isinstance(call.func, ast.Name) and call.func.id in scoped_writers for call in post_calls):
+        if not any(isinstance(call.func, ast.Name) and call.func.id in SCOPED_WRITERS for call in post_calls):
             errors.append(f"{url_name}: {class_name}.post() does not call a scoped writer")
         for call in (node for node in ast.walk(view) if isinstance(node, ast.Call)):
             method = getattr(call.func, "attr", None)
@@ -387,6 +386,21 @@ class DeleteOnlyView:
 """
 
         self.assertEqual(_permission_scoped_writer_class_names(source), {"DeleteOnlyView"})
+
+    def test_scoped_writer_names_have_one_source_of_truth(self):
+        import ast
+
+        writer_names = frozenset(("delete_permission_scoped_objects", "save_permission_scoped_object"))
+        tree = ast.parse(pathlib.Path(__file__).read_text())
+        registries = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Set)
+            and len(node.elts) == len(writer_names)
+            and frozenset(element.value for element in node.elts if isinstance(element, ast.Constant)) == writer_names
+        ]
+
+        self.assertEqual(len(registries), 1)
 
     def test_the_write_seam_scanner_checks_helpers_on_the_view_class(self):
         source = """

@@ -138,73 +138,53 @@ def _normal_exits(body, loop_depth, rolled_back, in_nested_atomic=False):
             yield from _normal_exits(handler.body, loop_depth, dominated, nested)
 
 
-def unaudited_atomic_exits(source, audited=None):
-    """Return one entry per normal atomic exit that no rollback dominates and no marker covers."""
-    audited = AUDITED_EXITS if audited is None else audited
+def _atomic_exits(source):
+    """Yield the shared scope, rollback, and marker facts consumed by both audits."""
     markers = _markers_by_line(source)
-    reported = []
+
+    def report(node, scope):
+        qualified = ".".join(scope)
+        for exit_node, dominated in _normal_exits(node.body, 0, False):
+            marker = markers.get(exit_node.lineno) or markers.get(exit_node.lineno - 1)
+            yield qualified, exit_node, dominated, marker
 
     def walk(node, scope):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 child_scope = [*scope, child.name]
                 if _opens_atomic(child):
-                    qualified = ".".join(child_scope)
-                    for exit_node, dominated in _normal_exits(child.body, 0, False):
-                        if dominated:
-                            continue
-                        marker = markers.get(exit_node.lineno) or markers.get(exit_node.lineno - 1)
-                        if marker is not None and (qualified, marker) in audited:
-                            continue
-                        row = (qualified, exit_node.lineno, marker)
-                        if row not in reported:
-                            reported.append(row)
-                walk(child, child_scope)
+                    yield from report(child, child_scope)
+                yield from walk(child, child_scope)
                 continue
             if _opens_atomic(child):
-                qualified = ".".join(scope)
-                for exit_node, dominated in _normal_exits(child.body, 0, False):
-                    if dominated:
-                        continue
-                    marker = markers.get(exit_node.lineno) or markers.get(exit_node.lineno - 1)
-                    if marker is not None and (qualified, marker) in audited:
-                        continue
-                    row = (qualified, exit_node.lineno, marker)
-                    if row not in reported:
-                        reported.append(row)
-            walk(child, scope)
+                yield from report(child, scope)
+            yield from walk(child, scope)
 
-    walk(ast.parse(source), [])
+    yield from walk(ast.parse(source), [])
+
+
+def unaudited_atomic_exits(source, audited=None):
+    """Return one entry per normal atomic exit that no rollback dominates and no marker covers."""
+    audited = AUDITED_EXITS if audited is None else audited
+    reported = []
+
+    for qualified, exit_node, dominated, marker in _atomic_exits(source):
+        if dominated:
+            continue
+        if marker is not None and (qualified, marker) in audited:
+            continue
+        row = (qualified, exit_node.lineno, marker)
+        if row not in reported:
+            reported.append(row)
+
     return reported
 
 
 def used_markers(source):
     """Return the (qualified function, marker id) pairs the source actually carries."""
-    markers = _markers_by_line(source)
-    used = set()
-
-    def walk(node, scope):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                child_scope = [*scope, child.name]
-                if _opens_atomic(child):
-                    qualified = ".".join(child_scope)
-                    for exit_node, _dominated in _normal_exits(child.body, 0, False):
-                        marker = markers.get(exit_node.lineno) or markers.get(exit_node.lineno - 1)
-                        if marker is not None:
-                            used.add((qualified, marker))
-                walk(child, child_scope)
-                continue
-            if _opens_atomic(child):
-                qualified = ".".join(scope)
-                for exit_node, _dominated in _normal_exits(child.body, 0, False):
-                    marker = markers.get(exit_node.lineno) or markers.get(exit_node.lineno - 1)
-                    if marker is not None:
-                        used.add((qualified, marker))
-            walk(child, scope)
-
-    walk(ast.parse(source), [])
-    return used
+    return {
+        (qualified, marker) for qualified, _exit_node, _dominated, marker in _atomic_exits(source) if marker is not None
+    }
 
 
 class AtomicExitScannerTest(SimpleTestCase):
@@ -214,6 +194,21 @@ class AtomicExitScannerTest(SimpleTestCase):
 
     def _report(self, source):
         return unaudited_atomic_exits(source, audited=self.AUDITED)
+
+    def test_one_walker_owns_atomic_exit_discovery(self):
+        tree = ast.parse(pathlib.Path(__file__).read_text())
+        callers = {
+            function.name
+            for function in tree.body
+            if isinstance(function, ast.FunctionDef)
+            and function.name != "_normal_exits"
+            and any(
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_normal_exits"
+                for node in ast.walk(function)
+            )
+        }
+
+        self.assertEqual(callers, {"_atomic_exits"})
 
     def test_a_write_then_an_unguarded_return_is_reported(self):
         """This is the shape of both bugs that shipped."""

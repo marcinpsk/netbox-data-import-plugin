@@ -146,10 +146,25 @@ class ImportProfile(NetBoxModel):
         """Return the detail URL for this import profile."""
         return reverse("plugins:netbox_data_import:importprofile", args=[self.pk])
 
+    def _validate_source_adapter_immutability(self):
+        """Return the persisted adapter and reject a different selected adapter."""
+        # A set pk does not prove that the row exists. An unsaved instance can carry a pk.
+        stored = (
+            type(self).objects.filter(pk=self.pk).values_list("source_adapter", flat=True).first()
+            if self.pk is not None
+            else None
+        )
+        if stored is not None and stored != self.source_adapter:
+            raise ValidationError({"source_adapter": "The source adapter cannot change after the profile is created."})
+        return stored
+
     def save(self, *args, **kwargs):
         """Normalize adapter configuration on every supported write that stores it."""
         update_fields = kwargs.get("update_fields")
-        if update_fields is None or "adapter_config" in update_fields:
+        updated = set(update_fields) if update_fields is not None else None
+        if updated is None or updated & {"source_adapter", "adapter_config"}:
+            self._validate_source_adapter_immutability()
+        if updated is None or "adapter_config" in updated:
             adapter = self.adapter
             if adapter is None:
                 raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
@@ -220,19 +235,11 @@ class ImportProfile(NetBoxModel):
         adapter = self.adapter
         if adapter is None:
             raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
-        # Decide from the persisted row: an unsaved instance can carry a pk, so a set pk is no proof
-        # the profile exists, and branching on it would skip both rules below.
-        stored = (
-            type(self).objects.filter(pk=self.pk).values_list("source_adapter", flat=True).first()
-            if self.pk is not None
-            else None
-        )
+        stored = self._validate_source_adapter_immutability()
         if stored is None:
             # A creation rule only: the adapter is immutable, so a stored profile keeps validating
             # once the release that implements its Target Module ships.
             validate_adapter_target_module(self.source_adapter)
-        elif stored != self.source_adapter:
-            raise ValidationError({"source_adapter": "The source adapter cannot change after the profile is created."})
         self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
 
 

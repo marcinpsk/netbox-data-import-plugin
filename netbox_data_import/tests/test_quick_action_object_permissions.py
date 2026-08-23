@@ -93,6 +93,18 @@ class QuickActionObjectPermissionTest(TestCase):
         self._assert_preview_redirect(response)
         self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile).exists())
 
+    def test_profile_change_without_ignored_device_add_cannot_ignore(self):
+        client = self._client_with("quick-ignore-no-add")
+
+        response = self._post(
+            client,
+            "ignore_device",
+            {"source_id": "no-add-source", "device_name": "No Add Device"},
+        )
+
+        self._assert_preview_redirect(response)
+        self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile).exists())
+
     def test_a_constrained_mapping_add_is_refused(self):
         client = self._client_with(
             "quick-mapping-scope",
@@ -254,6 +266,19 @@ class QuickActionObjectPermissionTest(TestCase):
         )
 
         response = self._post(client, "unignore_device", {"source_id": "refused-source"})
+
+        self._assert_preview_redirect(response)
+        self.assertTrue(IgnoredDevice.objects.filter(pk=ignored.pk).exists())
+
+    def test_profile_change_without_ignored_device_delete_cannot_unignore(self):
+        ignored = IgnoredDevice.objects.create(
+            profile=self.profile,
+            source_id="no-delete-source",
+            device_name="No Delete Device",
+        )
+        client = self._client_with("quick-unignore-no-delete")
+
+        response = self._post(client, "unignore_device", {"source_id": ignored.source_id})
 
         self._assert_preview_redirect(response)
         self.assertTrue(IgnoredDevice.objects.filter(pk=ignored.pk).exists())
