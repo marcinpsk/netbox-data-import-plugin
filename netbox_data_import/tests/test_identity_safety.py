@@ -437,6 +437,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
         preview_response = self.client.get(preview_url)
 
+        self.assertEqual(preview_response.status_code, 200)
         html = preview_response.content.decode()
         form_start = html.index(f'action="{resolve_url}"')
         form_end = html.index("</form>", form_start)
