@@ -15,6 +15,7 @@ from .models import (
     ClassRoleMapping,
     DeviceTypeMapping,
     ColumnTransformRule,
+    _require_adapter_config_mapping,
     validate_registered_adapter,
 )
 
@@ -65,6 +66,7 @@ class ImportProfileForm(NetBoxModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._config_form_class = None
+        stored = _require_adapter_config_mapping(self.instance.adapter_config)
         adapter = get_adapter(self._selected_adapter_key())
         if adapter is None:
             return
@@ -73,7 +75,6 @@ class ImportProfileForm(NetBoxModelForm):
         else:
             self.fields["source_adapter"].choices = selectable_adapter_choices()
         self._config_form_class = adapter.config_form_class()
-        stored = self.instance.adapter_config or {}
         for name, field in self._config_form_class.base_fields.items():
             self.fields[name] = copy.deepcopy(field)
             if name in stored:

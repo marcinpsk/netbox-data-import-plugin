@@ -199,6 +199,17 @@ class ImportProfileEditViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
+    def test_edit_refuses_a_non_mapping_adapter_configuration(self):
+        """The edit page exposes corrupt stored JSON instead of displaying defaults."""
+        for index, invalid_value in enumerate(([], "", 0, False, 1)):
+            with self.subTest(invalid_value=invalid_value):
+                profile = _make_profile(f"Non-mapping Edit Config {index}")
+                ImportProfile.objects.filter(pk=profile.pk).update(adapter_config=invalid_value)
+                url = reverse("plugins:netbox_data_import:importprofile_edit", kwargs={"pk": profile.pk})
+
+                with self.assertRaisesMessage(ValidationError, "must be a mapping"):
+                    self.client.get(url)
+
 
 class ColumnMappingViewTest(BaseViewTestCase):
     """Tests for ColumnMapping add/edit/delete views."""

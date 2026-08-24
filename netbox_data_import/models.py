@@ -246,7 +246,9 @@ class ImportProfile(NetBoxModel):
 def _require_adapter_config_mapping(config):
     """Return a stored adapter configuration mapping or expose corrupt JSON state."""
     if not isinstance(config, dict):
-        raise ValidationError("The stored adapter configuration must be a mapping. Edit and save this import profile.")
+        raise ValidationError(
+            "The stored adapter configuration must be a mapping. Replace it with a valid JSON mapping."
+        )
     return config
 
 
