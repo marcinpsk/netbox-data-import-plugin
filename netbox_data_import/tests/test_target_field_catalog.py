@@ -301,6 +301,17 @@ class ImportProfileAdapterTest(TestCase):
                 with self.assertRaisesMessage(ValidationError, self.EMPTY_REQUIRED_SETTING_ERROR):
                     profile.adapter_settings.primary_contact_lookup_field
 
+    def test_reading_a_non_mapping_configuration_fails_with_repair_guidance(self):
+        """A malformed stored JSON value cannot turn into the adapter defaults."""
+        for index, invalid_value in enumerate(([], "", 0, False)):
+            with self.subTest(invalid_value=invalid_value):
+                profile = ImportProfile.objects.create(name=f"Non-mapping Config {index}")
+                ImportProfile.objects.filter(pk=profile.pk).update(adapter_config=invalid_value)
+                profile.refresh_from_db()
+
+                with self.assertRaisesMessage(ValidationError, "must be a mapping"):
+                    profile.adapter_settings.sheet_name
+
     def test_explicit_optional_empty_values_keep_their_meanings_on_read(self):
         profile = ImportProfile.objects.create(name="Optional Empty Read")
         ImportProfile.objects.filter(pk=profile.pk).update(

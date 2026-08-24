@@ -198,10 +198,10 @@ class ImportProfile(NetBoxModel):
         from django import forms
         from django.forms.utils import pretty_name
 
+        config = _require_adapter_config_mapping(self.adapter_config)
         adapter = self.adapter
         if adapter is None:
             return []
-        config = self.adapter_config or {}
         rows = []
         for name, field in adapter.config_form_class().base_fields.items():
             value = config.get(name, field.initial)
@@ -243,13 +243,20 @@ class ImportProfile(NetBoxModel):
         self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
 
 
+def _require_adapter_config_mapping(config):
+    """Return a stored adapter configuration mapping or expose corrupt JSON state."""
+    if not isinstance(config, dict):
+        raise ValidationError("The stored adapter configuration must be a mapping. Edit and save this import profile.")
+    return config
+
+
 class AdapterSettings:
     """Read one adapter setting, falling back to the adapter form's declared default."""
 
     def __init__(self, adapter, config, adapter_key):
         self._adapter_key = adapter_key
         self._fields = adapter.config_form_class().base_fields if adapter is not None else None
-        self._config = config if isinstance(config, dict) else {}
+        self._config = _require_adapter_config_mapping(config)
 
     def __getattr__(self, name):
         fields = object.__getattribute__(self, "_fields")

@@ -6,6 +6,7 @@ import os
 from io import BytesIO
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
@@ -152,6 +153,13 @@ class ImportProfileDetailViewTest(BaseViewTestCase):
             '<tr><th scope="row">Update existing</th><td><span class="badge text-bg-success">Yes</span></td></tr>',
             html=True,
         )
+
+    def test_detail_refuses_a_non_mapping_adapter_configuration(self):
+        """The detail page exposes corrupt stored JSON instead of displaying defaults."""
+        ImportProfile.objects.filter(pk=self.profile.pk).update(adapter_config=[])
+
+        with self.assertRaisesMessage(ValidationError, "must be a mapping"):
+            self.client.get(reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk}))
 
 
 class ImportProfileEditViewTest(BaseViewTestCase):
