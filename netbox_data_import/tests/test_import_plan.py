@@ -340,6 +340,63 @@ class PlanBoundaryTest(SimpleTestCase):
         self.assertEqual(plan.units[0].changes[0].payload, {"name": "sw-1"})
         self.assertEqual(plan.fingerprint, _plan().fingerprint)
 
+    def test_nested_serialized_data_does_not_alias_the_plan(self):
+        """Every JSON container is detached, not only each top-level mapping."""
+        diagnostic = Diagnostic(
+            code="device.name_conflict",
+            severity=Severity.WARNING,
+            display={"message": {"text": "Conflict"}},
+        )
+        plan = _plan(
+            units=(
+                _unit(
+                    diagnostics=(diagnostic,),
+                    display={"row": {"label": "Row 2"}},
+                ),
+            ),
+            planning_context={"site": {"id": 3}},
+        )
+
+        data = plan.to_dict()
+        data["planning_context"]["site"]["id"] = 99
+        data["units"][0]["display"]["row"]["label"] = "mutated"
+        data["units"][0]["diagnostics"][0]["display"]["message"]["text"] = "mutated"
+
+        self.assertEqual(plan.planning_context, {"site": {"id": 3}})
+        self.assertEqual(plan.units[0].display, {"row": {"label": "Row 2"}})
+        self.assertEqual(plan.units[0].diagnostics[0].display, {"message": {"text": "Conflict"}})
+
+    def test_the_frozen_value_types_refuse_mapping_mutation(self):
+        """A frozen plan must keep a stable hash and fingerprint after construction."""
+        diagnostic = Diagnostic(
+            code="device.name_conflict",
+            severity=Severity.WARNING,
+            display={"text": "Conflict"},
+        )
+        change = _change(payload={"name": "sw-1", "labels": ["edge"]})
+        unit = _unit(changes=(change,), diagnostics=(diagnostic,))
+        plan = _plan(units=(unit,), planning_context={"site": {"id": 3}})
+        changes = {change}
+        fingerprint = plan.fingerprint
+        mappings = (
+            ("diagnostic display", diagnostic.display),
+            ("change payload", change.payload),
+            ("change preconditions", change.preconditions),
+            ("unit display", unit.display),
+            ("planning context", plan.planning_context),
+            ("nested planning context", plan.planning_context["site"]),
+        )
+
+        for label, mapping in mappings:
+            with self.subTest(mapping=label), self.assertRaises(TypeError):
+                mapping["mutated"] = True
+
+        with self.assertRaises(AttributeError):
+            change.payload["labels"].append("mutated")
+
+        self.assertIn(change, changes)
+        self.assertEqual(plan.fingerprint, fingerprint)
+
     def test_the_value_types_are_hashable(self):
         """A coordinator deduplicating changes with a set must not hit an unhashable dict."""
         self.assertEqual(len({_change(), _change()}), 1)

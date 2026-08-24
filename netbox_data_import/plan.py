@@ -16,7 +16,9 @@ import hashlib
 import json
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -72,10 +74,28 @@ def fingerprint_of(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _plain(value: Any, label: str) -> Any:
-    """Return *value* as detached plain JSON data, rejecting anything a plan may not carry."""
+def _freeze_json(value: Any) -> Any:
+    """Return recursively immutable JSON data."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: Any) -> Any:
+    """Return detached plain JSON data from an immutable plan value."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+def _frozen_json(value: Any, label: str) -> Any:
+    """Validate, detach, and recursively freeze JSON data entering a plan."""
     try:
-        return json.loads(canonical_json(value))
+        return _freeze_json(json.loads(canonical_json(value)))
     except (TypeError, ValueError) as exc:
         raise PlanInvalid(f"{label} must be JSON-serializable plan data: {exc}") from exc
 
@@ -110,7 +130,7 @@ class Diagnostic:
     code: str
     severity: str
     identities: tuple[str, ...] = ()
-    display: dict = field(default_factory=dict)
+    display: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate the code namespace and the severity vocabulary."""
@@ -119,7 +139,7 @@ class Diagnostic:
         if self.severity not in Severity.ALL:
             raise PlanInvalid(f"Unknown diagnostic severity '{self.severity}'.")
         object.__setattr__(self, "identities", _identities(self.identities, "Diagnostic identities"))
-        object.__setattr__(self, "display", _plain(self.display, "Diagnostic display"))
+        object.__setattr__(self, "display", _frozen_json(self.display, "Diagnostic display"))
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
@@ -136,7 +156,7 @@ class Diagnostic:
             "code": self.code,
             "severity": self.severity,
             "identities": list(self.identities),
-            "display": dict(self.display),
+            "display": _thaw_json(self.display),
         }
 
     @classmethod
@@ -157,9 +177,9 @@ class PlannedChange:
     identity: str
     target_module: str
     operation: str
-    payload: dict
+    payload: Mapping[str, Any]
     dependencies: tuple[str, ...] = ()
-    preconditions: dict = field(default_factory=dict)
+    preconditions: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Detach the mappings from planning state and reject anything a plan may not carry."""
@@ -170,8 +190,12 @@ class PlannedChange:
             if not isinstance(value, str) or not value:
                 raise PlanInvalid(f"A Planned Change needs a non-empty {name.replace('_', ' ')}.")
         object.__setattr__(self, "dependencies", _identities(self.dependencies, "Planned Change dependencies"))
-        object.__setattr__(self, "payload", _plain(self.payload, "Planned Change payload"))
-        object.__setattr__(self, "preconditions", _plain(self.preconditions, "Planned Change preconditions"))
+        object.__setattr__(self, "payload", _frozen_json(self.payload, "Planned Change payload"))
+        object.__setattr__(
+            self,
+            "preconditions",
+            _frozen_json(self.preconditions, "Planned Change preconditions"),
+        )
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
@@ -184,9 +208,9 @@ class PlannedChange:
             "identity": self.identity,
             "target_module": self.target_module,
             "operation": self.operation,
-            "payload": self.payload,
+            "payload": _thaw_json(self.payload),
             "dependencies": list(self.dependencies),
-            "preconditions": self.preconditions,
+            "preconditions": _thaw_json(self.preconditions),
         }
 
     def to_dict(self) -> dict:
@@ -214,7 +238,7 @@ class SynchronizationUnit:
     disposition: str
     changes: tuple[PlannedChange, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
-    display: dict = field(default_factory=dict)
+    display: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate the disposition and detach the display data."""
@@ -226,7 +250,7 @@ class SynchronizationUnit:
         object.__setattr__(
             self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Synchronization Unit diagnostics")
         )
-        object.__setattr__(self, "display", _plain(self.display, "Synchronization Unit display"))
+        object.__setattr__(self, "display", _frozen_json(self.display, "Synchronization Unit display"))
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
@@ -254,7 +278,7 @@ class SynchronizationUnit:
             "disposition": self.disposition,
             "changes": [change.to_dict() for change in self.changes],
             "diagnostics": [diagnostic.to_dict() for diagnostic in self.diagnostics],
-            "display": dict(self.display),
+            "display": _thaw_json(self.display),
         }
 
     @classmethod
@@ -278,7 +302,7 @@ class ImportPlan:
     source_fingerprint: str = ""
     profile_fingerprint: str = ""
     actor: str = ""
-    planning_context: dict = field(default_factory=dict)
+    planning_context: Mapping[str, Any] = field(default_factory=dict)
     revision: int = 1
     schema_version: int = SCHEMA_VERSION
 
@@ -286,7 +310,7 @@ class ImportPlan:
         """Detach the planning context from planning state."""
         object.__setattr__(self, "units", _elements(self.units, SynchronizationUnit, "Import Plan units"))
         object.__setattr__(self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Import Plan diagnostics"))
-        object.__setattr__(self, "planning_context", _plain(self.planning_context, "Planning context"))
+        object.__setattr__(self, "planning_context", _frozen_json(self.planning_context, "Planning context"))
         counts = Counter(unit.identity for unit in self.units)
         duplicates = sorted(identity for identity, count in counts.items() if count > 1)
         if duplicates:
@@ -306,7 +330,7 @@ class ImportPlan:
             "source_fingerprint": self.source_fingerprint,
             "profile_fingerprint": self.profile_fingerprint,
             "actor": self.actor,
-            "planning_context": self.planning_context,
+            "planning_context": _thaw_json(self.planning_context),
         }
 
     @property
@@ -330,7 +354,7 @@ class ImportPlan:
             "source_fingerprint": self.source_fingerprint,
             "profile_fingerprint": self.profile_fingerprint,
             "actor": self.actor,
-            "planning_context": dict(self.planning_context),
+            "planning_context": _thaw_json(self.planning_context),
             "revision": self.revision,
         }
 
