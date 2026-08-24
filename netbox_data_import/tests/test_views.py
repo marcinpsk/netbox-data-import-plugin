@@ -1148,6 +1148,13 @@ manufacturer_mappings:
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
+    def test_get_import_yaml_page_explains_adapter_config_replacement(self):
+        """The upload page warns that partial adapter configuration resets omitted settings."""
+        response = self.client.get(reverse("plugins:netbox_data_import:import_profile_yaml"))
+
+        self.assertContains(response, "replaces the profile's stored adapter configuration")
+        self.assertContains(response, "An omitted setting resets to the adapter's default")
+
     def test_post_creates_profile(self):
         """POST with valid YAML creates the profile."""
         url = reverse("plugins:netbox_data_import:import_profile_yaml")
