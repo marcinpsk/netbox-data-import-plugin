@@ -419,7 +419,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertEqual([row.action for row in device_rows], ["create", "create"])
 
     def test_duplicate_name_form_refuses_a_stale_preview_revision(self):
-        """A name from a retired rendered preview cannot become a row resolution."""
+        """A stale HTMX name form navigates instead of replacing the frozen preview."""
         rows = [
             self._device_row(2, "STALE-NAME-A", "stale-shared", self.rack_a, 1),
             self._device_row(3, "STALE-NAME-B", "stale-shared", self.rack_b, 2),

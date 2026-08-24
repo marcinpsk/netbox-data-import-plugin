@@ -324,7 +324,10 @@ class ContactResolutionAjaxTest(TestCase):
         """Without scripts the form is the only thing that can present a token to check."""
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
-        self.assertContains(response, 'name="preview_revision"')
+        html = response.content.decode()
+        form_start = html.index('id="contactCandidateForm"')
+        form_end = html.index("</form>", form_start)
+        self.assertIn('name="preview_revision"', html[form_start:form_end])
 
     def test_a_stale_revision_is_refused_on_the_form_path_when_it_supplies_one(self):
         """The rendered page carries its own token, so a retired one must not be honoured."""

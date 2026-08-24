@@ -2263,6 +2263,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
         stale_reason = _stale_preview_reason(request)
         if stale_reason is not None:
             messages.error(request, stale_reason)
+            # An inline render would replace the preview that the queued import has frozen.
             return _navigation_response(request, next_url)
         try:
             row_number = int(request.POST.get("row_number", ""))
