@@ -5,7 +5,7 @@ from django.db import migrations
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_data_import", "0024_repair_empty_required_adapter_settings"),
+        ("netbox_data_import", "0023_drop_moved_profile_columns"),
     ]
 
     operations = [
