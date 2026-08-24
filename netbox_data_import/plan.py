@@ -380,7 +380,7 @@ class ImportPlan:
         """
         try:
             version = data.get("schema_version")
-            if version != SCHEMA_VERSION:
+            if not isinstance(version, int) or isinstance(version, bool) or version != SCHEMA_VERSION:
                 raise PlanSchemaMismatch(f"Import Plan schema version {version} is not version {SCHEMA_VERSION}.")
             return cls(
                 units=tuple(SynchronizationUnit.from_dict(item) for item in data["units"]),

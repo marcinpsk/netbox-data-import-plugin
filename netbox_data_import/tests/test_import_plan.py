@@ -256,6 +256,15 @@ class PlanSerializationTest(SimpleTestCase):
         with self.assertRaises(PlanSchemaMismatch):
             ImportPlan.from_dict(stale)
 
+    def test_a_schema_version_must_be_an_integer(self):
+        """JSON booleans and floats are not valid Import Plan schema versions."""
+        for version in (True, 1.0):
+            with self.subTest(version=version):
+                payload = _plan().to_dict()
+                payload["schema_version"] = version
+                with self.assertRaises(PlanSchemaMismatch):
+                    ImportPlan.from_dict(payload)
+
 
 class DependencyGraphTest(SimpleTestCase):
     """Section 4.4: the coordinator merges changes into one directed acyclic graph."""
