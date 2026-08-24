@@ -160,7 +160,10 @@ class SavePermissionScopedObjectTest(TestCase):
     def test_an_overlength_value_is_refused_before_the_database_sees_it(self):
         user = user_with_object_permission("writer-long", [(DeviceTypeMapping, ["add"], None)])
 
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesMessage(
+            ValidationError,
+            "Device Type Mapping netbox_manufacturer_slug cannot exceed 100 characters.",
+        ):
             save_permission_scoped_object(
                 user, DeviceTypeMapping, self._lookup(), {"netbox_manufacturer_slug": "s" * 300}
             )

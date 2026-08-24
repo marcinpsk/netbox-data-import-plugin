@@ -53,7 +53,7 @@ def reject_overlong_fields(instance, model):
         max_length = getattr(field, "max_length", None)
         value = getattr(instance, field.attname, None)
         if max_length and isinstance(value, str) and len(value) > max_length:
-            raise ValidationError(f"{model._meta.verbose_name} {field.name} holds {max_length} characters.")
+            raise ValidationError(f"{model._meta.verbose_name} {field.name} cannot exceed {max_length} characters.")
 
 
 def save_or_refetch(instance, model, lookup):
