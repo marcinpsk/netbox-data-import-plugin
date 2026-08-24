@@ -19,7 +19,6 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
     # Django refuses to reverse these data migrations, so the walk back fakes each one, newest
     # first. The generated schema migrations between them still run their real reverse operations.
     irreversible_data_steps = (
-        ("0024_repair_empty_required_adapter_settings", "0023_drop_moved_profile_columns"),
         ("0022_migrate_profile_adapter_config", "0021_importprofile_adapter_config"),
         ("0020_migrate_import_source_custom_field", "0019_deviceimportsource"),
     )

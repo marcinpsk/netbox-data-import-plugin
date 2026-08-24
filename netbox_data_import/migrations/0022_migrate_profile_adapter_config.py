@@ -12,6 +12,11 @@ MOVED_COLUMNS = (
     "primary_contact_lookup_field",
     "preview_view_mode",
 )
+FROZEN_REQUIRED_DEFAULTS = {
+    "sheet_name": "Data",
+    "primary_contact_lookup_field": "email",
+    "preview_view_mode": "rows",
+}
 
 
 def move_columns_into_adapter_config(apps, schema_editor):
@@ -22,6 +27,12 @@ def move_columns_into_adapter_config(apps, schema_editor):
 
     for profile in ImportProfile.objects.all().iterator():
         config = {column: getattr(profile, column) for column in MOVED_COLUMNS}
+        config.update(
+            {
+                key: default if config[key] in ("", None) else config[key]
+                for key, default in FROZEN_REQUIRED_DEFAULTS.items()
+            }
+        )
         # The role reference becomes a natural key so an exported profile stays portable.
         config["primary_contact_role"] = role_names.get(profile.primary_contact_role_id)
         profile.source_adapter = "flat_workbook"

@@ -15,8 +15,7 @@ BEFORE = "0020_migrate_import_source_custom_field"
 ADD_CONFIG_FIELDS = "0021_importprofile_adapter_config"
 MOVE_CONFIG_DATA = "0022_migrate_profile_adapter_config"
 DROP_MOVED_COLUMNS = "0023_drop_moved_profile_columns"
-REPAIR_REQUIRED_SETTINGS = "0024_repair_empty_required_adapter_settings"
-LEAF = REPAIR_REQUIRED_SETTINGS
+LEAF = DROP_MOVED_COLUMNS
 
 MOVED_COLUMNS = (
     "sheet_name",
@@ -63,17 +62,15 @@ class ProfileAdapterConfigMigrationStructureTest(SimpleTestCase):
             self.assertTrue(operations)
             self.assertFalse(any(isinstance(operation, RunPython) for operation in operations))
 
-        for step in (MOVE_CONFIG_DATA, REPAIR_REQUIRED_SETTINGS):
-            operations = _migration(step).operations
-            self.assertTrue(operations)
-            self.assertTrue(all(isinstance(operation, RunPython) for operation in operations))
+        operations = _migration(MOVE_CONFIG_DATA).operations
+        self.assertTrue(operations)
+        self.assertTrue(all(isinstance(operation, RunPython) for operation in operations))
 
     def test_the_cutover_preserves_the_operation_order(self):
         """Data moves only after its targets exist and before its source columns disappear."""
         add_operations = _migration(ADD_CONFIG_FIELDS).operations
         move_operations = _migration(MOVE_CONFIG_DATA).operations
         remove_operations = _migration(DROP_MOVED_COLUMNS).operations
-        repair_operations = _migration(REPAIR_REQUIRED_SETTINGS).operations
 
         self.assertEqual(
             {operation.name for operation in add_operations if isinstance(operation, AddField)},
@@ -87,15 +84,9 @@ class ProfileAdapterConfigMigrationStructureTest(SimpleTestCase):
             {operation.name for operation in remove_operations if isinstance(operation, RemoveField)},
             set(REMOVED_FIELDS),
         )
-        self.assertEqual(
-            [operation.code.__name__ for operation in repair_operations],
-            ["repair_empty_required_settings"],
-        )
         self.assertIsNone(move_operations[0].reverse_code)
-        self.assertIsNone(repair_operations[0].reverse_code)
         self.assertIn((APP, ADD_CONFIG_FIELDS), _migration(MOVE_CONFIG_DATA).dependencies)
         self.assertIn((APP, MOVE_CONFIG_DATA), _migration(DROP_MOVED_COLUMNS).dependencies)
-        self.assertIn((APP, DROP_MOVED_COLUMNS), _migration(REPAIR_REQUIRED_SETTINGS).dependencies)
 
 
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
