@@ -603,6 +603,16 @@ class ImportExecution(models.Model):
         # PostgreSQL treats two NULL profiles as distinct, so the partial unique index cannot hold.
         if not fields.get("profile"):
             raise ValueError("An Import Execution reservation requires an Import Profile.")
+        required_audit_fields = {
+            "source_document": "a Source Document",
+            "actor": "an actor",
+            "plan_schema_version": "a plan schema version",
+            "accepted_plan_fingerprint": "an accepted plan fingerprint",
+            "selected_units": "selected Synchronization Unit identities",
+        }
+        for field_name, label in required_audit_fields.items():
+            if fields.get(field_name) is None:
+                raise ValueError(f"An Import Execution reservation requires {label}.")
         existing = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
         if existing is not None:
             return existing, False

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The target-neutral Import Plan: structure, fingerprints, and the dependency graph."""
 
+from dataclasses import replace
+
 from django.test import SimpleTestCase
 
 from netbox_data_import.plan import (
@@ -195,14 +197,33 @@ class PlanFingerprintTest(SimpleTestCase):
 
     def test_each_unit_carries_its_own_fingerprint(self):
         """Selective execution compares one unit at a time, so units digest independently."""
-        unit = _unit()
-        self.assertRegex(unit.fingerprint, r"^[0-9a-f]{64}$")
-        self.assertEqual(unit.fingerprint, _unit().fingerprint)
-        self.assertNotEqual(unit.fingerprint, _unit(identity="unit:2").fingerprint)
+        plan = _plan()
+        self.assertRegex(plan.unit_fingerprint("unit:1"), r"^[0-9a-f]{64}$")
+        self.assertEqual(plan.unit_fingerprint("unit:1"), _plan().unit_fingerprint("unit:1"))
+        self.assertNotEqual(
+            plan.unit_fingerprint("unit:1"),
+            _plan(units=(_unit(identity="unit:2"),)).unit_fingerprint("unit:2"),
+        )
 
     def test_a_unit_fingerprint_ignores_its_display_wording(self):
         """An unrelated wording change never blocks a safe selection."""
-        self.assertEqual(_unit(display={"label": "a"}).fingerprint, _unit(display={"label": "b"}).fingerprint)
+        one = _plan(units=(_unit(display={"label": "a"}),))
+        other = _plan(units=(_unit(display={"label": "b"}),))
+        self.assertEqual(one.unit_fingerprint("unit:1"), other.unit_fingerprint("unit:1"))
+
+    def test_every_plan_wide_input_changes_each_unit_fingerprint(self):
+        """Source, profile, actor, and context changes invalidate every accepted selection."""
+        baseline = _plan().unit_fingerprint("unit:1")
+        variants = (
+            _plan(schema_version=SCHEMA_VERSION + 1),
+            _plan(source_fingerprint="src-zzz"),
+            _plan(profile_fingerprint="prof-zzz"),
+            _plan(actor="operator-2"),
+            _plan(planning_context={"site_id": 4}),
+        )
+        for variant in variants:
+            with self.subTest(plan=variant):
+                self.assertNotEqual(baseline, variant.unit_fingerprint("unit:1"))
 
 
 class PlanSerializationTest(SimpleTestCase):
@@ -397,6 +418,17 @@ class PlanBoundaryTest(SimpleTestCase):
         self.assertIn(change, changes)
         self.assertEqual(plan.fingerprint, fingerprint)
 
+    def test_frozen_mapping_values_can_construct_derived_plan_objects(self):
+        """A caller can reuse a frozen value without converting it through serialization first."""
+        change = _change(payload={"name": "sw-1", "labels": ["edge"]})
+        derived_change = replace(change, operation="update")
+        reused_payload = _change(identity="device:2", payload=change.payload)
+        derived_plan = replace(_plan(units=(_unit(changes=(change,)),)), revision=2)
+
+        self.assertEqual(derived_change.payload, change.payload)
+        self.assertEqual(reused_payload.payload, change.payload)
+        self.assertEqual(derived_plan.revision, 2)
+
     def test_the_value_types_are_hashable(self):
         """A coordinator deduplicating changes with a set must not hit an unhashable dict."""
         self.assertEqual(len({_change(), _change()}), 1)
@@ -409,6 +441,8 @@ class PlanBoundaryTest(SimpleTestCase):
         from netbox_data_import.plan import PlanError
 
         for broken in (
+            None,
+            [],
             {"schema_version": SCHEMA_VERSION, "units": [{"identity": "u1"}], "diagnostics": []},
             {"schema_version": SCHEMA_VERSION, "units": None, "diagnostics": []},
             {"schema_version": SCHEMA_VERSION},

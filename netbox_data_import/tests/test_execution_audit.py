@@ -261,6 +261,26 @@ class ImportExecutionReservationTest(TransactionTestCase):
                 with self.assertRaises(ValueError):
                     ImportExecution.reserve(**_reservation(self.profile, self.document, self.actor, key=missing))
 
+    def test_a_reservation_requires_every_new_execution_audit_field(self):
+        """Nullable legacy columns must not permit an incomplete new audit record."""
+        required = (
+            "source_document",
+            "actor",
+            "plan_schema_version",
+            "accepted_plan_fingerprint",
+            "selected_units",
+        )
+        for field_name in required:
+            fields = _reservation(
+                self.profile,
+                self.document,
+                self.actor,
+                key=f"missing-{field_name}",
+            )
+            fields.pop(field_name)
+            with self.subTest(field=field_name), self.assertRaises(ValueError):
+                ImportExecution.reserve(**fields)
+
     def test_an_unrelated_integrity_error_is_not_reported_as_a_duplicate(self):
         """Only a lost race for this key returns an existing row; anything else must surface."""
         doomed = _document(self.profile, content=b"doomed bytes", uploaded_by=self.actor)

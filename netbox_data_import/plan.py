@@ -95,7 +95,11 @@ def _thaw_json(value: Any) -> Any:
 def _frozen_json(value: Any, label: str) -> Any:
     """Validate, detach, and recursively freeze JSON data entering a plan."""
     try:
-        return _freeze_json(json.loads(canonical_json(value)))
+        try:
+            serialized = canonical_json(value)
+        except TypeError:
+            serialized = canonical_json(_thaw_json(value))
+        return _freeze_json(json.loads(serialized))
     except (TypeError, ValueError) as exc:
         raise PlanInvalid(f"{label} must be JSON-serializable plan data: {exc}") from exc
 
@@ -266,11 +270,6 @@ class SynchronizationUnit:
             "diagnostics": [diagnostic.fingerprint_data for diagnostic in self.diagnostics],
         }
 
-    @property
-    def fingerprint(self) -> str:
-        """Return this unit's canonical fingerprint, so selection compares one unit at a time."""
-        return fingerprint_of(self.fingerprint_data)
-
     def to_dict(self) -> dict:
         """Return the serialized form."""
         return {
@@ -321,16 +320,23 @@ class ImportPlan:
         return hash(canonical_json(self.to_dict()))
 
     @property
-    def fingerprint_data(self):
-        """Return the decision inputs of section 4.3, which exclude display data and the revision."""
+    def _selection_context_data(self):
+        """Return the plan-wide inputs that invalidate every accepted unit."""
         return {
             "schema_version": self.schema_version,
-            "units": [unit.fingerprint_data for unit in self.units],
-            "diagnostics": [diagnostic.fingerprint_data for diagnostic in self.diagnostics],
             "source_fingerprint": self.source_fingerprint,
             "profile_fingerprint": self.profile_fingerprint,
             "actor": self.actor,
             "planning_context": _thaw_json(self.planning_context),
+        }
+
+    @property
+    def fingerprint_data(self):
+        """Return the decision inputs of section 4.3, which exclude display data and the revision."""
+        return {
+            **self._selection_context_data,
+            "units": [unit.fingerprint_data for unit in self.units],
+            "diagnostics": [diagnostic.fingerprint_data for diagnostic in self.diagnostics],
         }
 
     @property
@@ -344,6 +350,13 @@ class ImportPlan:
             if unit.identity == identity:
                 return unit
         return None
+
+    def unit_fingerprint(self, identity: str) -> str:
+        """Return one unit's decision inputs plus the context shared by every unit."""
+        unit = self.unit(identity)
+        if unit is None:
+            raise PlanInvalid(f"The Import Plan has no Synchronization Unit '{identity}'.")
+        return fingerprint_of({**self._selection_context_data, "unit": unit.fingerprint_data})
 
     def to_dict(self) -> dict:
         """Return the serialized form the session and a job payload carry."""
@@ -359,16 +372,16 @@ class ImportPlan:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> ImportPlan:
+    def from_dict(cls, data: Any) -> ImportPlan:
         """Rebuild a plan, rejecting a schema version this release does not execute.
 
         Every other malformed payload also raises a PlanError, so one caller-side ``except PlanError``
         covers a corrupted session entry or job payload (section 4.8).
         """
-        version = data.get("schema_version")
-        if version != SCHEMA_VERSION:
-            raise PlanSchemaMismatch(f"Import Plan schema version {version} is not version {SCHEMA_VERSION}.")
         try:
+            version = data.get("schema_version")
+            if version != SCHEMA_VERSION:
+                raise PlanSchemaMismatch(f"Import Plan schema version {version} is not version {SCHEMA_VERSION}.")
             return cls(
                 units=tuple(SynchronizationUnit.from_dict(item) for item in data["units"]),
                 diagnostics=tuple(Diagnostic.from_dict(item) for item in data["diagnostics"]),
