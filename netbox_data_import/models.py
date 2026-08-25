@@ -113,16 +113,21 @@ def validate_contact_candidate_resolution(
 
 
 @contextmanager
-def locked_profile_policy(profile_id):
-    """Hold one profile row for a policy write or for an import execution.
+def locked_profile_policy(*profile_ids):
+    """Hold the given profile rows for a policy write or for an import execution.
 
-    Every SourceResolution write and the import worker take this same lock in this same order, so a
-    decision cannot commit between the worker's check and its writes. Locking the resolution rows
-    alone would leave an insert free to land in that window, because a row that does not exist yet
-    cannot be locked.
+    Every SourceResolution write and the import worker take this same lock, so a decision cannot
+    commit between the worker's check and its writes. Locking the resolution rows alone would leave
+    an insert free to land in that window, because a row that does not exist yet cannot be locked.
+
+    A write that moves a row between profiles passes both, and the rows lock in primary-key order so
+    two such writes cannot deadlock by taking them in opposite orders.
     """
+    wanted = sorted({profile_id for profile_id in profile_ids if profile_id is not None})
     with transaction.atomic():
-        ImportProfile.objects.select_for_update().get(pk=profile_id)
+        locked = ImportProfile.objects.select_for_update().filter(pk__in=wanted).order_by("pk")
+        if len(locked) != len(wanted):
+            raise ImportProfile.DoesNotExist(f"No ImportProfile matches every id in {wanted}.")
         yield
 
 

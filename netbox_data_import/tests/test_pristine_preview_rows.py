@@ -243,8 +243,11 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         """Create the profile whose policy rows the two sides contend for."""
         self.profile = _build_profile("Lock Profile")
 
-    def _attempt_while_the_worker_holds_the_profile(self, write):
-        """Run *write* under the policy lock while another connection holds the same profile row."""
+    def _attempt_while_the_worker_holds_the_profile(self, write, *, lock=True):
+        """Run *write* while another connection holds the same profile row.
+
+        `lock=False` is for a write that reaches the policy lock through its own view.
+        """
         from django.db import connection
 
         from netbox_data_import.models import locked_profile_policy
@@ -265,7 +268,10 @@ class PolicyWriteSerializationTest(TransactionTestCase):
                 with connection.cursor() as cursor:
                     cursor.execute("SET lock_timeout TO '750ms'")
                 try:
-                    with locked_profile_policy(self.profile.pk):
+                    if lock:
+                        with locked_profile_policy(self.profile.pk):
+                            write()
+                    else:
                         write()
                 except OperationalError:
                     blocked.append(True)
@@ -308,3 +314,37 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         self.assertEqual(self._attempt_while_the_worker_holds_the_profile(edit), [True])
         row = SourceResolution.objects.get(profile=self.profile, source_id="LOCK-2")
         self.assertEqual(row.resolved_fields, {"device_name": "first-decision"})
+
+    def test_moving_a_resolution_off_a_locked_profile_waits(self):
+        """perform_update locked only the destination, so a move could strip the source mid-import."""
+        from rest_framework.test import APIClient
+
+        other = _build_profile("Lock Profile Destination")
+        resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="LOCK-3",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "decision"},
+        )
+        user = get_user_model().objects.create_superuser("move-user", "mv@example.invalid", "testpass")
+        api = APIClient()
+        api.force_authenticate(user=user)
+
+        responses = []
+
+        def move_it():
+            responses.append(
+                api.patch(
+                    f"/api/plugins/data-import/source-resolutions/{resolution.pk}/",
+                    {"profile": other.pk},
+                    format="json",
+                )
+            )
+
+        blocked = self._attempt_while_the_worker_holds_the_profile(move_it, lock=False)
+        self.assertEqual(
+            blocked, [True], f"PATCH did not wait; responses={[(r.status_code, r.content[:200]) for r in responses]}"
+        )
+        resolution.refresh_from_db()
+        self.assertEqual(resolution.profile_id, self.profile.pk)

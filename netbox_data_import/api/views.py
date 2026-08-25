@@ -148,9 +148,12 @@ class SourceResolutionViewSet(_PluginModelViewSet):
             serializer.save()
 
     def perform_update(self, serializer):
-        """Update the resolution under the profile lock."""
-        profile = serializer.validated_data.get("profile") or serializer.instance.profile
-        with locked_profile_policy(profile.pk):
+        """Update under both profile locks, because an update may move the row between profiles."""
+        # ValidatedModelSerializer.validate() has already written the incoming values onto the
+        # instance, so the profile the row still belongs to has to come from the database.
+        stored = SourceResolution.objects.filter(pk=serializer.instance.pk).values_list("profile_id", flat=True)
+        incoming = serializer.validated_data.get("profile")
+        with locked_profile_policy(stored.first(), incoming.pk if incoming else None):
             serializer.save()
 
     def perform_destroy(self, instance):
