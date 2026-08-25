@@ -20,8 +20,8 @@ from netbox_data_import.tests.helpers import make_dcim_objects
 JSON = "application/json"
 
 
-class ContactResolutionAjaxTest(TestCase):
-    """The save endpoint answers JSON for the modal and keeps the redirect for a plain form."""
+class ContactResolutionSessionMixin:
+    """Seed the preview session with one device row that still needs a Contact decision."""
 
     def setUp(self):
         """Put one device row that needs a Contact decision into the preview session."""
@@ -80,6 +80,10 @@ class ContactResolutionAjaxTest(TestCase):
         session[PREVIEW_REVISION_SESSION_KEY] = "revision-one"
         session[PREVIEW_DIRTY_SESSION_KEY] = False
         session.save()
+
+
+class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
+    """The save endpoint answers JSON for the modal and keeps the redirect for a plain form."""
 
     def _payload(self, **overrides):
         payload = {
@@ -408,3 +412,59 @@ class ContactResolutionAjaxTest(TestCase):
         )
         self.assertEqual(assignment.contact.email, "ajax.person@example.invalid")
         self.assertEqual(assignment.role, role)
+
+
+class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
+    """The picker asks the server on open, so a Contact created since the preview is offered."""
+
+    def _suggest(self, **overrides):
+        """Ask the endpoint for one row's current Contact suggestion."""
+        params = {"profile_id": self.profile.pk, "source_id": "AJAX-001"}
+        params.update(overrides)
+        return self.client.get(
+            reverse("plugins:netbox_data_import:contact_suggestion"),
+            params,
+            HTTP_ACCEPT=JSON,
+        )
+
+    def test_no_matching_contact_suggests_nothing(self):
+        """The row's candidate values identify no Contact, so the picker stays empty."""
+        response = self._suggest()
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIsNone(json.loads(response.content)["suggestion"])
+
+    def test_a_contact_created_after_the_preview_is_offered(self):
+        """This is the answer the page's baked map cannot give without a recalculation."""
+        from tenancy.models import Contact
+
+        contact = Contact.objects.create(name="Ajax Person", email="ajax.person@example.invalid")
+
+        response = self._suggest()
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(json.loads(response.content)["suggestion"]["id"], contact.pk)
+
+    def test_a_contact_without_an_email_is_still_offered(self):
+        """The lookup field is email, so a Contact carrying only the row's phone matched nothing."""
+        from tenancy.models import Contact
+
+        contact = Contact.objects.create(name="Ajax Phone Person", email="", phone="+1 202-555-0180")
+
+        response = self._suggest()
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(json.loads(response.content)["suggestion"]["id"], contact.pk)
+
+    def test_a_row_outside_the_active_preview_is_refused(self):
+        """The suggestion reads session state, so it must name one active row."""
+        response = self._suggest(source_id="NOT-A-ROW")
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("one active preview row", json.loads(response.content)["error"])
+
+    def test_a_missing_profile_is_refused(self):
+        """A request that names no profile cannot be tied to a preview."""
+        response = self._suggest(profile_id="")
+
+        self.assertEqual(response.status_code, 400, response.content)

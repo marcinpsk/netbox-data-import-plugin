@@ -479,6 +479,17 @@
                     <i class="mdi mdi-chevron-down"></i> Detail
                   </button>
                 {% endif %}
+                {# Sync placement sits in the detail row, so its actionable state needs a badge here. #}
+                {% if row.extra_data.netbox_device_id and row.rack_name and not row.extra_data.placement_sync_writes_nothing %}
+                  <br>
+                  <button type="button" class="badge text-bg-success ndi-diff-toggle mt-1 ndi-placement-badge"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
+                          aria-expanded="false"
+                          title="This row can set rack={{ row.rack_name }}{% if row.extra_data.u_position %}, U{{ row.extra_data.u_position }}{% endif %}{% if row.extra_data.face %}, {{ row.extra_data.face }}{% endif %}. Open the detail row to apply it.">
+                    <i class="mdi mdi-package-variant"></i> Placement
+                  </button>
+                {% endif %}
               </td>
               <td class="text-end" style="white-space:nowrap; min-width:180px;">
 
@@ -1002,7 +1013,8 @@
       <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}"
             id="contactCandidateForm"
             data-contact-lookup-field="{{ profile.adapter_settings.primary_contact_lookup_field }}"
-            data-contact-lookup-url="{% url 'plugins:netbox_data_import:contact_lookup' %}">
+            data-contact-lookup-url="{% url 'plugins:netbox_data_import:contact_lookup' %}"
+            data-contact-suggestion-url="{% url 'plugins:netbox_data_import:contact_suggestion' %}">
         {% csrf_token %}
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
         <input type="hidden" name="source_id" id="contactCandidateSourceId">

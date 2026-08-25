@@ -1156,3 +1156,36 @@ class NormalizeForCompareTest(TestCase):
         for value in ("inf", "Infinity", "-inf"):
             with self.subTest(value=value):
                 self.assertEqual(_normalize_for_compare(value), value.strip())
+
+
+class ExistingRackPreviewActionTest(TestCase):
+    """A rack row reports what it writes, so a row that writes nothing is not an update."""
+
+    def setUp(self):
+        """Create the profile, the site, and the rack the source row names."""
+        from dcim.models import Rack, Site
+
+        self.profile = _make_profile("RackNoopProfile")
+        self.site = Site.objects.create(name="Rack Noop Site", slug="rack-noop-site")
+        self.rack = Rack.objects.create(name="T1", site=self.site, u_height=42, serial="RACK-SERIAL")
+
+    def _preview(self, **overrides):
+        """Run one rack row through the preview and return its result row."""
+        row = {"_row_number": 2, "source_id": "261988", "rack_name": "T1", "device_class": "Cabinet"}
+        row.update(overrides)
+        result = run_import([row], self.profile, {"site": self.site}, dry_run=True)
+        return next(r for r in result.rows if r.object_type == "rack")
+
+    def test_a_row_that_changes_nothing_is_not_reported_as_an_update(self):
+        """The row repeats the rack's stored height and serial, so the import would write nothing."""
+        preview = self._preview(u_height=42, serial="RACK-SERIAL")
+
+        self.assertEqual(preview.action, "skip")
+        self.assertIn("changes nothing", preview.detail)
+
+    def test_a_row_that_changes_a_field_is_still_an_update(self):
+        """A different height is a real write, so the row keeps reporting it."""
+        preview = self._preview(u_height=47, serial="RACK-SERIAL")
+
+        self.assertEqual(preview.action, "update")
+        self.assertEqual(preview.detail, "Rack 'T1' already exists")

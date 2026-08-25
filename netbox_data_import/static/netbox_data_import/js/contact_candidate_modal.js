@@ -324,12 +324,8 @@
       }
       instance.refreshOptions(false);
     }
-    if (suggestionMessage) {
-      suggestionMessage.classList.toggle('d-none', !suggestion);
-      suggestionMessage.textContent = suggestion
-        ? 'A NetBox Contact with this row\'s configured identity already exists. Link it below to reuse it.'
-        : '';
-    }
+    showSuggestion(suggestion);
+    refreshSuggestion(sourceId, rowNumber);
 
     noContact.checked = resolvedFields.contact_resolution_applied === true
       && !Object.keys(savedSources).length
@@ -342,6 +338,40 @@
     setExpanded(linkExisting, existingWrap, Boolean(contactId.value || suggestion));
     toggleContactFields();
   });
+
+  function showSuggestion(suggestion) {
+    if (!suggestionMessage) return;
+    suggestionMessage.classList.toggle('d-none', !suggestion);
+    suggestionMessage.textContent = suggestion
+      ? 'A NetBox Contact matching a value in this row already exists. Link it below to reuse it.'
+      : '';
+  }
+
+  /* The page's suggestion map was built when the preview rendered, so a Contact created since,
+   * on another row, is only offered here if the server is asked again. */
+  function refreshSuggestion(sourceId, rowNumber) {
+    var url = form.dataset.contactSuggestionUrl;
+    var profileField = form.querySelector('input[name=profile_id]');
+    var profileId = profileField ? profileField.value : '';
+    if (!url || !sourceId || !profileId || contactId.value) return;
+    var separator = url.includes('?') ? '&' : '?';
+    var query = 'profile_id=' + encodeURIComponent(profileId) + '&source_id=' + encodeURIComponent(sourceId);
+    fetch(url + separator + query, {headers: {'Accept': 'application/json'}})
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        // The modal is shared, so a late answer must not write over the row now on screen.
+        if (!data || !data.suggestion || !stillShowing(sourceId)) return;
+        contactSuggestions[rowNumber] = data.suggestion;
+        var instance = picker();
+        if (instance) {
+          instance.addOption(contactOption(data.suggestion));
+          instance.refreshOptions(false);
+        }
+        showSuggestion(data.suggestion);
+        setExpanded(linkExisting, existingWrap, true);
+      })
+      .catch(function () {});
+  }
 
   editToggle.addEventListener('click', function () {
     setExpanded(editToggle, editPanel, editPanel.hidden);

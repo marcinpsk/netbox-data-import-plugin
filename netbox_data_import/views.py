@@ -118,6 +118,31 @@ def _parse_posted_profile_id(request):
         return None
 
 
+def _contact_candidate_context(request, profile_id, source_id):
+    """Return Contact candidates and row state for one active preview row."""
+    import_result = request.session.get("import_result") or {}
+    result_rows = [
+        row
+        for row in import_result.get("rows", [])
+        if str(row.get("source_id")) == str(source_id) and row.get("object_type") == "device"
+    ]
+    context = request.session.get("import_context") or {}
+    source_rows = [
+        row for row in (request.session.get("import_rows") or []) if str(row.get("source_id")) == str(source_id)
+    ]
+    if str(context.get("profile_id")) != str(profile_id) or len(source_rows) != 1 or len(result_rows) != 1:
+        raise ValidationError("The candidate resolution does not identify one active preview row.")
+
+    candidates = result_rows[0].get("extra_data", {}).get("candidate_values", {}).get("contact", {})
+    if not isinstance(candidates, dict) or not candidates:
+        raise ValidationError("The active preview row has no Contact candidate values.")
+    return (
+        {str(source_column): str(value) for source_column, value in candidates.items()},
+        source_rows[0],
+        result_rows[0],
+    )
+
+
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
     """Persist the confirmed source-to-device identity for a field review."""
     existing_match = (
@@ -1972,6 +1997,32 @@ class ContactLookupView(_AjaxPermissionView):
         )
 
 
+class ContactSuggestionView(_AjaxPermissionView):
+    """Return the Contact one preview row's candidate values identify, as it stands now."""
+
+    permission_required = "tenancy.view_contact"
+
+    def get(self, request):
+        """Recompute one row's suggestion, so a Contact created on another row is offered here."""
+        from django.http import JsonResponse
+
+        try:
+            profile_id = int(request.GET.get("profile_id", ""))
+        except (TypeError, ValueError):
+            profile_id = None
+        source_id = request.GET.get("source_id", "")
+        if profile_id is None or not source_id:
+            return JsonResponse({"error": "A valid import profile and source row are required."}, status=400)
+        profile = ImportProfile.objects.filter(pk=profile_id).first()
+        if profile is None:
+            return JsonResponse({"error": "A valid import profile is required."}, status=400)
+        try:
+            candidates, _source_row, _result_row = _contact_candidate_context(request, profile.pk, source_id)
+        except ValidationError as exc:
+            return JsonResponse({"error": "; ".join(exc.messages)}, status=400)
+        return JsonResponse({"suggestion": PrimaryContactResolver.suggest(candidates, profile, request.user)})
+
+
 class SyncDeviceFieldView(_AjaxPermissionView):
     """Apply a single field value from the import file to an existing NetBox device."""
 
@@ -2379,31 +2430,6 @@ class SaveResolutionView(_AjaxPermissionView):
 
     permission_required = "netbox_data_import.change_importprofile"
 
-    @staticmethod
-    def _contact_candidate_context(request, profile_id, source_id):
-        """Return Contact candidates and row state for one active preview row."""
-        import_result = request.session.get("import_result") or {}
-        result_rows = [
-            row
-            for row in import_result.get("rows", [])
-            if str(row.get("source_id")) == str(source_id) and row.get("object_type") == "device"
-        ]
-        context = request.session.get("import_context") or {}
-        source_rows = [
-            row for row in (request.session.get("import_rows") or []) if str(row.get("source_id")) == str(source_id)
-        ]
-        if str(context.get("profile_id")) != str(profile_id) or len(source_rows) != 1 or len(result_rows) != 1:
-            raise ValidationError("The candidate resolution does not identify one active preview row.")
-
-        candidates = result_rows[0].get("extra_data", {}).get("candidate_values", {}).get("contact", {})
-        if not isinstance(candidates, dict) or not candidates:
-            raise ValidationError("The active preview row has no Contact candidate values.")
-        return (
-            {str(source_column): str(value) for source_column, value in candidates.items()},
-            source_rows[0],
-            result_rows[0],
-        )
-
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
         import json
@@ -2435,7 +2461,7 @@ class SaveResolutionView(_AjaxPermissionView):
             if source_column == "candidate:contact":
                 try:
                     validate_registered_adapter(profile)
-                    candidates, source_row, result_row = self._contact_candidate_context(request, profile.pk, source_id)
+                    candidates, source_row, result_row = _contact_candidate_context(request, profile.pk, source_id)
                     validate_contact_candidate_resolution(
                         resolved_fields,
                         profile.adapter_settings.primary_contact_lookup_field,

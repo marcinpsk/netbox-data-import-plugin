@@ -1174,6 +1174,15 @@ def _set_rack_import_fields(rack, u_height, serial, rack_type, ctx):
         rack.tenant = ctx.tenant
 
 
+# The five fields _set_rack_import_fields writes, so a row that changes none of them writes nothing.
+_RACK_IMPORT_FIELDS = ("u_height", "serial", "rack_type_id", "location_id", "tenant_id")
+
+
+def _rack_row_changes_nothing(stored, candidate) -> bool:
+    """Return whether this row would leave every import-controlled rack field as it stands."""
+    return all(getattr(stored, field) == getattr(candidate, field) for field in _RACK_IMPORT_FIELDS)
+
+
 def _build_rack_candidate(Rack, ctx, rack_name, u_height, serial, rack_type):
     """Return an unsaved rack carrying the fields an import controls."""
     return Rack(
@@ -1399,6 +1408,9 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                     except ValidationError as exc:
                         ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "update"))
                         continue
+                    if _rack_row_changes_nothing(rack, candidate):
+                        action = "skip"
+                        detail = f"Rack '{rack_name}' already exists and this row changes nothing"
             else:
                 candidate = _build_rack_candidate(Rack, ctx, rack_name, u_height, serial, crm.rack_type)
                 try:

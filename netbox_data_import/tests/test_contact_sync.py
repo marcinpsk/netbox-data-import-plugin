@@ -495,14 +495,42 @@ class NativeContactSyncTest(TestCase):
         self.assertIsNone(review.selection)
         self.assertIsNone(review.plan)
 
-    def test_contact_suggestion_skips_blank_and_invalid_email_candidates(self):
-        """Only candidate values valid for the configured lookup reach the query."""
+    def test_a_candidate_value_that_identifies_no_contact_suggests_nothing(self):
+        """A blank value and a value no Contact carries leave the picker empty."""
         suggestion = PrimaryContactResolver.suggest(
             {"Blank": "", "Name": "Not an email"},
             self.profile,
         )
 
         self.assertIsNone(suggestion)
+
+    def test_a_row_carrying_only_a_name_finds_the_contact_with_that_name(self):
+        """The lookup field is email, so a name-only row matched nothing and had to be typed in."""
+        contact = Contact.objects.create(name="Piet Janssen", email="", phone="")
+
+        suggestion = PrimaryContactResolver.suggest({"Owner": "Piet Janssen"}, self.profile)
+
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion["id"], contact.pk)
+
+    def test_the_configured_lookup_field_still_answers_first(self):
+        """A row carrying both an email and another Contact's name keeps the email's answer."""
+        by_email = Contact.objects.create(name="Email Owner", email="owner@example.invalid")
+        Contact.objects.create(name="Name Owner", email="")
+
+        suggestion = PrimaryContactResolver.suggest(
+            {"Contact": "owner@example.invalid", "Owner": "Name Owner"},
+            self.profile,
+        )
+
+        self.assertEqual(suggestion["id"], by_email.pk)
+
+    def test_two_contacts_answering_the_same_name_suggest_nothing(self):
+        """A suggestion is only offered when the row identifies exactly one Contact."""
+        Contact.objects.create(name="Shared Name", email="one@example.invalid")
+        Contact.objects.create(name="Shared Name", email="two@example.invalid")
+
+        self.assertIsNone(PrimaryContactResolver.suggest({"Owner": "Shared Name"}, self.profile))
 
     def test_new_device_contact_plan_requires_assignment_permission(self):
         """A new Device plan checks assignment permission before any write."""
