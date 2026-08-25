@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-08-25)
+
+### Continuous Integration
+
+- Audit the workflows with zizmor and guard the release job
+  ([#100](https://github.com/marcinpsk/netbox-data-import-plugin/pull/100),
+  [`7e8e680`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7e8e680b6a75428b545fe417ea2cd6fc72dbd95c))
+
+### Features
+
+- Add the target-field catalog, adapter registry, and profile cut…
+  ([#103](https://github.com/marcinpsk/netbox-data-import-plugin/pull/103),
+  [`9cce873`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9cce873398f8114fb726ef5a6de76574abf051a4))
+
+
 ## v1.5.2 (2026-08-18)
 
 ### Bug Fixes
