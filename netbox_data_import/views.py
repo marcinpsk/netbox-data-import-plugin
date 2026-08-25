@@ -8,7 +8,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
-from django.http import HttpResponse, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -32,6 +32,7 @@ from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
 from . import __version__ as _plugin_version
 from .models import (
     locked_profile_policy,
+    locked_resolution_policy,
     ClassRoleMapping,
     ColumnMapping,
     ColumnTransformRule,
@@ -2901,8 +2902,12 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
     def post(self, request, *args, **kwargs):
         """Serialize against an executing import, which holds the same profile row."""
         resolution = self.get_object(**kwargs)
-        with locked_profile_policy(resolution.profile_id):
-            return super().post(request, *args, **kwargs)
+        try:
+            with locked_resolution_policy(resolution.pk):
+                return super().post(request, *args, **kwargs)
+        except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
+            # The row went away between the fetch and the lock, which is the 404 the fetch would give.
+            raise Http404 from None
 
 
 # ---------------------------------------------------------------------------

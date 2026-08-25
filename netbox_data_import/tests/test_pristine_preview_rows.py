@@ -32,6 +32,11 @@ def _build_profile(name):
     return profile
 
 
+def _seen(responses):
+    """Render collected API responses for an assertion message."""
+    return f"responses={[(r.status_code, r.content[:200]) for r in responses]}"
+
+
 def _pristine_rows():
     """Return the rows exactly as the parser produced them, with no resolution applied."""
     return [
@@ -243,11 +248,16 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         """Create the profile whose policy rows the two sides contend for."""
         self.profile = _build_profile("Lock Profile")
 
-    def _attempt_while_the_worker_holds_the_profile(self, write, *, lock=True):
-        """Run *write* while another connection holds the same profile row.
+    def _api(self, username):
+        """Return an authenticated REST client, so a write reaches the lock through the real view."""
+        from rest_framework.test import APIClient
 
-        `lock=False` is for a write that reaches the policy lock through its own view.
-        """
+        api = APIClient()
+        api.force_authenticate(user=get_user_model().objects.create_superuser(username, f"{username}@x.invalid", "p"))
+        return api
+
+    def _attempt_while_the_worker_holds_the_profile(self, write):
+        """Run *write* while another connection holds the same profile row."""
         from django.db import connection
 
         from netbox_data_import.models import locked_profile_policy
@@ -268,11 +278,7 @@ class PolicyWriteSerializationTest(TransactionTestCase):
                 with connection.cursor() as cursor:
                     cursor.execute("SET lock_timeout TO '750ms'")
                 try:
-                    if lock:
-                        with locked_profile_policy(self.profile.pk):
-                            write()
-                    else:
-                        write()
+                    write()
                 except OperationalError:
                     blocked.append(True)
             finally:
@@ -283,42 +289,54 @@ class PolicyWriteSerializationTest(TransactionTestCase):
 
     def test_a_new_resolution_cannot_commit_while_an_import_holds_the_profile(self):
         """An insert takes FOR KEY SHARE on the parent, which the worker's FOR UPDATE already blocks."""
+        api = self._api("insert-user")
+        responses = []
 
         def insert():
-            SourceResolution.objects.create(
-                profile=self.profile,
-                source_id="LOCK-1",
-                source_column="device_name",
-                original_value="pristine",
-                resolved_fields={"device_name": "late-decision"},
+            responses.append(
+                api.post(
+                    "/api/plugins/data-import/source-resolutions/",
+                    {
+                        "profile": self.profile.pk,
+                        "source_id": "LOCK-1",
+                        "source_column": "device_name",
+                        "original_value": "pristine",
+                        "resolved_fields": {"device_name": "late-decision"},
+                    },
+                    format="json",
+                )
             )
 
-        self.assertEqual(self._attempt_while_the_worker_holds_the_profile(insert), [True])
+        self.assertEqual(self._attempt_while_the_worker_holds_the_profile(insert), [True], _seen(responses))
         self.assertFalse(SourceResolution.objects.filter(source_id="LOCK-1").exists())
 
     def test_an_edited_resolution_cannot_commit_while_an_import_holds_the_profile(self):
-        """Updating a child row touches no parent row, so only the writer's own lock serializes it."""
-        SourceResolution.objects.create(
+        """Updating a child row touches no parent row, so only the view's own lock serializes it."""
+        resolution = SourceResolution.objects.create(
             profile=self.profile,
             source_id="LOCK-2",
             source_column="device_name",
             original_value="pristine",
             resolved_fields={"device_name": "first-decision"},
         )
+        api = self._api("edit-user")
+        responses = []
 
         def edit():
-            SourceResolution.objects.filter(profile=self.profile, source_id="LOCK-2").update(
-                resolved_fields={"device_name": "second-decision"}
+            responses.append(
+                api.patch(
+                    f"/api/plugins/data-import/source-resolutions/{resolution.pk}/",
+                    {"resolved_fields": {"device_name": "second-decision"}},
+                    format="json",
+                )
             )
 
-        self.assertEqual(self._attempt_while_the_worker_holds_the_profile(edit), [True])
-        row = SourceResolution.objects.get(profile=self.profile, source_id="LOCK-2")
-        self.assertEqual(row.resolved_fields, {"device_name": "first-decision"})
+        self.assertEqual(self._attempt_while_the_worker_holds_the_profile(edit), [True], _seen(responses))
+        resolution.refresh_from_db()
+        self.assertEqual(resolution.resolved_fields, {"device_name": "first-decision"})
 
-    def test_moving_a_resolution_off_a_locked_profile_waits(self):
-        """perform_update locked only the destination, so a move could strip the source mid-import."""
-        from rest_framework.test import APIClient
-
+    def test_moving_a_resolution_to_another_profile_is_refused(self):
+        """A row belongs to one profile for life, so no write can span two profile locks."""
         other = _build_profile("Lock Profile Destination")
         resolution = SourceResolution.objects.create(
             profile=self.profile,
@@ -327,24 +345,281 @@ class PolicyWriteSerializationTest(TransactionTestCase):
             original_value="pristine",
             resolved_fields={"device_name": "decision"},
         )
-        user = get_user_model().objects.create_superuser("move-user", "mv@example.invalid", "testpass")
+        api = self._api("move-user")
+
+        response = api.patch(
+            f"/api/plugins/data-import/source-resolutions/{resolution.pk}/",
+            {"profile": other.pk},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("cannot move to another profile", str(response.data["profile"]))
+        resolution.refresh_from_db()
+        self.assertEqual(resolution.profile_id, self.profile.pk)
+
+    def test_naming_the_profile_a_resolution_already_has_is_allowed(self):
+        """Resending the profile a row already has is not a move, so it must still be accepted."""
+        resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="LOCK-4",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "decision"},
+        )
+        api = self._api("stay-user")
+
+        response = api.patch(
+            f"/api/plugins/data-import/source-resolutions/{resolution.pk}/",
+            {"profile": self.profile.pk, "resolved_fields": {"device_name": "second-decision"}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        resolution.refresh_from_db()
+        self.assertEqual(resolution.resolved_fields, {"device_name": "second-decision"})
+
+
+class ProfileLockContractTest(TestCase):
+    """The lock helper must never yield while it holds nothing."""
+
+    def test_locking_no_profile_is_refused(self):
+        """`filter(pk__in=[])` never reaches the database, so an empty call would lock nothing."""
+        from netbox_data_import.models import locked_profile_policy
+
+        with self.assertRaises(ImportProfile.DoesNotExist):
+            with locked_profile_policy():
+                pass
+
+    def test_locking_only_missing_profiles_is_refused(self):
+        """A named profile that no longer exists is unexpected state, not an empty lock set."""
+        from netbox_data_import.models import locked_profile_policy
+
+        with self.assertRaises(ImportProfile.DoesNotExist):
+            with locked_profile_policy(9_999_999):
+                pass
+
+
+class ResolutionMoveRaceTest(TransactionTestCase):
+    """A delete must lock the profile the database says the row is in, not the one it read earlier.
+
+    The REST API refuses to move a saved row, so the move below goes straight through the ORM.
+    """
+
+    def setUp(self):
+        """Create both profiles, the resolution to delete, and the operator who deletes it."""
+        self.source = _build_profile("Move Race Source")
+        self.destination = _build_profile("Move Race Destination")
+        self.resolution = SourceResolution.objects.create(
+            profile=self.source,
+            source_id="MOVE-RACE-1",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "decision"},
+        )
+        self.user = get_user_model().objects.create_superuser("race-user", "race@example.invalid", "testpass")
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def test_a_delete_waits_for_the_profile_the_row_moved_to(self):
+        """The move commits between the view's read and its lock, so the read value is already stale."""
+        from contextlib import ExitStack
+
+        from django.db import connection
+        from django.db.models.signals import post_init
+
+        from netbox_data_import.models import locked_profile_policy
+
+        started = Event()
+        release = Event()
+        fired = []
+        stack = ExitStack()
+
+        def hold_the_destination_like_the_worker():
+            """Take the lock an import execution of the destination profile holds."""
+            with locked_profile_policy(self.destination.pk):
+                started.set()
+                self.assertTrue(release.wait(timeout=10))
+
+        def move_the_row_then_start_the_worker(sender, instance, **kwargs):
+            """Run once, in the gap between the view reading the row and taking its lock."""
+            if fired or instance.pk != self.resolution.pk:
+                return
+            fired.append(True)
+
+            def move_it():
+                SourceResolution.objects.filter(pk=self.resolution.pk).update(profile=self.destination)
+
+            with run_on_separate_connection(move_it):
+                pass
+            stack.enter_context(run_on_separate_connection(hold_the_destination_like_the_worker))
+            self.assertTrue(started.wait(timeout=10))
+
+        post_init.connect(move_the_row_then_start_the_worker, sender=SourceResolution)
+        url = reverse("plugins:netbox_data_import:source_resolution_delete", kwargs={"pk": self.resolution.pk})
+        blocked = []
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout TO '750ms'")
+            try:
+                self.client.post(url, {"confirm": True})
+            except OperationalError:
+                blocked.append(True)
+        finally:
+            post_init.disconnect(move_the_row_then_start_the_worker, sender=SourceResolution)
+            release.set()
+            stack.close()
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout TO 0")
+
+        self.assertEqual(fired, [True], "the move never ran, so the race was not reproduced")
+        self.assertEqual(blocked, [True], "the delete did not wait for the profile the row moved to")
+        self.assertTrue(SourceResolution.objects.filter(pk=self.resolution.pk).exists())
+
+
+class ResolutionVanishedUnderTheLockTest(TransactionTestCase):
+    """A row deleted between the fetch and the lock is the 404 the fetch itself would have given."""
+
+    def setUp(self):
+        """Create the profile, the resolution, and the operator who tries to delete it."""
+        self.profile = _build_profile("Vanished Profile")
+        self.resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="VANISH-1",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "decision"},
+        )
+        self.user = get_user_model().objects.create_superuser("vanish-user", "v@example.invalid", "testpass")
+
+    def _delete_the_row_once_it_is_fetched(self):
+        """Connect a one-shot receiver that drops the row from another connection."""
+        from django.db.models.signals import post_init
+
+        fired = []
+
+        def drop_it(sender, instance, **kwargs):
+            if fired or instance.pk != self.resolution.pk:
+                return
+            fired.append(True)
+
+            def delete_it():
+                SourceResolution.objects.filter(pk=self.resolution.pk).delete()
+
+            with run_on_separate_connection(delete_it):
+                pass
+
+        post_init.connect(drop_it, sender=SourceResolution)
+        self.addCleanup(post_init.disconnect, drop_it, sender=SourceResolution)
+        return fired
+
+    def test_the_delete_view_answers_404(self):
+        """The UI delete view fetched the row, so a vanished row is not a server error."""
+        fired = self._delete_the_row_once_it_is_fetched()
+        client = Client()
+        client.force_login(self.user)
+        url = reverse("plugins:netbox_data_import:source_resolution_delete", kwargs={"pk": self.resolution.pk})
+
+        response = client.post(url, {"confirm": True})
+
+        self.assertEqual(fired, [True])
+        self.assertEqual(response.status_code, 404)
+
+    def test_the_api_delete_answers_404(self):
+        """The REST delete reaches the same lock through DRF's own fetch."""
+        from rest_framework.test import APIClient
+
+        fired = self._delete_the_row_once_it_is_fetched()
         api = APIClient()
-        api.force_authenticate(user=user)
+        api.force_authenticate(user=self.user)
+
+        response = api.delete(f"/api/plugins/data-import/source-resolutions/{self.resolution.pk}/")
+
+        self.assertEqual(fired, [True])
+        self.assertEqual(response.status_code, 404)
+
+
+class ResolutionDeletedWhileTheWriteWaitsTest(TransactionTestCase):
+    """A write that waited for the lock must not act on a row that was deleted while it waited."""
+
+    def setUp(self):
+        """Create the profile, the resolution both sides contend for, and the REST client."""
+        from rest_framework.test import APIClient
+
+        self.profile = _build_profile("Resurrection Profile")
+        self.resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="GONE-1",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "first-decision"},
+        )
+        self.api = APIClient()
+        self.api.force_authenticate(
+            user=get_user_model().objects.create_superuser("gone-user", "g@example.invalid", "testpass")
+        )
+
+    def test_a_patch_that_waited_does_not_resurrect_the_row(self):
+        """`Model.save()` falls back to INSERT when its UPDATE matches nothing, restoring the old id."""
+        from netbox_data_import.models import locked_profile_policy
+        from netbox_data_import.tests.helpers import wait_until_a_lock_is_blocked
 
         responses = []
+        holding = Event()
 
-        def move_it():
+        def patch_it():
+            self.assertTrue(holding.wait(timeout=10))
             responses.append(
-                api.patch(
-                    f"/api/plugins/data-import/source-resolutions/{resolution.pk}/",
-                    {"profile": other.pk},
+                self.api.patch(
+                    f"/api/plugins/data-import/source-resolutions/{self.resolution.pk}/",
+                    {"resolved_fields": {"device_name": "second-decision"}},
                     format="json",
                 )
             )
 
-        blocked = self._attempt_while_the_worker_holds_the_profile(move_it, lock=False)
-        self.assertEqual(
-            blocked, [True], f"PATCH did not wait; responses={[(r.status_code, r.content[:200]) for r in responses]}"
+        with run_on_separate_connection(patch_it):
+            with locked_profile_policy(self.profile.pk):
+                holding.set()
+                # The PATCH read the row, then blocks here, so the delete below lands in its gap.
+                wait_until_a_lock_is_blocked(self)
+                SourceResolution.objects.filter(pk=self.resolution.pk).delete()
+
+        self.assertEqual([r.status_code for r in responses], [404], _seen(responses))
+        self.assertFalse(SourceResolution.objects.filter(pk=self.resolution.pk).exists())
+
+
+class ProfileCascadeLockOrderTest(TransactionTestCase):
+    """Deleting a profile must take its policy lock before the cascade reaches the child rows."""
+
+    def setUp(self):
+        """Create the profile and one saved resolution for the cascade to collect."""
+        self.profile = _build_profile("Cascade Profile")
+        self.resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="CASCADE-1",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "first-decision"},
         )
-        resolution.refresh_from_db()
-        self.assertEqual(resolution.profile_id, self.profile.pk)
+
+    def test_a_policy_write_does_not_deadlock_with_a_profile_delete(self):
+        """The cascade collects children first, so a lock taken after it inverts the writer's order."""
+        from netbox_data_import.models import ImportProfile, locked_profile_policy
+        from netbox_data_import.tests.helpers import wait_until_a_lock_is_blocked
+
+        holding = Event()
+
+        def delete_the_profile():
+            self.assertTrue(holding.wait(timeout=10))
+            ImportProfile.objects.get(pk=self.profile.pk).delete()
+
+        with run_on_separate_connection(delete_the_profile):
+            with locked_profile_policy(self.profile.pk):
+                holding.set()
+                wait_until_a_lock_is_blocked(self)
+                # Deadlocks here when the cascade already holds the child row and waits for this one.
+                SourceResolution.objects.filter(pk=self.resolution.pk).update(
+                    resolved_fields={"device_name": "second-decision"}
+                )
+
+        self.assertFalse(ImportProfile.objects.filter(pk=self.profile.pk).exists())

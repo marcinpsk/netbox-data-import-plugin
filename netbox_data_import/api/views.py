@@ -2,12 +2,14 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """DRF viewsets for the data-import plugin API."""
 
+from django.http import Http404
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import viewsets, permissions
 from rest_framework.permissions import DjangoModelPermissions
 
 from ..models import (
     locked_profile_policy,
+    locked_resolution_policy,
     ImportProfile,
     ColumnMapping,
     ClassRoleMapping,
@@ -148,18 +150,22 @@ class SourceResolutionViewSet(_PluginModelViewSet):
             serializer.save()
 
     def perform_update(self, serializer):
-        """Update under both profile locks, because an update may move the row between profiles."""
-        # ValidatedModelSerializer.validate() has already written the incoming values onto the
-        # instance, so the profile the row still belongs to has to come from the database.
-        stored = SourceResolution.objects.filter(pk=serializer.instance.pk).values_list("profile_id", flat=True)
-        incoming = serializer.validated_data.get("profile")
-        with locked_profile_policy(stored.first(), incoming.pk if incoming else None):
-            serializer.save()
+        """Update the resolution under its profile lock."""
+        # ValidatedModelSerializer.validate() writes the request values onto the instance, so only
+        # its primary key still names the stored row.
+        try:
+            with locked_resolution_policy(serializer.instance.pk):
+                serializer.save()
+        except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
+            raise Http404 from None
 
     def perform_destroy(self, instance):
-        """Delete the resolution under the profile lock."""
-        with locked_profile_policy(instance.profile_id):
-            instance.delete()
+        """Delete the resolution under its profile lock."""
+        try:
+            with locked_resolution_policy(instance.pk):
+                instance.delete()
+        except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
+            raise Http404 from None
 
     def get_queryset(self):
         """Filter by profile_id query param if provided."""

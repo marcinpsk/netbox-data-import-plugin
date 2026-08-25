@@ -198,6 +198,13 @@ class ColumnTransformRuleSerializer(PolicySectionSerializer):
 class SourceResolutionSerializer(PolicySectionSerializer):
     """Serializer for SourceResolution (rerere, plain model)."""
 
+    def validate_profile(self, value):
+        """Refuse to move a saved row: its source ID and column only mean anything in one profile."""
+        # Field validators run before ValidatedModelSerializer.validate() writes onto the instance.
+        if self.instance is not None and value.pk != self.instance.profile_id:
+            raise serializers.ValidationError("A saved resolution cannot move to another profile.")
+        return value
+
     def validate_policy_row(self, attrs):
         """Reject Contact candidate resolutions that the importer cannot apply."""
         instance = self.instance

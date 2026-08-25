@@ -120,14 +120,36 @@ def locked_profile_policy(*profile_ids):
     commit between the worker's check and its writes. Locking the resolution rows alone would leave
     an insert free to land in that window, because a row that does not exist yet cannot be locked.
 
-    A write that moves a row between profiles passes both, and the rows lock in primary-key order so
-    two such writes cannot deadlock by taking them in opposite orders.
+    The rows lock in primary-key order, so two callers naming several profiles cannot deadlock by
+    taking them in opposite orders.
     """
     wanted = sorted({profile_id for profile_id in profile_ids if profile_id is not None})
+    # Django short-circuits `pk__in=[]`, so an empty set would yield without ever taking a lock.
+    if not wanted:
+        raise ImportProfile.DoesNotExist("A policy write must name at least one ImportProfile to lock.")
     with transaction.atomic():
         locked = ImportProfile.objects.select_for_update().filter(pk__in=wanted).order_by("pk")
         if len(locked) != len(wanted):
             raise ImportProfile.DoesNotExist(f"No ImportProfile matches every id in {wanted}.")
+        yield
+
+
+@contextmanager
+def locked_resolution_policy(resolution_pk):
+    """Hold the profile a saved resolution belongs to, read from the database rather than trusted.
+
+    A caller reaches this holding an instance it fetched earlier, whose profile may be a stale copy.
+    The row is read again under the lock, so the caller acts on a row that still exists and still
+    belongs to the locked profile.
+    """
+    gone = SourceResolution.DoesNotExist(f"No SourceResolution matches id {resolution_pk}.")
+    profile_id = SourceResolution.objects.filter(pk=resolution_pk).values_list("profile_id", flat=True).first()
+    if profile_id is None:
+        raise gone
+    with locked_profile_policy(profile_id):
+        # A delete can still commit in the gap above, and a write that saw the row would resurrect it.
+        if not SourceResolution.objects.filter(pk=resolution_pk, profile_id=profile_id).exists():
+            raise gone
         yield
 
 
@@ -191,6 +213,15 @@ class ImportProfile(NetBoxModel):
                 raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
             self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
         return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        """Take the policy lock before the cascade, which would otherwise take the child rows first.
+
+        A policy write holds this row and then writes a child, so a cascade in the opposite order
+        deadlocks against it. NetBox deletes each object through this method, in bulk as well.
+        """
+        with locked_profile_policy(self.pk):
+            return super().delete(*args, **kwargs)
 
     @property
     def adapter(self):
