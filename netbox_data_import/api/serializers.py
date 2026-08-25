@@ -5,7 +5,7 @@
 import json
 
 from django.core.exceptions import ValidationError
-from netbox.api.serializers import NetBoxModelSerializer
+from netbox.api.serializers import NetBoxModelSerializer, ValidatedModelSerializer
 from rest_framework import serializers
 
 from ..adapters import DEFAULT_ADAPTER_KEY, get_adapter
@@ -25,18 +25,35 @@ from ..models import (
 )
 
 
-class PolicySectionSerializer(serializers.ModelSerializer):
+class PolicySectionApplicabilityMixin:
     """Apply the shared policy-section applicability rule on the REST write path."""
 
-    def validate(self, attrs):
+    def validate_policy_section(self, attrs):
         """Reject a row whose section does not apply to the profile's Source Adapter."""
-        attrs = super().validate(attrs)
         profile = attrs.get("profile", getattr(self.instance, "profile", None))
         try:
             validate_section_applicability(profile, self.Meta.model.POLICY_SECTION)
         except ValidationError as exc:
             raise serializers.ValidationError({"profile": exc.messages}) from exc
-        return attrs
+
+
+class PolicySectionSerializer(PolicySectionApplicabilityMixin, ValidatedModelSerializer):
+    """Base for the policy-section serializers, which are backed by plain Django models."""
+
+    # No Meta.fields below lists display_url: these rows have no UI detail route to reverse.
+
+    def validate(self, attrs):
+        """Run the policy checks, then the NetBox model validation."""
+        # A nested serializer is handed a resolved instance, so no field mapping exists to check.
+        if getattr(self, "nested", False):
+            return super().validate(attrs)
+        # Ahead of super(), whose full_clean() reports the same rules as non-field errors.
+        self.validate_policy_section(attrs)
+        self.validate_policy_row(attrs)
+        return super().validate(attrs)
+
+    def validate_policy_row(self, attrs):
+        """Check the fields this model resolves through the catalog. Subclasses override."""
 
 
 def _validate_target_keys(instance, attrs, names, *, allow_candidates=True, required=False):
@@ -106,13 +123,11 @@ class ColumnMappingSerializer(PolicySectionSerializer):
 
     class Meta:
         model = ColumnMapping
-        fields = ["id", "profile", "source_column", "target_field"]
+        fields = ["id", "url", "display", "profile", "source_column", "target_field"]
 
-    def validate(self, attrs):
+    def validate_policy_row(self, attrs):
         """Resolve the target field through the catalog."""
-        attrs = super().validate(attrs)
         _validate_target_keys(self.instance, attrs, ("target_field",), required=True)
-        return attrs
 
 
 class _RackTypeSlugField(serializers.SlugRelatedField):
@@ -131,7 +146,7 @@ class ClassRoleMappingSerializer(PolicySectionSerializer):
 
     class Meta:
         model = ClassRoleMapping
-        fields = ["id", "profile", "source_class", "creates_rack", "rack_type", "role_slug", "ignore"]
+        fields = ["id", "url", "display", "profile", "source_class", "creates_rack", "rack_type", "role_slug", "ignore"]
 
 
 class DeviceTypeMappingSerializer(PolicySectionSerializer):
@@ -141,6 +156,8 @@ class DeviceTypeMappingSerializer(PolicySectionSerializer):
         model = DeviceTypeMapping
         fields = [
             "id",
+            "url",
+            "display",
             "profile",
             "source_make",
             "source_model",
@@ -154,7 +171,7 @@ class IgnoredDeviceSerializer(PolicySectionSerializer):
 
     class Meta:
         model = IgnoredDevice
-        fields = ["id", "profile", "source_id", "device_name"]
+        fields = ["id", "url", "display", "profile", "source_id", "device_name"]
 
 
 class ColumnTransformRuleSerializer(PolicySectionSerializer):
@@ -164,6 +181,8 @@ class ColumnTransformRuleSerializer(PolicySectionSerializer):
         model = ColumnTransformRule
         fields = [
             "id",
+            "url",
+            "display",
             "profile",
             "source_column",
             "pattern",
@@ -171,19 +190,16 @@ class ColumnTransformRuleSerializer(PolicySectionSerializer):
             "group_2_target",
         ]
 
-    def validate(self, attrs):
+    def validate_policy_row(self, attrs):
         """Resolve both group targets through the catalog, excluding the candidate targets."""
-        attrs = super().validate(attrs)
         _validate_target_keys(self.instance, attrs, ("group_1_target", "group_2_target"), allow_candidates=False)
-        return attrs
 
 
 class SourceResolutionSerializer(PolicySectionSerializer):
     """Serializer for SourceResolution (rerere, plain model)."""
 
-    def validate(self, attrs):
+    def validate_policy_row(self, attrs):
         """Reject Contact candidate resolutions that the importer cannot apply."""
-        attrs = super().validate(attrs)
         instance = self.instance
         source_column = attrs.get("source_column", getattr(instance, "source_column", None))
         if source_column == "candidate:contact":
@@ -208,12 +224,13 @@ class SourceResolutionSerializer(PolicySectionSerializer):
                 ) from None
             except ValidationError as exc:
                 raise serializers.ValidationError({"resolved_fields": exc.messages}) from exc
-        return attrs
 
     class Meta:
         model = SourceResolution
         fields = [
             "id",
+            "url",
+            "display",
             "profile",
             "source_id",
             "source_column",
