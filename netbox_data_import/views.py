@@ -319,13 +319,54 @@ def _validate_model_instance(instance, label):
         raise ValueError(f"Validation error in {label}: {msg}") from exc
 
 
+def _legacy_adapter_config(profile_data):
+    """Return the pre-cutover scalar keys rewritten as a flat-workbook adapter configuration.
+
+    Releases up to 1.5.2 exported these settings as top-level `profile` keys. Database rows were
+    moved into `adapter_config` by migration 0022; an exported file has no such upgrade path.
+    """
+    from .adapter_forms import FlatWorkbookConfigForm
+
+    # The legacy keys are exactly the flat-workbook adapter's own settings.
+    legacy_keys = set(FlatWorkbookConfigForm.base_fields) & set(profile_data)
+    if not legacy_keys:
+        return None
+    conflicting = sorted({"adapter_config", "source_adapter"} & set(profile_data))
+    if conflicting:
+        raise ValueError(
+            f"Profile key(s) {', '.join(sorted(legacy_keys))} belong to a release before the adapter "
+            f"cutover and cannot be combined with {', '.join(conflicting)}."
+        )
+    config = {key: profile_data[key] for key in legacy_keys}
+    # The legacy file names the Contact Role by slug; adapter_config stores its name.
+    slug = config.get("primary_contact_role")
+    if slug:
+        from tenancy.models import ContactRole
+
+        role = ContactRole.objects.filter(slug=slug).first()
+        if role is None:
+            raise ValueError(f"No Contact Role matches the primary_contact_role slug '{slug}'.")
+        config["primary_contact_role"] = role.name
+    return config
+
+
 def _profile_defaults_from_yaml(profile_data):
     """Resolve the scalar profile values and the adapter configuration from YAML."""
-    unknown = sorted(set(profile_data) - {"name", "adapter_config", *_PROFILE_FIELDS})
+    legacy_config = _legacy_adapter_config(profile_data)
+    accepted = {"name", "adapter_config", *_PROFILE_FIELDS}
+    if legacy_config is not None:
+        accepted |= set(legacy_config)
+    unknown = sorted(set(profile_data) - accepted)
     if unknown:
         raise ValueError(f"Unknown profile key(s): {', '.join(unknown)}")
     profile_defaults = {field: profile_data[field] for field in _PROFILE_FIELDS if field in profile_data}
-    if "adapter_config" in profile_data:
+    if legacy_config is not None:
+        from .adapters import FlatWorkbookAdapter
+
+        # Pinned, not DEFAULT_ADAPTER_KEY: a legacy file is a flat workbook whatever the default becomes.
+        profile_defaults["source_adapter"] = FlatWorkbookAdapter.key
+        profile_defaults["adapter_config"] = legacy_config
+    elif "adapter_config" in profile_data:
         profile_defaults["adapter_config"] = profile_data["adapter_config"]
     return profile_defaults
 

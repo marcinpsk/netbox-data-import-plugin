@@ -1244,8 +1244,9 @@ manufacturer_mappings:
         """A key the profile block does not define is an error, never ignored."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        with self.assertRaisesMessage(ValueError, "sheet_name"):
-            _apply_profile_yaml_data({"profile": {"name": "Stray Key", "sheet_name": "Data"}})
+        # `sheet_name` is no longer a stray key: it is one of the pre-1.6 scalars #108 translates.
+        with self.assertRaisesMessage(ValueError, "stray_key"):
+            _apply_profile_yaml_data({"profile": {"name": "Stray Key", "stray_key": "Data"}})
 
     def test_post_creates_column_mappings(self):
         """POST with YAML creates column mappings."""
