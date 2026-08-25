@@ -9,7 +9,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from django.urls import reverse
 
-from netbox_data_import.engine import reapply_saved_resolutions, run_import
+from netbox_data_import.engine import derive_effective_rows, run_import
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
@@ -382,7 +382,7 @@ class ContactResolutionAjaxTest(TestCase):
         )
         # The first decision unblocks the row, so the second one meets a matched device.
         self._post()
-        rows = reapply_saved_resolutions([self.row], self.profile)
+        rows = derive_effective_rows([self.row], self.profile)
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
         device_row = next(r for r in result.rows if r.object_type == "device")
         self.assertEqual(device_row.extra_data.get("netbox_device_id"), device.pk)

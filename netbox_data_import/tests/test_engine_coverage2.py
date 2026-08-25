@@ -17,7 +17,7 @@ from netbox_data_import.engine import (
     _identity_text,
     _preview_device_row,
     _store_source_id,
-    reapply_saved_resolutions,
+    derive_effective_rows,
     run_import,
 )
 from netbox_data_import.models import ClassRoleMapping, ImportProfile, SourceResolution, stored_import_source
@@ -38,14 +38,14 @@ def _make_profile(name="ECov2Test") -> ImportProfile:
     )
 
 
-class ReapplySavedResolutionsTest(TestCase):
-    """Tests for reapply_saved_resolutions — lines 300, 305-313."""
+class DeriveEffectiveRowsTest(TestCase):
+    """Tests for derive_effective_rows."""
 
     def setUp(self):
         self.profile = _make_profile("RRSCov2")
 
     def test_applies_resolved_fields_to_matching_rows(self):
-        """reapply_saved_resolutions updates rows for matching source_ids."""
+        """derive_effective_rows updates rows for matching source_ids."""
         SourceResolution.objects.create(
             profile=self.profile,
             source_id="SRC-001",
@@ -57,13 +57,13 @@ class ReapplySavedResolutionsTest(TestCase):
             {"_row_number": 1, "source_id": "SRC-001", "device_name": "old-name", "device_class": "Unknown"},
             {"_row_number": 2, "source_id": "SRC-002", "device_name": "unchanged"},
         ]
-        result = reapply_saved_resolutions(rows, self.profile)
+        result = derive_effective_rows(rows, self.profile)
         self.assertEqual(result[0]["device_name"], "new-name")
         self.assertEqual(result[0]["device_class"], "Server")
         self.assertEqual(result[1]["device_name"], "unchanged")
 
     def test_does_not_mutate_original_rows(self):
-        """reapply_saved_resolutions makes shallow copies of matching rows."""
+        """derive_effective_rows makes shallow copies of matching rows."""
         SourceResolution.objects.create(
             profile=self.profile,
             source_id="SRC-MUT",
@@ -72,7 +72,7 @@ class ReapplySavedResolutionsTest(TestCase):
             resolved_fields={"device_name": "resolved"},
         )
         rows = [{"_row_number": 1, "source_id": "SRC-MUT", "device_name": "orig"}]
-        result = reapply_saved_resolutions(rows, self.profile)
+        result = derive_effective_rows(rows, self.profile)
         self.assertEqual(result[0]["device_name"], "resolved")
         self.assertEqual(rows[0]["device_name"], "orig")
 
@@ -89,7 +89,7 @@ class ReapplySavedResolutionsTest(TestCase):
             {"_row_number": 1, "source_id": "MATCH", "device_name": "x"},
             {"_row_number": 2, "source_id": "NOMATCH", "device_name": "z"},
         ]
-        result = reapply_saved_resolutions(rows, self.profile)
+        result = derive_effective_rows(rows, self.profile)
         self.assertEqual(len(result), 2)
 
     def test_copies_conflicts_before_clearing_resolved_fields(self):
@@ -110,7 +110,7 @@ class ReapplySavedResolutionsTest(TestCase):
             }
         ]
 
-        result = reapply_saved_resolutions(rows, self.profile)
+        result = derive_effective_rows(rows, self.profile)
 
         self.assertNotIn("_conflicts", result[0])
         self.assertEqual(rows[0]["_conflicts"], {"device_name": {"Name": "orig", "Alias": "override"}})
@@ -141,7 +141,7 @@ class ReapplySavedResolutionsTest(TestCase):
             }
         ]
 
-        result = reapply_saved_resolutions(rows, self.profile)
+        result = derive_effective_rows(rows, self.profile)
 
         self.assertEqual(result[0]["asset_tag"], "TEST-ASSET-002")
         self.assertIsNone(result[0]["device_name"])
@@ -163,7 +163,7 @@ class ReapplySavedResolutionsTest(TestCase):
             }
         ]
 
-        result = reapply_saved_resolutions(rows, self.profile)
+        result = derive_effective_rows(rows, self.profile)
 
         self.assertEqual(result[0]["device_name"], "merged-from-other-column")
 

@@ -196,7 +196,8 @@ class MultiColumnMergeTest(TestCase):
         self.assertEqual(conflict["Service Tag"], "XYZ-999")
 
     def test_conflict_cleared_by_saved_resolution(self):
-        """A saved SourceResolution for the target field clears the conflict."""
+        """A saved SourceResolution for the target field clears the conflict when rows are derived."""
+        from netbox_data_import.engine import derive_effective_rows
         from netbox_data_import.models import SourceResolution
 
         profile = self._make_merge_profile()
@@ -208,7 +209,10 @@ class MultiColumnMergeTest(TestCase):
             resolved_fields={"serial": "ABC-111"},
         )
 
-        rows = parse_file(self._make_single_row_workbook("ABC-111", "XYZ-999"), profile)
+        parsed = parse_file(self._make_single_row_workbook("ABC-111", "XYZ-999"), profile)
+        self.assertIsNone(parsed[0].get("serial"), "parsing stays pristine")
+
+        rows = derive_effective_rows(parsed, profile)
         self.assertEqual(rows[0]["serial"], "ABC-111")
         self.assertFalse(rows[0].get("_conflicts", {}).get("serial"))
 

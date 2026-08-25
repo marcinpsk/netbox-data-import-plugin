@@ -544,12 +544,6 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     # Pre-fetch transform rules for efficiency
     transform_rules = list(profile.column_transform_rules.all())
 
-    # Pre-fetch all saved resolutions for this profile (avoids N+1 queries)
-    resolutions_by_source_id: dict[str, list] = {}
-    for res in profile.source_resolutions.all():
-        resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
-    source_to_targets = _build_source_to_targets_map(profile)
-
     unused_stats: dict[str, dict] = {}
     capture_extra = profile.adapter_settings.capture_extra_data
 
@@ -566,12 +560,6 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
 
         _apply_transform_rules(row_dict, row, raw_headers, transform_rules)
 
-        # Apply saved resolutions (rerere)
-        source_id = row_dict.get("source_id", "")
-        if source_id:
-            for res in resolutions_by_source_id.get(str(source_id), []):
-                _apply_one_resolution(row_dict, res, source_to_targets)
-
         if return_stats or capture_extra:
             extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
             if capture_extra and extra:
@@ -584,13 +572,12 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     return rows
 
 
-def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
-    """Re-apply all saved SourceResolutions for a profile to pre-parsed rows.
+def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
+    """Return *rows* with every saved SourceResolution applied, leaving *rows* untouched.
 
-    Called in the preview GET handler so newly-saved resolutions are reflected
-    without requiring the user to re-upload the file.  The session rows may
-    already have older resolutions baked in; re-applying is idempotent for those
-    and correctly applies any resolution saved after the initial upload.
+    `rows` must be the pristine parsed rows. Applying a resolution only ever sets fields, so a
+    derivation that starts from an earlier result cannot express a target field the operator has
+    since dropped. Every caller derives, and none stores what it derived.
     """
     resolutions_by_source_id: dict[str, list] = {}
     for res in profile.source_resolutions.all():

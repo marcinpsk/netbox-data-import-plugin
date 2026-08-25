@@ -784,9 +784,11 @@ class ImportSetupView(PermissionRequiredMixin, View):
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
         context = {"site": site, "location": location, "tenant": tenant}
-        result = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
+        result = engine.run_import(
+            engine.derive_effective_rows(rows, profile), profile, context, dry_run=True, user=request.user
+        )
 
-        # Store result + raw rows + context in session for the preview/execute steps
+        # The session keeps the pristine parsed rows; every reader derives from them.
         # Rows need JSON-safe serialization (handle datetime from Excel)
         record_recalculated_preview(request.session, result)
         request.session["import_rows"] = _serialize_rows(rows)
@@ -870,9 +872,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             result = engine.ImportResult.from_session_dict(stored_result)
         else:
             context_obj = {"site": site, "location": location, "tenant": tenant}
-            # Apply saved resolutions again so changes made after upload appear.
-            rows = engine.reapply_saved_resolutions(rows, profile)
-            request.session["import_rows"] = _serialize_rows(rows)
+            # Derived, never stored: writing this back would bake the resolution into the session
+            # and stop a later edit from dropping a field.
+            rows = engine.derive_effective_rows(rows, profile)
             result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
             record_recalculated_preview(request.session, result)
 
@@ -2286,7 +2288,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             messages.error(request, "The device name must contain 1 to 64 characters.")
             return _name_resolution_response(request, next_url)
 
-        effective_rows = engine.reapply_saved_resolutions(rows, profile)
+        effective_rows = engine.derive_effective_rows(rows, profile)
         other_names = {
             engine._identity_text(device_name)
             for row in effective_rows
@@ -3619,7 +3621,9 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
         ignored_source_ids = set(profile.ignored_devices.values_list("source_id", flat=True))
         class_mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         eligible_rows = []
-        for row in rows:
+        # Match on the resolved identity: binding a source ID to the pristine name would override
+        # the resolution the operator approved in the preview.
+        for row in engine.derive_effective_rows(rows, profile):
             source_id = engine._str_val(row.get("source_id"))
             mapping = class_mappings.get(engine._str_val(row.get("device_class")))
             if (
@@ -3793,7 +3797,7 @@ class SyncSingleRowView(_AjaxPermissionView):
         except ValidationError as exc:
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
 
-        rows = engine.reapply_saved_resolutions(rows, profile)
+        rows = engine.derive_effective_rows(rows, profile)
 
         target = next((r for r in rows if r.get("_row_number") == row_number), None)
         if target is None:

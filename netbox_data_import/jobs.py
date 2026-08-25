@@ -82,7 +82,8 @@ class ImportJobRunner(JobRunner):
         if tenant_id and tenant is None:
             self._fail("The target tenant is no longer available.")
         context = {"site": site, "location": location, "tenant": tenant}
-        rows = engine.reapply_saved_resolutions(rows, profile)
+        pristine_rows = rows
+        rows = engine.derive_effective_rows(pristine_rows, profile)
 
         self._save_data(phase="validating")
         current_preview = engine.run_import(rows, profile, context, dry_run=True, user=user)
@@ -94,19 +95,35 @@ class ImportJobRunner(JobRunner):
             )
 
         identity_changed = False
+        superseded = False
         with transaction.atomic():
-            result = engine.run_import(
-                rows,
-                profile,
-                context,
-                dry_run=False,
-                user=user,
-                expected_intents=_import_intents(current_preview),
-                progress_callback=self._publish_progress,
-            )
-            identity_changed = any(row.extra_data.get("identity_state_changed") for row in result.rows)
-            if identity_changed:
+            # Lock the saved decisions first: read-committed does not wait for a save still open at
+            # the validation read above, and without the lock one could commit between this check
+            # and the writes below. A concurrent edit now blocks until this transaction ends.
+            list(profile.source_resolutions.select_for_update().values_list("pk", flat=True))
+            superseded = engine.derive_effective_rows(pristine_rows, profile) != rows
+            if superseded:
                 transaction.set_rollback(True)
+            else:
+                result = engine.run_import(
+                    rows,
+                    profile,
+                    context,
+                    dry_run=False,
+                    user=user,
+                    expected_intents=_import_intents(current_preview),
+                    progress_callback=self._publish_progress,
+                )
+                identity_changed = any(row.extra_data.get("identity_state_changed") for row in result.rows)
+                if identity_changed:
+                    transaction.set_rollback(True)
+        if superseded:
+            self._fail(
+                "A saved resolution changed while this import was starting. "
+                "Review the refreshed preview before importing.",
+                current_preview,
+                context_data,
+            )
         if identity_changed:
             self._fail(
                 "NetBox identity changed during import. No changes were saved. Review the refreshed preview.",

@@ -23,7 +23,7 @@ from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 from tenancy.models import Contact, ContactAssignment, ContactRole
 
 from netbox_data_import.contact_resolution import ContactSelection, PrimaryContactResolver
-from netbox_data_import.engine import parse_file, reapply_saved_resolutions, run_import
+from netbox_data_import.engine import parse_file, derive_effective_rows, run_import
 from netbox_data_import.jobs import ImportJobRunner
 from netbox_data_import.models import (
     ClassRoleMapping,
@@ -594,7 +594,7 @@ class NativeContactSyncTest(TestCase):
             }
         )
 
-        [resolved_row] = reapply_saved_resolutions([row], self.profile)
+        [resolved_row] = derive_effective_rows([row], self.profile)
         result = self._sync(resolved_row)
 
         self.assertFalse(result.has_errors, [item.to_dict() for item in result.rows])
@@ -620,7 +620,7 @@ class NativeContactSyncTest(TestCase):
             _candidate_values={"contact": {"Owner": "Candidate Operator"}},
         )
 
-        [resolved_row] = reapply_saved_resolutions([row], self.profile)
+        [resolved_row] = derive_effective_rows([row], self.profile)
         result = self._sync(resolved_row)
 
         self.assertFalse(result.has_errors, [item.to_dict() for item in result.rows])
@@ -647,7 +647,7 @@ class NativeContactSyncTest(TestCase):
             _candidate_values={"contact": {"Owner": "Replacement Operator"}},
         )
 
-        [resolved_row] = reapply_saved_resolutions([row], self.profile)
+        [resolved_row] = derive_effective_rows([row], self.profile)
         result = run_import([resolved_row], self.profile, {"site": self.site}, dry_run=True)
 
         self.assertTrue(result.has_errors)
