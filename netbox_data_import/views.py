@@ -31,6 +31,7 @@ from .forms import (
 from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
 from . import __version__ as _plugin_version
 from .models import (
+    locked_profile_policy,
     ClassRoleMapping,
     ColumnMapping,
     ColumnTransformRule,
@@ -2350,12 +2351,14 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             "resolved_fields": {"device_name": new_name},
         }
         try:
-            save_permission_scoped_object(
-                request.user,
-                SourceResolution,
-                {"profile": profile, "source_id": source_id, "source_column": "device_name"},
-                resolution_values,
-            )
+            # Serialize against an executing import, which holds the same profile row.
+            with locked_profile_policy(profile.pk):
+                save_permission_scoped_object(
+                    request.user,
+                    SourceResolution,
+                    {"profile": profile, "source_id": source_id, "source_column": "device_name"},
+                    resolution_values,
+                )
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved name.")
             return _name_resolution_response(request, next_url)
@@ -2442,7 +2445,8 @@ class SaveResolutionView(_AjaxPermissionView):
                 original_value = json.dumps(candidates, sort_keys=True)
                 contact_context = (source_row, result_row)
             try:
-                with transaction.atomic():
+                # Serialize against an executing import, which holds the same profile row.
+                with locked_profile_policy(profile.pk):
                     save_permission_scoped_object(
                         request.user,
                         SourceResolution,
@@ -2893,6 +2897,12 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 
     queryset = SourceResolution.objects.all()
     permission_required = "netbox_data_import.delete_sourceresolution"
+
+    def post(self, request, *args, **kwargs):
+        """Serialize against an executing import, which holds the same profile row."""
+        resolution = self.get_object(**kwargs)
+        with locked_profile_policy(resolution.profile_id):
+            return super().post(request, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------

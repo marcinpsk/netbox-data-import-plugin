@@ -2907,7 +2907,7 @@ class BulkYamlImportExtendedTest(BaseViewTestCase):
 
 
 class SourceResolutionDeleteViewTest(BaseViewTestCase):
-    """Tests for SourceResolutionDeleteView GET."""
+    """Tests for SourceResolutionDeleteView."""
 
     def setUp(self):
         """Set up a resolution to delete."""
@@ -2928,12 +2928,18 @@ class SourceResolutionDeleteViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 200)
 
     def test_post_delete_removes_resolution(self):
-        """POST delete removes the resolution."""
+        """A confirmed POST deletes the row. NetBox re-renders its form without `confirm`."""
+        url = reverse("plugins:netbox_data_import:source_resolution_delete", kwargs={"pk": self.res.pk})
+        resp = self.client.post(url, {"confirm": True})
+        self.assertEqual(resp.status_code, 302, resp.content)
+        self.assertFalse(SourceResolution.objects.filter(pk=self.res.pk).exists())
+
+    def test_an_unconfirmed_post_deletes_nothing(self):
+        """The confirmation form is the guard, so an unconfirmed POST must leave the row alone."""
         url = reverse("plugins:netbox_data_import:source_resolution_delete", kwargs={"pk": self.res.pk})
         resp = self.client.post(url)
-        self.assertIn(resp.status_code, [200, 302])
-        if resp.status_code == 302:
-            self.assertFalse(SourceResolution.objects.filter(pk=self.res.pk).exists())
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(SourceResolution.objects.filter(pk=self.res.pk).exists())
 
 
 class ClassRoleMappingInvalidPostTest(BaseViewTestCase):

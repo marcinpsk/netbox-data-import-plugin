@@ -7,6 +7,7 @@ from rest_framework import viewsets, permissions
 from rest_framework.permissions import DjangoModelPermissions
 
 from ..models import (
+    locked_profile_policy,
     ImportProfile,
     ColumnMapping,
     ClassRoleMapping,
@@ -139,6 +140,23 @@ class SourceResolutionViewSet(_PluginModelViewSet):
 
     queryset = SourceResolution.objects.select_related("profile")
     serializer_class = SourceResolutionSerializer
+
+    # Each write serializes against an executing import, which holds the same profile row.
+    def perform_create(self, serializer):
+        """Create the resolution under the profile lock."""
+        with locked_profile_policy(serializer.validated_data["profile"].pk):
+            serializer.save()
+
+    def perform_update(self, serializer):
+        """Update the resolution under the profile lock."""
+        profile = serializer.validated_data.get("profile") or serializer.instance.profile
+        with locked_profile_policy(profile.pk):
+            serializer.save()
+
+    def perform_destroy(self, instance):
+        """Delete the resolution under the profile lock."""
+        with locked_profile_policy(instance.profile_id):
+            instance.delete()
 
     def get_queryset(self):
         """Filter by profile_id query param if provided."""

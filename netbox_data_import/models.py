@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+from contextlib import contextmanager
+
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
@@ -108,6 +110,20 @@ def validate_contact_candidate_resolution(
         "field_values": {field: value.strip() for field, value in field_values.items()},
         "contact_id": contact_id,
     }
+
+
+@contextmanager
+def locked_profile_policy(profile_id):
+    """Hold one profile row for a policy write or for an import execution.
+
+    Every SourceResolution write and the import worker take this same lock in this same order, so a
+    decision cannot commit between the worker's check and its writes. Locking the resolution rows
+    alone would leave an insert free to land in that window, because a row that does not exist yet
+    cannot be locked.
+    """
+    with transaction.atomic():
+        ImportProfile.objects.select_for_update().get(pk=profile_id)
+        yield
 
 
 class ImportProfile(NetBoxModel):

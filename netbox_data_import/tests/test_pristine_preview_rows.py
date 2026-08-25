@@ -4,8 +4,11 @@
 
 import uuid
 
+from threading import Event
+
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
+from django.db.utils import OperationalError
 from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
@@ -231,3 +234,77 @@ class UploadStoresPristineRowsTest(TestCase):
         stored = self.client.session.get("import_rows") or []
         self.assertTrue(stored)
         self.assertEqual([r for r in stored if r.get("device_name") == "baked-by-parse-file"], [])
+
+
+class PolicyWriteSerializationTest(TransactionTestCase):
+    """A resolution write and an executing import serialize on the same profile row."""
+
+    def setUp(self):
+        """Create the profile whose policy rows the two sides contend for."""
+        self.profile = _build_profile("Lock Profile")
+
+    def _attempt_while_the_worker_holds_the_profile(self, write):
+        """Run *write* under the policy lock while another connection holds the same profile row."""
+        from django.db import connection
+
+        from netbox_data_import.models import locked_profile_policy
+
+        started = Event()
+        release = Event()
+        blocked = []
+
+        def hold_the_profile_like_the_worker():
+            """Take the same lock the import execution transaction takes."""
+            with locked_profile_policy(self.profile.pk):
+                started.set()
+                self.assertTrue(release.wait(timeout=10))
+
+        with run_on_separate_connection(hold_the_profile_like_the_worker):
+            try:
+                self.assertTrue(started.wait(timeout=10))
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO '750ms'")
+                try:
+                    with locked_profile_policy(self.profile.pk):
+                        write()
+                except OperationalError:
+                    blocked.append(True)
+            finally:
+                release.set()
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO 0")
+        return blocked
+
+    def test_a_new_resolution_cannot_commit_while_an_import_holds_the_profile(self):
+        """An insert takes FOR KEY SHARE on the parent, which the worker's FOR UPDATE already blocks."""
+
+        def insert():
+            SourceResolution.objects.create(
+                profile=self.profile,
+                source_id="LOCK-1",
+                source_column="device_name",
+                original_value="pristine",
+                resolved_fields={"device_name": "late-decision"},
+            )
+
+        self.assertEqual(self._attempt_while_the_worker_holds_the_profile(insert), [True])
+        self.assertFalse(SourceResolution.objects.filter(source_id="LOCK-1").exists())
+
+    def test_an_edited_resolution_cannot_commit_while_an_import_holds_the_profile(self):
+        """Updating a child row touches no parent row, so only the writer's own lock serializes it."""
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="LOCK-2",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "first-decision"},
+        )
+
+        def edit():
+            SourceResolution.objects.filter(profile=self.profile, source_id="LOCK-2").update(
+                resolved_fields={"device_name": "second-decision"}
+            )
+
+        self.assertEqual(self._attempt_while_the_worker_holds_the_profile(edit), [True])
+        row = SourceResolution.objects.get(profile=self.profile, source_id="LOCK-2")
+        self.assertEqual(row.resolved_fields, {"device_name": "first-decision"})
