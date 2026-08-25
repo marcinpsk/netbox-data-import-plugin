@@ -495,6 +495,25 @@ class NativeContactSyncTest(TestCase):
         self.assertIsNone(review.selection)
         self.assertIsNone(review.plan)
 
+    def test_a_row_whose_contact_assignment_is_missing_is_still_an_update(self):
+        """A device row writes more than its own fields, so an absent Contact is a write to report."""
+        row = self._row(
+            contact_resolution_applied=True,
+            contact_field_sources={},
+            contact_field_values={"name": "Noop Contact", "email": "noop.contact@example.invalid"},
+        )
+        run_import([dict(row)], self.profile, {"site": self.site}, dry_run=False)
+        settled = run_import([dict(row)], self.profile, {"site": self.site}, dry_run=True)
+        settled_row = next(r for r in settled.rows if r.object_type == "device")
+        self.assertEqual(settled_row.action, "skip", settled_row.detail)
+
+        ContactAssignment.objects.all().delete()
+
+        preview = run_import([dict(row)], self.profile, {"site": self.site}, dry_run=True)
+
+        device_row = next(r for r in preview.rows if r.object_type == "device")
+        self.assertEqual(device_row.action, "update", device_row.detail)
+
     def test_a_candidate_value_that_identifies_no_contact_suggests_nothing(self):
         """A blank value and a value no Contact carries leave the picker empty."""
         suggestion = PrimaryContactResolver.suggest(

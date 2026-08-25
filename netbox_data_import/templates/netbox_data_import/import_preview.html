@@ -426,7 +426,8 @@
                 {% elif row.action == 'update' %}
                   <span class="badge ndi-badge-update"><i class="mdi mdi-pencil"></i> Update</span>
                 {% elif row.action == 'skip' %}
-                  <span class="badge ndi-badge-skip">Skip</span>
+                  {# A matched row that writes nothing is not the same as one updates were turned off for. #}
+                  <span class="badge ndi-badge-skip">{% if row.extra_data.writes_nothing %}No-op{% else %}Skip{% endif %}</span>
                 {% elif row.action == 'error' %}
                   <span class="badge ndi-badge-error"><i class="mdi mdi-alert"></i> Error</span>
                 {% elif row.action == 'ignore' %}

@@ -388,6 +388,24 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
         action, _detail = self._rack_detail()
         self.assertEqual(action, "skip")
 
+    def _rack_main_row(self):
+        """Return the HTML of the rack row itself, not of its detail row."""
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        rows = list(response.context["result"].rows)
+        index = next(i for i, row in enumerate(rows, start=1) if row.object_type == "rack")
+        html = response.content.decode()
+        end = html.index(f'<tr id="diff-{index}" class="ndi-diff-row"')
+        return html[html.rindex("<tr", 0, end) : end]
+
+    def test_a_row_that_writes_nothing_reads_as_a_no_op_not_a_skip(self):
+        """`skip` also covers a row updates were turned off for, which is a different answer."""
+        self._preview_the_rack_that_netbox_already_holds(u_height=42)
+
+        main_row = self._rack_main_row()
+
+        self.assertIn(">No-op<", main_row)
+        self.assertNotIn(">Skip<", main_row)
+
 
 class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
     """Sync placement sits in the collapsed detail row, so the main row has to advertise it."""

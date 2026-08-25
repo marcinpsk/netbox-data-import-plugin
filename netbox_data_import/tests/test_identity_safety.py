@@ -3424,7 +3424,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
         profile = self._rack_profile("Rack Location Update Profile")
         location = Location.objects.create(name="Rack Target Location", slug="rack-target-location", site=self.site)
-        rack = Rack.objects.create(site=self.site, location=location, name="RACK-LOCATION-UPDATE", u_height=42)
+        # A height the row changes, so this stays an update and the location assertion still bites.
+        rack = Rack.objects.create(site=self.site, location=location, name="RACK-LOCATION-UPDATE", u_height=24)
         row = self._rack_row(2, "RACK-LOCATION-UPDATE", rack.name)
 
         result = run_import([row], profile, {"site": self.site, "location": location}, dry_run=False)
