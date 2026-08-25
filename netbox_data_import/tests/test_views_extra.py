@@ -6,7 +6,8 @@ from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ColumnMapping, ImportProfile
+from netbox_data_import.models import ColumnMapping, DeviceTypeMapping, ImportProfile
+from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.views import _fuzzy_match_netbox_field
 
 User = get_user_model()
@@ -15,10 +16,12 @@ User = get_user_model()
 def _make_profile(name="QMapTest") -> ImportProfile:
     return ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        update_existing=False,
-        create_missing_device_types=False,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "update_existing": False,
+            "create_missing_device_types": False,
+        },
     )
 
 
@@ -70,6 +73,48 @@ class QuickAddColumnMappingViewTest(TestCase):
         self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
         self.assertTrue(
             ColumnMapping.objects.filter(profile=self.profile, source_column="JiraID", target_field="serial").exists()
+        )
+
+    def test_an_overlength_target_field_is_refused(self):
+        """CATALOG.is_valid accepts any name after a family prefix, but the column is 100 chars."""
+        resp = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "JiraID",
+                "target_field": "extra_json:" + ("x" * 200),
+            },
+        )
+        self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
+        self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, source_column="JiraID").exists())
+
+    def test_an_overlength_source_column_is_refused(self):
+        """The source column is read straight from the request and the column is 200 chars."""
+        resp = self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "J" * 300,
+                "target_field": "serial",
+            },
+        )
+        self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
+        self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, target_field="serial").exists())
+
+    def test_a_refused_mapping_does_not_delete_the_displaced_row(self):
+        """The delete runs before the create, so an invalid write must not strand the profile."""
+        ColumnMapping.objects.create(profile=self.profile, source_column="OldCol", target_field="asset_tag")
+        self.client.post(
+            self.url,
+            {
+                "profile_id": self.profile.pk,
+                "source_column": "N" * 300,
+                "target_field": "asset_tag",
+            },
+        )
+        self.assertTrue(
+            ColumnMapping.objects.filter(profile=self.profile, source_column="OldCol").exists(),
+            "an invalid replacement must leave the existing mapping in place",
         )
 
     def test_keeps_existing_direct_mapping_for_another_target(self):
@@ -146,13 +191,13 @@ class QuickAddColumnMappingViewTest(TestCase):
         )
 
     def test_invalid_extra_json_key_rejected(self):
-        """extra_json: key with invalid characters (spaces, symbols) is rejected."""
+        """An extra_json: key with no name after the prefix is rejected by the catalog validator."""
         resp = self.client.post(
             self.url,
             {
                 "profile_id": self.profile.pk,
                 "source_column": "JiraID",
-                "target_field": "extra_json:has spaces!",
+                "target_field": "extra_json:   ",
             },
         )
         self.assertRedirects(resp, reverse("plugins:netbox_data_import:import_preview"), fetch_redirect_response=False)
@@ -248,4 +293,129 @@ class QuickAddColumnMappingViewTest(TestCase):
                 ).values_list("target_field", flat=True)
             ),
             {"candidate:contact", "asset_tag", "serial"},
+        )
+
+
+class QuickResolveDeviceTypeValidationTest(TestCase):
+    """The device-type quick action reads slugs and names straight from the request."""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser("qdtuser", "qdt@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="qdtuser", password="testpass")
+        self.profile = _make_profile("QDeviceTypeTest")
+        self.url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
+        self.preview = reverse("plugins:netbox_data_import:import_preview")
+
+    def _payload(self, **overrides):
+        payload = {
+            "profile_id": self.profile.pk,
+            "source_make": "Acme",
+            "source_model": "Widget",
+            "netbox_mfg_slug": "acme",
+            "netbox_dt_slug": "widget",
+        }
+        payload.update(overrides)
+        return payload
+
+    def _post(self, **overrides):
+        return self.client.post(self.url, self._payload(**overrides))
+
+    def _client_holding_only_the_mapping_permission(self, username, *, also_add_manufacturer=False):
+        """Log in a user who may save the mapping but may not create every NetBox object.
+
+        NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants nothing.
+        """
+        from dcim.models import Manufacturer
+
+        granted = [
+            (ImportProfile, ["change"], {"pk": self.profile.pk}),
+            (DeviceTypeMapping, ["add"], None),
+        ]
+        if also_add_manufacturer:
+            granted.append((Manufacturer, ["add"], None))
+        user_with_object_permission(username, granted)
+        client = Client()
+        self.assertTrue(client.login(username=username, password="testpass"))
+        return client
+
+    def test_an_overlength_device_type_slug_is_refused(self):
+        """The slug is posted directly and the mapping column holds 100 characters."""
+        response = self._post(netbox_dt_slug="d" * 300)
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+
+    def test_an_overlength_manufacturer_slug_is_refused(self):
+        """The manufacturer slug shares the same 100 character column."""
+        response = self._post(netbox_mfg_slug="m" * 300)
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+
+    def test_an_overlength_source_make_is_refused(self):
+        """The source make is read from the request and the column holds 200 characters."""
+        response = self._post(source_make="M" * 300)
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+
+    def test_creating_now_refuses_a_make_the_manufacturer_name_cannot_hold(self):
+        """The mapping accepts 200 characters, but the NetBox manufacturer name holds 100."""
+        from dcim.models import Manufacturer
+
+        response = self._post(source_make="M" * 150, action="create_now")
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
+        self.assertFalse(
+            DeviceTypeMapping.objects.filter(profile=self.profile).exists(),
+            "a refused create_now must not leave the mapping behind",
+        )
+
+    def test_creating_now_refuses_a_model_the_device_type_cannot_hold(self):
+        """The posted device type name is never bounded and the NetBox model holds 100."""
+        from dcim.models import DeviceType, Manufacturer
+
+        response = self._post(netbox_dt_name="D" * 150, action="create_now")
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceType.objects.filter(slug="widget").exists())
+        # The manufacturer is written first, so the refusal has to take it back too.
+        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
+        self.assertFalse(
+            DeviceTypeMapping.objects.filter(profile=self.profile).exists(),
+            "a refused create_now must not leave the mapping behind",
+        )
+
+    def test_a_missing_manufacturer_permission_leaves_no_mapping_behind(self):
+        """The refusal must not commit the mapping the same request already wrote."""
+        client = self._client_holding_only_the_mapping_permission("qdt-no-mfg")
+
+        response = client.post(self.url, self._payload(action="create_now"))
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+
+    def test_a_missing_device_type_permission_leaves_no_mapping_behind(self):
+        """The second permission sits behind the first, so it needs its own refusal."""
+        from dcim.models import Manufacturer
+
+        client = self._client_holding_only_the_mapping_permission("qdt-no-dt", also_add_manufacturer=True)
+
+        response = client.post(self.url, self._payload(action="create_now"))
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
+        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
+
+    def test_a_valid_mapping_is_still_saved(self):
+        """The guard must not refuse the values the preview page actually posts."""
+        response = self._post()
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        self.assertTrue(
+            DeviceTypeMapping.objects.filter(
+                profile=self.profile, source_make="Acme", netbox_device_type_slug="widget"
+            ).exists()
         )

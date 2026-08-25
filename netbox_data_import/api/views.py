@@ -47,7 +47,7 @@ class DjangoModelPermissionsWithView(DjangoModelPermissions):
 class ImportProfileViewSet(NetBoxModelViewSet):
     """CRUD viewset for ImportProfile (NetBoxModel)."""
 
-    queryset = ImportProfile.objects.select_related("primary_contact_role").prefetch_related(
+    queryset = ImportProfile.objects.prefetch_related(
         "tags", "column_mappings", "class_role_mappings", "device_type_mappings"
     )
     serializer_class = ImportProfileSerializer

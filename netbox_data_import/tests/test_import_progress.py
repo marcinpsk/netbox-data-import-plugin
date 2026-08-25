@@ -16,7 +16,7 @@ from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 
 from netbox_data_import.engine import run_import
 from netbox_data_import.jobs import ImportJobRunner
-from netbox_data_import.models import ClassRoleMapping, DeviceTypeMapping, ImportProfile
+from netbox_data_import.models import ClassRoleMapping, DeviceTypeMapping, ImportProfile, SourceResolution
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 
@@ -55,8 +55,7 @@ class ImportProgressViewTest(IsolatedRQQueueTestMixin, TestCase):
         )
         role = DeviceRole.objects.create(name="Import Progress Device", slug="import-progress-device")
         self.profile = ImportProfile.objects.create(
-            name="Import Progress Profile",
-            create_missing_device_types=False,
+            name="Import Progress Profile", adapter_config={"create_missing_device_types": False}
         )
         self.class_mapping = ClassRoleMapping.objects.create(
             profile=self.profile,
@@ -299,6 +298,30 @@ class ImportProgressViewTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertContains(results_response, "progress-device")
         setup_response = self.client.get(reverse("plugins:netbox_data_import:import_setup"))
         self.assertNotContains(setup_response, "Resume preview")
+
+    def test_resolution_saved_after_queueing_refuses_the_stale_import(self):
+        """The worker replays a late resolution before it validates the accepted preview."""
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(reverse("plugins:netbox_data_import:import_run"))
+        job = Job.objects.get(name="Data Import")
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="PROGRESS-001",
+            source_column="device_name",
+            original_value="progress-device",
+            resolved_fields={"device_name": "resolved-progress-device"},
+        )
+
+        self.run_rq_jobs()
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, "failed", job.error)
+        self.assertEqual(
+            job.data["message"],
+            "The import preview changed. Review the refreshed preview before importing.",
+        )
+        self.assertFalse(Device.objects.filter(name="progress-device").exists())
+        self.assertFalse(Device.objects.filter(name="resolved-progress-device").exists())
 
     def test_status_fragment_reads_live_progress_from_rq(self):
         """The polling endpoint reads progress that is visible before commit."""

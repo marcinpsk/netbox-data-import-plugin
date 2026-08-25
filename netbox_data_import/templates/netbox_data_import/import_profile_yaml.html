@@ -33,17 +33,23 @@
 
         <div class="alert alert-info mt-4">
           <strong>Expected YAML format:</strong>
+          <p class="mb-0 mt-2 small">
+            <code>adapter_config</code> replaces the profile's stored adapter configuration. It is not merged.
+            An omitted setting resets to the adapter's default.
+          </p>
           <pre class="mb-0 mt-2 small">profile:
   name: My Profile
-  sheet_name: Data
-  source_id_column: Id
-  custom_field_name: cans_id
-  update_existing: true
-  create_missing_device_types: true
-  preview_view_mode: rows
-  capture_extra_data: true
-  primary_contact_role: primary-contact
-  primary_contact_lookup_field: email
+  source_adapter: flat_workbook
+  adapter_config:
+    sheet_name: Data
+    source_id_column: Id
+    custom_field_name: cans_id
+    update_existing: true
+    create_missing_device_types: true
+    preview_view_mode: rows
+    capture_extra_data: true
+    primary_contact_role: Primary Contact
+    primary_contact_lookup_field: email
 
 column_mappings:
   - source_column: Name

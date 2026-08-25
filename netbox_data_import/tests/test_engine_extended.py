@@ -88,10 +88,12 @@ def _make_profile(name="EngineTest2") -> ImportProfile:
     """Create a profile matching the sample fixture."""
     profile = ImportProfile.objects.create(
         name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-        update_existing=True,
-        create_missing_device_types=True,
+        adapter_config={
+            "sheet_name": "Data",
+            "source_id_column": "Id",
+            "update_existing": True,
+            "create_missing_device_types": True,
+        },
     )
     for src, tgt in {
         "Id": "source_id",
@@ -213,7 +215,7 @@ class RunImportWriteTest(TestCase):
 
         # Pre-create the rack
         Rack.objects.create(name="Rack-01", site=self.site, u_height=42)
-        self.profile.update_existing = False
+        self.profile.adapter_config["update_existing"] = False
         self.profile.save()
 
         with open(FIXTURE_PATH, "rb") as f:
@@ -333,7 +335,9 @@ class ResolveDeviceTypeSlugsTest(TestCase):
 
     def setUp(self):
         """Create a profile for slug resolution tests."""
-        self.profile = ImportProfile.objects.create(name="SlugTest", sheet_name="Data", source_id_column="Id")
+        self.profile = ImportProfile.objects.create(
+            name="SlugTest", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
+        )
 
     def test_no_mapping_auto_slugifies(self):
         """Without an explicit mapping, make/model are slugified."""
@@ -393,10 +397,12 @@ class ColumnTransformRuleTest(TestCase):
         """Create profile with a transform rule."""
         self.profile = ImportProfile.objects.create(
             name="TransformTest",
-            sheet_name="Data",
-            source_id_column="Id",
-            update_existing=False,
-            create_missing_device_types=True,
+            adapter_config={
+                "sheet_name": "Data",
+                "source_id_column": "Id",
+                "update_existing": False,
+                "create_missing_device_types": True,
+            },
         )
         ColumnMapping.objects.create(profile=self.profile, source_column="Id", target_field="source_id")
         ColumnMapping.objects.create(profile=self.profile, source_column="Name", target_field="device_name")
@@ -631,7 +637,7 @@ class CreateMissingDeviceTypesFalseTest(TestCase):
 
         self.site = Site.objects.create(name="NoDTSite", slug="no-dt-site")
         self.profile = _make_profile("NoDTTest")
-        self.profile.create_missing_device_types = False
+        self.profile.adapter_config["create_missing_device_types"] = False
         self.profile.save()
 
     def test_missing_device_type_produces_error_row(self):
@@ -677,7 +683,9 @@ class ApplyTransformRulesTest(TestCase):
 
     def setUp(self):
         """Create a minimal profile for transform rule tests."""
-        self.profile = ImportProfile.objects.create(name="ATRTest", sheet_name="Data", source_id_column="Id")
+        self.profile = ImportProfile.objects.create(
+            name="ATRTest", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
+        )
 
     def test_group_1_target_set_on_match(self):
         """When the pattern matches, group_1_target is written to row_dict."""
@@ -790,7 +798,9 @@ class FindExistingDeviceTest(TestCase):
         mfg = Manufacturer.objects.create(name="FED Corp", slug="fed-corp")
         self.dt = DeviceType.objects.create(manufacturer=mfg, model="FED Model", slug="fed-model")
         self.role = DeviceRole.objects.create(name="FED Role", slug="fed-role")
-        self.profile = ImportProfile.objects.create(name="FEDProfile", sheet_name="Data", source_id_column="Id")
+        self.profile = ImportProfile.objects.create(
+            name="FEDProfile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
+        )
 
     def test_source_id_link_match(self):
         """_find_existing_device returns (device, 'source ID link') when a DeviceExistingMatch exists."""
@@ -936,7 +946,9 @@ class WriteRackToDbTest(TestCase):
         from dcim.models import Site
 
         self.site = Site.objects.create(name="WRSite", slug="wr-site")
-        self.profile = ImportProfile.objects.create(name="WRProfile", sheet_name="Data", source_id_column="Id")
+        self.profile = ImportProfile.objects.create(
+            name="WRProfile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
+        )
 
     def test_create_new_rack(self):
         """_write_rack_to_db creates a new Rack and records action='create'."""
@@ -1011,7 +1023,7 @@ class WriteRackToDbTest(TestCase):
         from dcim.models import Rack
 
         Rack.objects.create(site=self.site, name="SkipRack", u_height=42)
-        self.profile.update_existing = False
+        self.profile.adapter_config["update_existing"] = False
         self.profile.save()
         result = ImportResult()
         ctx = ImportContext(
@@ -1088,7 +1100,7 @@ class WriteDeviceRowTest(TestCase):
         self.dt = DeviceType.objects.create(manufacturer=self.mfg, model="WD Model", slug="wd-model")
         self.role = DeviceRole.objects.create(name="WD Role", slug="wd-role")
         self.profile = ImportProfile.objects.create(
-            name="WDProfile", sheet_name="Data", source_id_column="Id", update_existing=True
+            name="WDProfile", adapter_config={"sheet_name": "Data", "source_id_column": "Id", "update_existing": True}
         )
         self.crm = ClassRoleMapping.objects.create(profile=self.profile, source_class="Server", role_slug="wd-role")
 
@@ -1251,7 +1263,7 @@ class WriteDeviceRowTest(TestCase):
         """_write_device_row returns action='skip' when update_existing=False and device exists."""
         from dcim.models import Device, DeviceRole, DeviceType, Rack
 
-        self.profile.update_existing = False
+        self.profile.adapter_config["update_existing"] = False
         self.profile.save()
         Device.objects.create(name="wd-dev-05", site=self.site, device_type=self.dt, role=self.role)
         result = ImportResult()
@@ -1370,7 +1382,7 @@ class Pass3EdgeCasesTest(TestCase):
         dt = DeviceType.objects.create(manufacturer=mfg, model="P3 Model", slug="p3-model")
         role = DeviceRole.objects.create(name="P3 Role", slug="server")
         Device.objects.create(name="p3-existing", site=self.site, device_type=dt, role=role)
-        self.profile.update_existing = True
+        self.profile.adapter_config["update_existing"] = True
         self.profile.save()
         rows = [self._device_row(device_name="p3-existing", source_id="P3005", u_position="")]
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
@@ -1385,7 +1397,7 @@ class Pass3EdgeCasesTest(TestCase):
         dt = DeviceType.objects.create(manufacturer=mfg, model="P3B Model", slug="p3b-model")
         role = DeviceRole.objects.create(name="P3B Role", slug="server-p3b")
         Device.objects.create(name="p3b-existing", site=self.site, device_type=dt, role=role)
-        self.profile.update_existing = False
+        self.profile.adapter_config["update_existing"] = False
         self.profile.save()
         rows = [self._device_row(device_name="p3b-existing", source_id="P3006", u_position="")]
         result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
@@ -1461,7 +1473,7 @@ class EnsureManufacturerEdgeCaseTest(TestCase):
         """_ensure_manufacturer creates manufacturer in execute mode when flag is set."""
         from dcim.models import Manufacturer
 
-        self.profile.create_missing_device_types = True
+        self.profile.adapter_config["create_missing_device_types"] = True
         self.profile.save()
         result = ImportResult()
         ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=False, result=result)
@@ -1473,7 +1485,7 @@ class EnsureManufacturerEdgeCaseTest(TestCase):
         """_ensure_manufacturer is a no-op in execute mode when create_missing_device_types=False."""
         from dcim.models import Manufacturer
 
-        self.profile.create_missing_device_types = False
+        self.profile.adapter_config["create_missing_device_types"] = False
         self.profile.save()
         result = ImportResult()
         ctx = ImportContext(profile=self.profile, site=None, location=None, tenant=None, dry_run=False, result=result)
@@ -1712,7 +1724,9 @@ class FindExistingDeviceDeletedMatchTest(TestCase):
 
     def setUp(self):
         """Create profile for match tests."""
-        self.profile = ImportProfile.objects.create(name="DELMatchProfile", sheet_name="Data", source_id_column="Id")
+        self.profile = ImportProfile.objects.create(
+            name="DELMatchProfile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
+        )
 
     def test_deleted_device_match_falls_through(self):
         """When source-ID match points to a non-existent device PK, returns (None, None)."""
@@ -1820,7 +1834,7 @@ class Pass3InvalidPositionTest(TestCase):
     def test_invalid_position_produces_device_row(self):
         """A device row with non-numeric u_position (line 853-854 TypeError path) processes without crash."""
 
-        self.profile.create_missing_device_types = True
+        self.profile.adapter_config["create_missing_device_types"] = True
         self.profile.save()
 
         rows = [
@@ -1868,7 +1882,9 @@ class ResolveDeviceTypeSlugsNormalizeTest(TestCase):
 
     def setUp(self):
         """Create profile and a device type mapping with unicode escape in model."""
-        self.profile = ImportProfile.objects.create(name="DTSNProfile", sheet_name="Data", source_id_column="Id")
+        self.profile = ImportProfile.objects.create(
+            name="DTSNProfile", adapter_config={"sheet_name": "Data", "source_id_column": "Id"}
+        )
 
     def test_unicode_escape_in_model_matches(self):
         """DeviceTypeMapping with extra whitespace in source_model is matched after normalization (lines 241-242)."""
@@ -1916,11 +1932,12 @@ class StoreSourceIdTest(TestCase):
         role = DeviceRole.objects.create(name="SSIRole", slug="ssi-role")
         self.device = Device.objects.create(name="ssi-dev", device_type=dt, role=role, site=self.site)
         self.profile = ImportProfile.objects.create(
-            name="SSIProfile", sheet_name="Data", source_id_column="Id", custom_field_name="cans_id"
+            name="SSIProfile",
+            adapter_config={"sheet_name": "Data", "source_id_column": "Id", "custom_field_name": "cans_id"},
         )
 
     def test_store_source_id_with_custom_field_name(self):
-        """_store_source_id with profile.custom_field_name set writes to that custom field."""
+        """_store_source_id with the custom_field_name setting writes to that custom field."""
         from netbox_data_import.engine import _store_source_id
 
         _store_source_id(self.device, self.profile, "SSI-001")
@@ -1932,7 +1949,7 @@ class StoreSourceIdTest(TestCase):
         from netbox_data_import.engine import _store_source_id
         from netbox_data_import.models import stored_import_source
 
-        self.profile.custom_field_name = ""
+        self.profile.adapter_config["custom_field_name"] = ""
         self.profile.save()
         _store_source_id(self.device, self.profile, "SSI-002")
         self.device.refresh_from_db()
@@ -1959,7 +1976,7 @@ class PreviewMatchedBySerialTest(TestCase):
             serial="PMBS-SN-UNIQUE",
         )
         self.profile = _make_profile("PMBSProfile")
-        self.profile.update_existing = True
+        self.profile.adapter_config["update_existing"] = True
         self.profile.save()
         # Add a CRM for "Server" → server-pmbs (using the profile's built-in mappings)
         from netbox_data_import.models import ClassRoleMapping
@@ -2018,7 +2035,7 @@ class DeviceExistingMatchPrecedenceTest(TestCase):
         )
 
         self.profile = _make_profile("DEMPProfile")
-        self.profile.update_existing = True
+        self.profile.adapter_config["update_existing"] = True
         self.profile.save()
         # update_or_create: _make_profile already creates source_class="Server"
         ClassRoleMapping.objects.update_or_create(
@@ -2102,10 +2119,12 @@ class PermissionDeniedEngineTest(TestCase):
         self.role = DeviceRole.objects.create(name="PermRole", slug="perm-role")
         self.profile = ImportProfile.objects.create(
             name="PermProfile",
-            sheet_name="Data",
-            source_id_column="Id",
-            update_existing=True,
-            create_missing_device_types=True,
+            adapter_config={
+                "sheet_name": "Data",
+                "source_id_column": "Id",
+                "update_existing": True,
+                "create_missing_device_types": True,
+            },
         )
         self.crm = ClassRoleMapping.objects.create(
             profile=self.profile, source_class="Server", creates_rack=False, role_slug="perm-role"

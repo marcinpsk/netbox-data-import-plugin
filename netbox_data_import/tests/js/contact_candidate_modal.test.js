@@ -2,10 +2,14 @@
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
 /* Load the first-party browser asset in jsdom and drive it with real selects and
- * Tom Select instances, as the page does. */
+ * Tom Select instances, as the page does.
+ *
+ * The rendered flows live in `tests/browser/contact_candidate_modal.spec.js`, which runs the
+ * same controller in a real browser. This file keeps the cases a rendered test cannot reach:
+ * a missing lookup URL, the network call behind the picker, and a page with no saved state. */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TomSelect from "tom-select";
 
 const controllerPath = resolve(
@@ -21,12 +25,6 @@ const candidates = {
       "Contact Email": "first@example.invalid",
     },
   },
-  "second-row": {
-    contact: {
-      "Owner Name": "Second Contact",
-      "Owner Email": "second@example.invalid",
-    },
-  },
 };
 
 const contactSuggestions = {
@@ -38,6 +36,10 @@ const contactSuggestions = {
   },
 };
 
+const roleSuggestions = {
+  "first-row": { name: "Contact Name", email: "Contact Email" },
+};
+
 function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/" } = {}) {
   const lookupAttribute = lookupUrl === null ? "" : ` data-contact-lookup-url="${lookupUrl}"`;
   document.body.innerHTML = `
@@ -47,34 +49,34 @@ function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/" } 
         <input type="hidden" id="contactCandidateOriginalValue">
         <input type="hidden" id="contactCandidateResolvedFields">
         <input type="hidden" id="contactCandidateContactId">
+        <div id="contactCandidateSummary">
+          <div id="contactCandidateSummaryName"></div>
+          <div id="contactCandidateSummaryEmail"></div>
+          <div id="contactCandidateSummaryPhone"></div>
+          <button type="button" id="contactCandidateEditToggle" aria-expanded="false"></button>
+        </div>
+        <div id="contactCandidateProvenance"></div>
+        <div id="contactCandidateSuggestion" class="d-none"></div>
+        <div id="contactCandidateEdit" hidden>
+          <div id="contactCandidateValueRows"></div>
+          <button type="button" id="contactCandidateAddValue"></button>
+        </div>
+        <button type="button" id="contactCandidateLinkExisting" aria-expanded="false"></button>
         <input type="checkbox" id="contactCandidateNone">
-        <div id="contactCandidateFields">
-          <div id="contactCandidateSuggestion" class="d-none"></div>
+        <div id="contactCandidateExistingWrap" hidden>
           <select id="contactCandidateExisting"></select>
-          <select id="contactCandidateName"></select>
-          <input id="contactCandidateNameValue">
-          <select id="contactCandidateEmail"></select>
-          <input id="contactCandidateEmailValue">
-          <select id="contactCandidatePhone"></select>
-          <input id="contactCandidatePhoneValue">
         </div>
       </form>
     </div>
     <script id="ndi-candidate-values-by-row" type="application/json">${JSON.stringify(candidates)}</script>
     <script id="ndi-contact-suggestions-by-row" type="application/json">${JSON.stringify(contactSuggestions)}</script>
+    <script id="ndi-contact-role-suggestions-by-row" type="application/json">${JSON.stringify(roleSuggestions)}</script>
   `;
   window.EXISTING_RESOLUTIONS = resolutions;
   /* NetBox enhances every plain <select> itself and never exposes TomSelect on
-   * `window`, so the fixture initializes the selects the same way its
+   * `window`, so the fixture initializes the select the same way its
    * initStaticSelects() does. */
-  for (const id of [
-    "contactCandidateExisting",
-    "contactCandidateName",
-    "contactCandidateEmail",
-    "contactCandidatePhone",
-  ]) {
-    new TomSelect(document.getElementById(id), { create: false, maxOptions: undefined });
-  }
+  new TomSelect(document.getElementById("contactCandidateExisting"), { create: false, maxOptions: undefined });
   window.eval(controllerSource);
 }
 
@@ -87,14 +89,32 @@ function openRow(rowNumber, sourceId) {
   document.getElementById("contactCandidateModal").dispatchEvent(event);
 }
 
-function widgetOptionTexts(select) {
-  select.nextElementSibling.querySelector(".ts-control").dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  select.tomselect.refreshOptions(true);
-  return [...select.nextElementSibling.querySelectorAll(".ts-dropdown .option")].map((option) => option.textContent);
+function rolesByColumn() {
+  return Object.fromEntries(
+    [...document.querySelectorAll("#contactCandidateValueRows .ndi-contact-value-row")].map((row) => [
+      row.dataset.sourceColumn,
+      row.querySelector(".ndi-contact-role").value,
+    ]),
+  );
+}
+
+function submitPayload() {
+  const form = document.getElementById("contactCandidateForm");
+  const blocker = (event) => event.preventDefault();
+  form.addEventListener("submit", blocker);
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  form.removeEventListener("submit", blocker);
+  return JSON.parse(document.getElementById("contactCandidateResolvedFields").value || "{}");
 }
 
 beforeEach(() => {
   document.body.innerHTML = "";
+});
+
+// A stub restored at the end of a test body survives a failed assertion above it and turns
+// one failure into several.
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("contact candidate modal", () => {
@@ -103,212 +123,88 @@ describe("contact candidate modal", () => {
     delete window.EXISTING_RESOLUTIONS;
 
     expect(() => openRow("first-row", "source-first")).not.toThrow();
-    expect(document.getElementById("contactCandidateName").value).toBe("");
+    expect(rolesByColumn()).toEqual({ "Contact Name": "name", "Contact Email": "email" });
   });
 
-  /* Tom Select debounces `load` through loadThrottle, so the guard is observed
-   * through its callback rather than a synchronous return. */
   it("keeps the contact picker usable when the template omits the lookup URL", async () => {
     addPreviewFixture({}, { lookupUrl: null });
     openRow("first-row", "source-first");
 
-    const existing = document.getElementById("contactCandidateExisting");
-    const loaded = new Promise((resolveLoad) => {
-      existing.tomselect.settings.load.call(existing.tomselect, "query", resolveLoad);
-    });
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    const results = await new Promise((done) => picker.settings.load("ada", done));
 
-    await expect(loaded).resolves.toBeUndefined();
-  });
-
-  it("keeps candidate options visible in Tom Select after opening a row", () => {
-    addPreviewFixture();
-    openRow("first-row", "source-first");
-
-    const select = document.getElementById("contactCandidateName");
-    expect([...select.options].map((option) => option.value)).toEqual(["", "Contact Name", "Contact Email"]);
-    expect(widgetOptionTexts(select)).toEqual(["Contact Name: First Contact", "Contact Email: first@example.invalid"]);
-  });
-
-  it("shows saved sources and replaces widget options when another row opens", () => {
-    addPreviewFixture({
-      "source-first": {
-        "candidate:contact": {
-          resolved_fields: {
-            contact_resolution_applied: true,
-            contact_field_sources: { name: "Contact Name", email: "Contact Email" },
-          },
-        },
-      },
-    });
-    openRow("first-row", "source-first");
-
-    const name = document.getElementById("contactCandidateName");
-    const email = document.getElementById("contactCandidateEmail");
-    expect(name.value).toBe("Contact Name");
-    expect(name.tomselect.getValue()).toBe("Contact Name");
-    expect(email.value).toBe("Contact Email");
-    expect(email.tomselect.getValue()).toBe("Contact Email");
-
-    openRow("second-row", "source-second");
-    expect(widgetOptionTexts(name)).toEqual(["Owner Name: Second Contact", "Owner Email: second@example.invalid"]);
-    expect(name.tomselect.getValue()).toBe("");
-  });
-
-  it("disables and re-enables both native and Tom Select controls for no contact", () => {
-    addPreviewFixture();
-    openRow("first-row", "source-first");
-
-    const checkbox = document.getElementById("contactCandidateNone");
-    checkbox.checked = true;
-    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
-    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
-      const select = document.getElementById(id);
-      expect(select.disabled).toBe(true);
-      expect(select.tomselect.isDisabled).toBe(true);
-    }
-
-    checkbox.checked = false;
-    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
-    for (const id of ["contactCandidateName", "contactCandidateEmail", "contactCandidatePhone"]) {
-      const select = document.getElementById(id);
-      expect(select.disabled).toBe(false);
-      expect(select.tomselect.isDisabled).toBe(false);
-    }
-  });
-
-  it("saves typed Contact details when no source column supplies them", () => {
-    addPreviewFixture();
-    openRow("second-row", "source-second");
-    document.getElementById("contactCandidateNameValue").value = "Typed Contact";
-    document.getElementById("contactCandidateEmailValue").value = "typed@example.invalid";
-    document.getElementById("contactCandidatePhoneValue").value = "+1 202-555-0104";
-
-    document.getElementById("contactCandidateForm").dispatchEvent(new Event("submit", { cancelable: true }));
-
-    expect(JSON.parse(document.getElementById("contactCandidateResolvedFields").value)).toEqual({
-      contact_resolution_applied: true,
-      contact_field_sources: {},
-      contact_field_values: {
-        name: "Typed Contact",
-        email: "typed@example.invalid",
-        phone: "+1 202-555-0104",
-      },
-      contact_id: null,
-    });
-  });
-
-  it("reopens literal and selected-Contact resolutions as Contact choices", () => {
-    addPreviewFixture({
-      "source-second": {
-        "candidate:contact": {
-          resolved_fields: {
-            contact_resolution_applied: true,
-            contact_field_sources: {},
-            contact_field_values: {
-              name: "Saved Literal Contact",
-              email: "saved.literal@example.invalid",
-            },
-            contact_id: null,
-          },
-        },
-      },
-    });
-
-    openRow("second-row", "source-second");
-
-    expect(document.getElementById("contactCandidateNone").checked).toBe(false);
-    expect(document.getElementById("contactCandidateNameValue").disabled).toBe(false);
-    expect(document.getElementById("contactCandidateNameValue").value).toBe("Saved Literal Contact");
-
-    addPreviewFixture({
-      "source-first": {
-        "candidate:contact": {
-          resolved_fields: {
-            contact_resolution_applied: true,
-            contact_field_sources: {},
-            contact_field_values: {},
-            contact_id: 41,
-          },
-        },
-      },
-    });
-
-    openRow("first-row", "source-first");
-
-    expect(document.getElementById("contactCandidateNone").checked).toBe(false);
-    expect(document.getElementById("contactCandidateExisting").tomselect.getValue()).toBe("41");
-    expect(document.getElementById("contactCandidateForm").dispatchEvent(new Event("submit", { cancelable: true })))
-      .toBe(true);
-    expect(JSON.parse(document.getElementById("contactCandidateResolvedFields").value)).toEqual({
-      contact_resolution_applied: true,
-      contact_field_sources: {},
-      contact_field_values: {
-        name: "Existing First Contact",
-        email: "first@example.invalid",
-        phone: "+1 202-555-0103",
-      },
-      contact_id: 41,
-    });
-  });
-
-  it("offers the matched NetBox Contact and copies its current details", () => {
-    addPreviewFixture();
-    openRow("first-row", "source-first");
-    const existing = document.getElementById("contactCandidateExisting");
-
-    expect(existing.tomselect.options["41"].email).toBe("first@example.invalid");
-    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
-    existing.tomselect.setValue("41");
-
-    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
-    expect(document.getElementById("contactCandidateNameValue").value).toBe("Existing First Contact");
-    expect(document.getElementById("contactCandidateEmailValue").value).toBe("first@example.invalid");
-    expect(document.getElementById("contactCandidatePhoneValue").value).toBe("+1 202-555-0103");
+    expect(results).toBeUndefined();
   });
 
   it("finds Contacts created after the page loaded through the lookup endpoint", async () => {
-    addPreviewFixture();
-    const requested = [];
-    window.fetch = (url) => {
-      requested.push(url);
-      return Promise.resolve({
-        json: () =>
-          Promise.resolve({
-            results: [{ id: 77, name: "Brand New Contact", email: "brand.new@example.invalid", phone: "" }],
-          }),
-      });
-    };
-    openRow("second-row", "source-second");
-
-    const existing = document.getElementById("contactCandidateExisting");
-    existing.tomselect.control_input.value = "brand";
-    existing.tomselect.control_input.dispatchEvent(new Event("input", { bubbles: true }));
-    await vi.waitUntil(() => Boolean(existing.tomselect.options["77"]));
-
-    expect(requested).toEqual(["/contact-lookup/?q=brand"]);
-    expect(widgetOptionTexts(existing)).toEqual(["Brand New Contact · brand.new@example.invalid"]);
-
-    existing.tomselect.setValue("77");
-    expect(document.getElementById("contactCandidateContactId").value).toBe("77");
-    expect(document.getElementById("contactCandidateNameValue").value).toBe("Brand New Contact");
-    expect(document.getElementById("contactCandidateEmailValue").value).toBe("brand.new@example.invalid");
-  });
-
-  it("submits no Contact after an existing Contact was selected", () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: () =>
+        Promise.resolve({
+          results: [{ id: 92, name: "Fresh Contact", email: "fresh@example.invalid", phone: "" }],
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
     addPreviewFixture();
     openRow("first-row", "source-first");
-    document.getElementById("contactCandidateExisting").tomselect.setValue("41");
-    const checkbox = document.getElementById("contactCandidateNone");
-    checkbox.checked = true;
-    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
 
-    document.getElementById("contactCandidateForm").dispatchEvent(new Event("submit", { cancelable: true }));
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    const results = await new Promise((done) => picker.settings.load("fresh", done));
 
-    expect(JSON.parse(document.getElementById("contactCandidateResolvedFields").value)).toEqual({
-      contact_resolution_applied: true,
-      contact_field_sources: {},
-      contact_field_values: {},
-      contact_id: null,
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/contact-lookup/?q=fresh",
+      expect.objectContaining({ headers: { Accept: "application/json" } }),
+    );
+    expect(results[0].name).toBe("Fresh Contact");
+  });
+
+  it("asks for a query of at least two characters before calling the endpoint", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture();
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    await new Promise((done) => picker.settings.load("a", done));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reopens a saved literal value as its own row", () => {
+    addPreviewFixture({
+      "source-first": {
+        "candidate:contact": {
+          resolved_fields: {
+            contact_resolution_applied: true,
+            contact_field_sources: {},
+            contact_field_values: { name: "Typed Name", email: "typed@example.invalid" },
+          },
+        },
+      },
+    });
+    openRow("first-row", "source-first");
+
+    const literals = [...document.querySelectorAll(".ndi-contact-value-row[data-literal]")];
+    expect(literals.map((row) => row.querySelector(".ndi-contact-literal").value)).toEqual([
+      "Typed Name",
+      "typed@example.invalid",
+    ]);
+    expect(submitPayload().contact_field_values).toEqual({
+      name: "Typed Name",
+      email: "typed@example.invalid",
+    });
+  });
+
+  it("keeps the row's own values when a matching NetBox Contact is only offered", () => {
+    addPreviewFixture();
+    openRow("first-row", "source-first");
+
+    // The suggestion opens the picker, but nothing is linked until the operator chooses.
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+    expect(document.getElementById("contactCandidateExistingWrap").hidden).toBe(false);
+    expect(document.getElementById("contactCandidateContactId").value).toBe("");
+    expect(submitPayload().contact_field_sources).toEqual({
+      name: "Contact Name",
+      email: "Contact Email",
     });
   });
 });

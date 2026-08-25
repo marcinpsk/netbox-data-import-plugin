@@ -12,11 +12,7 @@ from netbox_data_import.tests.helpers import set_import_source
 
 
 def _make_profile(name="MiscTest") -> ImportProfile:
-    return ImportProfile.objects.create(
-        name=name,
-        sheet_name="Data",
-        source_id_column="Id",
-    )
+    return ImportProfile.objects.create(name=name, adapter_config={"sheet_name": "Data", "source_id_column": "Id"})
 
 
 class DeviceImportDataExtensionTest(TestCase):

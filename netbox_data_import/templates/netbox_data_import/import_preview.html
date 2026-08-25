@@ -5,7 +5,8 @@
 
 {% block title %}Import Preview{% endblock %}
 
-{% block head %}
+{% block content %}
+{# htmx boost swaps the body and discards the response head, so these render here. #}
 <style>
   /* Badge colors using Tabler CSS variables (NetBox uses --tblr-* not --bs-*) */
   .ndi-badge-create  { background-color: var(--tblr-success) !important; color: #fff !important; }
@@ -36,6 +37,10 @@
   [data-bs-theme="dark"] .ndi-badge-ignored { background-color: #4b5563 !important; border: 1px solid #6b7280 !important; }
   /* Generic unused-column badges need a tinted background to read in dark mode */
   [data-bs-theme="dark"] .ndi-badge-generic { background-color: #374151 !important; color: #e5e7eb !important; border-color: #4b5563 !important; }
+  /* Every source row toggles its own detail row, so it has to look clickable. */
+  #previewRowsBody > tr[data-action] { cursor: pointer; }
+  #previewRowsBody > tr[data-action]:hover > td { background-color: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.03)); }
+  .ndi-contact-resolved { --tblr-btn-color: var(--tblr-success); }
   /* Field diff sub-table. The collapsed state is the `hidden` attribute, not a rule here,
      so a row cannot render expanded while this stylesheet is missing. */
   .ndi-diff-toggle { cursor: pointer; border: none; }
@@ -44,11 +49,14 @@
   .ndi-diff-synced { text-decoration: line-through; color: var(--tblr-secondary); }
   .ndi-diff-badge { background-color: #f59e0b !important; color: #000 !important; }
   [data-bs-theme="dark"] .ndi-diff-badge { background-color: #fbbf24 !important; color: #000 !important; }
+  .ndi-contact-avatar { width: 2.5rem; height: 2.5rem; flex: 0 0 auto;
+                        display: flex; align-items: center; justify-content: center; }
+  .ndi-contact-col-head { font-size: .7rem; letter-spacing: .06em; text-transform: uppercase;
+                          color: var(--tblr-secondary); }
+  .ndi-contact-value-row { display: flex; align-items: center; gap: 1rem; padding: .35rem 0; }
+  .ndi-contact-value-row > .ndi-contact-role { width: 9.5rem; flex: 0 0 auto; }
 </style>
-<script src="{% static 'netbox_data_import/js/preview_row_controls.js' %}"></script>
-{% endblock %}
-
-{% block content %}
+<script src="{% static 'netbox_data_import/js/preview_row_controls.js' %}?v={{ plugin_version }}"></script>
 <input type="hidden" id="ndi-preview-revision" value="{{ preview_revision }}">
 <div class="row">
   <div class="col">
@@ -366,7 +374,9 @@
           </thead>
           <tbody id="previewRowsBody">
             {% for row in result.rows %}
-            <tr id="row-{{ row.row_number }}" data-action="{{ row.action }}" class="
+            {# Row numbers repeat across object types, so the id comes from the render order. #}
+            <tr id="prow-{{ forloop.counter }}" data-action="{{ row.action }}"
+                data-object-type="{{ row.object_type }}" data-row-number="{{ row.row_number }}" class="
               {% if row.action == 'create' and row.object_type == 'device' %}table-success
               {% elif row.action == 'create' and row.object_type == 'rack' %}table-success
               {% elif row.action == 'create' %}table-warning
@@ -426,19 +436,20 @@
               <td class="small text-muted">
                 {{ row.detail }}
                 {% if row.action == 'error' and row.extra_data.conflict_row_number %}
-                  <a href="#row-{{ row.extra_data.conflict_row_number }}"
-                     class="badge bg-warning text-dark text-decoration-none ms-1 ndi-jump-to-row"
-                     data-target-row="{{ row.extra_data.conflict_row_number }}"
-                     title="Scroll to the conflicting row">
+                  <button type="button"
+                          class="badge bg-warning text-dark border-0 ms-1 ndi-jump-to-row"
+                          data-target-row="{{ row.extra_data.conflict_row_number }}"
+                          data-target-type="{{ row.object_type }}"
+                          title="Scroll to the conflicting row">
                     <i class="mdi mdi-arrow-right-thin"></i> Jump to row {{ row.extra_data.conflict_row_number }}
-                  </a>
+                  </button>
                 {% endif %}
                 {% if row.extra_data.field_diff %}
                   {% with diff=row.extra_data.field_diff %}
                   <br>
                   <button type="button" class="badge ndi-diff-badge ndi-diff-toggle mt-1"
-                          data-diff-target="diff-{{ row.row_number }}"
-                          aria-controls="diff-{{ row.row_number }}"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
                           aria-expanded="false"
                           title="Click to see field differences">
                     <i class="mdi mdi-chevron-down"></i> {{ diff|length }} field(s) differ
@@ -449,13 +460,24 @@
                   {% with ignored=row.extra_data.field_ignored %}
                   <br>
                   <button type="button" class="badge ndi-badge-ignored ndi-diff-toggle mt-1"
-                          data-diff-target="diff-{{ row.row_number }}"
-                          aria-controls="diff-{{ row.row_number }}"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
                           aria-expanded="false"
                           title="Click to see ignored field differences">
                     <i class="mdi mdi-eye-off"></i> {{ ignored|length }} field(s) ignored
                   </button>
                   {% endwith %}
+                {% endif %}
+                {% if not row.extra_data.field_diff and not row.extra_data.field_ignored %}
+                  {# The row click is a pointer shortcut, so the keyboard needs a real control. #}
+                  <br>
+                  <button type="button" class="badge ndi-diff-badge ndi-diff-toggle mt-1"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
+                          aria-expanded="false"
+                          title="Show what this row does">
+                    <i class="mdi mdi-chevron-down"></i> Detail
+                  </button>
                 {% endif %}
               </td>
               <td class="text-end" style="white-space:nowrap; min-width:180px;">
@@ -534,6 +556,7 @@
                     <input type="hidden" name="profile_id" value="{{ profile_id }}">
                     <input type="hidden" name="source_id" value="{{ row.source_id }}">
                     <input type="hidden" name="row_number" value="{{ row.row_number }}">
+                    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
                     <input type="hidden" name="next" value="{{ preview_url }}">
                     <input type="text" name="new_name" value="{{ row.extra_data.suggested_name }}"
                            maxlength="64" required class="form-control form-control-sm"
@@ -664,6 +687,17 @@
                 {% endif %}
 
                 {% if row.object_type == 'device' and row.extra_data.candidate_values.contact and profile_id %}
+                {# A resolved row reads as answered: the operator needs to see which rows are left. #}
+                {% if row.source_id|stringformat:"s" in resolved_contact_source_ids %}
+                <button type="button"
+                        class="btn btn-sm btn-outline-success ms-1 ndi-contact-resolved"
+                        data-ndi-modal="#contactCandidateModal"
+                        data-row-number="{{ row.row_number }}"
+                        data-source-id="{{ row.source_id }}"
+                        title="This row's Contact fields are resolved. Open to review or change them.">
+                  <i class="mdi mdi-account-check"></i> Contact resolved
+                </button>
+                {% else %}
                 <button type="button"
                         class="btn btn-sm btn-outline-warning ms-1"
                         data-ndi-modal="#contactCandidateModal"
@@ -672,6 +706,7 @@
                         title="Choose which candidate values supply this row's Contact fields">
                   <i class="mdi mdi-account-question"></i> Resolve contact fields
                 </button>
+                {% endif %}
                 {% endif %}
 
                 {# Conflict badge: shown when two source columns disagree on the same target field #}
@@ -719,12 +754,29 @@
 
               </td>
             </tr>
-            {% if row.extra_data.netbox_device_id %}
-            {% if row.extra_data.field_diff or row.extra_data.field_ignored %}
-            <tr id="diff-{{ row.row_number }}" class="ndi-diff-row" hidden>
+            {# Every row carries a detail row so a click always answers, even with nothing to act on. #}
+            <tr id="diff-{{ forloop.counter }}" class="ndi-diff-row" hidden>
               <td colspan="7" class="p-0 border-top-0">
                 <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
-                  {% if row.rack_name %}
+                  {# `netbox_device_id` is set for device rows only, so the summary reads the action. #}
+                  {% if row.action == 'create' %}
+                  <div class="text-muted small">
+                    This row creates a new object, so there is nothing to compare against NetBox.
+                  </div>
+                  {% elif not row.extra_data.field_diff and not row.extra_data.field_ignored %}
+                  {% if not row.extra_data.netbox_device_id or not row.rack_name %}
+                  {% if row.action == 'update' %}
+                  <div class="text-muted small">
+                    This row matches NetBox. There is no field difference and no placement to apply.
+                  </div>
+                  {% else %}
+                  <div class="text-muted small">
+                    This row writes nothing to NetBox. The Detail column gives the reason.
+                  </div>
+                  {% endif %}
+                  {% endif %}
+                  {% endif %}
+                  {% if row.extra_data.netbox_device_id and row.rack_name %}
                   <div class="mb-2">
                     {# Grey and inert when this action writes nothing: green means it writes something #}
                     <button type="button"
@@ -742,6 +794,7 @@
                     <span class="text-muted small ms-2">rack=<strong>{{ row.rack_name }}</strong>{% if row.extra_data.u_position %}, U{{ row.extra_data.u_position }}{% endif %}{% if row.extra_data.face %}, {{ row.extra_data.face }}{% endif %}</span>
                   </div>
                   {% endif %}
+                  {% if row.extra_data.field_diff or row.extra_data.field_ignored %}
                   <table class="table table-sm table-borderless ndi-diff-table mb-0">
                     <thead>
                       <tr class="text-muted">
@@ -753,7 +806,7 @@
                     </thead>
                     <tbody>
                       {% for field_name, vals in row.extra_data.field_diff.items %}
-                      <tr id="diff-field-{{ row.row_number }}-{{ field_name }}">
+                      <tr id="diff-field-{{ forloop.parentloop.counter }}-{{ field_name }}">
                         <td class="text-muted">
                           {{ field_name }}
                           {% if field_name in row.extra_data.field_informational %}
@@ -789,7 +842,7 @@
                       </tr>
                       {% endfor %}
                       {% for field_name, vals in row.extra_data.field_ignored.items %}
-                      <tr id="ignored-field-{{ row.row_number }}-{{ field_name }}">
+                      <tr id="ignored-field-{{ forloop.parentloop.counter }}-{{ field_name }}">
                         <td class="text-muted">{{ field_name }}</td>
                         <td class="text-muted">
                           {{ vals.netbox|default:"—" }}
@@ -811,11 +864,10 @@
                       {% endfor %}
                     </tbody>
                   </table>
+                  {% endif %}
                 </div>
               </td>
             </tr>
-            {% endif %}
-            {% endif %}
             {% empty %}
             <tr><td colspan="7" class="text-center text-muted">No rows found in file.</td></tr>
             {% endfor %}
@@ -845,6 +897,7 @@
         {% csrf_token %}
         <div class="modal-body">
           <input type="hidden" name="profile_id" id="res_profile_id" value="{{ profile_id }}">
+          <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
           <input type="hidden" name="source_id" id="res_source_id">
           <input type="hidden" name="source_column" id="res_source_column">
           <input type="hidden" name="original_value" id="res_original_value">
@@ -912,6 +965,7 @@
       <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}" id="conflictForm">
         {% csrf_token %}
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <input type="hidden" name="source_id" id="conf_source_id">
         <input type="hidden" name="source_column" id="conf_source_column">
         <input type="hidden" name="original_value" id="conf_original_value" value="">
@@ -941,64 +995,69 @@
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title" id="contactCandidateModalLabel">
-          <i class="mdi mdi-account-question"></i> Resolve contact fields
+          <i class="mdi mdi-account-check"></i> Contact for this row
         </h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}"
             id="contactCandidateForm"
-            data-contact-lookup-field="{{ profile.primary_contact_lookup_field }}"
+            data-contact-lookup-field="{{ profile.adapter_settings.primary_contact_lookup_field }}"
             data-contact-lookup-url="{% url 'plugins:netbox_data_import:contact_lookup' %}">
         {% csrf_token %}
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
         <input type="hidden" name="source_id" id="contactCandidateSourceId">
         <input type="hidden" name="source_column" value="candidate:contact">
+        {# The scripts overwrite this with the live token; without them it is the only one sent. #}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <input type="hidden" name="original_value" id="contactCandidateOriginalValue">
         <input type="hidden" name="resolved_fields" id="contactCandidateResolvedFields">
         <input type="hidden" id="contactCandidateContactId">
         <input type="hidden" name="next" value="{{ preview_url }}">
         <div class="modal-body">
-          <p class="text-secondary small">
-            Choose a source column or enter a value for each Contact field. You can also find an existing NetBox Contact.
-          </p>
-          <div class="form-check mb-3">
-            <input class="form-check-input" type="checkbox" id="contactCandidateNone">
-            <label class="form-check-label" for="contactCandidateNone">No contact for this row</label>
+          <div class="card card-sm" id="contactCandidateSummary">
+            <div class="card-body d-flex align-items-start gap-3">
+              <span class="ndi-contact-avatar bg-primary-lt rounded"><i class="mdi mdi-account"></i></span>
+              <div class="flex-fill min-w-0">
+                <div class="fw-bold text-truncate" id="contactCandidateSummaryName"></div>
+                <div class="text-secondary text-truncate" id="contactCandidateSummaryEmail"></div>
+                <div class="text-secondary text-truncate" id="contactCandidateSummaryPhone"></div>
+              </div>
+              <button type="button" class="btn btn-sm" id="contactCandidateEditToggle"
+                      aria-controls="contactCandidateEdit" aria-expanded="false">Change</button>
+            </div>
           </div>
-          <div id="contactCandidateFields" class="row g-3">
-            <div class="col-12">
-              <div id="contactCandidateSuggestion" class="alert alert-info d-none mb-0" role="status"></div>
+          <div class="form-text mt-2" id="contactCandidateProvenance"></div>
+          <div id="contactCandidateSuggestion" class="alert alert-info d-none mt-3 mb-0" role="status"></div>
+
+          <div id="contactCandidateEdit" class="mt-3" hidden>
+            <div class="d-flex justify-content-between align-items-baseline">
+              <span class="ndi-contact-col-head">Values in this row</span>
+              <span class="ndi-contact-col-head">Use as</span>
             </div>
-            <div class="col-12">
-              <label class="form-label" for="contactCandidateExisting">Existing NetBox Contact</label>
-              <select class="form-select" id="contactCandidateExisting"
-                      placeholder="Type a name, email address, or phone number"></select>
-              <div class="form-text">Selecting a Contact copies its current details into the fields below.</div>
+            <hr class="my-2">
+            <div id="contactCandidateValueRows"></div>
+            <button type="button" class="btn btn-link btn-sm p-0" id="contactCandidateAddValue">
+              + Add a value that is not in this row
+            </button>
+          </div>
+
+          <div class="mt-3 d-flex flex-wrap align-items-center gap-3">
+            <button type="button" class="btn btn-link btn-sm p-0" id="contactCandidateLinkExisting"
+                    aria-controls="contactCandidateExistingWrap" aria-expanded="false">
+              Link an existing NetBox contact…
+            </button>
+            <span class="text-secondary" aria-hidden="true">·</span>
+            <div class="form-check m-0">
+              <input class="form-check-input" type="checkbox" id="contactCandidateNone">
+              <label class="form-check-label" for="contactCandidateNone">No contact for this row</label>
             </div>
-            <div class="col-md-4">
-              <label class="form-label" for="contactCandidateName">Contact name</label>
-              <select class="form-select" id="contactCandidateName"></select>
-              <input type="text" class="form-control mt-2" id="contactCandidateNameValue"
-                     aria-label="Contact name value"
-                     placeholder="Or enter a contact name">
-            </div>
-            <div class="col-md-4">
-              <label class="form-label" for="contactCandidateEmail">Email address</label>
-              <select class="form-select" id="contactCandidateEmail"></select>
-              <input type="email" class="form-control mt-2" id="contactCandidateEmailValue"
-                     aria-label="Email address value"
-                     placeholder="Or enter an email address">
-              {% if profile.primary_contact_lookup_field == 'email' %}
-              <div class="form-text">Required because this profile matches Contacts by email.</div>
-              {% endif %}
-            </div>
-            <div class="col-md-4">
-              <label class="form-label" for="contactCandidatePhone">Phone number</label>
-              <select class="form-select" id="contactCandidatePhone"></select>
-              <input type="text" class="form-control mt-2" id="contactCandidatePhoneValue"
-                     aria-label="Phone number value"
-                     placeholder="Or enter a phone number">
-            </div>
+          </div>
+
+          <div id="contactCandidateExistingWrap" class="mt-3" hidden>
+            <label class="form-label" for="contactCandidateExisting">Existing NetBox Contact</label>
+            <select class="form-select" id="contactCandidateExisting"
+                    placeholder="Type a name, email address, or phone number"></select>
+            <div class="form-text">Selecting a Contact uses its current details for this row.</div>
           </div>
         </div>
         <div class="modal-footer">
@@ -1017,6 +1076,7 @@
 {{ conflicts_by_row|json_script:"ndi-conflicts-by-row" }}
 {{ candidate_values_by_row|json_script:"ndi-candidate-values-by-row" }}
 {{ contact_suggestions_by_row|json_script:"ndi-contact-suggestions-by-row" }}
+{{ contact_role_suggestions_by_row|json_script:"ndi-contact-role-suggestions-by-row" }}
 {{ extra_columns_by_row|json_script:"ndi-extra-columns-by-row" }}
 {{ split_field_values_by_source_id|json_script:"ndi-split-field-values" }}
 <script>
@@ -1070,8 +1130,11 @@ var SPLIT_FIELD_VALUES = splitFieldValuesEl ? JSON.parse(splitFieldValuesEl.text
   document.addEventListener('click', function(e) {
     var link = e.target.closest('.ndi-jump-to-row');
     if (link) {
-      var targetRow = link.dataset.targetRow;
-      var el = document.getElementById('row-' + targetRow);
+      // Row numbers repeat across object types, so match the type as well as the number.
+      var el = document.querySelector(
+        '#previewRowsBody > tr[data-object-type="' + link.dataset.targetType +
+        '"][data-row-number="' + link.dataset.targetRow + '"]'
+      );
       if (el) {
         e.preventDefault();
         el.scrollIntoView({behavior: 'smooth', block: 'center'});
@@ -1662,7 +1725,7 @@ function cmCreateRole() {
   }
 
   var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
-  var body = new URLSearchParams({ name: name, slug: slug });
+  var body = new URLSearchParams({ profile_id: '{{ profile_id }}', name: name, slug: slug });
   fetch('{% url "plugins:netbox_data_import:quick_create_role" %}', {
     method: 'POST',
     headers: { 'X-CSRFToken': csrfToken, 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -2500,8 +2563,8 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
   });
 }());
 </script>
-<script src="{% static 'netbox_data_import/js/contact_candidate_modal.js' %}"></script>
-<script src="{% static 'netbox_data_import/js/preview_row_actions.js' %}"></script>
+<script src="{% static 'netbox_data_import/js/contact_candidate_modal.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/preview_row_actions.js' %}?v={{ plugin_version }}"></script>
 <script>
 (function () {
   var CONFLICTS_BY_ROW = JSON.parse(

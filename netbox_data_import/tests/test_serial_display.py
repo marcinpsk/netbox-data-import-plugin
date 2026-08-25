@@ -154,10 +154,12 @@ class SearchDeviceSerialDisplayTest(TestCase):
 
         profile = ImportProfile.objects.create(
             name=name,
-            sheet_name="Data",
-            source_id_column="Id",
-            update_existing=True,
-            create_missing_device_types=True,
+            adapter_config={
+                "sheet_name": "Data",
+                "source_id_column": "Id",
+                "update_existing": True,
+                "create_missing_device_types": True,
+            },
         )
         for src, tgt in {
             "Id": "source_id",

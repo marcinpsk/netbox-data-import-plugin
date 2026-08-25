@@ -9,6 +9,11 @@
  * constructs one Bootstrap Modal per trigger at load, which costs seconds of blocked main
  * thread on a preview with thousands of rows. */
 (function () {
+  // The script ships inside the swapped content, so an htmx boost evaluates it again on every
+  // navigation. Document listeners outlive the swap, so a second evaluation would double them.
+  if (window.ndiPreviewRowControls) return;
+  window.ndiPreviewRowControls = true;
+
   function setDiffExpanded(diffRow, expanded) {
     if (!diffRow) return;
     diffRow.hidden = !expanded;
@@ -29,6 +34,21 @@
     if (!toggle) return;
     var diffRow = document.getElementById(toggle.dataset.diffTarget);
     if (!diffRow) return;
+    setDiffExpanded(diffRow, diffRow.hidden);
+  });
+
+  /* Clicking anywhere on a source row toggles its detail row. This is a pointer shortcut for the
+   * row's own toggle button: the row keeps its table semantics, so the button carries the
+   * keyboard and the assistive-technology contract. Controls inside the row keep their behavior. */
+  document.addEventListener('click', function (event) {
+    var target = event.target;
+    if (target.closest('.ndi-diff-toggle')) return;
+    if (target.closest('button, a, input, select, textarea, label, [data-ndi-modal]')) return;
+    var row = target.closest('#previewRowsBody > tr[data-action]');
+    if (!row) return;
+    // The detail row always follows its source row, so no id lookup is involved.
+    var diffRow = row.nextElementSibling;
+    if (!diffRow || !diffRow.classList.contains('ndi-diff-row')) return;
     setDiffExpanded(diffRow, diffRow.hidden);
   });
 

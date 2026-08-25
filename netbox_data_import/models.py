@@ -5,23 +5,45 @@ from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
-PREVIEW_VIEW_CHOICES = [
-    ("rows", "Row view"),
-    ("racks", "Rack view"),
-]
+from .adapters import (
+    DEFAULT_ADAPTER_KEY,
+    UnknownSourceAdapter,
+    adapter_choices,
+    get_adapter,
+    output_kinds_for,
+)
+from .catalog import CATALOG, has_implemented_module, policy_section
 
-CONTACT_LOOKUP_FIELD_CHOICES = [
-    ("email", "Email address"),
-    ("name", "Name"),
-]
-
-CANDIDATE_TARGET_PREFIX = "candidate:"
-CANDIDATE_TARGET_CHOICES = [
-    ("candidate:contact", "Candidate values: Contact fields"),
-]
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
 CONTACT_RESOLUTION_KEYS = CONTACT_RESOLUTION_REQUIRED_KEYS | frozenset({"contact_field_values", "contact_id"})
+
+
+def validate_adapter_target_module(adapter_key):
+    """Reject a Source Adapter whose Target Module this release does not implement yet."""
+    if not has_implemented_module(output_kinds_for(adapter_key)):
+        raise ValidationError(
+            {"source_adapter": f"This release cannot import from the '{adapter_key}' source adapter yet."}
+        )
+
+
+def validate_registered_adapter(profile):
+    """Reject a profile whose stored Source Adapter this release does not register."""
+    if profile is not None and profile.adapter is None:
+        raise ValidationError(
+            f"This profile uses the source adapter '{profile.source_adapter}', which this release does not register."
+        )
+
+
+def validate_section_applicability(profile, section_key):
+    """Reject a policy row whose section does not apply to its profile's Source Adapter."""
+    section = policy_section(section_key)
+    if section is None or profile is None:
+        return
+    if not section.applies_to(profile.output_kinds):
+        raise ValidationError(
+            f"{section.label} do not apply to a profile using the '{profile.source_adapter}' source adapter."
+        )
 
 
 def _validated_contact_id(contact_id):
@@ -88,83 +110,21 @@ def validate_contact_candidate_resolution(
     }
 
 
-TARGET_FIELD_CHOICES = [
-    ("rack_name", "Rack name"),
-    ("device_name", "Device name"),
-    ("device_class", "Device class (maps to role/rack)"),
-    ("face", "Face (Front/Back)"),
-    ("airflow", "Airflow"),
-    ("u_position", "U position"),
-    ("status", "Status"),
-    ("make", "Make (manufacturer)"),
-    ("model", "Model (device type)"),
-    ("u_height", "U height"),
-    ("serial", "Serial number"),
-    ("asset_tag", "Asset tag"),
-    ("primary_ip4", "Primary IPv4"),
-    ("primary_ip6", "Primary IPv6"),
-    ("oob_ip", "Out-of-band IP"),
-    ("primary_contact", "Primary contact"),
-    ("source_id", "Source ID (stored in custom field)"),
-    *CANDIDATE_TARGET_CHOICES,
-]
-
-COLUMN_TRANSFORM_TARGET_FIELD_CHOICES = [
-    choice for choice in TARGET_FIELD_CHOICES if not choice[0].startswith(CANDIDATE_TARGET_PREFIX)
-]
-
-
 class ImportProfile(NetBoxModel):
     """Named configuration for one source file format."""
 
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True)
-    sheet_name = models.CharField(
-        max_length=100,
-        default="Data",
-        help_text="Name of the Excel worksheet to read",
+    source_adapter = models.CharField(
+        max_length=50,
+        choices=adapter_choices,
+        default=DEFAULT_ADAPTER_KEY,
+        help_text="Source format this profile reads. It cannot change after creation.",
     )
-    source_id_column = models.CharField(
-        max_length=100,
+    adapter_config = models.JSONField(
+        default=dict,
         blank=True,
-        help_text="Column whose value is stored in a NetBox custom field (e.g. 'Id')",
-    )
-    custom_field_name = models.CharField(
-        max_length=100,
-        blank=True,
-        help_text="NetBox custom field name to store the source ID in (e.g. 'cans_id')",
-    )
-    update_existing = models.BooleanField(
-        default=True,
-        help_text="Update existing NetBox objects when a match is found",
-    )
-    create_missing_device_types = models.BooleanField(
-        default=True,
-        help_text="Auto-create manufacturers and device types that don't exist in NetBox",
-    )
-    preview_view_mode = models.CharField(
-        max_length=10,
-        choices=PREVIEW_VIEW_CHOICES,
-        default="rows",
-        help_text="How to display the import preview (row table or rack diagrams)",
-    )
-    capture_extra_data = models.BooleanField(
-        default=False,
-        help_text=("Store unmapped source column values in the import record the plugin keeps for each device."),
-    )
-    primary_contact_role = models.ForeignKey(
-        to="tenancy.ContactRole",
-        on_delete=models.PROTECT,
-        related_name="+",
-        null=True,
-        blank=True,
-        help_text="Contact role to assign when a source row contains a primary contact.",
-    )
-    primary_contact_lookup_field = models.CharField(
-        max_length=10,
-        choices=CONTACT_LOOKUP_FIELD_CHOICES,
-        default="email",
-        help_text="Contact field used to match primary contact values from the source.",
+        help_text="Scalar settings the selected Source Adapter declares.",
     )
 
     # Override tags reverse accessor to avoid clashes with other plugins
@@ -186,9 +146,155 @@ class ImportProfile(NetBoxModel):
         """Return the detail URL for this import profile."""
         return reverse("plugins:netbox_data_import:importprofile", args=[self.pk])
 
+    def _validate_source_adapter_immutability(self):
+        """Return the persisted adapter and reject a different selected adapter."""
+        # A set pk does not prove that the row exists. An unsaved instance can carry a pk.
+        stored = (
+            type(self).objects.filter(pk=self.pk).values_list("source_adapter", flat=True).first()
+            if self.pk is not None
+            else None
+        )
+        if stored is not None and stored != self.source_adapter:
+            raise ValidationError({"source_adapter": "The source adapter cannot change after the profile is created."})
+        return stored
 
-class ColumnMapping(models.Model):
+    def save(self, *args, **kwargs):
+        """Normalize adapter configuration on every supported write that stores it."""
+        update_fields = kwargs.get("update_fields")
+        updated = set(update_fields) if update_fields is not None else None
+        if updated is None or updated & {"source_adapter", "adapter_config"}:
+            self._validate_source_adapter_immutability()
+        if updated is None or "adapter_config" in updated:
+            adapter = self.adapter
+            if adapter is None:
+                raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
+            self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
+        return super().save(*args, **kwargs)
+
+    @property
+    def adapter(self):
+        """Return the registered Source Adapter class for this profile."""
+        return get_adapter(self.source_adapter)
+
+    @property
+    def output_kinds(self) -> frozenset[str]:
+        """Return the adapter output kinds this profile can supply."""
+        return output_kinds_for(self.source_adapter)
+
+    @property
+    def adapter_settings(self):
+        """Return attribute access over ``adapter_config`` backed by the adapter's declared defaults."""
+        cache_key = (self.source_adapter, id(self.adapter_config))
+        cached = self.__dict__.get("_adapter_settings_cache")
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        settings = AdapterSettings(self.adapter, self.adapter_config, self.source_adapter)
+        self.__dict__["_adapter_settings_cache"] = (cache_key, settings)
+        return settings
+
+    @property
+    def adapter_config_display(self):
+        """Return (label, value) pairs for the adapter's declared settings, in declaration order."""
+        from django import forms
+        from django.forms.utils import pretty_name
+
+        config = _require_adapter_config_mapping(self.adapter_config)
+        adapter = self.adapter
+        if adapter is None:
+            return []
+        rows = []
+        for name, field in adapter.config_form_class().base_fields.items():
+            value = config.get(name, field.initial)
+            if isinstance(field, forms.ChoiceField) and not isinstance(field, forms.ModelChoiceField):
+                value = dict(field.choices).get(value, value)
+            rows.append((field.label or pretty_name(name), value))
+        return rows
+
+    @property
+    def resolved_primary_contact_role(self):
+        """Return the referenced Contact Role object, or None when unset or dangling.
+
+        Planning reads this once per row, so the lookup is memoized against the configured name. A
+        plain instance cache would keep returning the old role after ``adapter_config`` changes.
+        """
+        name = self.adapter_settings.primary_contact_role
+        if not name:
+            return None
+        cached = self.__dict__.get("_primary_contact_role_cache")
+        if cached is not None and cached[0] == name:
+            return cached[1]
+        from tenancy.models import ContactRole
+
+        role = ContactRole.objects.filter(name=name).first()
+        self.__dict__["_primary_contact_role_cache"] = (name, role)
+        return role
+
+    def clean(self):
+        """Reject an adapter change after creation and validate the adapter configuration."""
+        super().clean()
+        adapter = self.adapter
+        if adapter is None:
+            raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
+        stored = self._validate_source_adapter_immutability()
+        if stored is None:
+            # A creation rule only: the adapter is immutable, so a stored profile keeps validating
+            # once the release that implements its Target Module ships.
+            validate_adapter_target_module(self.source_adapter)
+        self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
+
+
+def _require_adapter_config_mapping(config):
+    """Return a stored adapter configuration mapping or expose corrupt JSON state."""
+    if not isinstance(config, dict):
+        raise ValidationError(
+            "The stored adapter configuration must be a mapping. Replace it with a valid JSON mapping."
+        )
+    return config
+
+
+class AdapterSettings:
+    """Read one adapter setting, falling back to the adapter form's declared default."""
+
+    def __init__(self, adapter, config, adapter_key):
+        self._adapter_key = adapter_key
+        self._fields = adapter.config_form_class().base_fields if adapter is not None else None
+        self._config = _require_adapter_config_mapping(config)
+
+    def __getattr__(self, name):
+        fields = object.__getattribute__(self, "_fields")
+        if fields is None:
+            key = object.__getattribute__(self, "_adapter_key")
+            raise UnknownSourceAdapter(f"This release does not register the source adapter '{key}'.")
+        if name not in fields:
+            raise AttributeError(f"'{name}' is not a setting of this profile's source adapter")
+        config = object.__getattribute__(self, "_config")
+        field = fields[name]
+        if name not in config:
+            return field.initial
+        value = config[name]
+        if field.required and (value is None or value == ""):
+            raise ValidationError(f"The required adapter setting '{name}' is empty. Edit and save this import profile.")
+        return value
+
+
+class PolicySectionModel(models.Model):
+    """A profile policy table scoped to the adapter output kinds its catalog section declares."""
+
+    POLICY_SECTION = ""
+
+    class Meta:
+        abstract = True
+
+    def clean(self):
+        """Reject a row whose section does not apply to the profile's Source Adapter."""
+        super().clean()
+        validate_section_applicability(self.profile if self.profile_id else None, self.POLICY_SECTION)
+
+
+class ColumnMapping(PolicySectionModel):
     """Maps one source column header to one semantic NetBox field."""
+
+    POLICY_SECTION = "column_mappings"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -207,32 +313,15 @@ class ColumnMapping(models.Model):
         verbose_name_plural = "Column Mappings"
 
     def clean(self):
-        """Allow standard TARGET_FIELD_CHOICES values and extra_json:<key> custom-field mappings."""
-        from django.core.exceptions import ValidationError
-
-        valid_standard = {choice[0] for choice in TARGET_FIELD_CHOICES}
+        """Resolve the target field through the catalog and reject an inapplicable row."""
+        super().clean()
         value = self.target_field or ""
-        if value in valid_standard:
-            return
-        if value.startswith("extra_json:") and value[len("extra_json:") :].strip():
-            return
-        raise ValidationError(
-            {
-                "target_field": (
-                    f"Value '{value}' is not a valid choice. "
-                    "Must be one of the standard field names or start with 'extra_json:'."
-                )
-            }
-        )
+        if not CATALOG.is_valid(value, output_kinds=self.profile.output_kinds if self.profile_id else None):
+            raise ValidationError({"target_field": CATALOG.invalid_key_message(value)})
 
     def get_target_field_display(self):
         """Return the human-readable name for the target_field value."""
-        for key, label in TARGET_FIELD_CHOICES:
-            if key == self.target_field:
-                return label
-        if self.target_field and self.target_field.startswith("extra_json:"):
-            return f"Custom field: {self.target_field[len('extra_json:') :]}"
-        return self.target_field
+        return CATALOG.display(self.target_field)
 
     def __str__(self):
         return f"{self.source_column} → {self.get_target_field_display()}"
@@ -242,8 +331,10 @@ class ColumnMapping(models.Model):
         return reverse("plugins:netbox_data_import:columnmapping_edit", args=[self.pk])
 
 
-class ClassRoleMapping(models.Model):
+class ClassRoleMapping(PolicySectionModel):
     """Maps a source 'class' value to a NetBox outcome (rack or device role)."""
+
+    POLICY_SECTION = "class_role_mappings"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -327,8 +418,10 @@ class ImportJob(models.Model):
         return reverse("plugins:netbox_data_import:importprofile", args=[self.profile_id])
 
 
-class DeviceTypeMapping(models.Model):
+class DeviceTypeMapping(PolicySectionModel):
     """Explicit (make, model) override when source naming doesn't slugify cleanly."""
+
+    POLICY_SECTION = "device_type_mappings"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -360,8 +453,10 @@ class DeviceTypeMapping(models.Model):
         return reverse("plugins:netbox_data_import:devicetypemapping_edit", args=[self.pk])
 
 
-class ManufacturerMapping(models.Model):
+class ManufacturerMapping(PolicySectionModel):
     """Maps a source 'make' value to an existing NetBox manufacturer slug."""
+
+    POLICY_SECTION = "manufacturer_mappings"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -389,8 +484,10 @@ class ManufacturerMapping(models.Model):
         return f"{self.source_make} → {self.netbox_manufacturer_slug}"
 
 
-class IgnoredDevice(models.Model):
+class IgnoredDevice(PolicySectionModel):
     """Per-device ignore record — prevents a specific source device from being imported."""
+
+    POLICY_SECTION = "ignored_devices"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -419,13 +516,15 @@ class IgnoredDevice(models.Model):
         return f"{self.device_name or self.source_id} (ignored)"
 
 
-class ColumnTransformRule(models.Model):
+class ColumnTransformRule(PolicySectionModel):
     r"""Regex-based transform applied to a source column during parse.
 
     Example: source_column='Name', pattern='^(\w{4,8}) - (.+)$',
     group_1_target='asset_tag', group_2_target='device_name'
     transforms "TEST0001 - EXAMPLE-SWITCH-01" into asset_tag="TEST0001", device_name="EXAMPLE-SWITCH-01".
     """
+
+    POLICY_SECTION = "column_transform_rules"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -465,6 +564,8 @@ class ColumnTransformRule(models.Model):
 
         from django.core.exceptions import ValidationError
 
+        super().clean()
+
         try:
             compiled = re.compile(self.pattern)
         except re.error as exc:
@@ -485,23 +586,14 @@ class ColumnTransformRule(models.Model):
                 }
             )
 
-        valid_standard = {choice[0] for choice in COLUMN_TRANSFORM_TARGET_FIELD_CHOICES}
+        output_kinds = self.profile.output_kinds if self.profile_id else None
         for attr in ("group_1_target", "group_2_target"):
             value = getattr(self, attr) or ""
             if not value:
                 continue
-            if value in valid_standard:
-                continue
-            if value.startswith("extra_json:") and value[len("extra_json:") :].strip():
-                continue
-            raise ValidationError(
-                {
-                    attr: (
-                        f"Value '{value}' is not a valid choice. "
-                        "Must be one of the standard field names or start with 'extra_json:'."
-                    )
-                }
-            )
+            # A capture group yields text, so a candidate target is not a valid group target.
+            if not CATALOG.is_valid(value, output_kinds=output_kinds, allow_candidates=False):
+                raise ValidationError({attr: CATALOG.invalid_key_message(value)})
 
     def __str__(self):
         return f"{self.source_column}: {self.pattern}"
@@ -511,13 +603,15 @@ class ColumnTransformRule(models.Model):
         return reverse("plugins:netbox_data_import:columntransformrule_edit", args=[self.pk])
 
 
-class SourceResolution(models.Model):
+class SourceResolution(PolicySectionModel):
     """Saved target-field decision for one source row.
 
     A resolution can split one source value or select candidate source columns
     for structured target fields. The import reapplies it when the same source
     row appears in a later file.
     """
+
+    POLICY_SECTION = "source_resolutions"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -554,13 +648,15 @@ class SourceResolution(models.Model):
         return f"{self.source_id}/{self.source_column}: {self.original_value!r}"
 
 
-class DeviceExistingMatch(models.Model):
+class DeviceExistingMatch(PolicySectionModel):
     """Explicit match between a source row and an existing NetBox device.
 
     When a user clicks "Link existing" on a device preview row, this record is saved.
     On re-import, the engine uses this to emit action='update' against the matched device
     instead of action='create', even if the device has no source-ID custom field yet.
     """
+
+    POLICY_SECTION = "device_existing_matches"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -603,8 +699,10 @@ class DeviceExistingMatch(models.Model):
         return f"{self.source_id}{tag} → Device #{self.netbox_device_id} ({self.device_name})"
 
 
-class IgnoredFieldDifference(models.Model):
+class IgnoredFieldDifference(PolicySectionModel):
     """Preserve one exact file/NetBox value pair for a device field difference."""
+
+    POLICY_SECTION = "ignored_field_differences"
 
     profile = models.ForeignKey(
         ImportProfile,

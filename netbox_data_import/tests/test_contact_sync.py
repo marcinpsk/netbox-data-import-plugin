@@ -34,10 +34,26 @@ from netbox_data_import.models import (
     stored_import_source,
 )
 from netbox_data_import.object_permissions import ObjectPermissionDenied
+from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
 from netbox_data_import.tests.helpers import set_import_source
 
 
 LOCAL_EXAMPLE_PATH = Path(__file__).resolve().parents[3] / "libre" / "example.xlsx"
+
+
+def _json_script(response, element_id):
+    """Return the payload Django's `json_script` filter rendered under *element_id*."""
+    import json
+    import re
+
+    match = re.search(
+        rf'<script id="{re.escape(element_id)}" type="application/json">(.*?)</script>',
+        response.content.decode(),
+        re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"the preview did not render a '{element_id}' payload")
+    return json.loads(match.group(1))
 
 
 class ContactMappingWorkbookTest(TestCase):
@@ -67,7 +83,7 @@ class ContactMappingWorkbookTest(TestCase):
 
     def test_primary_contact_column_maps_to_native_contact_target(self):
         """A Primary Contact cell parses as a native Contact value."""
-        profile = ImportProfile.objects.create(name="Portable Contact Mapping", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="Portable Contact Mapping", adapter_config={"sheet_name": "Data"})
         ColumnMapping.objects.create(
             profile=profile,
             source_column="Primary Contact",
@@ -81,7 +97,9 @@ class ContactMappingWorkbookTest(TestCase):
 
     def test_contact_candidate_columns_are_collected_per_row(self):
         """Every configured candidate column remains selectable per row."""
-        profile = ImportProfile.objects.create(name="Portable Contact Candidates", sheet_name="Data")
+        profile = ImportProfile.objects.create(
+            name="Portable Contact Candidates", adapter_config={"sheet_name": "Data"}
+        )
         candidate_columns = {"Primary Contact", "Contact", "Contact Number", "Owner"}
         ColumnMapping.objects.bulk_create(
             [
@@ -231,7 +249,7 @@ class LocalExampleContactMappingTest(TestCase):
 
     def test_primary_contact_column_maps_to_native_contact_target(self):
         """Populated Primary Contact cells parse as primary_contact values."""
-        profile = ImportProfile.objects.create(name="Local Contact Mapping", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="Local Contact Mapping", adapter_config={"sheet_name": "Data"})
         ColumnMapping.objects.create(
             profile=profile,
             source_column="Primary Contact",
@@ -247,7 +265,7 @@ class LocalExampleContactMappingTest(TestCase):
 
     def test_configured_contact_candidate_columns_are_collected_per_row(self):
         """Configured columns provide candidate values without asserting their meaning."""
-        profile = ImportProfile.objects.create(name="Local Contact Candidates", sheet_name="Data")
+        profile = ImportProfile.objects.create(name="Local Contact Candidates", adapter_config={"sheet_name": "Data"})
         candidate_columns = {"Primary Contact", "Contact", "Contact Number", "Owner"}
         ColumnMapping.objects.bulk_create(
             [
@@ -285,10 +303,12 @@ class NativeContactSyncTest(TestCase):
         self.contact_role = ContactRole.objects.create(name="Primary Contact", slug="primary-contact")
         self.profile = ImportProfile.objects.create(
             name="Native Contact Sync",
-            update_existing=True,
-            create_missing_device_types=False,
-            primary_contact_role=self.contact_role,
-            primary_contact_lookup_field="email",
+            adapter_config={
+                "update_existing": True,
+                "create_missing_device_types": False,
+                "primary_contact_role": self.contact_role.name,
+                "primary_contact_lookup_field": "email",
+            },
         )
         ClassRoleMapping.objects.create(
             profile=self.profile,
@@ -367,8 +387,12 @@ class NativeContactSyncTest(TestCase):
             "filename": "contact-candidates.xlsx",
         }
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "contact-sync-preview"
         session.save()
         return user
+
+    def _preview_revision(self):
+        return self.client.session[PREVIEW_REVISION_SESSION_KEY]
 
     def test_sync_migrates_legacy_primary_contact_to_native_assignment(self):
         """An update sync moves only the legacy contact value out of JSON."""
@@ -446,6 +470,21 @@ class NativeContactSyncTest(TestCase):
 
         with self.assertRaisesMessage(ValidationError, "valid email"):
             PrimaryContactResolver.review(self.device, row, self.profile)
+
+    def test_apply_refuses_a_role_deleted_after_the_review(self):
+        """One profile instance serves both calls, and it memoizes the role it resolved."""
+        from tenancy.models import ContactRole
+
+        row = self._row(
+            contact_resolution_applied=True,
+            contact_field_values={"name": "Late Contact", "email": "late@example.invalid"},
+            contact_field_sources={},
+        )
+        review = PrimaryContactResolver.review(self.device, row, self.profile)
+        ContactRole.objects.filter(name=self.profile.adapter_settings.primary_contact_role).delete()
+
+        with self.assertRaisesMessage(ValidationError, "no longer exists"):
+            PrimaryContactResolver.apply(self.device, self.profile, review)
 
     def test_review_without_contact_data_has_no_contact_plan(self):
         """A row without Contact data leaves native assignments unchanged."""
@@ -620,7 +659,7 @@ class NativeContactSyncTest(TestCase):
         )
 
     def test_preview_can_save_a_contact_candidate_row_resolution(self):
-        """The preview offers each candidate column for every Contact field."""
+        """The preview ships every candidate value and the role proposed for it."""
         self._set_extra_columns({"depth": 750})
         row = self._row(
             _candidate_values={
@@ -649,17 +688,30 @@ class NativeContactSyncTest(TestCase):
             "filename": "contact-candidates.xlsx",
         }
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "contact-sync-preview"
         session.save()
 
         preview_response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         self.assertContains(preview_response, "Resolve contact fields")
         self.assertContains(preview_response, "No contact for this row")
-        self.assertContains(preview_response, "Contact name")
-        self.assertContains(preview_response, "Email address")
-        self.assertContains(preview_response, "Phone number")
-        self.assertContains(preview_response, "Contact Number")
-        self.assertContains(preview_response, "Owner")
+        # The value rows are built from these two payloads, so they carry the contract now.
+        candidates = _json_script(preview_response, "ndi-candidate-values-by-row")
+        row_candidates = candidates[str(result.rows[0].row_number)]["contact"]
+        self.assertEqual(
+            row_candidates,
+            {
+                "Contact": "preview.contact@example.invalid",
+                "Contact Number": "+1 202-555-0100",
+                "Owner": "Preview Operator",
+            },
+        )
+        roles = _json_script(preview_response, "ndi-contact-role-suggestions-by-row")
+        # `Owner` holds a person here, but the header does not say so, so no field claims it.
+        self.assertEqual(
+            roles[str(result.rows[0].row_number)],
+            {"email": "Contact", "phone": "Contact Number"},
+        )
 
         resolution_response = self.client.post(
             reverse("plugins:netbox_data_import:save_resolution"),
@@ -667,6 +719,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": json.dumps(row["_candidate_values"]["contact"]),
                 "resolved_fields": json.dumps(
                     {
@@ -763,6 +816,7 @@ class NativeContactSyncTest(TestCase):
             "filename": "contact-candidates.xlsx",
         }
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "contact-sync-preview"
         session.save()
 
         response = self.client.post(
@@ -771,6 +825,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -909,6 +964,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -941,6 +997,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -975,6 +1032,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -1011,6 +1069,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -1054,6 +1113,7 @@ class NativeContactSyncTest(TestCase):
             "filename": "contact-candidates.xlsx",
         }
         session["import_preview_pending"] = True
+        session[PREVIEW_REVISION_SESSION_KEY] = "contact-sync-preview"
         session.save()
 
         response = self.client.post(
@@ -1062,6 +1122,7 @@ class NativeContactSyncTest(TestCase):
                 "profile_id": self.profile.pk,
                 "source_id": "CONTACT-001",
                 "source_column": "candidate:contact",
+                "preview_revision": self._preview_revision(),
                 "original_value": "",
                 "resolved_fields": json.dumps(
                     {
@@ -1254,8 +1315,8 @@ class NativeContactSyncTest(TestCase):
 
     def test_sync_can_match_primary_contacts_by_name(self):
         """A profile can treat the source contact value as a name."""
-        self.profile.primary_contact_lookup_field = "name"
-        self.profile.save(update_fields=["primary_contact_lookup_field"])
+        self.profile.adapter_config["primary_contact_lookup_field"] = "name"
+        self.profile.save(update_fields=["adapter_config"])
 
         result = self._sync(self._row(primary_contact="Operations Team"))
 
@@ -1266,8 +1327,8 @@ class NativeContactSyncTest(TestCase):
 
     def test_sync_requires_a_contact_role_when_contact_data_exists(self):
         """Contact data fails fast when the profile has no assignment role."""
-        self.profile.primary_contact_role = None
-        self.profile.save(update_fields=["primary_contact_role"])
+        self.profile.adapter_config["primary_contact_role"] = None
+        self.profile.save(update_fields=["adapter_config"])
 
         result = self._sync(self._row(primary_contact="primary.contact@example.com"))
 
@@ -1406,8 +1467,8 @@ class NativeContactSyncTest(TestCase):
 
     def test_preview_rejects_contact_data_without_a_role(self):
         """The preview fails before a contact can use an undefined role."""
-        self.profile.primary_contact_role = None
-        self.profile.save(update_fields=["primary_contact_role"])
+        self.profile.adapter_config["primary_contact_role"] = None
+        self.profile.save(update_fields=["adapter_config"])
 
         result = run_import(
             [self._row(primary_contact="primary.contact@example.com")],
@@ -1426,8 +1487,8 @@ class NativeContactSyncTest(TestCase):
         row = self._row(primary_contact="primary.contact@example.com")
         approved = run_import([row], self.profile, {"site": self.site}, dry_run=True)
         replacement_role = ContactRole.objects.create(name="Replacement Contact", slug="replacement-contact")
-        self.profile.primary_contact_role = replacement_role
-        self.profile.save(update_fields=["primary_contact_role"])
+        self.profile.adapter_config["primary_contact_role"] = replacement_role.name
+        self.profile.save(update_fields=["adapter_config"])
 
         current = run_import([row], self.profile, {"site": self.site}, dry_run=True)
 
@@ -1486,10 +1547,12 @@ class ConcurrentNativeContactSyncTest(TransactionTestCase):
         contact_role = ContactRole.objects.create(name="Concurrent Primary Contact", slug="concurrent-primary-contact")
         self.profile = ImportProfile.objects.create(
             name="Concurrent Native Contact Sync",
-            update_existing=True,
-            create_missing_device_types=False,
-            primary_contact_role=contact_role,
-            primary_contact_lookup_field="email",
+            adapter_config={
+                "update_existing": True,
+                "create_missing_device_types": False,
+                "primary_contact_role": contact_role.name,
+                "primary_contact_lookup_field": "email",
+            },
         )
         ClassRoleMapping.objects.create(
             profile=self.profile,
