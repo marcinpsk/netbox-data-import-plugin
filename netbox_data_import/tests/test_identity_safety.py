@@ -452,6 +452,99 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             ["SHARED-SERIAL", ""],
         )
 
+    def test_a_serial_the_preview_does_not_call_duplicated_is_kept(self):
+        """Giving up a serial is only offered for a real collision, so nothing else can drop one."""
+        rows = [
+            self._device_row(2, "SOLE-A", "sole-device-a", self.rack_a, 1),
+            self._device_row(3, "SOLE-B", "sole-device-b", self.rack_b, 2),
+        ]
+        rows[0]["serial"] = "SOLE-SERIAL-A"
+        rows[1]["serial"] = "SOLE-SERIAL-B"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SOLE-B",
+                "row_number": 3,
+                "preview_revision": self._preview_revision(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="SOLE-B").exists(),
+            "the view dropped a serial that no other row claims",
+        )
+
+    def test_the_second_side_of_a_collision_keeps_the_serial(self):
+        """One rendered page gives up one side of a collision, so the serial cannot vanish."""
+        rows = [
+            self._device_row(2, "BOTH-A", "both-device-a", self.rack_a, 1),
+            self._device_row(3, "BOTH-B", "both-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "CONTESTED-SERIAL"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+        revision = self._preview_revision()
+        url = reverse("plugins:netbox_data_import:ignore_duplicate_serial")
+
+        for source_id, row_number in (("BOTH-A", 2), ("BOTH-B", 3)):
+            self.client.post(
+                url,
+                {
+                    "profile_id": self.profile.pk,
+                    "source_id": source_id,
+                    "row_number": row_number,
+                    "preview_revision": revision,
+                },
+            )
+
+        self.assertEqual(
+            sorted(
+                SourceResolution.objects.filter(profile=self.profile, source_column="serial").values_list(
+                    "source_id", flat=True
+                )
+            ),
+            ["BOTH-A"],
+            "both sides gave up the serial, so the import lost it entirely",
+        )
+
+    def test_an_ignored_row_does_not_license_dropping_a_live_serial(self):
+        """An ignored row imports nothing, so sharing its serial is not a collision to settle."""
+        from netbox_data_import.models import IgnoredDevice
+
+        rows = [
+            self._device_row(2, "LIVE-A", "live-device-a", self.rack_a, 1),
+            self._device_row(3, "SKIPPED-B", "skipped-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "UNCONTESTED-SERIAL"
+        IgnoredDevice.objects.create(profile=self.profile, source_id="SKIPPED-B")
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        live_row = next(row for row in preview.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertIsNone(live_row.extra_data.get("identity_conflict"), live_row.to_dict())
+        self._set_import_session(rows, preview)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "LIVE-A",
+                "row_number": 2,
+                "preview_revision": self._preview_revision(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="LIVE-A").exists(),
+            "an ignored row was treated as a rival claim on the serial",
+        )
+
     def test_duplicate_name_form_refuses_a_stale_preview_revision(self):
         """A stale HTMX name form navigates instead of replacing the frozen preview."""
         rows = [

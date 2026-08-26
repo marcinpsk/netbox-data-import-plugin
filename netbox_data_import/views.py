@@ -2471,20 +2471,49 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             messages.error(request, "The source ID and row must identify one active import row.")
             return _name_resolution_response(request, next_url)
 
+        preview = load_cached_preview(request)
+        preview_rows = preview[1].rows if preview is not None else []
+        # Dropping a serial loses identity, so only the preview's own collision may authorize it.
+        if not any(
+            item.row_number == row_number
+            and item.object_type == "device"
+            and item.extra_data.get("identity_conflict") == "duplicate_serial"
+            for item in preview_rows
+        ):
+            messages.error(request, "This row has no duplicate serial in the current preview.")
+            return _name_resolution_response(request, next_url)
+
         original_serial = engine._str_val(source_rows[0].get("serial"))
         if not original_serial:
             messages.error(request, "This row carries no serial to give up.")
             return _name_resolution_response(request, next_url)
 
+        still_contested = False
         try:
             # Serialize against an executing import, which holds the same profile row.
             with locked_profile_policy(profile.pk):
-                save_permission_scoped_object(
-                    request.user,
-                    SourceResolution,
-                    {"profile": profile, "source_id": source_id, "source_column": "serial"},
-                    {"original_value": original_serial, "resolved_fields": {"serial": ""}},
+                # The preview above can predate a resolution saved since, so re-read the claim here:
+                # dropping the last copy of a serial would lose it instead of settling a collision.
+                effective_rows = engine.derive_effective_rows(rows, profile)
+                effective_serial = next(
+                    (
+                        engine._str_val(item.get("serial"))
+                        for item in effective_rows
+                        if item.get("_row_number") == row_number
+                    ),
+                    "",
                 )
+                still_contested = bool(effective_serial) and any(
+                    item.get("_row_number") != row_number and engine._str_val(item.get("serial")) == effective_serial
+                    for item in effective_rows
+                )
+                if still_contested:
+                    save_permission_scoped_object(
+                        request.user,
+                        SourceResolution,
+                        {"profile": profile, "source_id": source_id, "source_column": "serial"},
+                        {"original_value": original_serial, "resolved_fields": {"serial": ""}},
+                    )
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved serial.")
             return _name_resolution_response(request, next_url)
@@ -2493,6 +2522,10 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
         except IntegrityError:
             messages.error(request, "The saved serial changed while this request was being processed. Try again.")
+            return _name_resolution_response(request, next_url)
+
+        if not still_contested:
+            messages.error(request, "No other row claims this serial any more.")
             return _name_resolution_response(request, next_url)
 
         messages.success(request, f"Source '{source_id}' will import without serial '{original_serial}'.")

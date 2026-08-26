@@ -346,9 +346,19 @@ class QuickActionInputBoundsTest(TestCase):
         row = self._device_row(source_id, device_name)
 
         if url_name == "ignore_duplicate_serial":
-            # The view refuses a row with no serial to give up.
+            # The view refuses a serial the preview does not report as claimed by a second row.
             row["serial"] = f"SERIAL-{case_name}"
-            self._store_active_import([row])
+            twin = self._device_row(f"{source_id}-TWIN", f"{device_name}-twin")
+            twin["_row_number"] = 2
+            twin["serial"] = row["serial"]
+            result = run_import([row, twin], self.profile, {"site": self.site}, dry_run=True, user=self.user)
+            preview_row = next(item for item in result.rows if item.object_type == "device" and item.row_number == 1)
+            self.assertEqual(
+                preview_row.extra_data.get("identity_conflict"),
+                "duplicate_serial",
+                preview_row.to_dict(),
+            )
+            self._store_active_import([row, twin], result)
         elif url_name in {"save_resolution", "resolve_duplicate_name"}:
             self._store_active_import([row])
         elif url_name == "match_existing_device":
