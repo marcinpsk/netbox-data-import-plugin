@@ -143,6 +143,154 @@ def test_an_explicit_worker_count_above_the_ceiling_is_rejected():
     assert f"at most {MAX_PARALLEL_WORKERS} pytest workers" in result.stdout + result.stderr
 
 
+def test_a_gateway_specification_above_the_ceiling_is_rejected():
+    """`--tx` names the workers itself, so neither the auto hook nor a worker count sees it.
+
+    Without this the run starts `gw8`, and that worker fails in the isolation helper during
+    collection, after the databases of the other workers already exist.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
+    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
+    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            # The addopts carry `-n auto`, and xdist rewrites the gateway list from a worker
+            # count, so reaching this path at all means dropping them.
+            "-o",
+            "addopts=",
+            "--tx",
+            f"{MAX_PARALLEL_WORKERS + 1}*popen",
+            # `--tx` alone leaves distribution off, and then xdist starts none of the workers.
+            "--dist",
+            "load",
+            "--no-cov",
+            "-p",
+            "no:cacheprovider",
+            "--ignore=netbox_data_import",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        # Unguarded, this run starts the workers and waits on the one that cannot isolate itself.
+        timeout=120,
+    )
+
+    # 4 is pytest's usage-error status. It must refuse the run instead of collecting and failing later.
+    assert result.returncode == 4, f"exit {result.returncode}\n{(result.stdout + result.stderr)[-3000:]}"
+    assert f"at most {MAX_PARALLEL_WORKERS} pytest workers" in result.stdout + result.stderr
+
+
+def test_a_signed_gateway_multiplier_is_counted_the_way_xdist_counts_it():
+    """xdist parses the multiplier with `int()`, which takes a sign this repository must not miss."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
+    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
+    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-o",
+            "addopts=",
+            "--tx",
+            f"+{MAX_PARALLEL_WORKERS + 1}*popen",
+            "--dist",
+            "load",
+            "--no-cov",
+            "-p",
+            "no:cacheprovider",
+            "--ignore=netbox_data_import",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        # Unguarded, this run starts the workers and waits on the one that cannot isolate itself.
+        timeout=120,
+    )
+
+    # 4 is pytest's usage-error status. It must refuse the run instead of collecting and failing later.
+    assert result.returncode == 4, f"exit {result.returncode}\n{(result.stdout + result.stderr)[-3000:]}"
+    assert f"at most {MAX_PARALLEL_WORKERS} pytest workers" in result.stdout + result.stderr
+
+
+def test_collecting_without_running_is_left_alone():
+    """xdist starts no worker for `--collect-only`, so the ceiling has nothing to refuse."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
+    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
+    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-o",
+            "addopts=",
+            "--collect-only",
+            "--tx",
+            f"{MAX_PARALLEL_WORKERS + 1}*popen",
+            "--dist",
+            "load",
+            "--no-cov",
+            "-p",
+            "no:cacheprovider",
+            "--ignore=netbox_data_import",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        timeout=120,
+    )
+
+    # `--ignore` leaves nothing to collect, so pytest exits 5. Status 4 would mean the ceiling
+    # refused a run that starts no worker at all.
+    assert result.returncode == 5, f"exit {result.returncode}\n{(result.stdout + result.stderr)[-3000:]}"
+
+
+def test_a_gateway_specification_without_distribution_is_left_alone():
+    """`--tx` with distribution off starts no worker, so the ceiling has nothing to refuse."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
+    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
+    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-o",
+            "addopts=",
+            "--tx",
+            f"{MAX_PARALLEL_WORKERS + 1}*popen",
+            "--no-cov",
+            "-p",
+            "no:cacheprovider",
+            "--ignore=netbox_data_import",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        timeout=120,
+    )
+
+    # `--ignore` leaves nothing to collect, so pytest exits 5. Status 4 would mean the ceiling
+    # refused a run that starts no worker at all.
+    assert result.returncode == 5, f"exit {result.returncode}\n{(result.stdout + result.stderr)[-3000:]}"
+
+
 def _run_netbox_test_alias(worker_value=None):
     """Run the local test alias with pytest and the venv activation stubbed out."""
     script = "\n".join(

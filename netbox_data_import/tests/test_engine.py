@@ -1386,6 +1386,76 @@ class ExistingRackPreviewActionTest(TestCase):
         self.assertEqual(rack_row.action, "skip", rack_row.detail)
 
 
+class RackExpandedInTheSameBatchTest(TestCase):
+    """A device may take the space the same batch adds to its rack."""
+
+    def setUp(self):
+        """Create the rack the batch grows and the role its new device needs."""
+        from dcim.models import DeviceRole, Rack, Site
+
+        self.profile = _make_profile("RackGrowthProfile")
+        self.site = Site.objects.create(name="Rack Growth Site", slug="rack-growth-site")
+        DeviceRole.objects.create(name="Server", slug="server")
+        self.rack = Rack.objects.create(name="T1", site=self.site, u_height=20)
+
+    def _rows(self):
+        """Return a batch that raises the rack's height, then fills the space it added."""
+        return [
+            {
+                "_row_number": 2,
+                "source_id": "RACK-1",
+                "rack_name": "T1",
+                "device_class": "Cabinet",
+                "u_height": 42,
+            },
+            {
+                "_row_number": 3,
+                "source_id": "DEV-1",
+                "rack_name": "T1",
+                "device_name": "grown-device",
+                "device_class": "Server",
+                "u_position": 30,
+                "face": "front",
+                "make": "GrowthMfg",
+                "model": "GrowthModel",
+            },
+        ]
+
+    def _device_row(self, result):
+        """Return the one device row of *result*."""
+        return next(row for row in result.rows if row.object_type == "device")
+
+    def test_the_preview_places_the_device_in_the_space_the_batch_adds(self):
+        """U30 is outside the stored 20U rack and inside the 42U this batch leaves behind."""
+        result = run_import(self._rows(), self.profile, {"site": self.site}, dry_run=True)
+
+        device_row = self._device_row(result)
+        self.assertNotEqual(device_row.action, "error", device_row.detail)
+        self.assertEqual(device_row.action, "create", device_row.detail)
+
+    def test_the_import_agrees_with_the_preview(self):
+        """A preview that errors and an import that writes disagree, and the batch rolls back."""
+        from dcim.models import Device
+
+        from netbox_data_import.views import _import_intents
+
+        preview = run_import([dict(row) for row in self._rows()], self.profile, {"site": self.site}, dry_run=True)
+
+        written = run_import(
+            [dict(row) for row in self._rows()],
+            self.profile,
+            {"site": self.site},
+            dry_run=False,
+            expected_intents=_import_intents(preview),
+        )
+
+        device_row = self._device_row(written)
+        self.assertNotEqual(device_row.action, "error", device_row.detail)
+        self.rack.refresh_from_db()
+        self.assertEqual(self.rack.u_height, 42)
+        self.assertEqual(Device.objects.get(name="grown-device").position, 30)
+
+
 class MatchedDevicePreviewActionTest(TestCase):
     """A matched device row reports what it writes, so a row that writes nothing is not an update."""
 
