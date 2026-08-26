@@ -84,7 +84,15 @@ class PristinePreviewRowMixin:
         return self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
     def save_split(self, resolved_fields):
-        """Create or replace the saved split resolution for the one source row."""
+        """
+        Create or replace the saved field resolution for the source row.
+        
+        Parameters:
+            resolved_fields: Field values to associate with the source row.
+        
+        Returns:
+            The created or updated source resolution.
+        """
         resolution, _ = SourceResolution.objects.update_or_create(
             profile=self.profile,
             source_id=SOURCE_ID,
@@ -149,7 +157,7 @@ class ResolutionCommittedAfterValidationTest(PristinePreviewRowMixin, Transactio
     """A resolution that commits after the worker's validation read must not reach execution."""
 
     def setUp(self):
-        """Build the world, save a first decision, and take the preview the operator approves."""
+        """Set up the import scenario with a saved resolution and refreshed preview."""
         self.build_world()
         self.open_preview()
         self.save_split({"asset_tag": "TAG-1", "device_name": "server-a"})
@@ -163,12 +171,15 @@ class ResolutionCommittedAfterValidationTest(PristinePreviewRowMixin, Transactio
         from dcim.models import Device
 
         def supersede_the_decision(sender, instance, **kwargs):
-            """Commit an edited resolution once the worker reaches its validating phase."""
+            """
+            Update the device-name resolution when the job enters its validating phase.
+            """
             if (instance.data or {}).get("phase") != "validating":
                 return
             post_save.disconnect(supersede_the_decision, sender=Job)
 
             def write_it():
+                """Update the device-name resolution for the test profile."""
                 SourceResolution.objects.filter(
                     profile_id=self.profile.pk, source_id=SOURCE_ID, source_column="device_name"
                 ).update(resolved_fields={"device_name": "server-a-renamed"})
@@ -190,7 +201,7 @@ class UploadStoresPristineRowsTest(TestCase):
     """The real upload path must store pristine rows, not the parser's resolved output."""
 
     def setUp(self):
-        """Authenticate and create a profile that already carries a saved resolution."""
+        """Set up an authenticated client, site, import profile, and column mappings for upload tests."""
         from dcim.models import Site
 
         self.user = get_user_model().objects.create_superuser("upload-user", "u@example.invalid", "testpass")
@@ -249,7 +260,15 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         self.profile = _build_profile("Lock Profile")
 
     def _api(self, username):
-        """Return an authenticated REST client, so a write reaches the lock through the real view."""
+        """
+        Return an authenticated REST client for the specified username.
+        
+        Parameters:
+            username (str): Username for the superuser used to authenticate the client.
+        
+        Returns:
+            APIClient: An authenticated REST test client.
+        """
         from rest_framework.test import APIClient
 
         api = APIClient()
@@ -257,7 +276,15 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         return api
 
     def _attempt_while_the_worker_holds_the_profile(self, write):
-        """Run *write* while another connection holds the same profile row."""
+        """
+        Execute a write operation while another connection holds the profile lock.
+        
+        Parameters:
+        	write (callable): The write operation to execute while the profile is locked.
+        
+        Returns:
+        	blocked (list): A list containing `True` if the write raises `OperationalError`; otherwise, an empty list.
+        """
         from django.db import connection
 
         from netbox_data_import.models import locked_profile_policy
@@ -293,6 +320,9 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         responses = []
 
         def insert():
+            """
+            Submit a source-resolution creation request while the profile lock is held.
+            """
             responses.append(
                 api.post(
                     "/api/plugins/data-import/source-resolutions/",
@@ -323,6 +353,9 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         responses = []
 
         def edit():
+            """
+            Update the source resolution with a second device-name decision and record the API response.
+            """
             responses.append(
                 api.patch(
                     f"/api/plugins/data-import/source-resolutions/{resolution.pk}/",
@@ -422,7 +455,9 @@ class ResolutionMoveRaceTest(TransactionTestCase):
         self.client.force_login(self.user)
 
     def test_a_delete_waits_for_the_profile_the_row_moved_to(self):
-        """The move commits between the view's read and its lock, so the read value is already stale."""
+        """
+        Verify that deleting a resolution locks the profile currently assigned to it after a concurrent move.
+        """
         from contextlib import ExitStack
 
         from django.db import connection
@@ -436,18 +471,21 @@ class ResolutionMoveRaceTest(TransactionTestCase):
         stack = ExitStack()
 
         def hold_the_destination_like_the_worker():
-            """Take the lock an import execution of the destination profile holds."""
+            """Acquire the destination profile lock used during import execution and hold it until released by the test."""
             with locked_profile_policy(self.destination.pk):
                 started.set()
                 self.assertTrue(release.wait(timeout=10))
 
         def move_the_row_then_start_the_worker(sender, instance, **kwargs):
-            """Run once, in the gap between the view reading the row and taking its lock."""
+            """Move the resolution to another profile while the worker is acquiring its lock."""
             if fired or instance.pk != self.resolution.pk:
                 return
             fired.append(True)
 
             def move_it():
+                """
+                Move the resolution to the destination import profile.
+                """
                 SourceResolution.objects.filter(pk=self.resolution.pk).update(profile=self.destination)
 
             with run_on_separate_connection(move_it):
@@ -493,17 +531,28 @@ class ResolutionVanishedUnderTheLockTest(TransactionTestCase):
         self.user = get_user_model().objects.create_superuser("vanish-user", "v@example.invalid", "testpass")
 
     def _delete_the_row_once_it_is_fetched(self):
-        """Connect a one-shot receiver that drops the row from another connection."""
+        """Arrange for the current resolution to be deleted from a separate database connection when it is fetched.
+        
+        Returns:
+            list: A mutable marker containing one item after the deletion callback runs.
+        """
         from django.db.models.signals import post_init
 
         fired = []
 
         def drop_it(sender, instance, **kwargs):
+            """
+            Delete the target source resolution when its signal callback is triggered.
+            
+            Parameters:
+                instance: The source resolution associated with the signal event.
+            """
             if fired or instance.pk != self.resolution.pk:
                 return
             fired.append(True)
 
             def delete_it():
+                """Delete the test resolution if it still exists."""
                 SourceResolution.objects.filter(pk=self.resolution.pk).delete()
 
             with run_on_separate_connection(delete_it):

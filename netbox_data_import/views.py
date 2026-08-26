@@ -119,7 +119,20 @@ def _parse_posted_profile_id(request):
 
 
 def _contact_candidate_context(request, profile_id, source_id):
-    """Return Contact candidates and row state for one active preview row."""
+    """
+    Return Contact candidate values and preview row state for a single active device row.
+    
+    Parameters:
+        request: The request containing the import workflow session data.
+        profile_id: The profile identifier associated with the preview.
+        source_id: The source row identifier.
+    
+    Returns:
+        tuple: A mapping of source columns to candidate Contact values, the source row, and the import result row.
+    
+    Raises:
+        ValidationError: If the profile or source row does not identify exactly one active device preview row, or if no Contact candidates are available.
+    """
     import_result = request.session.get("import_result") or {}
     result_rows = [
         row
@@ -144,7 +157,20 @@ def _contact_candidate_context(request, profile_id, source_id):
 
 
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
-    """Persist the confirmed source-to-device identity for a field review."""
+    """
+    Persist a confirmed mapping between a source record and a NetBox device.
+    
+    Parameters:
+    	user: User performing the operation.
+    	profile: Import profile associated with the mapping.
+    	source_id: Identifier of the source record.
+    	device: NetBox device to associate with the source record.
+    	source_asset_tag: Asset tag from the source record.
+    
+    Returns:
+    	tuple: A success flag and an error code. The error code is empty on success,
+    	or ``"conflict"`` or ``"permission"`` when the mapping cannot be saved.
+    """
     existing_match = (
         DeviceExistingMatch.objects.select_for_update().filter(profile=profile, source_id=source_id).first()
     )
@@ -333,7 +359,16 @@ _PROFILE_FIELDS = ("description", "source_adapter")
 
 
 def _validate_model_instance(instance, label):
-    """Call full_clean() and surface ValidationErrors as ValueError so the atomic block rolls back."""
+    """
+    Validate a model instance and convert validation failures to a ValueError.
+    
+    Parameters:
+        instance: The model instance to validate.
+        label (str): Name used to identify the instance in the error message.
+    
+    Raises:
+        ValueError: If model validation fails.
+    """
     from django.core.exceptions import ValidationError as DjangoValidationError
 
     try:
@@ -347,10 +382,17 @@ def _validate_model_instance(instance, label):
 
 
 def _legacy_adapter_config(profile_data):
-    """Return the pre-cutover scalar keys rewritten as a flat-workbook adapter configuration.
-
-    Releases up to 1.5.2 exported these settings as top-level `profile` keys. Database rows were
-    moved into `adapter_config` by migration 0022; an exported file has no such upgrade path.
+    """
+    Convert legacy top-level flat-workbook settings into adapter configuration.
+    
+    Parameters:
+        profile_data (dict): Profile data that may contain legacy adapter settings.
+    
+    Returns:
+        dict or None: The converted adapter configuration, or `None` when no legacy settings are present.
+    
+    Raises:
+        ValueError: If legacy settings conflict with modern adapter keys or reference an unknown Contact Role slug.
     """
     from .adapter_forms import FlatWorkbookConfigForm
 
@@ -378,7 +420,18 @@ def _legacy_adapter_config(profile_data):
 
 
 def _profile_defaults_from_yaml(profile_data):
-    """Resolve the scalar profile values and the adapter configuration from YAML."""
+    """
+    Resolve profile fields and adapter configuration from YAML data.
+    
+    Parameters:
+    	profile_data (dict): YAML profile values, including supported profile fields and adapter settings.
+    
+    Returns:
+    	dict: Profile defaults containing recognized scalar fields and adapter configuration.
+    
+    Raises:
+    	ValueError: If the YAML data contains unknown profile keys.
+    """
     legacy_config = _legacy_adapter_config(profile_data)
     accepted = {"name", "adapter_config", *_PROFILE_FIELDS}
     if legacy_config is not None:
@@ -834,7 +887,16 @@ class ImportSetupView(PermissionRequiredMixin, View):
         return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
     def post(self, request):
-        """Parse the uploaded file and redirect to the preview step."""
+        """
+        Process the uploaded workbook and prepare its dry-run results for the import preview.
+        
+        Invalid form submissions and file parsing errors redisplay the setup form with an error
+        message. Valid submissions store the parsed rows and import context in the session.
+        
+        Returns:
+            HttpResponse: The setup form response for invalid input or parsing errors, or a
+                redirect to the import preview for valid input.
+        """
         form = ImportSetupForm(request.POST, request.FILES, user=request.user)
         if not form.is_valid():
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
@@ -898,7 +960,17 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         )
 
     def render_preview(self, request, preview_url, *, use_materialized_result=False):
-        """Re-run the dry-run import and render the preview template."""
+        """
+        Render the import preview using the current or stored dry-run result.
+        
+        Parameters:
+        	request: The current HTTP request and import session.
+        	preview_url: URL used to build the preview context and navigation state.
+        	use_materialized_result (bool): Whether to use the stored dry-run result instead of recalculating it.
+        
+        Returns:
+        	HttpResponse: The rendered preview or a redirect when the import state is unavailable or invalid.
+        """
         rows = request.session.get("import_rows")
         ctx = request.session.get("import_context", {})
         if not rows or not ctx:
@@ -1969,7 +2041,13 @@ class ContactLookupView(_AjaxPermissionView):
     permission_required = "tenancy.view_contact"
 
     def get(self, request):
-        """Return a small real-shape Contact result set."""
+        """
+        Searches visible contacts by name, email address, or phone number.
+        
+        Returns:
+            JsonResponse: A JSON object containing up to 20 matching contacts. Queries
+                shorter than two characters produce an empty result set.
+        """
         from django.db.models import Q
         from django.http import JsonResponse
         from tenancy.models import Contact
@@ -2003,7 +2081,12 @@ class ContactSuggestionView(_AjaxPermissionView):
     permission_required = "tenancy.view_contact"
 
     def get(self, request):
-        """Recompute one row's suggestion, so a Contact created on another row is offered here."""
+        """
+        Recomputes the Contact suggestion for an import source row.
+        
+        Returns:
+            JsonResponse: The suggested Contact candidate, or an error response when the profile or source row is invalid.
+        """
         from django.http import JsonResponse
 
         try:
@@ -2338,7 +2421,14 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Validate and persist the replacement device name."""
+        """
+        Validate and save a replacement device name for an active import source row.
+        
+        The replacement must be unique among source rows and existing devices at the active site.
+        
+        Parameters:
+        	request: The HTTP request containing the source row, profile, and replacement name.
+        """
         from dcim.models import Device
 
         ctx_data = request.session.get("import_context") or {}
@@ -2431,7 +2521,14 @@ class SaveResolutionView(_AjaxPermissionView):
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Persist a manual field resolution for rerere replay."""
+        """Persist a manual source-field resolution and optionally update the linked device contact.
+        
+        Parameters:
+        	request: The request containing the import profile, source row, source column, and resolved values.
+        
+        Returns:
+        	An HTTP response indicating whether the resolution was saved or an error occurred.
+        """
         import json
 
         profile_id = _parse_posted_profile_id(request)
@@ -2926,7 +3023,12 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
     permission_required = "netbox_data_import.delete_sourceresolution"
 
     def post(self, request, *args, **kwargs):
-        """Serialize against an executing import, which holds the same profile row."""
+        """
+        Process the resolution update while preventing concurrent changes during an executing import.
+        
+        Raises:
+            Http404: If the resolution or associated import profile no longer exists.
+        """
         resolution = self.get_object(**kwargs)
         try:
             with locked_resolution_policy(resolution.pk):
@@ -3678,7 +3780,9 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
     )
 
     def post(self, request):  # noqa: C901
-        """Run auto-matching and redirect back to preview with a summary message."""
+        """
+        Automatically matches eligible import rows to visible devices and redirects to the preview with a summary of the results.
+        """
         from dcim.models import Device
 
         profile_id = _parse_posted_profile_id(request)

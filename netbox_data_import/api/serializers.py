@@ -29,7 +29,7 @@ class PolicySectionApplicabilityMixin:
     """Apply the shared policy-section applicability rule on the REST write path."""
 
     def validate_policy_section(self, attrs):
-        """Reject a row whose section does not apply to the profile's Source Adapter."""
+        """Rejects policy data when the selected profile's source adapter does not support the model's policy section."""
         profile = attrs.get("profile", getattr(self.instance, "profile", None))
         try:
             validate_section_applicability(profile, self.Meta.model.POLICY_SECTION)
@@ -43,7 +43,14 @@ class PolicySectionSerializer(PolicySectionApplicabilityMixin, ValidatedModelSer
     # No Meta.fields below lists display_url: these rows have no UI detail route to reverse.
 
     def validate(self, attrs):
-        """Run the policy checks, then the NetBox model validation."""
+        """Validate policy section and row data before applying model validation.
+        
+        Parameters:
+            attrs (dict): Attribute values being validated.
+        
+        Returns:
+            dict: The validated attribute values.
+        """
         # A nested serializer is handed a resolved instance, so no field mapping exists to check.
         if getattr(self, "nested", False):
             return super().validate(attrs)
@@ -53,11 +60,25 @@ class PolicySectionSerializer(PolicySectionApplicabilityMixin, ValidatedModelSer
         return super().validate(attrs)
 
     def validate_policy_row(self, attrs):
-        """Check the fields this model resolves through the catalog. Subclasses override."""
+        """
+        Validate policy-row fields that require model-specific checks.
+        """
 
 
 def _validate_target_keys(instance, attrs, names, *, allow_candidates=True, required=False):
-    """Reject a target key the profile's Source Adapter cannot supply."""
+    """
+    Validate target keys against the profile's source adapter output kinds.
+    
+    Parameters:
+        instance: Existing object providing profile and target values.
+        attrs (dict): Updated attribute values to validate.
+        names (iterable): Target attribute names to validate.
+        allow_candidates (bool): Whether candidate target keys are accepted.
+        required (bool): Whether each target value must be non-empty.
+    
+    Raises:
+        serializers.ValidationError: If a target key is invalid or a required value is empty.
+    """
     profile = attrs.get("profile", getattr(instance, "profile", None))
     output_kinds = profile.output_kinds if profile is not None else None
     for name in names:
@@ -126,7 +147,12 @@ class ColumnMappingSerializer(PolicySectionSerializer):
         fields = ["id", "url", "display", "profile", "source_column", "target_field"]
 
     def validate_policy_row(self, attrs):
-        """Resolve the target field through the catalog."""
+        """
+        Validate the policy row's required target field against the catalog.
+        
+        Parameters:
+            attrs (dict): Policy row attributes to validate.
+        """
         _validate_target_keys(self.instance, attrs, ("target_field",), required=True)
 
 
@@ -191,7 +217,9 @@ class ColumnTransformRuleSerializer(PolicySectionSerializer):
         ]
 
     def validate_policy_row(self, attrs):
-        """Resolve both group targets through the catalog, excluding the candidate targets."""
+        """
+        Validate both group target fields against the profile catalog.
+        """
         _validate_target_keys(self.instance, attrs, ("group_1_target", "group_2_target"), allow_candidates=False)
 
 
@@ -199,14 +227,31 @@ class SourceResolutionSerializer(PolicySectionSerializer):
     """Serializer for SourceResolution (rerere, plain model)."""
 
     def validate_profile(self, value):
-        """Refuse to move a saved row: its source ID and column only mean anything in one profile."""
+        """
+        Validate the profile assignment for a source resolution.
+        
+        Parameters:
+            value: Profile assigned to the resolution.
+        
+        Returns:
+            The validated profile.
+        
+        Raises:
+            serializers.ValidationError: If a saved resolution is assigned to a
+                different profile.
+        """
         # Field validators run before ValidatedModelSerializer.validate() writes onto the instance.
         if self.instance is not None and value.pk != self.instance.profile_id:
             raise serializers.ValidationError("A saved resolution cannot move to another profile.")
         return value
 
     def validate_policy_row(self, attrs):
-        """Reject Contact candidate resolutions that the importer cannot apply."""
+        """Validate contact-candidate resolution data for the policy row.
+        
+        Raises:
+            serializers.ValidationError: If the candidate values are not a JSON object
+                or the resolved fields are invalid.
+        """
         instance = self.instance
         source_column = attrs.get("source_column", getattr(instance, "source_column", None))
         if source_column == "candidate:contact":

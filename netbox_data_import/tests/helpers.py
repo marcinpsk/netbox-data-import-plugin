@@ -141,7 +141,19 @@ def setup_preview_with_device_matches(client, profile):
 
 
 def set_import_source(device, profile, source_id="", extra_columns=None, unassigned_ips=None):
-    """Store the import record the engine writes for one device."""
+    """
+    Create or update the import source record associated with a device.
+    
+    Parameters:
+        device: The device associated with the import source.
+        profile: The import profile used for the device.
+        source_id (str): Identifier for the external import source.
+        extra_columns (dict, optional): Additional column mappings.
+        unassigned_ips (dict, optional): IP address assignments without a device.
+    
+    Returns:
+        DeviceImportSource: The created or updated import source record.
+    """
     from netbox_data_import.models import DeviceImportSource
 
     record, _ = DeviceImportSource.objects.update_or_create(
@@ -157,7 +169,13 @@ def set_import_source(device, profile, source_id="", extra_columns=None, unassig
 
 
 def wait_until_a_lock_is_blocked(test, timeout=10):
-    """Block until another backend is waiting for a lock this connection holds."""
+    """
+    Wait until another database backend is blocked by a lock held by the current connection.
+    
+    Parameters:
+        test: Test case used to report failure if no blocked backend appears.
+        timeout (int | float): Maximum number of seconds to wait.
+    """
     from django.db import connection
 
     # pg_stat_activity is cached for the whole transaction; pg_locks reads live lock-manager state.

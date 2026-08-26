@@ -27,6 +27,7 @@ User = get_user_model()
 
 
 def _make_profile(name="ECov2Test") -> ImportProfile:
+    """Create an import profile configured for spreadsheet-based device imports."""
     return ImportProfile.objects.create(
         name=name,
         adapter_config={

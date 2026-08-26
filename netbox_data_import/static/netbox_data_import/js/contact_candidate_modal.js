@@ -339,6 +339,10 @@
     toggleContactFields();
   });
 
+  /**
+   * Displays or hides the message suggesting that an existing Contact can be linked.
+   * @param {string} suggestion - The suggestion message to display, or an empty value to hide it.
+   */
   function showSuggestion(suggestion) {
     if (!suggestionMessage) return;
     suggestionMessage.classList.toggle('d-none', !suggestion);
@@ -347,8 +351,11 @@
       : '';
   }
 
-  /* The page's suggestion map was built when the preview rendered, so a Contact created since,
-   * on another row, is only offered here if the server is asked again. */
+  /**
+   * Refreshes the suggested Contact for a preview row.
+   * @param {string} sourceId - The source identifier for the preview row.
+   * @param {number} rowNumber - The preview row number whose suggestion is refreshed.
+   */
   function refreshSuggestion(sourceId, rowNumber) {
     var url = form.dataset.contactSuggestionUrl;
     var profileField = form.querySelector('input[name=profile_id]');

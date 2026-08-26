@@ -50,7 +50,7 @@ class LegacyProfileYamlImportTest(TestCase):
     """`_profile_defaults_from_yaml` translates the pre-cutover scalar keys."""
 
     def setUp(self):
-        """Authenticate and create the Contact Role the legacy file references by slug."""
+        """Create an authenticated test client and the contact role referenced by the legacy profile."""
         from tenancy.models import ContactRole
 
         self.user = get_user_model().objects.create_superuser("legacy-yaml", "l@example.invalid", "testpass")
@@ -113,7 +113,9 @@ class LegacyProfileYamlImportTest(TestCase):
         self.assertFalse(ImportProfile.objects.filter(name="Legacy Export Profile").exists())
 
     def test_mixing_legacy_scalars_with_adapter_config_is_refused(self):
-        """Two ways to say the same thing have no defensible precedence, so refuse the file."""
+        """
+        Rejects legacy scalar settings when combined with ``adapter_config``.
+        """
         payload = LEGACY_YAML.replace(
             b"  sheet_name: Inventory\n",
             b"  sheet_name: Inventory\n  adapter_config:\n    sheet_name: Other\n",

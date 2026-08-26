@@ -326,13 +326,21 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
         return rows[index - 1].action, html[start : html.index("</tr>", start)]
 
     def _rack_detail(self):
-        """Return (action, detail-row HTML) for the workbook's rack row in the current preview."""
+        """
+        Selects the rack row from the current preview.
+        
+        Returns:
+        	tuple: The row action and rendered detail-row HTML.
+        """
         return self._detail_for(lambda row: row.object_type == "rack")
 
     def _preview_the_rack_that_netbox_already_holds(self, u_height=24):
-        """Create the workbook's rack in NetBox, so its row turns from a creation into an update.
-
-        The default height differs from the workbook's, so the row still writes something.
+        """
+        Create the rack represented by the preview workbook in NetBox so its row becomes an update.
+        
+        Parameters:
+            u_height (int): Rack height to use when creating the rack. The default produces a
+                change from the workbook value, while matching values produce a no-op.
         """
         from dcim.models import Rack, Site
 
@@ -415,9 +423,14 @@ class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
         return self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
 
     def _place_the_workbook_device_in_netbox(self, *, same_rack):
-        """Match a workbook device to NetBox, either already placed as the row asks or not.
-
-        `same_rack=True` leaves the row nothing to write, which is the case the badge must skip.
+        """
+        Create a NetBox device corresponding to a workbook row, optionally matching its rack placement.
+        
+        Parameters:
+            same_rack (bool): Whether to place the device at the workbook row's rack and position.
+        
+        Returns:
+            dict: The workbook row used to create the device.
         """
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 

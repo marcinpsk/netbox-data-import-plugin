@@ -145,12 +145,16 @@ class SourceResolutionViewSet(_PluginModelViewSet):
 
     # Each write serializes against an executing import, which holds the same profile row.
     def perform_create(self, serializer):
-        """Create the resolution under the profile lock."""
+        """Create the source resolution while holding a lock on its associated profile."""
         with locked_profile_policy(serializer.validated_data["profile"].pk):
             serializer.save()
 
     def perform_update(self, serializer):
-        """Update the resolution under its profile lock."""
+        """Update a source resolution while holding its profile lock.
+        
+        Raises:
+            Http404: If the source resolution or its associated import profile no longer exists.
+        """
         # ValidatedModelSerializer.validate() writes the request values onto the instance, so only
         # its primary key still names the stored row.
         try:
@@ -160,7 +164,12 @@ class SourceResolutionViewSet(_PluginModelViewSet):
             raise Http404 from None
 
     def perform_destroy(self, instance):
-        """Delete the resolution under its profile lock."""
+        """
+        Delete the source resolution while holding its associated profile lock.
+        
+        Raises:
+            Http404: If the resolution or its associated profile does not exist.
+        """
         try:
             with locked_resolution_policy(instance.pk):
                 instance.delete()

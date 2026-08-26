@@ -614,7 +614,7 @@ class NativeContactSyncTest(TestCase):
             PrimaryContactResolver._plan(self.device, self.profile, selection)
 
     def test_saved_contact_resolution_maps_candidate_values_to_native_fields(self):
-        """One saved row decision supplies Contact name, email, and phone."""
+        """Ensure saved contact resolutions populate native contact fields and create the corresponding assignment."""
         self._set_extra_columns({"depth": 750})
         email = "resolved.contact@example.invalid"
         phone = "+1 202-555-0100"

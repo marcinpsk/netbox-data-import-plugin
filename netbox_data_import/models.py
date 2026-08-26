@@ -69,7 +69,24 @@ def validate_contact_candidate_resolution(
     lookup_field: str,
     available_source_columns,
 ) -> dict:
-    """Validate and normalize one saved Contact candidate resolution."""
+    """
+    Validate a saved Contact candidate resolution and return its normalized values.
+    
+    Parameters:
+        resolved_fields (dict): Resolution data containing source-column selections,
+            literal field values, and an optional Contact ID.
+        lookup_field (str): Contact field required as the lookup field.
+        available_source_columns (Iterable[str]): Source columns available for the
+            current row.
+    
+    Returns:
+        dict: Normalized field sources, stripped literal field values, and Contact
+            ID.
+    
+    Raises:
+        ValidationError: If the resolution structure, selected columns, literal
+            values, required fields, or Contact ID is invalid.
+    """
     if (
         not isinstance(resolved_fields, dict)
         or not CONTACT_RESOLUTION_REQUIRED_KEYS <= set(resolved_fields)
@@ -114,14 +131,14 @@ def validate_contact_candidate_resolution(
 
 @contextmanager
 def locked_profile_policy(*profile_ids):
-    """Hold the given profile rows for a policy write or for an import execution.
-
-    Every SourceResolution write and the import worker take this same lock, so a decision cannot
-    commit between the worker's check and its writes. Locking the resolution rows alone would leave
-    an insert free to land in that window, because a row that does not exist yet cannot be locked.
-
-    The rows lock in primary-key order, so two callers naming several profiles cannot deadlock by
-    taking them in opposite orders.
+    """
+    Hold the specified import profiles locked for the duration of a policy write or import execution.
+    
+    Parameters:
+        *profile_ids: Primary keys of the profiles to lock. At least one existing, non-null ID is required.
+    
+    Raises:
+        ImportProfile.DoesNotExist: If no profile ID is provided or any specified profile does not exist.
     """
     wanted = sorted({profile_id for profile_id in profile_ids if profile_id is not None})
     # Django short-circuits `pk__in=[]`, so an empty set would yield without ever taking a lock.
@@ -136,11 +153,14 @@ def locked_profile_policy(*profile_ids):
 
 @contextmanager
 def locked_resolution_policy(resolution_pk):
-    """Hold the profile a saved resolution belongs to, read from the database rather than trusted.
-
-    A caller reaches this holding an instance it fetched earlier, whose profile may be a stale copy.
-    The row is read again under the lock, so the caller acts on a row that still exists and still
-    belongs to the locked profile.
+    """
+    Hold the profile associated with a saved source resolution while the resolution is verified.
+    
+    Parameters:
+        resolution_pk: Primary key of the source resolution.
+    
+    Raises:
+        SourceResolution.DoesNotExist: If the resolution does not exist or was deleted before verification.
     """
     gone = SourceResolution.DoesNotExist(f"No SourceResolution matches id {resolution_pk}.")
     profile_id = SourceResolution.objects.filter(pk=resolution_pk).values_list("profile_id", flat=True).first()
@@ -202,7 +222,11 @@ class ImportProfile(NetBoxModel):
         return stored
 
     def save(self, *args, **kwargs):
-        """Normalize adapter configuration on every supported write that stores it."""
+        """Validate adapter immutability and normalize adapter configuration before saving.
+        
+        Raises:
+            ValidationError: If the source adapter is unknown or its configuration is invalid.
+        """
         update_fields = kwargs.get("update_fields")
         updated = set(update_fields) if update_fields is not None else None
         if updated is None or updated & {"source_adapter", "adapter_config"}:
@@ -215,10 +239,8 @@ class ImportProfile(NetBoxModel):
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
-        """Take the policy lock before the cascade, which would otherwise take the child rows first.
-
-        A policy write holds this row and then writes a child, so a cascade in the opposite order
-        deadlocks against it. NetBox deletes each object through this method, in bulk as well.
+        """
+        Delete the profile while holding its policy lock to prevent conflicting policy updates during cascade deletion.
         """
         with locked_profile_policy(self.pk):
             return super().delete(*args, **kwargs)

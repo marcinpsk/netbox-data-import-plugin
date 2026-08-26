@@ -86,6 +86,14 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
     """The save endpoint answers JSON for the modal and keeps the redirect for a plain form."""
 
     def _payload(self, **overrides):
+        """Build a default contact-resolution request payload with optional overrides.
+        
+        Parameters:
+        	overrides: Values that replace or extend the default payload fields.
+        
+        Returns:
+        	dict: The prepared request payload.
+        """
         payload = {
             "profile_id": self.profile.pk,
             "source_id": "AJAX-001",

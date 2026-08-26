@@ -223,6 +223,14 @@ class PrimaryContactResolver:
 
     @staticmethod
     def _suggestion_from_plan(plan) -> dict | None:
+        """Build a reuse suggestion from an existing Contact plan.
+        
+        Parameters:
+        	plan (dict): Contact plan containing reuse details.
+        
+        Returns:
+        	dict | None: A Contact suggestion when the plan reuses an existing Contact; otherwise, ``None``.
+        """
         if not plan or plan["contact_action"] != "reuse":
             return None
         return {
@@ -234,7 +242,17 @@ class PrimaryContactResolver:
 
     @staticmethod
     def _unique_contact(values, fields, user) -> dict | None:
-        """Return the one visible Contact that an exact match on *fields* identifies."""
+        """
+        Finds a single visible Contact matching the supplied values in the specified fields.
+        
+        Parameters:
+            values: Values to match case-insensitively.
+            fields: Contact fields to search.
+            user: User whose view permissions restrict the matches.
+        
+        Returns:
+            A dictionary containing the Contact's ID, name, email, and phone, or None if zero or multiple Contacts match.
+        """
         from tenancy.models import Contact
 
         query = Q()
@@ -257,7 +275,16 @@ class PrimaryContactResolver:
 
     @classmethod
     def suggest(cls, candidate_values: dict[str, str], profile, user=None) -> dict | None:
-        """Return the one visible Contact that a candidate value in this row identifies."""
+        """
+        Find a single visible Contact matching the row's candidate values.
+        
+        Parameters:
+            candidate_values (dict[str, str]): Candidate Contact values from the row.
+            profile: Import profile containing the configured Contact lookup field.
+        
+        Returns:
+            dict | None: The matching Contact, or `None` when no unique visible match exists.
+        """
         values = [value for value in map(_text, candidate_values.values()) if value]
         if not values:
             return None
@@ -272,6 +299,21 @@ class PrimaryContactResolver:
 
     @classmethod
     def _plan_assignment(cls, obj, role, contact, user, lock):
+        """
+        Determine the assignment changes required for a Contact role.
+        
+        Parameters:
+        	obj: Object whose Contact assignment is being resolved.
+        	role: Contact role to resolve.
+        	contact: Contact to assign.
+        	user: User whose permissions are checked.
+        	lock: Whether existing assignments should be locked during evaluation.
+        
+        Returns:
+        	tuple: The existing primary assignment, the assignment for the selected
+        		Contact, and an action such as ``"create"``, ``"replace"``,
+        		``"demote_and_promote"``, ``"promote"``, or ``"unchanged"``.
+        """
         from tenancy.models import ContactAssignment
 
         if obj is None:

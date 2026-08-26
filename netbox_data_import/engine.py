@@ -511,12 +511,19 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
 
 
 def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
-    """Read the Excel file and return a list of row-dicts keyed by target_field name.
-
-    When return_stats=True, returns a tuple (rows, unused_stats) where unused_stats
-    is a dict mapping unmapped source column names to {"count": int, "samples": list[str]}.
-
-    Raises ParseError if the file or sheet is invalid.
+    """
+    Read the configured worksheet and convert its non-empty rows into target-field mappings.
+    
+    Parameters:
+        file_obj: Excel workbook file object.
+        profile (ImportProfile): Import profile defining the worksheet, mappings, and transforms.
+        return_stats (bool): Whether to include statistics for unmapped source columns.
+    
+    Returns:
+        list[dict] or tuple[list[dict], dict]: Parsed rows, optionally paired with unmapped-column statistics containing usage counts and sample values.
+    
+    Raises:
+        ParseError: If the target module, workbook, or configured worksheet is invalid.
     """
     if not has_implemented_module(profile.output_kinds):
         raise ParseError(f"This release has no Target Module for the '{profile.source_adapter}' source adapter.")
@@ -573,11 +580,15 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
 
 
 def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
-    """Return *rows* with every saved SourceResolution applied, leaving *rows* untouched.
-
-    `rows` must be the pristine parsed rows. Applying a resolution only ever sets fields, so a
-    derivation that starts from an earlier result cannot express a target field the operator has
-    since dropped. Every caller derives, and none stores what it derived.
+    """
+    Apply saved source resolutions to parsed rows without modifying the input rows.
+    
+    Parameters:
+        rows (list[dict]): Pristine parsed rows to derive effective values from.
+        profile: Import profile containing the saved source resolutions.
+    
+    Returns:
+        list[dict]: Rows with applicable saved resolutions applied.
     """
     resolutions_by_source_id: dict[str, list] = {}
     for res in profile.source_resolutions.all():
@@ -1179,11 +1190,16 @@ _RACK_IMPORT_FIELDS = ("u_height", "serial", "rack_type_id", "location_id", "ten
 
 
 def _ip_already_assigned(device, ip_field, ip_str) -> bool:
-    """Return whether the device already carries exactly this address on *ip_field*.
-
-    The writer only assigns after finding an interface of this device that already carries the
-    address, and it resolves the IPAddress by that interface's VRF. Anything else it would either
-    create or record as unassigned, so only that exact state counts as settled.
+    """
+    Determine whether a device field already references the specified IP address on the device.
+    
+    Parameters:
+    	device: The device whose IP field is checked.
+    	ip_field: The device attribute containing the IP address.
+    	ip_str: The IP address to compare.
+    
+    Returns:
+    	bool: `True` if the field references the specified address and it is assigned to an interface on the device in the same VRF, `False` otherwise.
     """
     import ipaddress
 
@@ -1221,9 +1237,17 @@ def _device_binding_is_current(profile, source_id, device, asset_tag) -> bool:
 
 
 def _import_record_is_current(device, profile, source_id, extra_columns) -> bool:
-    """Return whether the plugin's import record already holds what this row would store.
-
-    A row that supplies no unassigned address expects an empty map, so a stored one is a change.
+    """
+    Determine whether a device's stored import record matches the current row.
+    
+    Parameters:
+        device: Device whose import record is checked.
+        profile: Import profile associated with the row.
+        source_id: Source identifier for the row.
+        extra_columns: Additional source values stored with the row.
+    
+    Returns:
+        bool: True if the stored record matches the profile, source ID, and extra columns and has no unassigned IP addresses, false otherwise.
     """
     stored = DeviceImportSource.objects.filter(device_id=device.pk).first()
     return stored is not None and (
@@ -1237,10 +1261,21 @@ def _import_record_is_current(device, profile, source_id, extra_columns) -> bool
 def _matched_device_writes_nothing(
     device, review, contact_review, ip_fields, profile, source_id, asset_tag, *, zero_u=False
 ) -> bool:
-    """Return whether updating this matched Device would leave every stored value as it stands.
-
-    The execute guard compares the writer's action to the previewed one, so both sides decide here.
-    Every input is read-only, and anything this cannot prove counts as a write.
+    """
+    Determine whether processing a matched device would leave all import-controlled values unchanged.
+    
+    Parameters:
+    	device: The matched device to inspect.
+    	review: Reviewed device-field changes.
+    	contact_review: Reviewed primary-contact changes.
+    	ip_fields: IP assignments proposed by the import.
+    	profile: Import profile controlling metadata and source bindings.
+    	source_id: Source identifier for the imported device.
+    	asset_tag: Asset tag used for source binding checks.
+    	zero_u (bool): Whether the device type requires position and face to be cleared.
+    
+    Returns:
+    	bool: True if no device, contact, IP, source metadata, or binding changes are required; False otherwise.
     """
     # `review` is None when no reviewer loaded, which leaves the field comparison unavailable.
     if review is None or review.differing:
@@ -1273,7 +1308,18 @@ def _existing_rack_detail(rack_name, action, candidate) -> str:
 
 
 def _rack_import_candidate(rack, u_height, serial, rack_type, ctx):
-    """Return the rack as this row would leave it, or None when the profile does not update."""
+    """Build a candidate rack reflecting this row's configured import-field updates.
+    
+    Parameters:
+        rack: Existing rack to copy.
+        u_height: Rack height to apply.
+        serial: Rack serial number to apply.
+        rack_type: Rack type to apply.
+        ctx: Import context containing profile settings and field-update behavior.
+    
+    Returns:
+        A copied rack with the import-controlled fields applied, or `None` when existing racks are not updated.
+    """
     if not ctx.profile.adapter_settings.update_existing:
         return None
     candidate = copy(rack)
@@ -1282,9 +1328,15 @@ def _rack_import_candidate(rack, u_height, serial, rack_type, ctx):
 
 
 def _existing_rack_action(rack, candidate) -> str:
-    """Return the action an existing rack takes.
-
-    The execute guard compares the writer's action to the previewed one, so both sides decide here.
+    """
+    Determine whether an existing rack should be updated or skipped.
+    
+    Parameters:
+        rack: The existing rack.
+        candidate: The proposed import state for the rack, or None when no candidate exists.
+    
+    Returns:
+        "update" if an import-controlled field would change, otherwise "skip".
     """
     if candidate is None:
         return "skip"
@@ -1327,7 +1379,19 @@ def _rack_validation_error_row(row, source_id, rack_name, exc, operation):
 
 
 def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, rack_type=None):
-    """Write or update a rack in the database and record the result."""
+    """
+    Create or update a rack and record the operation outcome in the import result.
+    
+    Parameters:
+        rack_name: Name identifying the rack.
+        u_height: Rack height in rack units.
+        serial: Rack serial number.
+        source_id: Source-system identifier for the rack.
+        row: Parsed source row containing import metadata.
+        ctx: Import context used for permissions, state, and result tracking.
+        Rack: Rack model class.
+        rack_type: Optional rack type to assign.
+    """
     rack, ambiguous = _get_unique_rack(Rack, ctx, rack_name, lock=True)
     if ambiguous:
         ctx.result.rows.append(_ambiguous_rack_row(row, source_id, rack_name, rack_name, ctx, "rack"))
@@ -1429,7 +1493,18 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
 
 
 def _pass2_process_racks(rows, ctx, class_role_map):
-    """Pass 2: create or update Rack objects. Populates ctx.rack_map in place."""
+    """
+    Process rack rows for the import and record their results.
+    
+    Eligible racks are created, updated, or validated according to the import mode.
+    The context's rack map is populated for subsequent device placement checks, including
+    unsaved rack candidates during previews.
+    
+    Parameters:
+    	rows: Parsed import rows.
+    	ctx: Import context containing site, profile, result, and rack state.
+    	class_role_map: Mapping of device classes to their rack-processing configuration.
+    """
     from dcim.models import Rack
 
     for row in rows:
@@ -2387,7 +2462,22 @@ def _preview_device_row(  # noqa: C901
     ambiguous_names: frozenset = frozenset(),
     role_slug=_NOT_PROVIDED,
 ):
-    """Return a RowResult for *dry_run* mode (no DB writes)."""
+    """
+    Preview a device import row without writing changes to the database.
+    
+    Parameters:
+        ip_fields (dict | None): Parsed IP address fields to include in the preview.
+        device_face: Rack face for the device.
+        device_airflow: Device airflow direction.
+        device_status: Device status to preview.
+        u_position: Resolved rack position for field-difference reporting.
+        is_explicit_mapping (bool): Whether the device type was explicitly mapped.
+        ambiguous_names (frozenset): Device names that cannot be used for unambiguous matching.
+        role_slug: Device role slug, when a role is provided.
+    
+    Returns:
+        RowResult: The preview outcome, including the planned action, identity information, placement details, field differences, and any validation conflicts.
+    """
     # Parse u_height early so it's available in all return paths
     u_height_raw = row.get("u_height", 1)
     review_u_height = _coerce_int(u_height_raw, 1)
@@ -2940,6 +3030,20 @@ def _write_device_row(  # noqa: C901
     ip_fields: dict | None = None,
     ambiguous_names: frozenset = frozenset(),
 ):
+    """
+    Create or update a device from an imported row.
+    
+    Parameters:
+        row (dict): Parsed source row containing import values and row metadata.
+        ctx: Import context containing profile, site, location, tenant, permissions, and preview state.
+        source_id: Source-system identifier used to bind the row to a device.
+        device_name: Candidate name for the device.
+        ip_fields (dict | None): IP address values to assign or retain as import metadata.
+        ambiguous_names (frozenset): Device names known to be ambiguous during identity matching.
+    
+    Returns:
+        RowResult: The create, update, skip, or error result for the device row.
+    """
     rack_name = _str_val(row.get("rack_name"))
     device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
     device_role = _cached_device_role(ctx, DeviceRole, crm.role_slug)
