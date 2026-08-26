@@ -354,6 +354,8 @@
     instance.refreshOptions(false);
   }
 
+  var latestRefresh = 0;
+
   /* The page's suggestion map was built when the preview rendered, so a Contact created since,
    * on another row, is only offered here if the server is asked again. */
   function refreshSuggestion(sourceId, rowNumber) {
@@ -363,11 +365,14 @@
     if (!url || !sourceId || !profileId || contactId.value) return;
     var separator = url.includes('?') ? '&' : '?';
     var query = 'profile_id=' + encodeURIComponent(profileId) + '&source_id=' + encodeURIComponent(sourceId);
+    var asked = ++latestRefresh;
     fetch(url + separator + query, {headers: {'Accept': 'application/json'}})
       .then(function (response) { return response.json(); })
       .then(function (data) {
+        // Reopening the same row asks again, which the row identity alone cannot tell apart.
+        if (!data || asked !== latestRefresh) return;
         // The modal is shared, so a late answer must not write over the row now on screen.
-        if (!data || !stillShowing(sourceId)) return;
+        if (!stillShowing(sourceId)) return;
         var instance = picker();
         var offered = contactSuggestions[rowNumber];
         if (!data.suggestion) {
@@ -377,15 +382,15 @@
           showSuggestion(null);
           return;
         }
-        // An operator who picked a Contact while the answer was in flight keeps that choice.
-        if (contactId.value) return;
         contactSuggestions[rowNumber] = data.suggestion;
+        // One row identifies one Contact, so the previous offer must not stay on the list.
+        dropOffered(instance, offered);
         if (instance) {
-          // One row identifies one Contact, so the previous offer must not stay on the list.
-          dropOffered(instance, offered);
           instance.addOption(contactOption(data.suggestion));
           instance.refreshOptions(false);
         }
+        // An operator who picked a Contact while the answer was in flight keeps that choice.
+        if (contactId.value) return;
         showSuggestion(data.suggestion);
         setExpanded(linkExisting, existingWrap, true);
       })

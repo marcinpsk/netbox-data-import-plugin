@@ -300,6 +300,112 @@ describe("contact candidate modal", () => {
     expect(picker.options["41"]).toBeUndefined();
   });
 
+  it("ignores an earlier answer when the same row was reopened", async () => {
+    let answerFirst;
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          answerFirst = () =>
+            resolve({
+              json: () =>
+                Promise.resolve({
+                  suggestion: { id: 41, name: "Existing First Contact", email: "first@example.invalid", phone: "" },
+                }),
+            });
+        }),
+      )
+      .mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+          }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    // Both opens are the same row, so the row identity alone cannot tell the two answers apart.
+    openRow("first-row", "source-first");
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    answerFirst();
+    await new Promise((settle) => setTimeout(settle, 10));
+
+    // The answer to the reopen is the current one, so the earlier answer may not undo it.
+    expect(picker.options["52"]).toBeDefined();
+    expect(picker.options["41"]).toBeUndefined();
+  });
+
+  it("still replaces the offered Contact when the operator picked another one meanwhile", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.addOption({ id: "88", value: "88", text: "Chosen Contact", name: "Chosen Contact" });
+    picker.setValue("88");
+    answer();
+
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    // Their choice survives, and the Contact the row no longer identifies is off the list.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("88");
+    expect(picker.options["41"]).toBeUndefined();
+  });
+
+  it("does not offer a late answer against the row now on screen", async () => {
+    let answerFirst;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answerFirst = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    // The second row already has a linked Contact, so opening it asks the server nothing.
+    addPreviewFixture(
+      {
+        "source-second": {
+          "candidate:contact": {
+            resolved_fields: { contact_resolution_applied: true, contact_id: 88 },
+          },
+        },
+      },
+      { suggestionUrl: "/contact-suggestion/" },
+    );
+    openRow("first-row", "source-first");
+    openRow("second-row", "source-second");
+    answerFirst();
+    await new Promise((settle) => setTimeout(settle, 10));
+
+    // Nothing asked on behalf of this row, so the first row's answer may not land on it.
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    expect(picker.options["52"]).toBeUndefined();
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not bring the dropped suggestion back when the row is reopened", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);
