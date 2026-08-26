@@ -6,6 +6,7 @@ import os
 from contextlib import contextmanager
 from queue import Queue
 from threading import Thread
+from time import monotonic, sleep
 
 from django.db import connections
 
@@ -153,3 +154,19 @@ def set_import_source(device, profile, source_id="", extra_columns=None, unassig
         },
     )
     return record
+
+
+def wait_until_a_lock_is_blocked(test, timeout=10):
+    """Block until another backend is waiting for a lock this connection holds."""
+    from django.db import connection
+
+    # pg_stat_activity is cached for the whole transaction; pg_locks reads live lock-manager state.
+    query = "SELECT count(*) FROM pg_locks WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))"
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            if cursor.fetchone()[0]:
+                return
+        sleep(0.05)
+    test.fail("No other backend started waiting for a lock this connection holds.")

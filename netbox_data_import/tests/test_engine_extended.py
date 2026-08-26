@@ -505,7 +505,7 @@ class RunImportIgnoredDeviceTest(TestCase):
 
 
 class SourceResolutionInEngineTest(TestCase):
-    """Tests that source resolutions (rerere) are applied during parse_file."""
+    """Parsing leaves the source values alone; derivation applies the saved resolutions."""
 
     def setUp(self):
         """Create profile and a saved resolution."""
@@ -525,14 +525,24 @@ class SourceResolutionInEngineTest(TestCase):
                 resolved_fields={"device_name": "resolved-device-name"},
             )
 
-    def test_resolution_applied_to_row(self):
-        """parse_file applies saved resolutions to the matching row."""
+    def test_parse_file_leaves_the_parsed_value_alone(self):
+        """A baked row cannot express a target field a later edit drops, so parsing must not bake."""
         if not self.first_source_id:
             self.skipTest("No source_id in fixture rows")
         with open(FIXTURE_PATH, "rb") as f:
             rows = parse_file(f, self.profile)
-        resolved_rows = [r for r in rows if r.get("device_name") == "resolved-device-name"]
-        self.assertEqual(len(resolved_rows), 1)
+        self.assertEqual([r for r in rows if r.get("device_name") == "resolved-device-name"], [])
+
+    def test_derivation_applies_the_resolution(self):
+        """The one derivation step every reader shares applies it instead."""
+        from netbox_data_import.engine import derive_effective_rows
+
+        if not self.first_source_id:
+            self.skipTest("No source_id in fixture rows")
+        with open(FIXTURE_PATH, "rb") as f:
+            rows = parse_file(f, self.profile)
+        effective = derive_effective_rows(rows, self.profile)
+        self.assertEqual(len([r for r in effective if r.get("device_name") == "resolved-device-name"]), 1)
 
 
 class ImportResultPropertyTest(TestCase):

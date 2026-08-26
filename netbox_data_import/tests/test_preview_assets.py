@@ -329,15 +329,18 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
         """Return (action, detail-row HTML) for the workbook's rack row in the current preview."""
         return self._detail_for(lambda row: row.object_type == "rack")
 
-    def _preview_the_rack_that_netbox_already_holds(self):
-        """Create the workbook's rack in NetBox, so its row turns from a creation into an update."""
+    def _preview_the_rack_that_netbox_already_holds(self, u_height=24):
+        """Create the workbook's rack in NetBox, so its row turns from a creation into an update.
+
+        The default height differs from the workbook's, so the row still writes something.
+        """
         from dcim.models import Rack, Site
 
         self._setup_session()
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         rack_row = next(row for row in response.context["result"].rows if row.object_type == "rack")
         site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
-        Rack.objects.create(name=rack_row.name, site=site, u_height=42)
+        Rack.objects.create(name=rack_row.name, site=site, u_height=u_height)
 
     def test_a_rack_row_that_creates_says_so(self):
         """The create message is the baseline the existing-rack case has to differ from."""
@@ -370,10 +373,85 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertNotIn(self.CREATE_MESSAGE, detail)
         self.assertIn(self.NO_WRITE_MESSAGE, detail)
 
-    def test_an_update_row_with_no_difference_still_reports_a_match(self):
+    def test_an_update_row_with_no_field_diff_still_reports_a_match(self):
         """Scoping the match message to `update` must not remove it from the row it belongs to."""
         self._preview_the_rack_that_netbox_already_holds()
 
         action, detail = self._rack_detail()
         self.assertEqual(action, "update")
         self.assertIn(self.MATCH_MESSAGE, detail)
+
+    def test_a_rack_row_that_writes_nothing_is_not_called_an_update(self):
+        """The rack already carries every value this row sets, so calling it an update misleads."""
+        self._preview_the_rack_that_netbox_already_holds(u_height=42)
+
+        action, _detail = self._rack_detail()
+        self.assertEqual(action, "skip")
+
+    def _rack_main_row(self):
+        """Return the HTML of the rack row itself, not of its detail row."""
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        rows = list(response.context["result"].rows)
+        index = next(i for i, row in enumerate(rows, start=1) if row.object_type == "rack")
+        html = response.content.decode()
+        end = html.index(f'<tr id="diff-{index}" class="ndi-diff-row"')
+        return html[html.rindex("<tr", 0, end) : end]
+
+    def test_a_row_that_writes_nothing_reads_as_a_no_op_not_a_skip(self):
+        """`skip` also covers a row updates were turned off for, which is a different answer."""
+        self._preview_the_rack_that_netbox_already_holds(u_height=42)
+
+        main_row = self._rack_main_row()
+
+        self.assertIn(">No-op<", main_row)
+        self.assertNotIn(">Skip<", main_row)
+
+
+class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
+    """Sync placement sits in the collapsed detail row, so the main row has to advertise it."""
+
+    def _preview_html(self):
+        """Return the rendered preview for the current session."""
+        return self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+
+    def _place_the_workbook_device_in_netbox(self, *, same_rack):
+        """Match a workbook device to NetBox, either already placed as the row asks or not.
+
+        `same_rack=True` leaves the row nothing to write, which is the case the badge must skip.
+        """
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        self._setup_session()
+        rows = self.client.session["import_rows"]
+        # The Cabinet row also carries a rack name, so the position is what marks a real device.
+        row = next(r for r in rows if r.get("rack_name") and r.get("u_position"))
+        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        rack = Rack.objects.create(name=row["rack_name"], site=site, u_height=42)
+        manufacturer = Manufacturer.objects.create(name="BadgeMfg", slug="badge-mfg")
+        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="BadgeModel", slug="badge-model")
+        role = DeviceRole.objects.create(name="BadgeRole", slug="badge-role")
+        Device.objects.create(
+            name=row["device_name"],
+            site=site,
+            device_type=device_type,
+            role=role,
+            rack=rack if same_rack else None,
+            position=int(row["u_position"]) if same_rack else None,
+            face=(row.get("face") or "").lower() if same_rack else "",
+        )
+        return row
+
+    def test_a_row_that_can_apply_a_placement_carries_the_badge(self):
+        """The operator has to open the row to see the green button, so the badge answers first."""
+        row = self._place_the_workbook_device_in_netbox(same_rack=False)
+
+        html = self._preview_html()
+
+        self.assertIn("ndi-placement-badge", html)
+        self.assertIn(f"rack={row['rack_name']}", html)
+
+    def test_a_row_whose_placement_writes_nothing_carries_no_badge(self):
+        """The badge tracks the green button, so an inert placement must not advertise one."""
+        self._place_the_workbook_device_in_netbox(same_rack=True)
+
+        self.assertNotIn("ndi-placement-badge", self._preview_html())

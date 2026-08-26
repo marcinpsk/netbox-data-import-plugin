@@ -2,11 +2,14 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """DRF viewsets for the data-import plugin API."""
 
+from django.http import Http404
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import viewsets, permissions
 from rest_framework.permissions import DjangoModelPermissions
 
 from ..models import (
+    locked_profile_policy,
+    locked_resolution_policy,
     ImportProfile,
     ColumnMapping,
     ClassRoleMapping,
@@ -134,11 +137,52 @@ class ColumnTransformRuleViewSet(_PluginModelViewSet):
         return qs
 
 
+def _revalidate_against_the_stored_row(serializer):
+    """Read the resolution again and check the request against the row as it now stands.
+
+    save() writes every field, so a request that changed another field first would otherwise be
+    undone. The whole validation runs again rather than validate() alone, because the field checks
+    read the stored row too, and the profile lock makes this reading of it authoritative. The
+    result is discarded: the values are the request's own, which the first pass already holds.
+    """
+    serializer.instance = SourceResolution.objects.get(pk=serializer.instance.pk)
+    serializer.run_validation(serializer.initial_data)
+
+
 class SourceResolutionViewSet(_PluginModelViewSet):
     """CRUD viewset for SourceResolution (rerere)."""
 
     queryset = SourceResolution.objects.select_related("profile")
     serializer_class = SourceResolutionSerializer
+
+    # Each write serializes against an executing import, which holds the same profile row.
+    def perform_create(self, serializer):
+        """Create the resolution under the profile lock."""
+        try:
+            with locked_profile_policy(serializer.validated_data["profile"].pk):
+                serializer.save()
+        except ImportProfile.DoesNotExist:
+            # The profile is read to validate the request, and can be deleted before the lock.
+            raise Http404 from None
+
+    def perform_update(self, serializer):
+        """Update the resolution under its profile lock."""
+        # ValidatedModelSerializer.validate() writes the request values onto the instance, so only
+        # its primary key still names the stored row.
+        try:
+            with locked_resolution_policy(serializer.instance.pk):
+                _revalidate_against_the_stored_row(serializer)
+                serializer.save()
+        except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
+            raise Http404 from None
+
+    def perform_destroy(self, instance):
+        """Delete the resolution under its profile lock."""
+        try:
+            with locked_resolution_policy(instance.pk):
+                instance.delete()
+        except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
+            raise Http404 from None
 
     def get_queryset(self):
         """Filter by profile_id query param if provided."""
