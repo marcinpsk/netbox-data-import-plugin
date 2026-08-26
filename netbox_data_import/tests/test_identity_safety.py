@@ -656,6 +656,37 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             "a serial was given up against a target the preview would have discarded",
         )
 
+    def test_a_name_is_not_resolved_against_an_import_target_that_went_stale(self):
+        """The name check queries the saved target, so a stale one cannot clear a replacement."""
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Identity Name Tenant", slug="identity-name-tenant")
+        rows = [
+            self._device_row(2, "STALE-NAME-A", "stale-name-shared", self.rack_a, 1),
+            self._device_row(3, "STALE-NAME-B", "stale-name-shared", self.rack_b, 2),
+        ]
+        preview = run_import(rows, self.profile, {"site": self.site, "tenant": tenant}, dry_run=True)
+        self._set_import_session(rows, preview, tenant=tenant)
+        revision = self._preview_revision()
+        tenant.delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "STALE-NAME-B",
+                "row_number": 3,
+                "new_name": "stale-name-replacement",
+                "preview_revision": revision,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="STALE-NAME-B").exists(),
+            "a replacement name was cleared against a target the preview would have discarded",
+        )
+
     def test_duplicate_name_form_refuses_a_stale_preview_revision(self):
         """A stale HTMX name form navigates instead of replacing the frozen preview."""
         rows = [

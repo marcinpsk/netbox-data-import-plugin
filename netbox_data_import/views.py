@@ -2343,6 +2343,24 @@ class SyncPlacementView(_AjaxPermissionView):
 # ---------------------------------------------------------------------------
 
 
+def _device_name_already_claimed(effective_rows, row_number, new_name, target):
+    """Return why this device name is unavailable at the import target, or None when it is free."""
+    from dcim.models import Device
+
+    other_names = {
+        engine._identity_text(device_name)
+        for row in effective_rows
+        if row.get("_row_number") != row_number and (device_name := engine._effective_device_name(row))
+    }
+    if engine._identity_text(new_name) in other_names:
+        return f"Device name '{new_name}' is already used by another source row."
+    tenant = target["tenant"]
+    tenant_filter = {"tenant": tenant} if tenant is not None else {"tenant__isnull": True}
+    if Device.objects.filter(site=target["site"], name__iexact=new_name, **tenant_filter).exists():
+        return f"Device name '{new_name}' already exists at the active import site."
+    return None
+
+
 class ResolveDuplicateNameView(PermissionRequiredMixin, View):
     """Save a unique device name for one duplicate source row."""
 
@@ -2350,8 +2368,6 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Validate and persist the replacement device name."""
-        from dcim.models import Device
-
         ctx_data = request.session.get("import_context") or {}
         rows = request.session.get("import_rows") or []
         next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
@@ -2393,35 +2409,31 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             messages.error(request, "The device name must contain 1 to 64 characters.")
             return _name_resolution_response(request, next_url)
 
-        effective_rows = engine.derive_effective_rows(rows, profile)
-        other_names = {
-            engine._identity_text(device_name)
-            for row in effective_rows
-            if row.get("_row_number") != row_number and (device_name := engine._effective_device_name(row))
-        }
-        if engine._identity_text(new_name) in other_names:
-            messages.error(request, f"Device name '{new_name}' is already used by another source row.")
-            return _name_resolution_response(request, next_url)
-        tenant_filter = (
-            {"tenant_id": ctx_data.get("tenant_id")} if ctx_data.get("tenant_id") else {"tenant__isnull": True}
-        )
-        if Device.objects.filter(site_id=ctx_data.get("site_id"), name__iexact=new_name, **tenant_filter).exists():
-            messages.error(request, f"Device name '{new_name}' already exists at the active import site.")
+        target = _resolved_import_target(ctx_data)
+        if target is None:
+            messages.error(request, "The saved import target is no longer available. Start a new preview.")
             return _name_resolution_response(request, next_url)
 
         resolution_values = {
             "original_value": engine._str_val(source_rows[0].get("device_name")),
             "resolved_fields": {"device_name": new_name},
         }
+        already_claimed = None
         try:
             # Serialize against an executing import, which holds the same profile row.
             with locked_profile_policy(profile.pk):
-                save_permission_scoped_object(
-                    request.user,
-                    SourceResolution,
-                    {"profile": profile, "source_id": source_id, "source_column": "device_name"},
-                    resolution_values,
+                # Read the claims under the lock: a name saved between the check and the write would
+                # otherwise let two source rows resolve to the same device name.
+                already_claimed = _device_name_already_claimed(
+                    engine.derive_effective_rows(rows, profile), row_number, new_name, target
                 )
+                if already_claimed is None:
+                    save_permission_scoped_object(
+                        request.user,
+                        SourceResolution,
+                        {"profile": profile, "source_id": source_id, "source_column": "device_name"},
+                        resolution_values,
+                    )
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved name.")
             return _name_resolution_response(request, next_url)
@@ -2430,6 +2442,10 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
         except IntegrityError:
             messages.error(request, "The saved name changed while this request was being processed. Try again.")
+            return _name_resolution_response(request, next_url)
+
+        if already_claimed is not None:
+            messages.error(request, already_claimed)
             return _name_resolution_response(request, next_url)
 
         messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
