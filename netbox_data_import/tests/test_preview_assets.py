@@ -407,6 +407,45 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertNotIn(">Skip<", main_row)
 
 
+class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
+    """A row that matched a NetBox device says so, whatever its field diff turns out to be."""
+
+    def _preview_html(self):
+        """Return the rendered preview for the current session."""
+        return self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+
+    def _match_a_workbook_device(self):
+        """Create the NetBox device one workbook row names, so that row matches it."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        self._setup_session()
+        rows = self.client.session["import_rows"]
+        row = next(r for r in rows if r.get("device_name") and r.get("u_position"))
+        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        manufacturer = Manufacturer.objects.create(name="MatchMfg", slug="match-mfg")
+        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="MatchModel", slug="match-model")
+        role = DeviceRole.objects.create(name="MatchRole", slug="match-role")
+        device = Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
+        return row, device
+
+    def test_a_row_that_matched_a_device_carries_the_badge(self):
+        """The row reports an update the field diff cannot explain, so it names what it matched."""
+        _row, device = self._match_a_workbook_device()
+
+        html = self._preview_html()
+
+        self.assertIn("ndi-matched-badge", html)
+        self.assertIn(f"/dcim/devices/{device.pk}/", html)
+
+    def test_a_row_that_matched_nothing_carries_no_badge(self):
+        """A device this import creates has nothing to point at."""
+        self._setup_session()
+
+        html = self._preview_html()
+
+        self.assertNotIn("ndi-matched-badge", html)
+
+
 class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
     """Sync placement sits in the collapsed detail row, so the main row has to advertise it."""
 

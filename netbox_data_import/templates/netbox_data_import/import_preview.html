@@ -491,6 +491,16 @@
                     <i class="mdi mdi-package-variant"></i> Placement
                   </button>
                 {% endif %}
+                {# An update a matched row cannot explain through its field diff still has a device. #}
+                {% if row.object_type == 'device' and row.extra_data.netbox_device_id %}
+                  <br>
+                  <a href="{% url 'dcim:device' pk=row.extra_data.netbox_device_id %}"
+                     class="badge ndi-badge-generic ndi-matched-badge mt-1"
+                     target="_blank" rel="noopener"
+                     title="This row matched the NetBox device '{{ row.name }}'. Open it in a new tab.">
+                    <i class="mdi mdi-link-variant"></i> Matched
+                  </a>
+                {% endif %}
               </td>
               <td class="text-end" style="white-space:nowrap; min-width:180px;">
 
