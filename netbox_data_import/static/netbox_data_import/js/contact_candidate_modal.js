@@ -331,7 +331,8 @@
       }
       instance.refreshOptions(false);
     }
-    showSuggestion(suggestion);
+    // The message asks for a Contact to be linked, so a row that has one is not asked again.
+    showSuggestion(contactId.value ? null : suggestion);
     refreshSuggestion(sourceId, rowNumber);
 
     noContact.checked = resolvedFields.contact_resolution_applied === true
@@ -376,7 +377,7 @@
       }
       heldOffer = null;
     }
-    if (!contactId.value) showSuggestion(contactSuggestions[shownRow]);
+    showSuggestion(contactId.value ? null : contactSuggestions[shownRow]);
   }
 
   var latestRefresh = 0;

@@ -255,12 +255,12 @@ describe("contact candidate modal", () => {
     answer();
 
     await vi.waitFor(() => {
-      expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+      expect(picker.options["41"]).toBeUndefined();
     });
     // Their choice survives, and the Contact the page offered is gone from the picker.
     expect(document.getElementById("contactCandidateContactId").value).toBe("88");
     expect(picker.options["88"]).toBeDefined();
-    expect(picker.options["41"]).toBeUndefined();
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
   });
 
   it("keeps the stale option when it is the Contact the operator selected", async () => {
@@ -271,10 +271,11 @@ describe("contact candidate modal", () => {
 
     const picker = document.getElementById("contactCandidateExisting").tomselect;
     picker.setValue("41");
-
     await vi.waitFor(() => {
-      expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+      expect(fetchMock).toHaveBeenCalled();
     });
+    await new Promise((settle) => setTimeout(settle, 10));
+
     // Removing a selected option clears the selection, so the save reports the deletion instead.
     expect(document.getElementById("contactCandidateContactId").value).toBe("41");
     expect(picker.options["41"]).toBeDefined();
@@ -505,6 +506,33 @@ describe("contact candidate modal", () => {
     // The row still identifies it, so the message and the list must say the same thing.
     expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
     expect(picker.options["41"]).toBeDefined();
+  });
+
+  it("stops offering the Contact once the operator links one", () => {
+    addPreviewFixture();
+    openRow("first-row", "source-first");
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+
+    document.getElementById("contactCandidateExisting").tomselect.setValue("41");
+
+    // The message asks for a Contact to be linked, which is done.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+  });
+
+  it("does not offer a Contact to a row that already links one", () => {
+    addPreviewFixture({
+      "source-first": {
+        "candidate:contact": {
+          resolved_fields: { contact_resolution_applied: true, contact_id: 41 },
+        },
+      },
+    });
+    openRow("first-row", "source-first");
+
+    // The row was saved with a linked Contact, so the message has nothing to ask for.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
   });
 
   it("does not bring the dropped suggestion back when the row is reopened", async () => {
