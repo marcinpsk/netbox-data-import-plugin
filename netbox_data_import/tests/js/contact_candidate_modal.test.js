@@ -280,6 +280,26 @@ describe("contact candidate modal", () => {
     expect(picker.options["41"]).toBeDefined();
   });
 
+  it("replaces the offered Contact when the server names a different one", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: () =>
+        Promise.resolve({
+          suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    // The page offers Contact 41, which stopped matching this row before the modal opened.
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    // One row identifies one Contact, so the replaced one must not stay on offer.
+    expect(picker.options["41"]).toBeUndefined();
+  });
+
   it("does not bring the dropped suggestion back when the row is reopened", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);

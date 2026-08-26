@@ -347,6 +347,13 @@
       : '';
   }
 
+  /* Removing a selected option clears the selection, so an offer the operator chose stays. */
+  function dropOffered(instance, offered) {
+    if (!instance || !offered || String(offered.id) === contactId.value) return;
+    instance.removeOption(String(offered.id));
+    instance.refreshOptions(false);
+  }
+
   /* The page's suggestion map was built when the preview rendered, so a Contact created since,
    * on another row, is only offered here if the server is asked again. */
   function refreshSuggestion(sourceId, rowNumber) {
@@ -362,16 +369,11 @@
         // The modal is shared, so a late answer must not write over the row now on screen.
         if (!data || !stillShowing(sourceId)) return;
         var instance = picker();
+        var offered = contactSuggestions[rowNumber];
         if (!data.suggestion) {
-          // The Contact the page offers is gone, so keeping it would only fail on save. The
-          // option stays when it is the operator's current choice, because removing a selected
-          // option clears the selection.
-          var stale = contactSuggestions[rowNumber];
+          // The Contact the page offers is gone, so keeping it would only fail on save.
           delete contactSuggestions[rowNumber];
-          if (instance && stale && String(stale.id) !== contactId.value) {
-            instance.removeOption(String(stale.id));
-            instance.refreshOptions(false);
-          }
+          dropOffered(instance, offered);
           showSuggestion(null);
           return;
         }
@@ -379,6 +381,8 @@
         if (contactId.value) return;
         contactSuggestions[rowNumber] = data.suggestion;
         if (instance) {
+          // One row identifies one Contact, so the previous offer must not stay on the list.
+          dropOffered(instance, offered);
           instance.addOption(contactOption(data.suggestion));
           instance.refreshOptions(false);
         }
