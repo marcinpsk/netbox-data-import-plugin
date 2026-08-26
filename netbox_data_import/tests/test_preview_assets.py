@@ -459,14 +459,21 @@ class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
         device = Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
         return row, device
 
+    def _badge_tag(self, html):
+        """Return the badge anchor itself, so a link elsewhere on the page cannot answer for it."""
+        return re.search(r'<a\b[^>]*\bclass="[^"]*ndi-matched-badge[^"]*"[^>]*>', html)
+
     def test_a_row_that_matched_a_device_carries_the_badge(self):
         """The row reports an update the field diff cannot explain, so it names what it matched."""
         _row, device = self._match_a_workbook_device()
 
         html = self._preview_html()
 
-        self.assertIn("ndi-matched-badge", html)
-        self.assertIn(f"/dcim/devices/{device.pk}/", html)
+        badge = self._badge_tag(html)
+        self.assertIsNotNone(badge, "the matched row must carry the badge")
+        href = re.search(r'href="([^"]*)"', badge.group(0))
+        self.assertIsNotNone(href, badge.group(0))
+        self.assertEqual(href.group(1), f"/dcim/devices/{device.pk}/")
 
     def test_a_row_that_matched_nothing_carries_no_badge(self):
         """A device this import creates has nothing to point at."""
@@ -474,7 +481,7 @@ class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
 
         html = self._preview_html()
 
-        self.assertNotIn("ndi-matched-badge", html)
+        self.assertIsNone(self._badge_tag(html))
 
 
 class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
