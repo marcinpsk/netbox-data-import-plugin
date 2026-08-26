@@ -668,8 +668,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
         tenant = Tenant.objects.create(name="Identity Name Tenant", slug="identity-name-tenant")
         rows = [
-            self._device_row(2, "STALE-NAME-A", "stale-name-shared", self.rack_a, 1),
-            self._device_row(3, "STALE-NAME-B", "stale-name-shared", self.rack_b, 2),
+            self._device_row(2, "STALE-NAME-A", "stale-name-first", self.rack_a, 1),
+            self._device_row(3, "STALE-NAME-B", "stale-name-second", self.rack_b, 2),
         ]
         preview = run_import(rows, self.profile, {"site": self.site, "tenant": tenant}, dry_run=True)
         self._set_import_session(rows, preview, tenant=tenant)
@@ -733,6 +733,35 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             SourceResolution.objects.get(profile=self.profile, source_id="SWAP-A").resolved_fields,
             {"serial": "SWAP-SECOND"},
             "the view gave up a serial the operator was never shown",
+        )
+
+    def test_the_locked_serial_recheck_reports_how_long_it_held_the_lock(self):
+        """The locked dry run grows with the source file, so its hold time has to reach the log."""
+        rows = [
+            self._device_row(2, "TIMED-A", "timed-device-a", self.rack_a, 1),
+            self._device_row(3, "TIMED-B", "timed-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "TIMED-SERIAL"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        with self.assertLogs("netbox_data_import.views", level="INFO") as captured:
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+                {
+                    "profile_id": self.profile.pk,
+                    "source_id": "TIMED-B",
+                    "row_number": 3,
+                    "preview_revision": self._preview_revision(),
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(SourceResolution.objects.filter(profile=self.profile, source_id="TIMED-B").exists())
+        self.assertTrue(
+            any("held the profile policy lock" in line and "2 source rows" in line for line in captured.output),
+            captured.output,
         )
 
     def test_duplicate_name_form_refuses_a_stale_preview_revision(self):

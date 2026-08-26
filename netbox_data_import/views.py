@@ -2,6 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import difflib
 import logging
+import time
 from urllib.parse import parse_qs, urlsplit
 
 from django.contrib import messages
@@ -2525,6 +2526,7 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
         try:
             # Serialize against an executing import, which holds the same profile row.
             with locked_profile_policy(profile.pk):
+                held_since = time.monotonic()
                 # Read the target and re-judge the collision under the lock. Only the engine knows
                 # which rows it will create, and a serial match alone also counts rows it skips.
                 target = _resolved_import_target(ctx_data)
@@ -2547,6 +2549,12 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
                             {"profile": profile, "source_id": source_id, "source_column": "serial"},
                             {"original_value": original_serial, "resolved_fields": {"serial": ""}},
                         )
+                # The dry run costs more as the file grows, and the import worker waits behind it.
+                logger.info(
+                    "IgnoreDuplicateSerialView: held the profile policy lock for %.2fs over %d source rows.",
+                    time.monotonic() - held_since,
+                    len(rows),
+                )
         except ImportProfile.DoesNotExist:
             messages.error(request, "The import profile is no longer available.")
             return _name_resolution_response(request, next_url)
