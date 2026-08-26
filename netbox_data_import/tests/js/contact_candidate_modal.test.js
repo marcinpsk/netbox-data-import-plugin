@@ -406,6 +406,74 @@ describe("contact candidate modal", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("retires the replaced offer once the operator lets go of it", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    // The operator takes the Contact the page offered, which the answer then replaces.
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.setValue("41");
+    answer();
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
+
+    picker.clear();
+
+    // Nothing holds the replaced Contact now, so the row offers only the one it identifies.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("");
+    expect(picker.options["41"]).toBeUndefined();
+    expect(picker.options["52"]).toBeDefined();
+  });
+
+  it("shows the offer that arrived behind a selection once the selection goes", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 52, name: "Other Contact", email: "second@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    // The page found no Contact for this row, so only the answer can offer one.
+    openRow("second-row", "source-second");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.addOption({ id: "88", value: "88", text: "Chosen Contact", name: "Chosen Contact" });
+    picker.setValue("88");
+    answer();
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    // Their choice stands, so the offer stays quiet behind it.
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+
+    picker.clear();
+
+    // With nothing chosen, the row must say that a matching Contact exists.
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+  });
+
   it("does not bring the dropped suggestion back when the row is reopened", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);

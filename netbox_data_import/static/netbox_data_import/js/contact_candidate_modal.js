@@ -38,6 +38,8 @@
   var addValue = document.getElementById('contactCandidateAddValue');
   var provenance = document.getElementById('contactCandidateProvenance');
   var linkedContacts = {};
+  var shownRow = null;
+  var heldOffer = null;
   var saveInFlight = false;
   var summary = {
     name: document.getElementById('contactCandidateSummaryName'),
@@ -233,18 +235,21 @@
     contactId.value = '';
     var instance = picker();
     if (instance && instance.getValue()) instance.clear(true);
+    releaseOffer();
   }
 
   function applyExistingContact(value) {
     var instance = existingContact.tomselect;
     if (!value || !instance) {
       contactId.value = '';
+      releaseOffer();
       refreshSummary();
       return;
     }
     var contact = instance.options[value];
     if (!contact) return;
     contactId.value = String(contact.id);
+    releaseOffer();
     // A linked Contact supplies every field, so no row may also claim one, and a literal the
     // required-field check rejected must stop blocking the form.
     valueRows.querySelectorAll('.ndi-contact-role').forEach(function (select) { select.value = ''; });
@@ -287,6 +292,8 @@
     var savedValues = resolvedFields.contact_field_values || {};
     var suggestion = contactSuggestions[rowNumber];
     var proposed = roleSuggestions[rowNumber] || {};
+    shownRow = rowNumber;
+    heldOffer = null;
 
     document.getElementById('contactCandidateSourceId').value = sourceId;
     document.getElementById('contactCandidateOriginalValue').value = JSON.stringify(rowCandidates);
@@ -347,11 +354,29 @@
       : '';
   }
 
-  /* Removing a selected option clears the selection, so an offer the operator chose stays. */
+  /* Removing a selected option clears the selection, so an offer the operator holds waits. */
   function dropOffered(instance, offered) {
-    if (!instance || !offered || String(offered.id) === contactId.value) return;
+    if (!instance || !offered) return;
+    if (String(offered.id) === contactId.value) {
+      heldOffer = String(offered.id);
+      return;
+    }
     instance.removeOption(String(offered.id));
     instance.refreshOptions(false);
+  }
+
+  /* A replaced offer leaves when the choice moves off it, and an offer that arrived behind a
+   * choice speaks once there is none. */
+  function releaseOffer() {
+    var instance = existingContact.tomselect;
+    if (heldOffer && heldOffer !== contactId.value) {
+      if (instance) {
+        instance.removeOption(heldOffer);
+        instance.refreshOptions(false);
+      }
+      heldOffer = null;
+    }
+    if (!contactId.value) showSuggestion(contactSuggestions[shownRow]);
   }
 
   var latestRefresh = 0;
