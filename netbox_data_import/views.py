@@ -905,9 +905,6 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.warning(request, "No import in progress. Please start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        from dcim.models import Location, Site
-        from tenancy.models import Tenant
-
         profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=ctx.get("profile_id")).first()
         if not profile:
             _discard_import_preview(request)
@@ -922,18 +919,12 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.error(request, "; ".join(exc.messages))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        site = Site.objects.filter(pk=ctx.get("site_id")).first()
-        location = Location.objects.filter(pk=ctx.get("location_id")).first() if ctx.get("location_id") else None
-        tenant = Tenant.objects.filter(pk=ctx.get("tenant_id")).first() if ctx.get("tenant_id") else None
-        target_is_stale = (
-            site is None
-            or (ctx.get("location_id") and (location is None or location.site_id != site.pk))
-            or (ctx.get("tenant_id") and tenant is None)
-        )
-        if target_is_stale:
+        target = _resolved_import_target(ctx)
+        if target is None:
             _discard_import_preview(request)
             messages.warning(request, "The saved import target is no longer available. Start a new preview.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        site, location, tenant = target["site"], target["location"], target["tenant"]
 
         stored_result = request.session.get("import_result")
         if use_materialized_result and isinstance(stored_result, dict):
@@ -1543,6 +1534,23 @@ def _preview_action_error(request, next_url, message, *, status=409):
         return JsonResponse({"ok": False, "error": message}, status=status)
     messages.error(request, message)
     return redirect(next_url)
+
+
+def _resolved_import_target(ctx_data):
+    """Return the engine context the saved import names, or None once that target went stale."""
+    from dcim.models import Location, Site
+    from tenancy.models import Tenant
+
+    site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
+    location = Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
+    tenant = Tenant.objects.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
+    if (
+        site is None
+        or (ctx_data.get("location_id") and (location is None or location.site_id != site.pk))
+        or (ctx_data.get("tenant_id") and tenant is None)
+    ):
+        return None
+    return {"site": site, "location": location, "tenant": tenant}
 
 
 def _stale_preview_reason(request):
@@ -2428,6 +2436,16 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
         return _name_resolution_response(request, next_url)
 
 
+def _reports_duplicate_serial(preview_rows, row_number) -> bool:
+    """Answer whether the engine calls this source row's serial a duplicate."""
+    return any(
+        item.row_number == row_number
+        and item.object_type == "device"
+        and item.extra_data.get("identity_conflict") == "duplicate_serial"
+        for item in preview_rows
+    )
+
+
 class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
     """Drop the serial from one source row so the rows sharing it stop colliding."""
 
@@ -2472,15 +2490,9 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
 
         preview = load_cached_preview(request)
-        preview_rows = preview[1].rows if preview is not None else []
-        # Dropping a serial loses identity, so only the preview's own collision may authorize it.
-        if not any(
-            item.row_number == row_number
-            and item.object_type == "device"
-            and item.extra_data.get("identity_conflict") == "duplicate_serial"
-            for item in preview_rows
-        ):
-            messages.error(request, "This row has no duplicate serial in the current preview.")
+        # The action settles the collision the operator was shown, not one that arrived after.
+        if preview is None or not _reports_duplicate_serial(preview[1].rows, row_number):
+            messages.error(request, "This row shows no duplicate serial in the current preview.")
             return _name_resolution_response(request, next_url)
 
         original_serial = engine._str_val(source_rows[0].get("serial"))
@@ -2488,25 +2500,25 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             messages.error(request, "This row carries no serial to give up.")
             return _name_resolution_response(request, next_url)
 
+        target = _resolved_import_target(ctx_data)
+        if target is None:
+            messages.error(request, "The saved import target is no longer available. Start a new preview.")
+            return _name_resolution_response(request, next_url)
+
         still_contested = False
         try:
             # Serialize against an executing import, which holds the same profile row.
             with locked_profile_policy(profile.pk):
-                # The preview above can predate a resolution saved since, so re-read the claim here:
-                # dropping the last copy of a serial would lose it instead of settling a collision.
-                effective_rows = engine.derive_effective_rows(rows, profile)
-                effective_serial = next(
-                    (
-                        engine._str_val(item.get("serial"))
-                        for item in effective_rows
-                        if item.get("_row_number") == row_number
-                    ),
-                    "",
+                # Only the engine knows which rows it will import, so let it re-judge the collision
+                # next to the write: a serial match alone also counts rows the import skips.
+                current = engine.run_import(
+                    engine.derive_effective_rows(rows, profile),
+                    profile,
+                    target,
+                    dry_run=True,
+                    user=request.user,
                 )
-                still_contested = bool(effective_serial) and any(
-                    item.get("_row_number") != row_number and engine._str_val(item.get("serial")) == effective_serial
-                    for item in effective_rows
-                )
+                still_contested = _reports_duplicate_serial(current.rows, row_number)
                 if still_contested:
                     save_permission_scoped_object(
                         request.user,
@@ -2525,7 +2537,7 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
 
         if not still_contested:
-            messages.error(request, "No other row claims this serial any more.")
+            messages.error(request, "No other row that this import will create claims this serial.")
             return _name_resolution_response(request, next_url)
 
         messages.success(request, f"Source '{source_id}' will import without serial '{original_serial}'.")
