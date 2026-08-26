@@ -380,6 +380,330 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         self.assertEqual(resolution.resolved_fields, {"device_name": "second-decision"})
 
 
+class ProfileVanishedBeforeTheJobLockTest(PristinePreviewRowMixin, TransactionTestCase):
+    """A profile deleted before the worker's policy lock is a job failure, not a traceback."""
+
+    def setUp(self):
+        """Build the world and take the preview the operator approves."""
+        self.build_world()
+        self.open_preview()
+
+    def test_the_job_reports_the_missing_profile(self):
+        """Every other missing dependency ends in _fail, so this one owes the same report."""
+        from core.exceptions import JobFailed
+        from core.models import Job
+
+        from dcim.models import Device
+        from django.db import connection
+
+        deleted = []
+
+        def delete_the_profile_when_the_lock_runs(execute, sql, params, many, context):
+            # Stand in for a profile deleted between the worker's read and its policy lock.
+            if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
+                deleted.append(True)
+
+                def delete_it():
+                    ImportProfile.objects.get(pk=self.profile.pk).delete()
+
+                with run_on_separate_connection(delete_it):
+                    pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(delete_the_profile_when_the_lock_runs):
+            with self.assertRaises(JobFailed):
+                self.run_the_worker()
+
+        self.assertEqual(deleted, [True], "the locking statement never ran")
+        job = Job.objects.get(name="Data Import")
+        self.assertEqual(job.data["message"], "The import profile is no longer available.")
+        self.assertFalse(Device.objects.filter(name="server-a").exists())
+
+
+class ProfileVanishedBeforeTheCreateLockTest(TransactionTestCase):
+    """A profile deleted between validation and the lock is the 404 the request would have got."""
+
+    def setUp(self):
+        """Create the profile the request names and the operator who posts the resolution."""
+        self.profile = _build_profile("Create Race Profile")
+        self.user = get_user_model().objects.create_superuser("create-race", "c@example.invalid", "p")
+
+    def test_the_api_answers_404(self):
+        """The create path takes the same lock as the update path, so it owes the same answer."""
+        from django.db import connection
+        from rest_framework.test import APIClient
+
+        deleted = []
+
+        def delete_the_profile_when_the_lock_runs(execute, sql, params, many, context):
+            # Stand in for a profile deleted between the serializer's read and the create lock.
+            if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
+                deleted.append(True)
+
+                def delete_it():
+                    ImportProfile.objects.get(pk=self.profile.pk).delete()
+
+                with run_on_separate_connection(delete_it):
+                    pass
+            return execute(sql, params, many, context)
+
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+
+        with connection.execute_wrapper(delete_the_profile_when_the_lock_runs):
+            response = api.post(
+                "/api/plugins/data-import/source-resolutions/",
+                {
+                    "profile": self.profile.pk,
+                    "source_id": "CREATE-RACE-1",
+                    "source_column": "device_name",
+                    "original_value": "pristine",
+                    "resolved_fields": {"device_name": "decision"},
+                },
+                format="json",
+            )
+
+        self.assertEqual(deleted, [True], "the locking statement never ran")
+        self.assertEqual(response.status_code, 404, response.content[:300])
+        self.assertFalse(SourceResolution.objects.filter(source_id="CREATE-RACE-1").exists())
+
+
+class ConcurrentPartialUpdateTest(TransactionTestCase):
+    """A PATCH holds the row it read, so the lock alone does not stop it overwriting a newer field."""
+
+    def setUp(self):
+        """Create the resolution two requests contend for."""
+        self.profile = _build_profile("Partial Update Profile")
+        self.resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="PATCH-1",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "first-decision"},
+        )
+        self.user = get_user_model().objects.create_superuser("patch-race", "p@example.invalid", "p")
+
+    def test_a_field_the_request_did_not_send_keeps_the_newer_value(self):
+        """The other request committed first, so its field must survive this one's save."""
+        from django.db.models.signals import post_init
+        from rest_framework.test import APIClient
+
+        fired = []
+
+        def change_another_field(sender, instance, **kwargs):
+            """Run once, after the view read the row and before it takes the lock."""
+            if fired or instance.pk != self.resolution.pk:
+                return
+            fired.append(True)
+
+            def write_it():
+                SourceResolution.objects.filter(pk=self.resolution.pk).update(original_value="from-the-other-request")
+
+            with run_on_separate_connection(write_it):
+                pass
+
+        post_init.connect(change_another_field, sender=SourceResolution)
+        self.addCleanup(post_init.disconnect, change_another_field, sender=SourceResolution)
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+
+        response = api.patch(
+            f"/api/plugins/data-import/source-resolutions/{self.resolution.pk}/",
+            {"resolved_fields": {"device_name": "second-decision"}},
+            format="json",
+        )
+
+        self.assertEqual(fired, [True], "the other request never wrote, so the race did not happen")
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        self.resolution.refresh_from_db()
+        self.assertEqual(self.resolution.resolved_fields, {"device_name": "second-decision"})
+        self.assertEqual(self.resolution.original_value, "from-the-other-request")
+
+
+class ConcurrentUpdateCollidesTest(TransactionTestCase):
+    """Validation ran against the row as it was read, so the merged row is checked again."""
+
+    def setUp(self):
+        """Create the row under edit and the row its merged identity would collide with."""
+        self.profile = _build_profile("Collide Profile")
+        self.edited = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="COLLIDE-A",
+            source_column="column-x",
+            original_value="pristine",
+            resolved_fields={"device_name": "first"},
+        )
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="COLLIDE-B",
+            source_column="column-y",
+            original_value="pristine",
+            resolved_fields={"device_name": "other"},
+        )
+        self.user = get_user_model().objects.create_superuser("collide", "x@example.invalid", "p")
+
+    def test_a_merge_that_would_duplicate_another_row_is_refused(self):
+        """(profile, source_id, source_column) is unique, and the merge can reach a taken triple."""
+        from django.db.models.signals import post_init
+        from rest_framework.test import APIClient
+
+        fired = []
+
+        def move_the_row(sender, instance, **kwargs):
+            """Run once, after the view read the row and before it takes the lock."""
+            if fired or instance.pk != self.edited.pk:
+                return
+            fired.append(True)
+
+            def write_it():
+                SourceResolution.objects.filter(pk=self.edited.pk).update(source_id="COLLIDE-B")
+
+            with run_on_separate_connection(write_it):
+                pass
+
+        post_init.connect(move_the_row, sender=SourceResolution)
+        self.addCleanup(post_init.disconnect, move_the_row, sender=SourceResolution)
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+
+        # Valid against the row as read: (COLLIDE-A, column-y) is free. The merge is not.
+        response = api.patch(
+            f"/api/plugins/data-import/source-resolutions/{self.edited.pk}/",
+            {"source_column": "column-y"},
+            format="json",
+        )
+
+        self.assertEqual(fired, [True], "the other request never wrote, so the race did not happen")
+        self.assertEqual(response.status_code, 400, response.content[:300])
+        self.edited.refresh_from_db()
+        self.assertEqual(self.edited.source_column, "column-x")
+
+
+class ConcurrentContactUpdateTest(TransactionTestCase):
+    """The Contact candidate rules live in the serializer, so the merged row must meet them too."""
+
+    def setUp(self):
+        """Create a Contact candidate resolution the profile can still apply."""
+        import json
+
+        self.profile = _build_profile("Contact Merge Profile")
+        ColumnMapping.objects.create(profile=self.profile, source_column="Owner", target_field="candidate:contact")
+        ColumnMapping.objects.create(
+            profile=self.profile, source_column="Owner Email", target_field="candidate:contact"
+        )
+        self.resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="CONTACT-1",
+            source_column="candidate:contact",
+            original_value=json.dumps({"Owner": "Ada", "Owner Email": "ada@example.invalid"}),
+            resolved_fields={
+                "contact_resolution_applied": True,
+                "contact_field_sources": {"name": "Owner Email", "email": "Owner Email"},
+            },
+        )
+        self.user = get_user_model().objects.create_superuser("contact-merge", "cm@example.invalid", "p")
+
+    def test_a_selection_of_a_column_the_stored_row_lost_is_refused(self):
+        """The other request dropped the column this one selects, so the merge cannot apply."""
+        import json
+
+        from django.db.models.signals import post_init
+        from rest_framework.test import APIClient
+
+        fired = []
+
+        def drop_the_column(sender, instance, **kwargs):
+            """Run once, after the view read the row and before it takes the lock."""
+            if fired or instance.pk != self.resolution.pk:
+                return
+            fired.append(True)
+
+            def write_it():
+                SourceResolution.objects.filter(pk=self.resolution.pk).update(
+                    original_value=json.dumps({"Owner Email": "ada@example.invalid"})
+                )
+
+            with run_on_separate_connection(write_it):
+                pass
+
+        post_init.connect(drop_the_column, sender=SourceResolution)
+        self.addCleanup(post_init.disconnect, drop_the_column, sender=SourceResolution)
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+
+        # Valid against the row as read, whose candidate values still carry the Owner column.
+        response = api.patch(
+            f"/api/plugins/data-import/source-resolutions/{self.resolution.pk}/",
+            {
+                "resolved_fields": {
+                    "contact_resolution_applied": True,
+                    "contact_field_sources": {"name": "Owner", "email": "Owner Email"},
+                }
+            },
+            format="json",
+        )
+
+        self.assertEqual(fired, [True], "the other request never wrote, so the race did not happen")
+        self.assertEqual(response.status_code, 400, response.content[:400])
+        self.resolution.refresh_from_db()
+        self.assertEqual(
+            self.resolution.resolved_fields["contact_field_sources"], {"name": "Owner Email", "email": "Owner Email"}
+        )
+
+
+class ConcurrentProfileMoveTest(TransactionTestCase):
+    """A saved resolution may not leave its profile, judged against the row as it now stands."""
+
+    def setUp(self):
+        """Create the resolution and the profile another request moves it to."""
+        self.origin = _build_profile("Move Origin")
+        self.destination = _build_profile("Move Destination")
+        self.resolution = SourceResolution.objects.create(
+            profile=self.origin,
+            source_id="MOVE-1",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "first"},
+        )
+        self.user = get_user_model().objects.create_superuser("move-race", "m@example.invalid", "p")
+
+    def test_a_request_naming_the_old_profile_cannot_take_the_row_back(self):
+        """Naming the profile the row has left is the move the field check refuses."""
+        from django.db.models.signals import post_init
+        from rest_framework.test import APIClient
+
+        fired = []
+
+        def move_the_row(sender, instance, **kwargs):
+            """Run once, after the view read the row and before it takes the lock."""
+            if fired or instance.pk != self.resolution.pk:
+                return
+            fired.append(True)
+
+            def write_it():
+                SourceResolution.objects.filter(pk=self.resolution.pk).update(profile=self.destination)
+
+            with run_on_separate_connection(write_it):
+                pass
+
+        post_init.connect(move_the_row, sender=SourceResolution)
+        self.addCleanup(post_init.disconnect, move_the_row, sender=SourceResolution)
+        api = APIClient()
+        api.force_authenticate(user=self.user)
+
+        # The request names the profile the row carried when it was read, and has since left.
+        response = api.patch(
+            f"/api/plugins/data-import/source-resolutions/{self.resolution.pk}/",
+            {"profile": self.origin.pk, "resolved_fields": {"device_name": "second"}},
+            format="json",
+        )
+
+        self.assertEqual(fired, [True], "the other request never wrote, so the race did not happen")
+        self.assertEqual(response.status_code, 400, response.content[:300])
+        self.resolution.refresh_from_db()
+        self.assertEqual(self.resolution.profile_id, self.destination.pk)
+
+
 class ProfileLockContractTest(TestCase):
     """The lock helper must never yield while it holds nothing."""
 

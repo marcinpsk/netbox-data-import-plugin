@@ -580,7 +580,10 @@ def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
     since dropped. Every caller derives, and none stores what it derived.
     """
     resolutions_by_source_id: dict[str, list] = {}
-    for res in profile.source_resolutions.all():
+    # Two resolutions can share a source_id, and a later one overrides the fields an earlier one
+    # set. Meta.ordering stops at source_id, so source_column completes the order the callers
+    # compare against each other.
+    for res in profile.source_resolutions.order_by("source_id", "source_column"):
         resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
 
     if not resolutions_by_source_id:

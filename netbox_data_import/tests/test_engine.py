@@ -218,6 +218,65 @@ class MultiColumnMergeTest(TestCase):
         self.assertFalse(rows[0].get("_conflicts", {}).get("serial"))
 
 
+class DerivationOrderTest(TestCase):
+    """Two resolutions for one source row must apply in the same order on every derivation."""
+
+    def _profile_with_two_resolutions_for_one_row(self):
+        """Save the later source_column first, so insertion order is not the order to apply."""
+        from netbox_data_import.models import SourceResolution
+
+        profile = ImportProfile.objects.create(
+            name="Derivation Order",
+            adapter_config={"sheet_name": "Data", "source_id_column": "Id"},
+        )
+        ColumnMapping.objects.create(profile=profile, source_column="Name", target_field="device_name")
+        # (profile, source_id, source_column) is unique, so one source row can own several.
+        for column, decision in (("zz_column", "from-zz"), ("aa_column", "from-aa")):
+            SourceResolution.objects.create(
+                profile=profile,
+                source_id="ORDER-1",
+                source_column=column,
+                original_value="pristine",
+                resolved_fields={"device_name": decision},
+            )
+        return profile
+
+    def test_the_database_is_asked_for_a_total_order(self):
+        """The job compares two derivations, so an undefined order reads as a changed policy."""
+        from django.db import connection
+
+        from netbox_data_import.engine import derive_effective_rows
+        from netbox_data_import.models import SourceResolution
+
+        profile = self._profile_with_two_resolutions_for_one_row()
+        reads = []
+
+        def record_the_resolution_read(execute, sql, params, many, context):
+            if SourceResolution._meta.db_table in sql and "ORDER BY" in sql:
+                reads.append(sql)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(record_the_resolution_read):
+            derive_effective_rows([{"source_id": "ORDER-1", "device_name": "pristine"}], profile)
+
+        self.assertTrue(reads, "the resolutions were never read with an ORDER BY")
+        for sql in reads:
+            # Meta.ordering stops at source_id, and SQL leaves ties there in no defined order.
+            self.assertIn("source_column", sql.rsplit("ORDER BY", 1)[1], sql)
+
+    def test_the_resolution_that_wins_does_not_depend_on_the_database(self):
+        """Applying the same rows in the other order would name the other decision."""
+        from netbox_data_import.engine import derive_effective_rows
+
+        profile = self._profile_with_two_resolutions_for_one_row()
+        rows = [{"source_id": "ORDER-1", "device_name": "pristine"}]
+
+        derived = derive_effective_rows(rows, profile)
+
+        # source_column completes the order, so the last writer for the field is always this one.
+        self.assertEqual(derived[0]["device_name"], "from-zz")
+
+
 class ApplyColumnMappingsTest(TestCase):
     """Tests for apply_column_mappings — re-applying mappings to already-parsed rows."""
 

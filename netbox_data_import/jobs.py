@@ -96,12 +96,17 @@ class ImportJobRunner(JobRunner):
 
         identity_changed = False
         superseded = False
+        profile_gone = False
         with transaction.atomic():
             # Every resolution write takes this same lock, so none can commit between this check
             # and the writes below. Locking the resolution rows would leave an insert free to land.
-            with locked_profile_policy(profile.pk):
-                superseded = engine.derive_effective_rows(pristine_rows, profile) != rows
-            if superseded:
+            try:
+                with locked_profile_policy(profile.pk):
+                    superseded = engine.derive_effective_rows(pristine_rows, profile) != rows
+            except ImportProfile.DoesNotExist:
+                # A delete takes this same lock, so it can commit between the read above and here.
+                profile_gone = True
+            if profile_gone or superseded:
                 transaction.set_rollback(True)
             else:
                 result = engine.run_import(
@@ -116,6 +121,8 @@ class ImportJobRunner(JobRunner):
                 identity_changed = any(row.extra_data.get("identity_state_changed") for row in result.rows)
                 if identity_changed:
                     transaction.set_rollback(True)
+        if profile_gone:
+            self._fail("The import profile is no longer available.")
         if superseded:
             self._fail(
                 "A saved resolution changed while this import was starting. "
