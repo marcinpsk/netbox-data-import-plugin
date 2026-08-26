@@ -2,11 +2,14 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """DRF viewsets for the data-import plugin API."""
 
+from django.http import Http404
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import viewsets, permissions
 from rest_framework.permissions import DjangoModelPermissions
 
 from ..models import (
+    locked_profile_policy,
+    locked_resolution_policy,
     ImportProfile,
     ColumnMapping,
     ClassRoleMapping,
@@ -139,6 +142,30 @@ class SourceResolutionViewSet(_PluginModelViewSet):
 
     queryset = SourceResolution.objects.select_related("profile")
     serializer_class = SourceResolutionSerializer
+
+    # Each write serializes against an executing import, which holds the same profile row.
+    def perform_create(self, serializer):
+        """Create the resolution under the profile lock."""
+        with locked_profile_policy(serializer.validated_data["profile"].pk):
+            serializer.save()
+
+    def perform_update(self, serializer):
+        """Update the resolution under its profile lock."""
+        # ValidatedModelSerializer.validate() writes the request values onto the instance, so only
+        # its primary key still names the stored row.
+        try:
+            with locked_resolution_policy(serializer.instance.pk):
+                serializer.save()
+        except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
+            raise Http404 from None
+
+    def perform_destroy(self, instance):
+        """Delete the resolution under its profile lock."""
+        try:
+            with locked_resolution_policy(instance.pk):
+                instance.delete()
+        except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
+            raise Http404 from None
 
     def get_queryset(self):
         """Filter by profile_id query param if provided."""

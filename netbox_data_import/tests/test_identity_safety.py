@@ -21,7 +21,7 @@ from netbox_data_import.engine import (
     _pass1_ensure_types,
     _rack_position_error_row,
     _suggest_unique_device_name,
-    reapply_saved_resolutions,
+    derive_effective_rows,
     run_import,
 )
 from netbox_data_import.forms import ImportSetupForm
@@ -413,7 +413,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             source_column="device_name",
         )
         self.assertEqual(resolution.resolved_fields, {"device_name": suggestion.extra_data["suggested_name"]})
-        resolved_rows = reapply_saved_resolutions(rows, self.profile)
+        resolved_rows = derive_effective_rows(rows, self.profile)
         result = run_import(resolved_rows, self.profile, {"site": self.site}, dry_run=True)
         device_rows = [row for row in result.rows if row.object_type == "device"]
         self.assertEqual([row.action for row in device_rows], ["create", "create"])
@@ -3424,7 +3424,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
         profile = self._rack_profile("Rack Location Update Profile")
         location = Location.objects.create(name="Rack Target Location", slug="rack-target-location", site=self.site)
-        rack = Rack.objects.create(site=self.site, location=location, name="RACK-LOCATION-UPDATE", u_height=42)
+        # A height the row changes, so this stays an update and the location assertion still bites.
+        rack = Rack.objects.create(site=self.site, location=location, name="RACK-LOCATION-UPDATE", u_height=24)
         row = self._rack_row(2, "RACK-LOCATION-UPDATE", rack.name)
 
         result = run_import([row], profile, {"site": self.site, "location": location}, dry_run=False)

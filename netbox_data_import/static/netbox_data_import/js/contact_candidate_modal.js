@@ -38,6 +38,8 @@
   var addValue = document.getElementById('contactCandidateAddValue');
   var provenance = document.getElementById('contactCandidateProvenance');
   var linkedContacts = {};
+  var shownRow = null;
+  var heldOffer = null;
   var saveInFlight = false;
   var summary = {
     name: document.getElementById('contactCandidateSummaryName'),
@@ -233,18 +235,21 @@
     contactId.value = '';
     var instance = picker();
     if (instance && instance.getValue()) instance.clear(true);
+    releaseOffer();
   }
 
   function applyExistingContact(value) {
     var instance = existingContact.tomselect;
     if (!value || !instance) {
       contactId.value = '';
+      releaseOffer();
       refreshSummary();
       return;
     }
     var contact = instance.options[value];
     if (!contact) return;
     contactId.value = String(contact.id);
+    releaseOffer();
     // A linked Contact supplies every field, so no row may also claim one, and a literal the
     // required-field check rejected must stop blocking the form.
     valueRows.querySelectorAll('.ndi-contact-role').forEach(function (select) { select.value = ''; });
@@ -287,6 +292,8 @@
     var savedValues = resolvedFields.contact_field_values || {};
     var suggestion = contactSuggestions[rowNumber];
     var proposed = roleSuggestions[rowNumber] || {};
+    shownRow = rowNumber;
+    heldOffer = null;
 
     document.getElementById('contactCandidateSourceId').value = sourceId;
     document.getElementById('contactCandidateOriginalValue').value = JSON.stringify(rowCandidates);
@@ -324,12 +331,9 @@
       }
       instance.refreshOptions(false);
     }
-    if (suggestionMessage) {
-      suggestionMessage.classList.toggle('d-none', !suggestion);
-      suggestionMessage.textContent = suggestion
-        ? 'A NetBox Contact with this row\'s configured identity already exists. Link it below to reuse it.'
-        : '';
-    }
+    // The message asks for a Contact to be linked, so a row that has one is not asked again.
+    showSuggestion(contactId.value ? null : suggestion);
+    refreshSuggestion(sourceId, rowNumber);
 
     noContact.checked = resolvedFields.contact_resolution_applied === true
       && !Object.keys(savedSources).length
@@ -342,6 +346,83 @@
     setExpanded(linkExisting, existingWrap, Boolean(contactId.value || suggestion));
     toggleContactFields();
   });
+
+  function showSuggestion(suggestion) {
+    if (!suggestionMessage) return;
+    suggestionMessage.classList.toggle('d-none', !suggestion);
+    suggestionMessage.textContent = suggestion
+      ? 'A NetBox Contact matching a value in this row already exists. Link it below to reuse it.'
+      : '';
+  }
+
+  /* Removing a selected option clears the selection, so an offer the operator holds waits. */
+  function dropOffered(instance, offered) {
+    if (!instance || !offered) return;
+    if (String(offered.id) === contactId.value) {
+      heldOffer = String(offered.id);
+      return;
+    }
+    instance.removeOption(String(offered.id));
+    instance.refreshOptions(false);
+  }
+
+  /* A replaced offer leaves when the choice moves off it, and an offer that arrived behind a
+   * choice speaks once there is none. */
+  function releaseOffer() {
+    var instance = existingContact.tomselect;
+    if (heldOffer && heldOffer !== contactId.value) {
+      if (instance) {
+        instance.removeOption(heldOffer);
+        instance.refreshOptions(false);
+      }
+      heldOffer = null;
+    }
+    showSuggestion(contactId.value ? null : contactSuggestions[shownRow]);
+  }
+
+  var latestRefresh = 0;
+
+  /* The page's suggestion map was built when the preview rendered, so a Contact created since,
+   * on another row, is only offered here if the server is asked again. */
+  function refreshSuggestion(sourceId, rowNumber) {
+    var url = form.dataset.contactSuggestionUrl;
+    var profileField = form.querySelector('input[name=profile_id]');
+    var profileId = profileField ? profileField.value : '';
+    if (!url || !sourceId || !profileId || contactId.value) return;
+    var separator = url.includes('?') ? '&' : '?';
+    var query = 'profile_id=' + encodeURIComponent(profileId) + '&source_id=' + encodeURIComponent(sourceId);
+    var asked = ++latestRefresh;
+    fetch(url + separator + query, {headers: {'Accept': 'application/json'}})
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        // Reopening the same row asks again, which the row identity alone cannot tell apart.
+        if (!data || asked !== latestRefresh) return;
+        // The modal is shared, so a late answer must not write over the row now on screen.
+        if (!stillShowing(sourceId)) return;
+        var instance = picker();
+        var offered = contactSuggestions[rowNumber];
+        if (!data.suggestion) {
+          // The Contact the page offers is gone, so keeping it would only fail on save.
+          delete contactSuggestions[rowNumber];
+          dropOffered(instance, offered);
+          showSuggestion(null);
+          return;
+        }
+        contactSuggestions[rowNumber] = data.suggestion;
+        // One row identifies one Contact, so an offer it replaces must not stay on the list.
+        if (offered && String(offered.id) !== String(data.suggestion.id)) dropOffered(instance, offered);
+        if (instance) {
+          // addOption() updates an option that is already there, so the details stay current.
+          instance.addOption(contactOption(data.suggestion));
+          instance.refreshOptions(false);
+        }
+        // An operator who picked a Contact while the answer was in flight keeps that choice.
+        if (contactId.value) return;
+        showSuggestion(data.suggestion);
+        setExpanded(linkExisting, existingWrap, true);
+      })
+      .catch(function () {});
+  }
 
   editToggle.addEventListener('click', function () {
     setExpanded(editToggle, editPanel, editPanel.hidden);

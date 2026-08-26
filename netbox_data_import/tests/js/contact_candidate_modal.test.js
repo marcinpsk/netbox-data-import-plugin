@@ -25,6 +25,12 @@ const candidates = {
       "Contact Email": "first@example.invalid",
     },
   },
+  // A row the preview found no Contact for, which is what the live lookup answers again.
+  "second-row": {
+    contact: {
+      "Contact Name": "Second Contact",
+    },
+  },
 };
 
 const contactSuggestions = {
@@ -40,11 +46,14 @@ const roleSuggestions = {
   "first-row": { name: "Contact Name", email: "Contact Email" },
 };
 
-function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/" } = {}) {
+function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/", suggestionUrl = null } = {}) {
   const lookupAttribute = lookupUrl === null ? "" : ` data-contact-lookup-url="${lookupUrl}"`;
+  // Opt-in, so the tests that count lookup calls do not also see the suggestion call.
+  const suggestionAttribute = suggestionUrl === null ? "" : ` data-contact-suggestion-url="${suggestionUrl}"`;
   document.body.innerHTML = `
     <div id="contactCandidateModal">
-      <form id="contactCandidateForm" data-contact-lookup-field="email"${lookupAttribute}>
+      <form id="contactCandidateForm" data-contact-lookup-field="email"${lookupAttribute}${suggestionAttribute}>
+        <input type="hidden" name="profile_id" value="7">
         <input type="hidden" id="contactCandidateSourceId">
         <input type="hidden" id="contactCandidateOriginalValue">
         <input type="hidden" id="contactCandidateResolvedFields">
@@ -192,6 +201,355 @@ describe("contact candidate modal", () => {
       name: "Typed Name",
       email: "typed@example.invalid",
     });
+  });
+
+  it("offers a Contact created since the page rendered, without a recalculation", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: () =>
+        Promise.resolve({
+          suggestion: { id: 77, name: "Late Contact", email: "late@example.invalid", phone: "" },
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    // The page's map holds nothing for this row, so only the server can answer.
+    openRow("second-row", "source-second");
+
+    await vi.waitFor(() => {
+      expect(document.getElementById("contactCandidateExisting").tomselect.options["77"]).toBeDefined();
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/contact-suggestion/?profile_id=7&source_id=source-second",
+      expect.objectContaining({ headers: { Accept: "application/json" } }),
+    );
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+  });
+
+  it("drops a suggestion the server no longer offers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    // The page's map still holds the Contact the preview found, which has since been deleted.
+    openRow("first-row", "source-first");
+
+    await vi.waitFor(() => {
+      expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+    });
+    expect(document.getElementById("contactCandidateExisting").tomselect.options["41"]).toBeUndefined();
+  });
+
+  it("still drops the stale suggestion when the operator picked another Contact meanwhile", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () => resolve({ json: () => Promise.resolve({ suggestion: null }) });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.addOption({ id: "88", value: "88", text: "Chosen Contact", name: "Chosen Contact" });
+    picker.setValue("88");
+    answer();
+
+    await vi.waitFor(() => {
+      expect(picker.options["41"]).toBeUndefined();
+    });
+    // Their choice survives, and the Contact the page offered is gone from the picker.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("88");
+    expect(picker.options["88"]).toBeDefined();
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+  });
+
+  it("keeps the stale option when it is the Contact the operator selected", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.setValue("41");
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    await new Promise((settle) => setTimeout(settle, 10));
+
+    // Removing a selected option clears the selection, so the save reports the deletion instead.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
+    expect(picker.options["41"]).toBeDefined();
+  });
+
+  it("replaces the offered Contact when the server names a different one", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: () =>
+        Promise.resolve({
+          suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    // The page offers Contact 41, which stopped matching this row before the modal opened.
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    // One row identifies one Contact, so the replaced one must not stay on offer.
+    expect(picker.options["41"]).toBeUndefined();
+  });
+
+  it("ignores an earlier answer when the same row was reopened", async () => {
+    let answerFirst;
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          answerFirst = () =>
+            resolve({
+              json: () =>
+                Promise.resolve({
+                  suggestion: { id: 41, name: "Existing First Contact", email: "first@example.invalid", phone: "" },
+                }),
+            });
+        }),
+      )
+      .mockResolvedValue({
+        json: () =>
+          Promise.resolve({
+            suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+          }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    // Both opens are the same row, so the row identity alone cannot tell the two answers apart.
+    openRow("first-row", "source-first");
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    answerFirst();
+    await new Promise((settle) => setTimeout(settle, 10));
+
+    // The answer to the reopen is the current one, so the earlier answer may not undo it.
+    expect(picker.options["52"]).toBeDefined();
+    expect(picker.options["41"]).toBeUndefined();
+  });
+
+  it("still replaces the offered Contact when the operator picked another one meanwhile", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.addOption({ id: "88", value: "88", text: "Chosen Contact", name: "Chosen Contact" });
+    picker.setValue("88");
+    answer();
+
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    // Their choice survives, and the Contact the row no longer identifies is off the list.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("88");
+    expect(picker.options["41"]).toBeUndefined();
+  });
+
+  it("does not offer a late answer against the row now on screen", async () => {
+    let answerFirst;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answerFirst = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    // The second row already has a linked Contact, so opening it asks the server nothing.
+    addPreviewFixture(
+      {
+        "source-second": {
+          "candidate:contact": {
+            resolved_fields: { contact_resolution_applied: true, contact_id: 88 },
+          },
+        },
+      },
+      { suggestionUrl: "/contact-suggestion/" },
+    );
+    openRow("first-row", "source-first");
+    openRow("second-row", "source-second");
+    answerFirst();
+    await new Promise((settle) => setTimeout(settle, 10));
+
+    // Nothing asked on behalf of this row, so the first row's answer may not land on it.
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    expect(picker.options["52"]).toBeUndefined();
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires the replaced offer once the operator lets go of it", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 52, name: "Other Contact", email: "first@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    // The operator takes the Contact the page offered, which the answer then replaces.
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.setValue("41");
+    answer();
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
+
+    picker.clear();
+
+    // Nothing holds the replaced Contact now, so the row offers only the one it identifies.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("");
+    expect(picker.options["41"]).toBeUndefined();
+    expect(picker.options["52"]).toBeDefined();
+  });
+
+  it("shows the offer that arrived behind a selection once the selection goes", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 52, name: "Other Contact", email: "second@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    // The page found no Contact for this row, so only the answer can offer one.
+    openRow("second-row", "source-second");
+
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.addOption({ id: "88", value: "88", text: "Chosen Contact", name: "Chosen Contact" });
+    picker.setValue("88");
+    answer();
+    await vi.waitFor(() => {
+      expect(picker.options["52"]).toBeDefined();
+    });
+    // Their choice stands, so the offer stays quiet behind it.
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+
+    picker.clear();
+
+    // With nothing chosen, the row must say that a matching Contact exists.
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+  });
+
+  it("keeps the offer on the list when the answer names the same Contact", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 41, name: "Existing First Contact", email: "first@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    // The operator takes the offered Contact, and the answer names that same Contact.
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.setValue("41");
+    answer();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    await new Promise((settle) => setTimeout(settle, 10));
+
+    picker.clear();
+
+    // The row still identifies it, so the message and the list must say the same thing.
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+    expect(picker.options["41"]).toBeDefined();
+  });
+
+  it("stops offering the Contact once the operator links one", () => {
+    addPreviewFixture();
+    openRow("first-row", "source-first");
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+
+    document.getElementById("contactCandidateExisting").tomselect.setValue("41");
+
+    // The message asks for a Contact to be linked, which is done.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+  });
+
+  it("does not offer a Contact to a row that already links one", () => {
+    addPreviewFixture({
+      "source-first": {
+        "candidate:contact": {
+          resolved_fields: { contact_resolution_applied: true, contact_id: 41 },
+        },
+      },
+    });
+    openRow("first-row", "source-first");
+
+    // The row was saved with a linked Contact, so the message has nothing to ask for.
+    expect(document.getElementById("contactCandidateContactId").value).toBe("41");
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+  });
+
+  it("does not bring the dropped suggestion back when the row is reopened", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+    await vi.waitFor(() => {
+      expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+    });
+
+    // A reopen rebuilds the picker from the page's map, which must no longer hold the deleted one.
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));
+    openRow("first-row", "source-first");
+
+    expect(document.getElementById("contactCandidateExisting").tomselect.options["41"]).toBeUndefined();
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
   });
 
   it("keeps the row's own values when a matching NetBox Contact is only offered", () => {

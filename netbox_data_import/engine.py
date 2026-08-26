@@ -544,12 +544,6 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     # Pre-fetch transform rules for efficiency
     transform_rules = list(profile.column_transform_rules.all())
 
-    # Pre-fetch all saved resolutions for this profile (avoids N+1 queries)
-    resolutions_by_source_id: dict[str, list] = {}
-    for res in profile.source_resolutions.all():
-        resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
-    source_to_targets = _build_source_to_targets_map(profile)
-
     unused_stats: dict[str, dict] = {}
     capture_extra = profile.adapter_settings.capture_extra_data
 
@@ -566,12 +560,6 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
 
         _apply_transform_rules(row_dict, row, raw_headers, transform_rules)
 
-        # Apply saved resolutions (rerere)
-        source_id = row_dict.get("source_id", "")
-        if source_id:
-            for res in resolutions_by_source_id.get(str(source_id), []):
-                _apply_one_resolution(row_dict, res, source_to_targets)
-
         if return_stats or capture_extra:
             extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
             if capture_extra and extra:
@@ -584,13 +572,12 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     return rows
 
 
-def reapply_saved_resolutions(rows: list[dict], profile) -> list[dict]:
-    """Re-apply all saved SourceResolutions for a profile to pre-parsed rows.
+def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
+    """Return *rows* with every saved SourceResolution applied, leaving *rows* untouched.
 
-    Called in the preview GET handler so newly-saved resolutions are reflected
-    without requiring the user to re-upload the file.  The session rows may
-    already have older resolutions baked in; re-applying is idempotent for those
-    and correctly applies any resolution saved after the initial upload.
+    `rows` must be the pristine parsed rows. Applying a resolution only ever sets fields, so a
+    derivation that starts from an earlier result cannot express a target field the operator has
+    since dropped. Every caller derives, and none stores what it derived.
     """
     resolutions_by_source_id: dict[str, list] = {}
     for res in profile.source_resolutions.all():
@@ -1187,6 +1174,125 @@ def _set_rack_import_fields(rack, u_height, serial, rack_type, ctx):
         rack.tenant = ctx.tenant
 
 
+# The five fields _set_rack_import_fields writes, so a row that changes none of them writes nothing.
+_RACK_IMPORT_FIELDS = ("u_height", "serial", "rack_type_id", "location_id", "tenant_id")
+
+
+def _ip_already_assigned(device, ip_field, ip_str) -> bool:
+    """Return whether the device already carries exactly this address on *ip_field*.
+
+    The writer only assigns after finding an interface of this device that already carries the
+    address, and it resolves the IPAddress by that interface's VRF. Anything else it would either
+    create or record as unassigned, so only that exact state counts as settled.
+    """
+    import ipaddress
+
+    from ipam.models import IPAddress
+
+    current = getattr(device, ip_field, None)
+    if current is None:
+        return False
+    try:
+        if ipaddress.ip_interface(str(current.address)) != ipaddress.ip_interface(str(ip_str)):
+            return False
+    except ValueError:
+        return False
+    same_address = list(IPAddress.objects.filter(address=str(current.address)).values_list("pk", flat=True)[:2])
+    if same_address != [current.pk]:
+        return False
+    interface = current.assigned_object
+    return (
+        interface is not None
+        and getattr(interface, "device_id", None) == device.pk
+        and getattr(interface, "vrf_id", None) == current.vrf_id
+    )
+
+
+def _device_binding_is_current(profile, source_id, device, asset_tag) -> bool:
+    """Return whether the source-to-device binding this row would write already exists."""
+    if not source_id:
+        return True
+    return profile.device_matches.filter(
+        source_id=source_id,
+        netbox_device_id=device.pk,
+        device_name=device.name,
+        source_asset_tag=asset_tag or "",
+    ).exists()
+
+
+def _import_record_is_current(device, profile, source_id, extra_columns) -> bool:
+    """Return whether the plugin's import record already holds what this row would store.
+
+    A row that supplies no unassigned address expects an empty map, so a stored one is a change.
+    """
+    stored = DeviceImportSource.objects.filter(device_id=device.pk).first()
+    return stored is not None and (
+        stored.profile_id == profile.pk
+        and stored.source_id == (source_id or "")
+        and stored.extra_columns == (extra_columns or {})
+        and not stored.unassigned_ips
+    )
+
+
+def _matched_device_writes_nothing(
+    device, review, contact_review, ip_fields, profile, source_id, asset_tag, *, zero_u=False
+) -> bool:
+    """Return whether updating this matched Device would leave every stored value as it stands.
+
+    The execute guard compares the writer's action to the previewed one, so both sides decide here.
+    Every input is read-only, and anything this cannot prove counts as a write.
+    """
+    # `review` is None when no reviewer loaded, which leaves the field comparison unavailable.
+    if review is None or review.differing:
+        return False
+    # A zero-U type has its position and face cleared whatever the row says, and a row that
+    # omits either value is never compared against the stored one.
+    if zero_u and (device.position is not None or device.face):
+        return False
+    plan = contact_review.plan if contact_review is not None else None
+    if plan is not None and not (plan["contact_action"] == "reuse" and plan["assignment_action"] == "unchanged"):
+        return False
+    if any(not _ip_already_assigned(device, ip_field, ip_str) for ip_field, ip_str in (ip_fields or {}).items()):
+        return False
+    custom_field = profile.adapter_settings.custom_field_name
+    if custom_field and source_id and device.custom_field_data.get(custom_field) != source_id:
+        return False
+    if not _device_binding_is_current(profile, source_id, device, asset_tag):
+        return False
+    extra_columns = contact_review.extra_columns if contact_review is not None else {}
+    return _import_record_is_current(device, profile, source_id, extra_columns)
+
+
+def _existing_rack_detail(rack_name, action, candidate) -> str:
+    """Return the reason an existing rack row reports its action."""
+    if action == "update":
+        return f"Rack '{rack_name}' already exists"
+    if candidate is None:
+        return f"Rack '{rack_name}' already exists (update_existing=False)"
+    return f"Rack '{rack_name}' already exists and this row changes nothing"
+
+
+def _rack_import_candidate(rack, u_height, serial, rack_type, ctx):
+    """Return the rack as this row would leave it, or None when the profile does not update."""
+    if not ctx.profile.adapter_settings.update_existing:
+        return None
+    candidate = copy(rack)
+    _set_rack_import_fields(candidate, u_height, serial, rack_type, ctx)
+    return candidate
+
+
+def _existing_rack_action(rack, candidate) -> str:
+    """Return the action an existing rack takes.
+
+    The execute guard compares the writer's action to the previewed one, so both sides decide here.
+    """
+    if candidate is None:
+        return "skip"
+    if all(getattr(rack, field) == getattr(candidate, field) for field in _RACK_IMPORT_FIELDS):
+        return "skip"
+    return "update"
+
+
 def _build_rack_candidate(Rack, ctx, rack_name, u_height, serial, rack_type):
     """Return an unsaved rack carrying the fields an import controls."""
     return Rack(
@@ -1227,7 +1333,8 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
         ctx.result.rows.append(_ambiguous_rack_row(row, source_id, rack_name, rack_name, ctx, "rack"))
         return
     if rack is not None:
-        action = "update" if ctx.profile.adapter_settings.update_existing else "skip"
+        candidate = _rack_import_candidate(rack, u_height, serial, rack_type, ctx)
+        action = _existing_rack_action(rack, candidate)
         if not _intent_matches(ctx, row, "rack", action, rack.pk, _rack_identity_state(rack)):
             ctx.result.rows.append(
                 _identity_state_error(
@@ -1239,7 +1346,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
                 )
             )
             return
-        if ctx.profile.adapter_settings.update_existing:
+        if action == "update":
             if ctx.user is not None and not Rack.objects.restrict(ctx.user, "change").filter(pk=rack.pk).exists():
                 ctx.result.rows.append(_perm_denied_row("dcim.change_rack", row, rack_name, "rack"))
                 return
@@ -1276,7 +1383,7 @@ def _write_rack_to_db(rack_name, u_height, serial, source_id, row, ctx, Rack, ra
                     name=rack_name,
                     action="skip",
                     object_type="rack",
-                    detail=f"Rack '{rack_name}' already exists (update_existing=False)",
+                    detail=_existing_rack_detail(rack_name, action, candidate),
                 )
             )
     else:
@@ -1402,16 +1509,15 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                 ctx.result.rows.append(_ambiguous_rack_row(row, source_id, rack_name, rack_name, ctx, "rack"))
                 continue
             if rack is not None:
-                action = "update" if ctx.profile.adapter_settings.update_existing else "skip"
-                detail = f"Rack '{rack_name}' already exists"
-                if ctx.profile.adapter_settings.update_existing:
-                    candidate = copy(rack)
-                    _set_rack_import_fields(candidate, u_height, serial, crm.rack_type, ctx)
+                candidate = _rack_import_candidate(rack, u_height, serial, crm.rack_type, ctx)
+                if candidate is not None:
                     try:
                         candidate.full_clean()
                     except ValidationError as exc:
                         ctx.result.rows.append(_rack_validation_error_row(row, source_id, rack_name, exc, "update"))
                         continue
+                action = _existing_rack_action(rack, candidate)
+                detail = _existing_rack_detail(rack_name, action, candidate)
             else:
                 candidate = _build_rack_candidate(Rack, ctx, rack_name, u_height, serial, crm.rack_type)
                 try:
@@ -1441,6 +1547,7 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                         "rack_type_name": str(crm.rack_type) if crm.rack_type_id else "",
                         **({"netbox_rack_id": rack.pk} if rack is not None else {}),
                         **({"_identity_state": _rack_identity_state(rack)} if rack is not None else {}),
+                        **({"writes_nothing": True} if action == "skip" and candidate is not None else {}),
                     },
                 )
             )
@@ -2646,6 +2753,7 @@ def _preview_device_row(  # noqa: C901
 
     primary_contact_plan = None
     contact_suggestion = None
+    contact_review = None
     if action in ("create", "update"):
         try:
             contact_review = PrimaryContactResolver.review(
@@ -2678,6 +2786,20 @@ def _preview_device_row(  # noqa: C901
                 error_row.extra_data["_identity_state"] = _device_identity_state(matched_device)
             return error_row
 
+    writes_nothing = action == "update" and _matched_device_writes_nothing(
+        matched_device,
+        review,
+        contact_review,
+        ip_fields,
+        review_ctx.profile,
+        source_id,
+        asset_tag,
+        zero_u=is_zero_u,
+    )
+    if writes_nothing:
+        action = "skip"
+        detail = f"Device '{matched_device.name}' matches this row, which writes nothing"
+
     return RowResult(
         row_number=row["_row_number"],
         source_id=source_id,
@@ -2703,6 +2825,7 @@ def _preview_device_row(  # noqa: C901
             "dt_exists": dt_exists,
             "extra_columns": row.get("_extra_columns", {}),
             "conflicts": row.get("_conflicts", {}),
+            **({"writes_nothing": True} if writes_nothing else {}),
             **rack_error_extra,
             **placement_error_extra,
             **({"candidate_values": row["_candidate_values"]} if row.get("_candidate_values") else {}),
@@ -2715,7 +2838,11 @@ def _preview_device_row(  # noqa: C901
             **({"primary_contact_plan": primary_contact_plan} if primary_contact_plan is not None else {}),
             **({"contact_suggestion": contact_suggestion} if contact_suggestion is not None else {}),
             **({"identity_conflict": identity_conflict} if identity_conflict else {}),
-            **({"netbox_device_id": matched_device.pk} if matched_device is not None and action != "skip" else {}),
+            **(
+                {"netbox_device_id": matched_device.pk}
+                if matched_device is not None and (action != "skip" or writes_nothing)
+                else {}
+            ),
             **({"_identity_state": _device_identity_state(matched_device)} if matched_device is not None else {}),
             **(
                 {
@@ -3072,7 +3199,35 @@ def _write_device_row(  # noqa: C901
             )
             if placement_error is not None:
                 return placement_error
+        contact_review = None
         actual_action = "update" if ctx.profile.adapter_settings.update_existing else "skip"
+        if actual_action == "update":
+            # Read-only, and needed here because the guard below compares this action to the preview.
+            try:
+                contact_review = PrimaryContactResolver.review(
+                    device,
+                    row,
+                    ctx.profile,
+                    ctx.user,
+                    candidate_source_columns=ctx.candidate_source_columns,
+                )
+            except _ObjectPermissionDenied as exc:
+                return _perm_denied_row(str(exc) or "dcim.change_device", row, device_name, "device")
+            except (DatabaseError, ValidationError) as exc:
+                return _rack_position_error_row(
+                    row, source_id, device_name, make, model, asset_tag, rack_name, position, exc, "update"
+                )
+            if _matched_device_writes_nothing(
+                device,
+                review,
+                contact_review,
+                ip_fields,
+                ctx.profile,
+                source_id,
+                asset_tag,
+                zero_u=device_type is not None and device_type.u_height == 0,
+            ):
+                actual_action = "skip"
         if not _intent_matches(ctx, row, "device", actual_action, device.pk, _device_identity_state(device)):
             return _identity_state_error(
                 row,
@@ -3097,7 +3252,7 @@ def _write_device_row(  # noqa: C901
                 rack_name=rack_name,
                 extra_data={"identity_conflict": "device_already_bound", "netbox_device_id": device.pk},
             )
-        if ctx.profile.adapter_settings.update_existing:
+        if actual_action == "update":
             if (
                 ctx.user is not None
                 and not _device_queryset_for_user(Device, ctx.user, "change").filter(pk=device.pk).exists()
@@ -3121,13 +3276,6 @@ def _write_device_row(  # noqa: C901
             device.tenant = write_ctx.tenant
             ip_json = {}
             try:
-                contact_review = PrimaryContactResolver.review(
-                    device,
-                    row,
-                    ctx.profile,
-                    ctx.user,
-                    candidate_source_columns=ctx.candidate_source_columns,
-                )
                 with transaction.atomic():
                     device.full_clean()
                     device.save()
@@ -3168,7 +3316,11 @@ def _write_device_row(  # noqa: C901
             name=device_name,
             action="skip",
             object_type="device",
-            detail=f"Device '{device.name}' already exists (update_existing=False)",
+            detail=(
+                f"Device '{device.name}' matches this row, which writes nothing"
+                if ctx.profile.adapter_settings.update_existing
+                else f"Device '{device.name}' already exists (update_existing=False)"
+            ),
             rack_name=rack_name,
             extra_data={"source_make": make, "source_model": model, "asset_tag": asset_tag or ""},
         )
