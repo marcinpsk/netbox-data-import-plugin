@@ -8,7 +8,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
-from django.http import HttpResponse, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -31,6 +31,8 @@ from .forms import (
 from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
 from . import __version__ as _plugin_version
 from .models import (
+    locked_profile_policy,
+    locked_resolution_policy,
     ClassRoleMapping,
     ColumnMapping,
     ColumnTransformRule,
@@ -114,6 +116,31 @@ def _parse_posted_profile_id(request):
         return int(request.POST.get("profile_id", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _contact_candidate_context(request, profile_id, source_id):
+    """Return Contact candidates and row state for one active preview row."""
+    import_result = request.session.get("import_result") or {}
+    result_rows = [
+        row
+        for row in import_result.get("rows", [])
+        if str(row.get("source_id")) == str(source_id) and row.get("object_type") == "device"
+    ]
+    context = request.session.get("import_context") or {}
+    source_rows = [
+        row for row in (request.session.get("import_rows") or []) if str(row.get("source_id")) == str(source_id)
+    ]
+    if str(context.get("profile_id")) != str(profile_id) or len(source_rows) != 1 or len(result_rows) != 1:
+        raise ValidationError("The candidate resolution does not identify one active preview row.")
+
+    candidates = result_rows[0].get("extra_data", {}).get("candidate_values", {}).get("contact", {})
+    if not isinstance(candidates, dict) or not candidates:
+        raise ValidationError("The active preview row has no Contact candidate values.")
+    return (
+        {str(source_column): str(value) for source_column, value in candidates.items()},
+        source_rows[0],
+        result_rows[0],
+    )
 
 
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
@@ -319,13 +346,54 @@ def _validate_model_instance(instance, label):
         raise ValueError(f"Validation error in {label}: {msg}") from exc
 
 
+def _legacy_adapter_config(profile_data):
+    """Return the pre-cutover scalar keys rewritten as a flat-workbook adapter configuration.
+
+    Releases up to 1.5.2 exported these settings as top-level `profile` keys. Database rows were
+    moved into `adapter_config` by migration 0022; an exported file has no such upgrade path.
+    """
+    from .adapter_forms import FlatWorkbookConfigForm
+
+    # The legacy keys are exactly the flat-workbook adapter's own settings.
+    legacy_keys = set(FlatWorkbookConfigForm.base_fields) & set(profile_data)
+    if not legacy_keys:
+        return None
+    conflicting = sorted({"adapter_config", "source_adapter"} & set(profile_data))
+    if conflicting:
+        raise ValueError(
+            f"Profile key(s) {', '.join(sorted(legacy_keys))} belong to a release before the adapter "
+            f"cutover and cannot be combined with {', '.join(conflicting)}."
+        )
+    config = {key: profile_data[key] for key in legacy_keys}
+    # The legacy file names the Contact Role by slug; adapter_config stores its name.
+    slug = config.get("primary_contact_role")
+    if slug:
+        from tenancy.models import ContactRole
+
+        role = ContactRole.objects.filter(slug=slug).first()
+        if role is None:
+            raise ValueError(f"No Contact Role matches the primary_contact_role slug '{slug}'.")
+        config["primary_contact_role"] = role.name
+    return config
+
+
 def _profile_defaults_from_yaml(profile_data):
     """Resolve the scalar profile values and the adapter configuration from YAML."""
-    unknown = sorted(set(profile_data) - {"name", "adapter_config", *_PROFILE_FIELDS})
+    legacy_config = _legacy_adapter_config(profile_data)
+    accepted = {"name", "adapter_config", *_PROFILE_FIELDS}
+    if legacy_config is not None:
+        accepted |= set(legacy_config)
+    unknown = sorted(set(profile_data) - accepted)
     if unknown:
         raise ValueError(f"Unknown profile key(s): {', '.join(unknown)}")
     profile_defaults = {field: profile_data[field] for field in _PROFILE_FIELDS if field in profile_data}
-    if "adapter_config" in profile_data:
+    if legacy_config is not None:
+        from .adapters import FlatWorkbookAdapter
+
+        # Pinned, not DEFAULT_ADAPTER_KEY: a legacy file is a flat workbook whatever the default becomes.
+        profile_defaults["source_adapter"] = FlatWorkbookAdapter.key
+        profile_defaults["adapter_config"] = legacy_config
+    elif "adapter_config" in profile_data:
         profile_defaults["adapter_config"] = profile_data["adapter_config"]
     return profile_defaults
 
@@ -784,9 +852,11 @@ class ImportSetupView(PermissionRequiredMixin, View):
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
         context = {"site": site, "location": location, "tenant": tenant}
-        result = engine.run_import(rows, profile, context, dry_run=True, user=request.user)
+        result = engine.run_import(
+            engine.derive_effective_rows(rows, profile), profile, context, dry_run=True, user=request.user
+        )
 
-        # Store result + raw rows + context in session for the preview/execute steps
+        # The session keeps the pristine parsed rows; every reader derives from them.
         # Rows need JSON-safe serialization (handle datetime from Excel)
         record_recalculated_preview(request.session, result)
         request.session["import_rows"] = _serialize_rows(rows)
@@ -870,9 +940,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             result = engine.ImportResult.from_session_dict(stored_result)
         else:
             context_obj = {"site": site, "location": location, "tenant": tenant}
-            # Apply saved resolutions again so changes made after upload appear.
-            rows = engine.reapply_saved_resolutions(rows, profile)
-            request.session["import_rows"] = _serialize_rows(rows)
+            # Derived, never stored: writing this back would bake the resolution into the session
+            # and stop a later edit from dropping a field.
+            rows = engine.derive_effective_rows(rows, profile)
             result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
             record_recalculated_preview(request.session, result)
 
@@ -1927,6 +1997,32 @@ class ContactLookupView(_AjaxPermissionView):
         )
 
 
+class ContactSuggestionView(_AjaxPermissionView):
+    """Return the Contact one preview row's candidate values identify, as it stands now."""
+
+    permission_required = "tenancy.view_contact"
+
+    def get(self, request):
+        """Recompute one row's suggestion, so a Contact created on another row is offered here."""
+        from django.http import JsonResponse
+
+        try:
+            profile_id = int(request.GET.get("profile_id", ""))
+        except (TypeError, ValueError):
+            profile_id = None
+        source_id = request.GET.get("source_id", "")
+        if profile_id is None or not source_id:
+            return JsonResponse({"error": "A valid import profile and source row are required."}, status=400)
+        profile = ImportProfile.objects.filter(pk=profile_id).first()
+        if profile is None:
+            return JsonResponse({"error": "A valid import profile is required."}, status=400)
+        try:
+            candidates, _source_row, _result_row = _contact_candidate_context(request, profile.pk, source_id)
+        except ValidationError as exc:
+            return JsonResponse({"error": "; ".join(exc.messages)}, status=400)
+        return JsonResponse({"suggestion": PrimaryContactResolver.suggest(candidates, profile, request.user)})
+
+
 class SyncDeviceFieldView(_AjaxPermissionView):
     """Apply a single field value from the import file to an existing NetBox device."""
 
@@ -2286,7 +2382,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             messages.error(request, "The device name must contain 1 to 64 characters.")
             return _name_resolution_response(request, next_url)
 
-        effective_rows = engine.reapply_saved_resolutions(rows, profile)
+        effective_rows = engine.derive_effective_rows(rows, profile)
         other_names = {
             engine._identity_text(device_name)
             for row in effective_rows
@@ -2307,12 +2403,14 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             "resolved_fields": {"device_name": new_name},
         }
         try:
-            save_permission_scoped_object(
-                request.user,
-                SourceResolution,
-                {"profile": profile, "source_id": source_id, "source_column": "device_name"},
-                resolution_values,
-            )
+            # Serialize against an executing import, which holds the same profile row.
+            with locked_profile_policy(profile.pk):
+                save_permission_scoped_object(
+                    request.user,
+                    SourceResolution,
+                    {"profile": profile, "source_id": source_id, "source_column": "device_name"},
+                    resolution_values,
+                )
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved name.")
             return _name_resolution_response(request, next_url)
@@ -2331,31 +2429,6 @@ class SaveResolutionView(_AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
     permission_required = "netbox_data_import.change_importprofile"
-
-    @staticmethod
-    def _contact_candidate_context(request, profile_id, source_id):
-        """Return Contact candidates and row state for one active preview row."""
-        import_result = request.session.get("import_result") or {}
-        result_rows = [
-            row
-            for row in import_result.get("rows", [])
-            if str(row.get("source_id")) == str(source_id) and row.get("object_type") == "device"
-        ]
-        context = request.session.get("import_context") or {}
-        source_rows = [
-            row for row in (request.session.get("import_rows") or []) if str(row.get("source_id")) == str(source_id)
-        ]
-        if str(context.get("profile_id")) != str(profile_id) or len(source_rows) != 1 or len(result_rows) != 1:
-            raise ValidationError("The candidate resolution does not identify one active preview row.")
-
-        candidates = result_rows[0].get("extra_data", {}).get("candidate_values", {}).get("contact", {})
-        if not isinstance(candidates, dict) or not candidates:
-            raise ValidationError("The active preview row has no Contact candidate values.")
-        return (
-            {str(source_column): str(value) for source_column, value in candidates.items()},
-            source_rows[0],
-            result_rows[0],
-        )
 
     def post(self, request):
         """Persist a manual field resolution for rerere replay."""
@@ -2388,7 +2461,7 @@ class SaveResolutionView(_AjaxPermissionView):
             if source_column == "candidate:contact":
                 try:
                     validate_registered_adapter(profile)
-                    candidates, source_row, result_row = self._contact_candidate_context(request, profile.pk, source_id)
+                    candidates, source_row, result_row = _contact_candidate_context(request, profile.pk, source_id)
                     validate_contact_candidate_resolution(
                         resolved_fields,
                         profile.adapter_settings.primary_contact_lookup_field,
@@ -2399,7 +2472,8 @@ class SaveResolutionView(_AjaxPermissionView):
                 original_value = json.dumps(candidates, sort_keys=True)
                 contact_context = (source_row, result_row)
             try:
-                with transaction.atomic():
+                # Serialize against an executing import, which holds the same profile row.
+                with locked_profile_policy(profile.pk):
                     save_permission_scoped_object(
                         request.user,
                         SourceResolution,
@@ -2850,6 +2924,16 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 
     queryset = SourceResolution.objects.all()
     permission_required = "netbox_data_import.delete_sourceresolution"
+
+    def post(self, request, *args, **kwargs):
+        """Serialize against an executing import, which holds the same profile row."""
+        resolution = self.get_object(**kwargs)
+        try:
+            with locked_resolution_policy(resolution.pk):
+                return super().post(request, *args, **kwargs)
+        except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
+            # The row went away between the fetch and the lock, which is the 404 the fetch would give.
+            raise Http404 from None
 
 
 # ---------------------------------------------------------------------------
@@ -3619,7 +3703,9 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
         ignored_source_ids = set(profile.ignored_devices.values_list("source_id", flat=True))
         class_mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         eligible_rows = []
-        for row in rows:
+        # Match on the resolved identity: binding a source ID to the pristine name would override
+        # the resolution the operator approved in the preview.
+        for row in engine.derive_effective_rows(rows, profile):
             source_id = engine._str_val(row.get("source_id"))
             mapping = class_mappings.get(engine._str_val(row.get("device_class")))
             if (
@@ -3793,7 +3879,7 @@ class SyncSingleRowView(_AjaxPermissionView):
         except ValidationError as exc:
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
 
-        rows = engine.reapply_saved_resolutions(rows, profile)
+        rows = engine.derive_effective_rows(rows, profile)
 
         target = next((r for r in rows if r.get("_row_number") == row_number), None)
         if target is None:

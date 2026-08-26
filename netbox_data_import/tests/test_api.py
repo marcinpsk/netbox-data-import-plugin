@@ -508,3 +508,126 @@ class ImportJobAPITest(BaseAPITestCase):
         data = json.loads(resp.content)
         self.assertEqual(data["count"], 1)
         self.assertEqual(data["results"][0]["input_filename"], "file-p1.xlsx")
+
+
+class PolicySerializerNetBoxBaseTest(BaseAPITestCase):
+    """The policy endpoints carry the NetBox identity fields and keep refusing a duplicate with 400."""
+
+    def setUp(self):
+        """Create one profile that every policy row below hangs off."""
+        super().setUp()
+        self.profile = _make_profile("APIPolicyBase")
+
+    def _rows(self):
+        """Return one saved row per policy endpoint, as (endpoint, instance) pairs."""
+        from netbox_data_import.models import ColumnTransformRule, SourceResolution
+
+        return [
+            (
+                "column-mappings",
+                ColumnMapping.objects.create(profile=self.profile, source_column="Name", target_field="device_name"),
+            ),
+            (
+                "class-role-mappings",
+                ClassRoleMapping.objects.create(profile=self.profile, source_class="Server", role_slug="server"),
+            ),
+            (
+                "device-type-mappings",
+                DeviceTypeMapping.objects.create(
+                    profile=self.profile,
+                    source_make="Cisco",
+                    source_model="C9300",
+                    netbox_manufacturer_slug="cisco",
+                    netbox_device_type_slug="cisco-c9300",
+                ),
+            ),
+            (
+                "ignored-devices",
+                IgnoredDevice.objects.create(profile=self.profile, source_id="IGN-900", device_name="dev-900"),
+            ),
+            (
+                "column-transforms",
+                ColumnTransformRule.objects.create(
+                    profile=self.profile,
+                    source_column="Serial",
+                    pattern=r"^(\w+)$",
+                    group_1_target="asset_tag",
+                    group_2_target="",
+                ),
+            ),
+            (
+                "source-resolutions",
+                SourceResolution.objects.create(
+                    profile=self.profile,
+                    source_id="SR-900",
+                    source_column="Name",
+                    original_value="old",
+                    resolved_fields={"device_name": "new"},
+                ),
+            ),
+        ]
+
+    def test_every_policy_endpoint_exposes_the_netbox_identity_fields(self):
+        """`url` and `display` come from the NetBox serializer base, and `url` resolves back to the row."""
+        for endpoint, row in self._rows():
+            with self.subTest(endpoint=endpoint):
+                resp = self.client.get(
+                    f"/api/plugins/data-import/{endpoint}/{row.pk}/",
+                    HTTP_ACCEPT="application/json",
+                )
+                self.assertEqual(resp.status_code, 200, resp.content)
+                payload = resp.json()
+                self.assertEqual(payload["display"], str(row))
+                self.assertTrue(payload["url"].endswith(f"/{endpoint}/{row.pk}/"), payload["url"])
+                # Follow the advertised URL so a wrong route name fails here instead of in a client.
+                followed = self.client.get(payload["url"], HTTP_ACCEPT="application/json")
+                self.assertEqual(followed.status_code, 200, followed.content)
+                self.assertEqual(followed.json()["id"], row.pk)
+
+    def test_no_policy_endpoint_advertises_display_url(self):
+        """These rows are edited on the profile page, so there is no UI detail route to point at."""
+        for endpoint, row in self._rows():
+            with self.subTest(endpoint=endpoint):
+                resp = self.client.get(
+                    f"/api/plugins/data-import/{endpoint}/{row.pk}/",
+                    HTTP_ACCEPT="application/json",
+                )
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertNotIn("display_url", resp.json())
+
+    def test_a_duplicate_row_is_refused_with_400_and_never_reaches_the_database(self):
+        """The UniqueConstraint 400 must survive the base swap, which drops DRF's own unique check."""
+        import json
+
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="Dup", role_slug="server")
+        resp = self.client.post(
+            "/api/plugins/data-import/class-role-mappings/",
+            data=json.dumps({"profile": self.profile.pk, "source_class": "Dup", "role_slug": "server"}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(ClassRoleMapping.objects.filter(profile=self.profile, source_class="Dup").count(), 1)
+
+    def test_a_section_the_adapter_does_not_supply_is_still_refused(self):
+        """The applicability rule moved to a mixin, so prove it still runs on the REST write path."""
+        import json
+
+        from netbox_data_import.models import ImportProfile
+
+        trace = ImportProfile.objects.create(name="APIPolicyTrace", source_adapter="trace_workbook")
+        resp = self.client.post(
+            "/api/plugins/data-import/class-role-mappings/",
+            data=json.dumps({"profile": trace.pk, "source_class": "Server", "role_slug": "server"}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("profile", resp.json())
+
+    def test_a_nested_policy_serializer_is_handed_an_instance_not_a_dict(self):
+        """The applicability rule runs before super(), so it must stand aside for a nested serializer."""
+        from netbox_data_import.api.serializers import ColumnMappingSerializer
+
+        row = ColumnMapping.objects.create(profile=self.profile, source_column="Nested", target_field="device_name")
+        self.assertIs(ColumnMappingSerializer(nested=True).validate(row), row)

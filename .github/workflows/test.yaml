@@ -23,16 +23,13 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
         include:
-          # `coverage` marks the one leg that publishes the report. It keeps the later steps off the
-          # NetBox version, which they used to repeat and would silently stop matching after a bump.
+          # One row per NetBox version, which pins the Python versions it supports.
+          # `coverage` marks the row that publishes the report, so a version bump cannot miss it.
           - python-version: "3.12"
             netbox-version: "v4.6.8"
             coverage: true
-          - python-version: "3.14"
-            netbox-version: "v4.6.8"
 
     services:
       redis:
@@ -126,9 +123,9 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/netbox/netbox
           TEST_DB_NAME: test_netbox_data_import_ci
           TEST_REDIS_HOST: localhost
-        # Four workers match the standard public runner's CPU allocation. The
-        # plugin test configuration isolates PostgreSQL and Redis per worker.
-        run: pytest -n 4 --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
+        # `-n auto` comes from the addopts, capped by conftest.py at the workers that get
+        # private PostgreSQL and Redis databases.
+        run: pytest --dist loadscope --disable-warnings -o pythonpath=../netbox/netbox
 
       - name: Generate coverage report
         if: matrix.coverage

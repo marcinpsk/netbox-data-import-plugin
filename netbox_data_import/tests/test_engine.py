@@ -13,6 +13,7 @@ from netbox_data_import.engine import (
     ParseError,
     RowResult,
     _ensure_device_type,
+    _ip_already_assigned,
     _normalize_for_compare,
     _preview_device_row,
     parse_file,
@@ -196,7 +197,8 @@ class MultiColumnMergeTest(TestCase):
         self.assertEqual(conflict["Service Tag"], "XYZ-999")
 
     def test_conflict_cleared_by_saved_resolution(self):
-        """A saved SourceResolution for the target field clears the conflict."""
+        """A saved SourceResolution for the target field clears the conflict when rows are derived."""
+        from netbox_data_import.engine import derive_effective_rows
         from netbox_data_import.models import SourceResolution
 
         profile = self._make_merge_profile()
@@ -208,9 +210,71 @@ class MultiColumnMergeTest(TestCase):
             resolved_fields={"serial": "ABC-111"},
         )
 
-        rows = parse_file(self._make_single_row_workbook("ABC-111", "XYZ-999"), profile)
+        parsed = parse_file(self._make_single_row_workbook("ABC-111", "XYZ-999"), profile)
+        self.assertIsNone(parsed[0].get("serial"), "parsing stays pristine")
+
+        rows = derive_effective_rows(parsed, profile)
         self.assertEqual(rows[0]["serial"], "ABC-111")
         self.assertFalse(rows[0].get("_conflicts", {}).get("serial"))
+
+
+class DerivationOrderTest(TestCase):
+    """Two resolutions for one source row must apply in the same order on every derivation."""
+
+    def _profile_with_two_resolutions_for_one_row(self):
+        """Save the later source_column first, so insertion order is not the order to apply."""
+        from netbox_data_import.models import SourceResolution
+
+        profile = ImportProfile.objects.create(
+            name="Derivation Order",
+            adapter_config={"sheet_name": "Data", "source_id_column": "Id"},
+        )
+        ColumnMapping.objects.create(profile=profile, source_column="Name", target_field="device_name")
+        # (profile, source_id, source_column) is unique, so one source row can own several.
+        for column, decision in (("zz_column", "from-zz"), ("aa_column", "from-aa")):
+            SourceResolution.objects.create(
+                profile=profile,
+                source_id="ORDER-1",
+                source_column=column,
+                original_value="pristine",
+                resolved_fields={"device_name": decision},
+            )
+        return profile
+
+    def test_the_database_is_asked_for_a_total_order(self):
+        """The job compares two derivations, so an undefined order reads as a changed policy."""
+        from django.db import connection
+
+        from netbox_data_import.engine import derive_effective_rows
+        from netbox_data_import.models import SourceResolution
+
+        profile = self._profile_with_two_resolutions_for_one_row()
+        reads = []
+
+        def record_the_resolution_read(execute, sql, params, many, context):
+            if SourceResolution._meta.db_table in sql and "ORDER BY" in sql:
+                reads.append(sql)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(record_the_resolution_read):
+            derive_effective_rows([{"source_id": "ORDER-1", "device_name": "pristine"}], profile)
+
+        self.assertTrue(reads, "the resolutions were never read with an ORDER BY")
+        for sql in reads:
+            # Meta.ordering stops at source_id, and SQL leaves ties there in no defined order.
+            self.assertIn("source_column", sql.rsplit("ORDER BY", 1)[1], sql)
+
+    def test_the_resolution_that_wins_does_not_depend_on_the_database(self):
+        """Applying the same rows in the other order would name the other decision."""
+        from netbox_data_import.engine import derive_effective_rows
+
+        profile = self._profile_with_two_resolutions_for_one_row()
+        rows = [{"source_id": "ORDER-1", "device_name": "pristine"}]
+
+        derived = derive_effective_rows(rows, profile)
+
+        # source_column completes the order, so the last writer for the field is always this one.
+        self.assertEqual(derived[0]["device_name"], "from-zz")
 
 
 class ApplyColumnMappingsTest(TestCase):
@@ -1152,3 +1216,266 @@ class NormalizeForCompareTest(TestCase):
         for value in ("inf", "Infinity", "-inf"):
             with self.subTest(value=value):
                 self.assertEqual(_normalize_for_compare(value), value.strip())
+
+
+class ExistingRackPreviewActionTest(TestCase):
+    """A rack row reports what it writes, so a row that writes nothing is not an update."""
+
+    def setUp(self):
+        """Create the profile, the site, and the rack the source row names."""
+        from dcim.models import Rack, Site
+
+        self.profile = _make_profile("RackNoopProfile")
+        self.site = Site.objects.create(name="Rack Noop Site", slug="rack-noop-site")
+        self.rack = Rack.objects.create(name="T1", site=self.site, u_height=42, serial="RACK-SERIAL")
+
+    def _preview(self, **overrides):
+        """Run one rack row through the preview and return its result row."""
+        row = {"_row_number": 2, "source_id": "261988", "rack_name": "T1", "device_class": "Cabinet"}
+        row.update(overrides)
+        result = run_import([row], self.profile, {"site": self.site}, dry_run=True)
+        return next(r for r in result.rows if r.object_type == "rack")
+
+    def test_a_row_that_changes_nothing_is_not_reported_as_an_update(self):
+        """The row repeats the rack's stored height and serial, so the import would write nothing."""
+        preview = self._preview(u_height=42, serial="RACK-SERIAL")
+
+        self.assertEqual(preview.action, "skip")
+        self.assertIn("changes nothing", preview.detail)
+
+    def test_a_row_that_changes_a_field_is_still_an_update(self):
+        """A different height is a real write, so the row keeps reporting it."""
+        preview = self._preview(u_height=47, serial="RACK-SERIAL")
+
+        self.assertEqual(preview.action, "update")
+        self.assertEqual(preview.detail, "Rack 'T1' already exists")
+
+    def test_a_rack_row_the_profile_never_updates_is_not_a_no_op(self):
+        """`update_existing` off is a different answer from a row that had nothing to write."""
+        self.profile.adapter_config = {**self.profile.adapter_config, "update_existing": False}
+        self.profile.save()
+
+        preview = self._preview(u_height=42, serial="RACK-SERIAL")
+
+        self.assertEqual(preview.action, "skip")
+        self.assertFalse(preview.extra_data.get("writes_nothing"), preview.extra_data)
+        self.assertIn("update_existing=False", preview.detail)
+
+    def test_the_import_agrees_with_the_preview_about_a_row_that_writes_nothing(self):
+        """The execute guard compares the writer's action to the previewed one, so they must agree."""
+        from netbox_data_import.views import _import_intents
+
+        row = {
+            "_row_number": 2,
+            "source_id": "261988",
+            "rack_name": "T1",
+            "device_class": "Cabinet",
+            "u_height": 42,
+            "serial": "RACK-SERIAL",
+        }
+        preview = run_import([dict(row)], self.profile, {"site": self.site}, dry_run=True)
+
+        written = run_import(
+            [dict(row)],
+            self.profile,
+            {"site": self.site},
+            dry_run=False,
+            expected_intents=_import_intents(preview),
+        )
+
+        rack_row = next(r for r in written.rows if r.object_type == "rack")
+        self.assertNotEqual(rack_row.action, "error", rack_row.detail)
+        self.assertEqual(rack_row.action, "skip", rack_row.detail)
+
+
+class MatchedDevicePreviewActionTest(TestCase):
+    """A matched device row reports what it writes, so a row that writes nothing is not an update."""
+
+    def setUp(self):
+        """Create the site, roles, and profile the workbook rows need."""
+        from dcim.models import DeviceRole, Site
+
+        self.site = Site.objects.create(name="Device Noop Site", slug="device-noop-site")
+        DeviceRole.objects.create(name="Server", slug="server")
+        DeviceRole.objects.create(name="Network Switch", slug="network-switch")
+        self.profile = _make_profile("DeviceNoopProfile")
+
+    def _rows(self):
+        """Return the workbook's parsed rows."""
+        with open(FIXTURE_PATH, "rb") as f:
+            return parse_file(f, self.profile)
+
+    def _run(self, rows, *, dry_run, expected_intents=None):
+        """Run one import pass over *rows*."""
+        return run_import(
+            [dict(r) for r in rows],
+            self.profile,
+            {"site": self.site},
+            dry_run=dry_run,
+            expected_intents=expected_intents,
+        )
+
+    def _device_row(self, result, name):
+        """Return the result row for one device by name."""
+        return next(r for r in result.rows if r.object_type == "device" and r.name == name)
+
+    def test_a_second_preview_of_an_imported_row_writes_nothing(self):
+        """Re-previewing a file already imported is the case an operator hits every day."""
+        rows = self._rows()
+        first = self._run(rows, dry_run=False)
+        self.assertEqual([r.detail for r in first.rows if r.action == "error"], [])
+
+        preview = self._run(rows, dry_run=True)
+
+        device_row = self._device_row(preview, "server-01")
+        self.assertEqual(device_row.action, "skip", device_row.detail)
+        self.assertIn("writes nothing", device_row.detail)
+
+    def test_a_changed_field_is_still_an_update(self):
+        """A serial the device does not carry is a real write, so the row keeps reporting it."""
+        rows = self._rows()
+        self._run(rows, dry_run=False)
+        for row in rows:
+            if row.get("device_name") == "server-01":
+                row["serial"] = "CHANGED-SERIAL"
+
+        preview = self._run(rows, dry_run=True)
+
+        device_row = self._device_row(preview, "server-01")
+        self.assertEqual(device_row.action, "update", device_row.detail)
+
+    def test_a_row_that_still_has_to_record_its_import_state_is_an_update(self):
+        """The import record is what a later run reads, so restoring it is a write like any other."""
+        from netbox_data_import.models import DeviceImportSource
+
+        rows = self._rows()
+        self._run(rows, dry_run=False)
+        DeviceImportSource.objects.filter(device__name="server-01").delete()
+
+        preview = self._run(rows, dry_run=True)
+
+        device_row = self._device_row(preview, "server-01")
+        self.assertEqual(device_row.action, "update", device_row.detail)
+
+    def test_a_row_that_writes_nothing_still_names_the_device_it_matched(self):
+        """The execute guard only compares an object id when the preview recorded one."""
+        rows = self._rows()
+        self._run(rows, dry_run=False)
+
+        preview = self._run(rows, dry_run=True)
+
+        device_row = self._device_row(preview, "server-01")
+        self.assertEqual(device_row.action, "skip", device_row.detail)
+        self.assertTrue(device_row.extra_data.get("netbox_device_id"), device_row.extra_data)
+
+    def test_a_zero_u_device_still_carrying_a_position_is_an_update(self):
+        """A zero-U type has its position cleared too, and an equal position compares as settled."""
+        from dcim.models import Device, DeviceType
+
+        rows = self._rows()
+        self._run(rows, dry_run=False)
+        device = Device.objects.get(name="server-01")
+        DeviceType.objects.filter(pk=device.device_type_id).update(u_height=0)
+        Device.objects.filter(pk=device.pk).update(position=None, face="")
+        Device.objects.filter(pk=device.pk).update(position=10)
+
+        preview = self._run(rows, dry_run=True)
+
+        device_row = self._device_row(preview, "server-01")
+        self.assertEqual(device_row.action, "update", device_row.detail)
+
+    def test_a_zero_u_device_still_carrying_a_face_is_an_update(self):
+        """The writer clears face for a zero-U type, and a blank source face is never compared."""
+        from dcim.models import Device, DeviceType
+
+        rows = self._rows()
+        self._run(rows, dry_run=False)
+        device = Device.objects.get(name="server-01")
+        DeviceType.objects.filter(pk=device.device_type_id).update(u_height=0)
+        Device.objects.filter(pk=device.pk).update(face="front")
+        for row in rows:
+            row.pop("face", None)
+
+        preview = self._run(rows, dry_run=True)
+
+        device_row = self._device_row(preview, "server-01")
+        self.assertEqual(device_row.action, "update", device_row.detail)
+
+    def test_a_row_that_still_has_to_bind_its_device_is_an_update(self):
+        """The binding is what matches this row next time, so creating it is a write."""
+        rows = self._rows()
+        self._run(rows, dry_run=False)
+        self.profile.device_matches.all().delete()
+
+        preview = self._run(rows, dry_run=True)
+
+        device_row = self._device_row(preview, "server-01")
+        self.assertEqual(device_row.action, "update", device_row.detail)
+
+    def test_the_import_agrees_with_the_preview_about_a_row_that_writes_nothing(self):
+        """The execute guard compares the writer's action to the previewed one, so they must agree."""
+        from netbox_data_import.views import _import_intents
+
+        rows = self._rows()
+        self._run(rows, dry_run=False)
+        preview = self._run(rows, dry_run=True)
+
+        written = self._run(rows, dry_run=False, expected_intents=_import_intents(preview))
+
+        device_row = self._device_row(written, "server-01")
+        self.assertNotEqual(device_row.action, "error", device_row.detail)
+        self.assertEqual(device_row.action, "skip", device_row.detail)
+
+
+class IpAlreadyAssignedTest(TestCase):
+    """The writer resolves an address to one IPAddress, so only a unique address is settled."""
+
+    def setUp(self):
+        """Create a device whose interface carries the address it uses as its primary IPv4."""
+        from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
+        from ipam.models import IPAddress
+
+        site = Site.objects.create(name="Ip Site", slug="ip-site")
+        manufacturer = Manufacturer.objects.create(name="IpMfg", slug="ip-mfg")
+        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="IpModel", slug="ip-model")
+        role = DeviceRole.objects.create(name="IpRole", slug="ip-role")
+        self.device = Device.objects.create(name="ip-device", site=site, device_type=device_type, role=role)
+        # The writer only assigns through an interface, so the settled state has to carry one.
+        self.interface = Interface.objects.create(device=self.device, name="eth0", type="1000base-t")
+        self.address = IPAddress.objects.create(address="10.0.0.5/24", assigned_object=self.interface)
+        Device.objects.filter(pk=self.device.pk).update(primary_ip4=self.address)
+        self.device.refresh_from_db()
+
+    def test_the_address_the_device_carries_is_settled(self):
+        """One address, one IPAddress: the writer can only resolve to what the device already has."""
+        self.assertTrue(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
+
+    def test_a_second_row_holding_the_same_address_is_not_settled(self):
+        """The writer filters by address and VRF, so it could resolve to the other object."""
+        from ipam.models import IPAddress
+
+        IPAddress.objects.create(address="10.0.0.5/24")
+
+        self.assertFalse(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
+
+    def test_a_different_address_is_not_settled(self):
+        """A row naming another address is a real write."""
+        self.assertFalse(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.6/24"))
+
+    def test_an_address_no_interface_carries_is_not_settled(self):
+        """Without an interface the writer cannot assign, so it records the address as unassigned."""
+        self.address.assigned_object = None
+        self.address.save()
+        self.device.refresh_from_db()
+
+        self.assertFalse(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
+
+    def test_an_interface_in_another_vrf_is_not_settled(self):
+        """The writer resolves the address by the interface's VRF, which would miss this object."""
+        from ipam.models import VRF
+
+        self.interface.vrf = VRF.objects.create(name="IpVrf")
+        self.interface.save()
+        self.device.refresh_from_db()
+
+        self.assertFalse(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))

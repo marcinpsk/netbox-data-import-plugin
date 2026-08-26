@@ -14,7 +14,7 @@ from django.core.validators import validate_email
 from django.db import connection, transaction
 from django.db.models import Q
 
-from .models import stored_import_source, validate_contact_candidate_resolution
+from .models import CONTACT_RESOLUTION_FIELDS, stored_import_source, validate_contact_candidate_resolution
 from .object_permissions import ObjectPermissionDenied, enforce_saved_object_permission
 
 
@@ -232,29 +232,15 @@ class PrimaryContactResolver:
             "phone": plan["contact_phone"],
         }
 
-    @classmethod
-    def suggest(cls, candidate_values: dict[str, str], profile, user=None) -> dict | None:
-        """Return one visible Contact whose configured identity occurs in the row."""
+    @staticmethod
+    def _unique_contact(values, fields, user) -> dict | None:
+        """Return the one visible Contact that an exact match on *fields* identifies."""
         from tenancy.models import Contact
 
-        lookup_field = profile.adapter_settings.primary_contact_lookup_field
-        values = []
-        for candidate in candidate_values.values():
-            value = _text(candidate)
-            if not value:
-                continue
-            if lookup_field == "email":
-                try:
-                    validate_email(value)
-                except ValidationError:
-                    continue
-            values.append(value)
-        if not values:
-            return None
-
         query = Q()
-        for value in values:
-            query |= Q(**{f"{lookup_field}__iexact": value})
+        for field in fields:
+            for value in values:
+                query |= Q(**{f"{field}__iexact": value})
         contacts = Contact.objects.filter(query)
         if user is not None:
             contacts = contacts.restrict(user, "view")
@@ -268,6 +254,21 @@ class PrimaryContactResolver:
             "email": contact.email,
             "phone": contact.phone,
         }
+
+    @classmethod
+    def suggest(cls, candidate_values: dict[str, str], profile, user=None) -> dict | None:
+        """Return the one visible Contact that a candidate value in this row identifies."""
+        values = [value for value in map(_text, candidate_values.values()) if value]
+        if not values:
+            return None
+        lookup_field = profile.adapter_settings.primary_contact_lookup_field
+        # The configured lookup field answers first. A row carrying only a name matches nothing
+        # there, so the remaining identity fields answer rather than leaving the picker empty.
+        for fields in ([lookup_field], sorted(CONTACT_RESOLUTION_FIELDS - {lookup_field})):
+            match = cls._unique_contact(values, fields, user)
+            if match is not None:
+                return match
+        return None
 
     @classmethod
     def _plan_assignment(cls, obj, role, contact, user, lock):

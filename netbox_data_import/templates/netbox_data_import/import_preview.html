@@ -426,7 +426,8 @@
                 {% elif row.action == 'update' %}
                   <span class="badge ndi-badge-update"><i class="mdi mdi-pencil"></i> Update</span>
                 {% elif row.action == 'skip' %}
-                  <span class="badge ndi-badge-skip">Skip</span>
+                  {# A matched row that writes nothing is not the same as one updates were turned off for. #}
+                  <span class="badge ndi-badge-skip">{% if row.extra_data.writes_nothing %}No-op{% else %}Skip{% endif %}</span>
                 {% elif row.action == 'error' %}
                   <span class="badge ndi-badge-error"><i class="mdi mdi-alert"></i> Error</span>
                 {% elif row.action == 'ignore' %}
@@ -477,6 +478,17 @@
                           aria-expanded="false"
                           title="Show what this row does">
                     <i class="mdi mdi-chevron-down"></i> Detail
+                  </button>
+                {% endif %}
+                {# Sync placement sits in the detail row, so its actionable state needs a badge here. #}
+                {% if row.extra_data.netbox_device_id and row.rack_name and not row.extra_data.placement_sync_writes_nothing %}
+                  <br>
+                  <button type="button" class="badge text-bg-success ndi-diff-toggle mt-1 ndi-placement-badge"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
+                          aria-expanded="false"
+                          title="This row can set rack={{ row.rack_name }}{% if row.extra_data.u_position %}, U{{ row.extra_data.u_position }}{% endif %}{% if row.extra_data.face %}, {{ row.extra_data.face }}{% endif %}. Open the detail row to apply it.">
+                    <i class="mdi mdi-package-variant"></i> Placement
                   </button>
                 {% endif %}
               </td>
@@ -1002,7 +1014,8 @@
       <form method="post" action="{% url 'plugins:netbox_data_import:save_resolution' %}"
             id="contactCandidateForm"
             data-contact-lookup-field="{{ profile.adapter_settings.primary_contact_lookup_field }}"
-            data-contact-lookup-url="{% url 'plugins:netbox_data_import:contact_lookup' %}">
+            data-contact-lookup-url="{% url 'plugins:netbox_data_import:contact_lookup' %}"
+            data-contact-suggestion-url="{% url 'plugins:netbox_data_import:contact_suggestion' %}">
         {% csrf_token %}
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
         <input type="hidden" name="source_id" id="contactCandidateSourceId">
