@@ -3049,6 +3049,7 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
         resolution = self.get_object(**kwargs)
         try:
             with locked_resolution_policy(resolution.pk):
+                # atomic-exit-safe: locked-delete-committed
                 return super().post(request, *args, **kwargs)
         except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
             # The row went away between the fetch and the lock, which is the 404 the fetch would give.

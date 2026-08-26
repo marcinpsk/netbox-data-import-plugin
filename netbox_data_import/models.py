@@ -221,6 +221,7 @@ class ImportProfile(NetBoxModel):
         deadlocks against it. NetBox deletes each object through this method, in bulk as well.
         """
         with locked_profile_policy(self.pk):
+            # atomic-exit-safe: locked-cascade-committed
             return super().delete(*args, **kwargs)
 
     @property
