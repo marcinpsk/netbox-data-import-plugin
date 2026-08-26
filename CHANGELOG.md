@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.6.1 (2026-08-26)
+
+### Bug Fixes
+
+- Close the three review follow-ups deferred from #103
+  ([#115](https://github.com/marcinpsk/netbox-data-import-plugin/pull/115),
+  [`0893a85`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0893a850c675499219562ce048d864d76c3d774b))
+
+
 ## v1.6.0 (2026-08-25)
 
 ### Continuous Integration
