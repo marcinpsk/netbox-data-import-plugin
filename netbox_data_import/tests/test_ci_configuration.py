@@ -69,6 +69,40 @@ class NetBoxMainWorkflowTest(TestCase):
         self.assertIs(checkout.get("with", {}).get("persist-credentials"), False)
 
 
+class TestWorkflowTest(TestCase):
+    """Keep the test workflows on the worker count and the version pairing the repository decides."""
+
+    WORKFLOWS = ["test.yaml", "test-netbox-main.yaml"]
+
+    def _workflow(self, name):
+        return Path(__file__).resolve().parents[2] / ".github" / "workflows" / name
+
+    def test_no_workflow_hardcodes_a_pytest_worker_count(self):
+        """`conftest.py` caps `-n auto` at the workers that get private Redis databases.
+
+        A number on the command line overrides the addopts and skips that reasoning.
+        """
+        for name in self.WORKFLOWS:
+            with self.subTest(workflow=name):
+                self.assertNotRegex(self._workflow(name).read_text(), r"pytest[^\n]*-n\s+\d")
+
+    def test_the_matrix_does_not_cap_the_parallel_jobs(self):
+        """GitHub allocates the runners, so a fixed ceiling only makes the run longer."""
+        strategy = yaml.safe_load(self._workflow("test.yaml").read_text())["jobs"]["test-netbox"]["strategy"]
+
+        self.assertNotIn("max-parallel", strategy)
+
+    def test_each_netbox_version_is_tested_on_one_python_version(self):
+        """NetBox pins the Python versions it supports, so the plugin does not test them again."""
+        matrix = yaml.safe_load(self._workflow("test.yaml").read_text())["jobs"]["test-netbox"]["strategy"]["matrix"]
+        pythons_by_netbox = {}
+        for leg in matrix["include"]:
+            pythons_by_netbox.setdefault(leg["netbox-version"], set()).add(leg["python-version"])
+
+        repeated = {version: sorted(pythons) for version, pythons in pythons_by_netbox.items() if len(pythons) > 1}
+        self.assertEqual(repeated, {})
+
+
 class ReleaseWorkflowTest(TestCase):
     """Keep the release workflow unprivileged where it runs pull-request code, and serial."""
 
