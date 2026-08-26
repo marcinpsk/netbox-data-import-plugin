@@ -605,7 +605,11 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             {"profile_id": self.profile.pk, "source_id": "LATE-B"},
         )
         self.assertEqual(restored.status_code, 302)
-        # Restoring a device leaves the rendered preview and its token in place.
+        self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile, source_id="LATE-B").exists())
+        # The rival is back and now collides, but the rendered preview and its token are unchanged.
+        live = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        arrived = next(row for row in live.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertEqual(arrived.extra_data.get("identity_conflict"), "duplicate_serial", arrived.to_dict())
         self.assertEqual(self._preview_revision(), revision)
 
         response = self.client.post(
@@ -636,6 +640,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         for row in rows:
             row["serial"] = "STALE-TARGET-SERIAL"
         preview = run_import(rows, self.profile, {"site": self.site, "tenant": tenant}, dry_run=True)
+        shown = next(row for row in preview.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertEqual(shown.extra_data.get("identity_conflict"), "duplicate_serial", shown.to_dict())
         self._set_import_session(rows, preview, tenant=tenant)
         revision = self._preview_revision()
         tenant.delete()
@@ -685,6 +691,48 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertFalse(
             SourceResolution.objects.filter(profile=self.profile, source_id="STALE-NAME-B").exists(),
             "a replacement name was cleared against a target the preview would have discarded",
+        )
+
+    def test_only_the_serial_the_preview_named_can_be_given_up(self):
+        """The row may collide on a different serial later, which the operator never authorized."""
+        rows = [
+            self._device_row(2, "SWAP-A", "swap-device-a", self.rack_a, 1),
+            self._device_row(3, "SWAP-B", "swap-device-b", self.rack_b, 2),
+            self._device_row(4, "SWAP-C", "swap-device-c", self.rack_a, 3),
+        ]
+        rows[0]["serial"] = "SWAP-FIRST"
+        rows[1]["serial"] = "SWAP-FIRST"
+        rows[2]["serial"] = "SWAP-SECOND"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        shown = next(row for row in preview.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertEqual(shown.extra_data.get("duplicate_serial"), "SWAP-FIRST", shown.to_dict())
+        self._set_import_session(rows, preview)
+        revision = self._preview_revision()
+
+        # A saved resolution moves row 2 onto the other serial without rotating the token.
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="SWAP-A",
+            source_column="serial",
+            original_value="SWAP-FIRST",
+            resolved_fields={"serial": "SWAP-SECOND"},
+        )
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SWAP-A",
+                "row_number": 2,
+                "preview_revision": revision,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            SourceResolution.objects.get(profile=self.profile, source_id="SWAP-A").resolved_fields,
+            {"serial": "SWAP-SECOND"},
+            "the view gave up a serial the operator was never shown",
         )
 
     def test_duplicate_name_form_refuses_a_stale_preview_revision(self):

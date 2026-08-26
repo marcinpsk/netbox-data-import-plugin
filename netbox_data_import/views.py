@@ -2409,31 +2409,33 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             messages.error(request, "The device name must contain 1 to 64 characters.")
             return _name_resolution_response(request, next_url)
 
-        target = _resolved_import_target(ctx_data)
-        if target is None:
-            messages.error(request, "The saved import target is no longer available. Start a new preview.")
-            return _name_resolution_response(request, next_url)
-
         resolution_values = {
             "original_value": engine._str_val(source_rows[0].get("device_name")),
             "resolved_fields": {"device_name": new_name},
         }
-        already_claimed = None
+        refusal = None
         try:
             # Serialize against an executing import, which holds the same profile row.
             with locked_profile_policy(profile.pk):
-                # Read the claims under the lock: a name saved between the check and the write would
-                # otherwise let two source rows resolve to the same device name.
-                already_claimed = _device_name_already_claimed(
-                    engine.derive_effective_rows(rows, profile), row_number, new_name, target
-                )
-                if already_claimed is None:
+                # Read the target and the claims under the lock: a name saved between the check and
+                # the write would otherwise let two source rows resolve to the same device name.
+                target = _resolved_import_target(ctx_data)
+                if target is None:
+                    refusal = "The saved import target is no longer available. Start a new preview."
+                else:
+                    refusal = _device_name_already_claimed(
+                        engine.derive_effective_rows(rows, profile), row_number, new_name, target
+                    )
+                if refusal is None:
                     save_permission_scoped_object(
                         request.user,
                         SourceResolution,
                         {"profile": profile, "source_id": source_id, "source_column": "device_name"},
                         resolution_values,
                     )
+        except ImportProfile.DoesNotExist:
+            messages.error(request, "The import profile is no longer available.")
+            return _name_resolution_response(request, next_url)
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved name.")
             return _name_resolution_response(request, next_url)
@@ -2444,22 +2446,24 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             messages.error(request, "The saved name changed while this request was being processed. Try again.")
             return _name_resolution_response(request, next_url)
 
-        if already_claimed is not None:
-            messages.error(request, already_claimed)
+        if refusal is not None:
+            messages.error(request, refusal)
             return _name_resolution_response(request, next_url)
 
         messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
         return _name_resolution_response(request, next_url)
 
 
-def _reports_duplicate_serial(preview_rows, row_number) -> bool:
-    """Answer whether the engine calls this source row's serial a duplicate."""
-    return any(
-        item.row_number == row_number
-        and item.object_type == "device"
-        and item.extra_data.get("identity_conflict") == "duplicate_serial"
-        for item in preview_rows
-    )
+def _duplicate_serial_shown(preview_rows, row_number) -> str:
+    """Return the serial the engine calls a duplicate on this source row, or an empty string."""
+    for item in preview_rows:
+        if (
+            item.row_number == row_number
+            and item.object_type == "device"
+            and item.extra_data.get("identity_conflict") == "duplicate_serial"
+        ):
+            return engine._str_val(item.extra_data.get("duplicate_serial"))
+    return ""
 
 
 class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
@@ -2506,8 +2510,9 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
 
         preview = load_cached_preview(request)
-        # The action settles the collision the operator was shown, not one that arrived after.
-        if preview is None or not _reports_duplicate_serial(preview[1].rows, row_number):
+        # The action settles the collision the operator was shown, on the serial it named.
+        shown_serial = _duplicate_serial_shown(preview[1].rows, row_number) if preview is not None else ""
+        if not shown_serial:
             messages.error(request, "This row shows no duplicate serial in the current preview.")
             return _name_resolution_response(request, next_url)
 
@@ -2516,32 +2521,35 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             messages.error(request, "This row carries no serial to give up.")
             return _name_resolution_response(request, next_url)
 
-        target = _resolved_import_target(ctx_data)
-        if target is None:
-            messages.error(request, "The saved import target is no longer available. Start a new preview.")
-            return _name_resolution_response(request, next_url)
-
-        still_contested = False
+        refusal = None
         try:
             # Serialize against an executing import, which holds the same profile row.
             with locked_profile_policy(profile.pk):
-                # Only the engine knows which rows it will import, so let it re-judge the collision
-                # next to the write: a serial match alone also counts rows the import skips.
-                current = engine.run_import(
-                    engine.derive_effective_rows(rows, profile),
-                    profile,
-                    target,
-                    dry_run=True,
-                    user=request.user,
-                )
-                still_contested = _reports_duplicate_serial(current.rows, row_number)
-                if still_contested:
-                    save_permission_scoped_object(
-                        request.user,
-                        SourceResolution,
-                        {"profile": profile, "source_id": source_id, "source_column": "serial"},
-                        {"original_value": original_serial, "resolved_fields": {"serial": ""}},
+                # Read the target and re-judge the collision under the lock. Only the engine knows
+                # which rows it will create, and a serial match alone also counts rows it skips.
+                target = _resolved_import_target(ctx_data)
+                if target is None:
+                    refusal = "The saved import target is no longer available. Start a new preview."
+                else:
+                    current = engine.run_import(
+                        engine.derive_effective_rows(rows, profile),
+                        profile,
+                        target,
+                        dry_run=True,
+                        user=request.user,
                     )
+                    if _duplicate_serial_shown(current.rows, row_number) != shown_serial:
+                        refusal = f"No other row this import creates still claims serial '{shown_serial}'."
+                    else:
+                        save_permission_scoped_object(
+                            request.user,
+                            SourceResolution,
+                            {"profile": profile, "source_id": source_id, "source_column": "serial"},
+                            {"original_value": original_serial, "resolved_fields": {"serial": ""}},
+                        )
+        except ImportProfile.DoesNotExist:
+            messages.error(request, "The import profile is no longer available.")
+            return _name_resolution_response(request, next_url)
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved serial.")
             return _name_resolution_response(request, next_url)
@@ -2552,11 +2560,11 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             messages.error(request, "The saved serial changed while this request was being processed. Try again.")
             return _name_resolution_response(request, next_url)
 
-        if not still_contested:
-            messages.error(request, "No other row that this import will create claims this serial.")
+        if refusal is not None:
+            messages.error(request, refusal)
             return _name_resolution_response(request, next_url)
 
-        messages.success(request, f"Source '{source_id}' will import without serial '{original_serial}'.")
+        messages.success(request, f"Source '{source_id}' will import without serial '{shown_serial}'.")
         return _name_resolution_response(request, next_url)
 
 
