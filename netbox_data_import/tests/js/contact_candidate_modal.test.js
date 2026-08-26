@@ -474,6 +474,39 @@ describe("contact candidate modal", () => {
     expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
   });
 
+  it("keeps the offer on the list when the answer names the same Contact", async () => {
+    let answer;
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = () =>
+          resolve({
+            json: () =>
+              Promise.resolve({
+                suggestion: { id: 41, name: "Existing First Contact", email: "first@example.invalid", phone: "" },
+              }),
+          });
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-first");
+
+    // The operator takes the offered Contact, and the answer names that same Contact.
+    const picker = document.getElementById("contactCandidateExisting").tomselect;
+    picker.setValue("41");
+    answer();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    await new Promise((settle) => setTimeout(settle, 10));
+
+    picker.clear();
+
+    // The row still identifies it, so the message and the list must say the same thing.
+    expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(false);
+    expect(picker.options["41"]).toBeDefined();
+  });
+
   it("does not bring the dropped suggestion back when the row is reopened", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);

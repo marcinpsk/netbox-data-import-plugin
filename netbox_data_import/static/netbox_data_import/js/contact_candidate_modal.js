@@ -408,9 +408,10 @@
           return;
         }
         contactSuggestions[rowNumber] = data.suggestion;
-        // One row identifies one Contact, so the previous offer must not stay on the list.
-        dropOffered(instance, offered);
+        // One row identifies one Contact, so an offer it replaces must not stay on the list.
+        if (offered && String(offered.id) !== String(data.suggestion.id)) dropOffered(instance, offered);
         if (instance) {
+          // addOption() updates an option that is already there, so the details stay current.
           instance.addOption(contactOption(data.suggestion));
           instance.refreshOptions(false);
         }
