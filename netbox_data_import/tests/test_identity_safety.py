@@ -418,6 +418,40 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         device_rows = [row for row in result.rows if row.object_type == "device"]
         self.assertEqual([row.action for row in device_rows], ["create", "create"])
 
+    def test_a_duplicate_serial_can_be_given_up_on_one_source_row(self):
+        """Two rows cannot both claim one serial, so the operator drops it from one of them."""
+        rows = [
+            self._device_row(2, "SER-A", "serial-device-a", self.rack_a, 1),
+            self._device_row(3, "SER-B", "serial-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "SHARED-SERIAL"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SER-B",
+                "row_number": 3,
+                "preview_revision": self._preview_revision(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        resolution = SourceResolution.objects.get(profile=self.profile, source_id="SER-B", source_column="serial")
+        self.assertEqual(resolution.resolved_fields, {"serial": ""})
+        resolved_rows = derive_effective_rows(rows, self.profile)
+        result = run_import(resolved_rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [row for row in result.rows if row.object_type == "device"]
+        self.assertEqual([row.action for row in device_rows], ["create", "create"])
+        # The row that kept the serial is the one that still carries it into NetBox.
+        self.assertEqual(
+            [row.extra_data.get("source_serial") for row in device_rows],
+            ["SHARED-SERIAL", ""],
+        )
+
     def test_duplicate_name_form_refuses_a_stale_preview_revision(self):
         """A stale HTMX name form navigates instead of replacing the frozen preview."""
         rows = [

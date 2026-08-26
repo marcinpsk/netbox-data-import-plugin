@@ -72,6 +72,9 @@ ROW_ACTION_PAYLOADS = {
     "ignore_field_difference": [
         {"source_id": LONG, "row_number": "1", "target_field": "serial"},
     ],
+    "ignore_duplicate_serial": [
+        {"source_id": LONG, "row_number": "1"},
+    ],
     "match_existing_device": [
         {"source_id": LONG, "row_number": "1"},
     ],
@@ -97,6 +100,7 @@ ROW_ACTION_CONTROL_PAYLOADS = {
         "row_number": "1",
         "target_field": "serial",
     },
+    "ignore_duplicate_serial": {"source_id": "CONTROL-SERIAL", "row_number": "1"},
     "match_existing_device": {"source_id": "CONTROL-MATCH", "row_number": "1"},
     "sync_single_row": {"row_number": "1"},
     "auto_match_devices": {},
@@ -341,7 +345,11 @@ class QuickActionInputBoundsTest(TestCase):
         device_name = f"bounds-{case_name}"
         row = self._device_row(source_id, device_name)
 
-        if url_name in {"save_resolution", "resolve_duplicate_name"}:
+        if url_name == "ignore_duplicate_serial":
+            # The view refuses a row with no serial to give up.
+            row["serial"] = f"SERIAL-{case_name}"
+            self._store_active_import([row])
+        elif url_name in {"save_resolution", "resolve_duplicate_name"}:
             self._store_active_import([row])
         elif url_name == "match_existing_device":
             device = Device.objects.create(

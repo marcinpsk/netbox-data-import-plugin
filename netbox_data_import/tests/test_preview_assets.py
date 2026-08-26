@@ -407,6 +407,37 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertNotIn(">Skip<", main_row)
 
 
+class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
+    """A refused row needs an action on it, or the operator can do nothing about the collision."""
+
+    def _preview_html_with_a_shared_serial(self):
+        """Give two workbook rows one serial and render the preview."""
+        self._setup_session()
+        session = self.client.session
+        rows = session["import_rows"]
+        # A row that already carries a serial is a device row, not the Cabinet row.
+        devices = [row for row in rows if row.get("serial")][:2]
+        self.assertEqual(len(devices), 2, "the sample workbook must carry two device rows")
+        for row in devices:
+            row["serial"] = "SHARED-PREVIEW-SERIAL"
+        session["import_rows"] = rows
+        session.save()
+        return self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+
+    def test_a_duplicate_serial_row_offers_the_ignore_action(self):
+        """The operator gives the serial up on one row so the other keeps it."""
+        html = self._preview_html_with_a_shared_serial()
+
+        self.assertIn("Duplicate serial", html)
+        self.assertIn("ignore-duplicate-serial/", html)
+
+    def test_a_duplicate_serial_row_names_the_other_row(self):
+        """Finding the other row is what makes the choice possible."""
+        html = self._preview_html_with_a_shared_serial()
+
+        self.assertIn("also on row", html)
+
+
 class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
     """A row that matched a NetBox device says so, whatever its field diff turns out to be."""
 

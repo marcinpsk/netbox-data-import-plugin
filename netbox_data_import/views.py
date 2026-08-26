@@ -2057,7 +2057,10 @@ class SyncDeviceFieldView(_AjaxPermissionView):
                 return JsonResponse({"ok": False, "error": "Device not found"})
 
         try:
-            display = self._apply_field(device, field, value, _STATUS_MAP)
+            # The write carries its own transaction: nothing wraps this request, and a receiver
+            # on the model can require one.
+            with transaction.atomic():
+                display = self._apply_field(device, field, value, _STATUS_MAP)
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
@@ -2422,6 +2425,77 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
 
         messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
+        return _name_resolution_response(request, next_url)
+
+
+class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
+    """Drop the serial from one source row so the rows sharing it stop colliding."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Persist an empty serial for the row the operator gives it up on."""
+        ctx_data = request.session.get("import_context") or {}
+        rows = request.session.get("import_rows") or []
+        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+        profile_id = _parse_posted_profile_id(request)
+        if profile_id is None:
+            messages.error(request, "A valid import profile is required.")
+            return _name_resolution_response(request, next_url)
+        if str(ctx_data.get("profile_id")) != str(profile_id):
+            messages.error(request, "The selected profile is not the active import profile.")
+            return _name_resolution_response(request, next_url)
+
+        profile = get_object_or_404(
+            ImportProfile.objects.restrict(request.user, "change"),
+            pk=profile_id,
+        )
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            # An inline render would replace the preview that the queued import has frozen.
+            messages.error(request, stale_reason)
+            return _navigation_response(request, next_url)
+        try:
+            row_number = int(request.POST.get("row_number", ""))
+        except (TypeError, ValueError):
+            messages.error(request, "A valid source row is required.")
+            return _name_resolution_response(request, next_url)
+
+        source_id = engine._str_val(request.POST.get("source_id"))
+        source_rows = [
+            row
+            for row in rows
+            if row.get("_row_number") == row_number and engine._str_val(row.get("source_id")) == source_id
+        ]
+        if not source_id or len(source_rows) != 1:
+            messages.error(request, "The source ID and row must identify one active import row.")
+            return _name_resolution_response(request, next_url)
+
+        original_serial = engine._str_val(source_rows[0].get("serial"))
+        if not original_serial:
+            messages.error(request, "This row carries no serial to give up.")
+            return _name_resolution_response(request, next_url)
+
+        try:
+            # Serialize against an executing import, which holds the same profile row.
+            with locked_profile_policy(profile.pk):
+                save_permission_scoped_object(
+                    request.user,
+                    SourceResolution,
+                    {"profile": profile, "source_id": source_id, "source_column": "serial"},
+                    {"original_value": original_serial, "resolved_fields": {"serial": ""}},
+                )
+        except ObjectPermissionDenied:
+            messages.error(request, "Permission denied: cannot create or change this saved serial.")
+            return _name_resolution_response(request, next_url)
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+            return _name_resolution_response(request, next_url)
+        except IntegrityError:
+            messages.error(request, "The saved serial changed while this request was being processed. Try again.")
+            return _name_resolution_response(request, next_url)
+
+        messages.success(request, f"Source '{source_id}' will import without serial '{original_serial}'.")
         return _name_resolution_response(request, next_url)
 
 
