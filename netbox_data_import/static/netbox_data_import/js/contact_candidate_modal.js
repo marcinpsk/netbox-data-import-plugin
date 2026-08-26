@@ -360,9 +360,24 @@
       .then(function (response) { return response.json(); })
       .then(function (data) {
         // The modal is shared, so a late answer must not write over the row now on screen.
-        if (!data || !data.suggestion || !stillShowing(sourceId)) return;
-        contactSuggestions[rowNumber] = data.suggestion;
+        if (!data || !stillShowing(sourceId)) return;
         var instance = picker();
+        if (!data.suggestion) {
+          // The Contact the page offers is gone, so keeping it would only fail on save. The
+          // option stays when it is the operator's current choice, because removing a selected
+          // option clears the selection.
+          var stale = contactSuggestions[rowNumber];
+          delete contactSuggestions[rowNumber];
+          if (instance && stale && String(stale.id) !== contactId.value) {
+            instance.removeOption(String(stale.id));
+            instance.refreshOptions(false);
+          }
+          showSuggestion(null);
+          return;
+        }
+        // An operator who picked a Contact while the answer was in flight keeps that choice.
+        if (contactId.value) return;
+        contactSuggestions[rowNumber] = data.suggestion;
         if (instance) {
           instance.addOption(contactOption(data.suggestion));
           instance.refreshOptions(false);

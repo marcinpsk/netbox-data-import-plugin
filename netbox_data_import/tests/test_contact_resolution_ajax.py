@@ -456,6 +456,20 @@ class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(json.loads(response.content)["suggestion"]["id"], contact.pk)
 
+    def test_a_contact_deleted_after_the_preview_is_no_longer_offered(self):
+        """The page still holds the deleted Contact, so the endpoint has to answer that it is gone."""
+        from tenancy.models import Contact
+
+        contact = Contact.objects.create(name="Ajax Person", email="ajax.person@example.invalid")
+        self.assertEqual(json.loads(self._suggest().content)["suggestion"]["id"], contact.pk)
+
+        contact.delete()
+
+        response = self._suggest()
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIsNone(json.loads(response.content)["suggestion"])
+
     def test_a_row_outside_the_active_preview_is_refused(self):
         """The suggestion reads session state, so it must name one active row."""
         response = self._suggest(source_id="NOT-A-ROW")
