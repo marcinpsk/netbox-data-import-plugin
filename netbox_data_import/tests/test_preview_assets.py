@@ -505,6 +505,8 @@ class SplitNameSkipsAnIgnoredRowTest(SimpleTestCase):
         self.assertIsNotNone(guard, "the preview must guard the split control")
         self.assertIn("row.action != 'ignore'", guard.group(1))
         self.assertIn("row.object_type == 'device'", guard.group(1))
+        # A row can reach `skip` with no name at all, and the modal would open on an empty value.
+        self.assertIn("row.name", guard.group(1))
 
 
 class ConflictModalReadsTheCatalogTest(PreviewSessionMixin, BaseViewTestCase):

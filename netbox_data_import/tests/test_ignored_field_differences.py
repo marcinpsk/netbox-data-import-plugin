@@ -192,6 +192,46 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             "a refused field review must not leave the device binding behind",
         )
 
+    def _row_with_an_ip(self, address="192.0.2.10"):
+        """Return the source rows with one mapped IPv4 column."""
+        rows = [dict(self.rows[0])]
+        rows[0]["primary_ip4"] = address
+        return rows
+
+    def _give_the_device_an_address(self, address):
+        """Assign an address on a real interface, the way the writer leaves one."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        interface, _ = Interface.objects.get_or_create(device=self.device, name="mgmt", type="1000base-t")
+        ip = IPAddress.objects.create(address=address, assigned_object=interface)
+        self.device.primary_ip4 = ip
+        self.device.save()
+        return ip
+
+    def test_an_ignored_ip_difference_is_not_written(self):
+        """Ignoring a difference has to stop the write, or the control is a lie."""
+        self._give_the_device_an_address("192.0.2.99/24")
+        rows = self._row_with_an_ip()
+        self._save_rows(rows)
+        self._ignore_and_recalculate(target_field="primary_ip4")
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.99/24")
+
+    def test_an_ip_difference_that_is_not_ignored_is_still_written(self):
+        """The guard must stop the ignored field only, not every address the row carries."""
+        self._give_the_device_an_address("192.0.2.99/24")
+        rows = self._row_with_an_ip()
+        self._save_rows(rows)
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.10/32")
+
     def test_user_can_ignore_the_exact_current_field_difference(self):
         """A reviewed value pair moves from Fields Differ to Fields Ignored."""
         response = self.client.post(

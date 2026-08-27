@@ -783,6 +783,22 @@ class IPBuriedInSourceTextTest(TestCase):
             with self.subTest(raw=raw):
                 self.assertIsNone(self._parse(raw))
 
+    def test_an_address_a_word_runs_into_is_refused_rather_than_truncated(self):
+        """Hex letters continue an address, so a word can leave a shorter valid one behind.
+
+        Refusing costs the row an address it never really carried. Truncating gives the device a
+        different address than the source names, which no later review would catch.
+        """
+        for raw in ("2001:db8::1backup", "10.0.0.1and10.0.0.2", "192.0.2.1a"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(self._parse(raw))
+
+    def test_a_separator_that_is_not_a_word_still_ends_the_address(self):
+        """`_`, `-`, `/` and whitespace end a value; only letters and digits continue one."""
+        self.assertEqual(self._parse("192.0.2.7_vlan"), "192.0.2.7/32")
+        self.assertEqual(self._parse("[192.0.2.8]"), "192.0.2.8/32")
+        self.assertEqual(self._parse("192.0.2.9, 192.0.2.10"), "192.0.2.9/32")
+
 
 class EnsureDeviceTypeExecuteModeTest(TestCase):
     """Tests that _ensure_device_type never appends RowResult rows in execute mode."""

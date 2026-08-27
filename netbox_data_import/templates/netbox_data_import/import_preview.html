@@ -691,7 +691,7 @@
                 {% endif %}
 
                 {# A matched row is where the file name and NetBox visibly disagree, so it needs this too. #}
-                {% if row.object_type == 'device' and row.source_id and profile_id and row.action != 'ignore' %}
+                {% if row.object_type == 'device' and row.source_id and row.name and profile_id and row.action != 'ignore' %}
                   <button type="button" class="btn btn-sm btn-outline-info ms-1"
                           data-ndi-modal="#splitNameModal"
                           data-source-id="{{ row.source_id}}"
