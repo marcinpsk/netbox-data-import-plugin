@@ -2185,6 +2185,8 @@ class ContactSuggestionView(_AjaxPermissionView):
         if profile is None:
             return JsonResponse({"error": "A valid import profile is required."}, status=400)
         try:
+            # The open picker outlives an upgrade, so the stored profile can name a retired adapter.
+            validate_registered_adapter(profile)
             candidates, _source_row, _result_row = _contact_candidate_context(request, profile.pk, source_id)
         except ValidationError as exc:
             return JsonResponse({"error": "; ".join(exc.messages)}, status=400)

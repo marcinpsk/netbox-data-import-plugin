@@ -477,6 +477,15 @@ class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
         self.assertEqual(response.status_code, 400, response.content)
         self.assertIn("one active preview row", json.loads(response.content)["error"])
 
+    def test_a_retired_adapter_is_refused_instead_of_raising(self):
+        """The open picker outlives an upgrade, so the row can name a profile the release dropped."""
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
+
+        response = self._suggest()
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("retired_adapter", json.loads(response.content)["error"])
+
     def test_a_missing_profile_is_refused(self):
         """A request that names no profile cannot be tied to a preview."""
         response = self._suggest(profile_id="")
