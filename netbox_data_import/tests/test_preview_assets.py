@@ -454,7 +454,7 @@ class SplitNameReachesAMatchedRowTest(PreviewSessionMixin, BaseViewTestCase):
     """The file name is worth splitting exactly when NetBox already disagrees with it."""
 
     def _device_rows(self, html):
-        """Return (action, source_id, cells) for every device row the page renders."""
+        """Return (action, opening tag, cells) for every device row the page renders."""
         rows = []
         for block in html.split("<tr")[1:]:
             opening, _, body = block.partition(">")
@@ -501,7 +501,10 @@ class SplitNameSkipsAnIgnoredRowTest(SimpleTestCase):
     def test_the_split_control_still_excludes_an_ignored_row(self):
         """Widening this condition to reach matched rows must not also reach ignored ones."""
         source = self.TEMPLATE.read_text()
-        guard = re.search(r"\{% if ([^%]*?)%\}(?=[^{]*?splitNameModal)", source, re.DOTALL)
+        self.assertIn("#splitNameModal", source, "the preview must render the split control")
+        # The guard is the last `{% if %}` before the control, whatever else the markup grows.
+        head = source[: source.index("#splitNameModal")]
+        guard = re.search(r"\{% if ([^%]*?)%\}(?!.*\{% if )", head, re.DOTALL)
         self.assertIsNotNone(guard, "the preview must guard the split control")
         self.assertIn("row.action != 'ignore'", guard.group(1))
         self.assertIn("row.object_type == 'device'", guard.group(1))
@@ -518,7 +521,9 @@ class ConflictModalReadsTheCatalogTest(PreviewSessionMixin, BaseViewTestCase):
 
         html = self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
 
-        labels = json.loads(re.search(r'id="ndi-target-field-labels"[^>]*>(.*?)</script>', html, re.DOTALL).group(1))
+        block = re.search(r'id="ndi-target-field-labels"[^>]*>(.*?)</script>', html, re.DOTALL)
+        self.assertIsNotNone(block, "the preview must publish the target field labels")
+        labels = json.loads(block.group(1))
         self.assertEqual(labels["device_name"], CATALOG.display("device_name"))
         self.assertEqual(labels["primary_ip4"], CATALOG.display("primary_ip4"))
         self.assertEqual(labels["serial"], CATALOG.display("serial"))

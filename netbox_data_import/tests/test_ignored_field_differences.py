@@ -278,6 +278,42 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
 
         self.assertContains(response, "would go to mgmt0")
 
+    def test_a_full_import_puts_the_address_where_the_preview_said_it_would(self):
+        """The preview names an interface; an import that does something else makes it a lie."""
+        from dcim.models import Interface
+
+        Interface.objects.create(device=self.device, name="ge-0/0/0", type="1000base-t")
+        mgmt = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        rows = self._row_with_an_ip("192.0.2.50")
+        self._save_rows(rows)
+        _response, row = self._preview_device_row()
+        self.assertEqual(row.extra_data["field_diff"]["primary_ip4"]["ip_target"], "would go to mgmt0")
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertIsNotNone(self.device.primary_ip4, "the import must assign the address it previewed")
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.50/32")
+        self.assertEqual(self.device.primary_ip4.assigned_object, mgmt)
+
+    def test_a_full_import_keeps_an_address_it_has_nowhere_to_put(self):
+        """The device type declares no interfaces. The device still imports and the value survives.
+
+        The preview already names this repair on the row, so the import does not have to fail the
+        device over it. Losing the address would be the real damage.
+        """
+        from netbox_data_import.models import DeviceImportSource
+
+        rows = self._row_with_an_ip("192.0.2.51")
+        self._save_rows(rows)
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip4)
+        stored = DeviceImportSource.objects.get(device=self.device)
+        self.assertEqual(stored.unassigned_ips, {"primary_ip4": "192.0.2.51/32"})
+
     def _sync_from_the_preview(self, field):
         """Run one preview row action, the way the sync button in the diff table does."""
         return self.client.post(

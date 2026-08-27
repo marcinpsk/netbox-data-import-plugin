@@ -4441,6 +4441,27 @@ class SyncIPSafetyTests(TestCase):
         self.device.refresh_from_db()
         self.assertEqual(str(self.device.oob_ip.address), "2001:db8::2/128")
 
+    def test_an_address_the_device_points_at_but_no_interface_holds_is_repaired(self):
+        """NetBox requires the field's address to sit on an interface of that device.
+
+        A row written before that rule was enforced leaves the device pointing at an unassigned
+        address. Promoting it onto a second field would persist a state NetBox's own forms refuse.
+        """
+        from ipam.models import IPAddress
+
+        stranded = IPAddress.objects.create(address="192.0.2.77/32")
+        self.device.oob_ip = stranded
+        self.device.save(update_fields=["oob_ip"])
+
+        response = self._sync("primary_ip4", "192.0.2.77")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        stranded.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.pk, stranded.pk)
+        self.assertEqual(stranded.assigned_object, self.iface, "the address must be put on an interface")
+        self.assertEqual(IPAddress.objects.filter(address__net_host="192.0.2.77").count(), 1)
+
     def test_the_same_host_under_another_prefix_is_not_duplicated(self):
         """The workbook states a bare address; another device already holds it inside its subnet."""
         from dcim.models import Device, Interface

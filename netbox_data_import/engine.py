@@ -3329,7 +3329,7 @@ def _write_device_row(  # noqa: C901
                     device.save()
                     _bind_device_source(ctx.profile, source_id, device, asset_tag)
                     for ip_field, ip_str in (ip_fields or {}).items():
-                        assigned = _assign_ip_to_device(device, ip_field, ip_str)
+                        assigned = _assign_ip_to_device(device, ip_field, ip_str, ctx.user)
                         if not assigned:
                             ip_json[ip_field] = ip_str
                     PrimaryContactResolver.apply(device, ctx.profile, contact_review, ctx.user)
@@ -3462,43 +3462,26 @@ def _write_device_row(  # noqa: C901
     )
 
 
-def _assign_ip_to_device(device, ip_field: str, ip_str: str):
-    """Attempt to assign an IP natively to a device; returns True on success.
+def _assign_ip_to_device(device, ip_field: str, ip_str: str, user=None):
+    """Put one address on an interface of *device*; return whether it landed.
 
-    For existing devices: search interfaces for a subnet containing ip_str.
-    If found, create/get the IPAddress and set it on the device field.
-    If not found, returns False (caller should store in JSON).
+    False means there is nowhere to put it, and the caller records the value as unassigned so the
+    row does not lose it. The preview names the same interface through the same resolver.
     """
-    from ipam.models import IPAddress
-    import ipaddress
+    from . import ip_assignment
 
     try:
-        target_interface = ipaddress.ip_interface(ip_str)
-    except ValueError:
+        target = ip_assignment.resolve(device, ip_field, ip_str)
+    except ip_assignment.IPAssignmentError:
         return False
-
-    # Search device interfaces for one whose assigned IPs or subnet matches
-    for iface in device.interfaces.prefetch_related("ip_addresses").all():
-        for existing_ip in iface.ip_addresses.all():
-            try:
-                existing_net = ipaddress.ip_interface(str(existing_ip.address)).network
-                if target_interface.ip in existing_net:
-                    # Found a matching interface - handle IPAddress safely
-                    vrf = getattr(iface, "vrf", None)
-                    ip_obj = IPAddress.objects.filter(address=ip_str, vrf=vrf).first()
-                    if ip_obj is None:
-                        ip_obj = IPAddress.objects.create(address=ip_str, assigned_object=iface, vrf=vrf)
-                    elif ip_obj.assigned_object is None:
-                        ip_obj.assigned_object = iface
-                        ip_obj.save(update_fields=["assigned_object_type", "assigned_object_id"])
-                    elif getattr(ip_obj.assigned_object, "device_id", None) != device.pk:
-                        return False
-                    setattr(device, ip_field, ip_obj)
-                    device.save(update_fields=[ip_field])
-                    return True
-            except (ValueError, AttributeError):
-                continue
-    return False
+    if target.already_held:
+        if getattr(device, f"{ip_field}_id", None) != target.existing.pk:
+            setattr(device, ip_field, target.existing)
+            device.save(update_fields=[ip_field])
+        return True
+    setattr(device, ip_field, ip_assignment.apply(target, user))
+    device.save(update_fields=[ip_field])
+    return True
 
 
 def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901

@@ -75,15 +75,16 @@ def held_by_device(device, address):
     """Return the address this device already carries, or None.
 
     Every interface is searched, not only a management one, and the mask is ignored: a workbook
-    states a bare address where the device holds the same host inside its real subnet. The
-    device's own IP fields are searched too, so an address it keeps as its out-of-band IP is
-    found even when nothing else points at it.
+    states a bare address where the device holds the same host inside its real subnet.
+
+    An address the device points at but no interface of its own holds is not a match. NetBox
+    requires an IP field to name an address on that device, so that state is repaired through the
+    normal path rather than copied onto a second field.
     """
     from ipam.models import IPAddress
 
     wanted = _host(address)
-    candidates = list(IPAddress.objects.filter(interface__device=device).select_related("vrf"))
-    candidates += [held for held in (getattr(device, name, None) for name in IP_FIELD_FAMILY) if held is not None]
+    candidates = IPAddress.objects.filter(interface__device=device).select_related("vrf")
     matches = [candidate for candidate in candidates if _host(candidate.address) == wanted]
     if not matches:
         return None
@@ -133,3 +134,25 @@ def resolve(device, field: str, value) -> IPTarget:
         owner = getattr(existing.assigned_object, "device", None) or existing.assigned_object
         raise IPAssignmentError(f"Address {existing.address} is already assigned to '{owner}'.")
     return IPTarget(address=address, interface=interface, existing=existing, already_held=False)
+
+
+def apply(target: IPTarget, user=None):
+    """Write the address *target* names onto its interface, and return the IPAddress.
+
+    The row sync and the import writer both land here, so an address is created, scoped and
+    checked the same way whichever one runs.
+    """
+    from ipam.models import IPAddress
+
+    from .object_permissions import enforce_saved_object_permission
+
+    address = target.existing
+    action = "change" if address is not None else "add"
+    if address is None:
+        address = IPAddress(address=target.address, vrf=target.interface.vrf)
+    address.assigned_object = target.interface
+    address.full_clean()
+    address.save()
+    # An ObjectPermission's constraints are only evaluated against the saved row.
+    enforce_saved_object_permission(address, user, action)
+    return address

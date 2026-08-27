@@ -63,7 +63,6 @@ from .device_field_review import DeviceFieldReviewer
 from .object_permissions import (
     ObjectPermissionDenied,
     delete_permission_scoped_objects,
-    enforce_saved_object_permission,
     save_or_refetch,
     save_permission_scoped_object,
 )
@@ -2257,32 +2256,15 @@ class SyncDeviceFieldView(_AjaxPermissionView):
                 device.save(update_fields=[field])
             return target.summary
 
-        address = self._saved_ip_address(target, user)
+        try:
+            address = ip_assignment.apply(target, user)
+        except ValidationError as exc:
+            raise ValueError("; ".join(exc.messages)) from exc
+        except ObjectPermissionDenied as exc:
+            raise ValueError(f"Permission denied: {exc} for this IP address.") from exc
         setattr(device, field, address)
         device.save(update_fields=[field])
         return f"{address.address} on {target.interface.name}"
-
-    @staticmethod
-    def _saved_ip_address(target, user):
-        """Create or re-assign the IPAddress the target names, inside the user's IPAM scope."""
-        from ipam.models import IPAddress
-
-        address = target.existing
-        action = "change" if address is not None else "add"
-        if address is None:
-            address = IPAddress(address=target.address, vrf=target.interface.vrf)
-        address.assigned_object = target.interface
-        try:
-            address.full_clean()
-        except ValidationError as exc:
-            raise ValueError("; ".join(exc.messages)) from exc
-        address.save()
-        # Constraints are only evaluated against the saved row, so the check follows the write.
-        try:
-            enforce_saved_object_permission(address, user, action)
-        except ObjectPermissionDenied as exc:
-            raise ValueError(f"Permission denied: {exc} for this IP address.") from exc
-        return address
 
     @staticmethod
     def _reject_invalid_placement(device) -> None:
