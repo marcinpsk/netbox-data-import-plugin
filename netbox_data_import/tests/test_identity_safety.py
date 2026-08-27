@@ -764,6 +764,59 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             captured.output,
         )
 
+    def test_both_row_decisions_refuse_the_same_malformed_request(self):
+        """The two decisions share one set of preview preconditions, so they cannot drift apart."""
+        rows = [
+            self._device_row(2, "GATE-A", "gate-device-a", self.rack_a, 1),
+            self._device_row(3, "GATE-B", "gate-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "GATE-SERIAL"
+        actions = {
+            "resolve_duplicate_name": {"new_name": "gate-replacement"},
+            "ignore_duplicate_serial": {},
+        }
+        # A twin of the active profile, so only its identity differs and both views can reach a write.
+        twin = ImportProfile.objects.create(
+            name="Gate Twin Profile",
+            adapter_config={"sheet_name": "Data", "update_existing": True, "create_missing_device_types": False},
+        )
+        ClassRoleMapping.objects.create(
+            profile=twin, source_class="Server", creates_rack=False, role_slug=self.role.slug
+        )
+        malformed = {
+            "no profile id": {"profile_id": ""},
+            "another profile": {"profile_id": twin.pk},
+            "stale revision": {"preview_revision": "a-revision-that-expired"},
+            "row number is not a number": {"row_number": "not-a-number"},
+            "row number no row carries": {"row_number": 99},
+            "source id no row carries": {"source_id": "GATE-ABSENT"},
+        }
+
+        for url_name, extra in actions.items():
+            for case, override in malformed.items():
+                with self.subTest(url_name=url_name, case=case):
+                    SourceResolution.objects.all().delete()
+                    preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+                    self._set_import_session(rows, preview)
+                    payload = {
+                        "profile_id": self.profile.pk,
+                        "source_id": "GATE-B",
+                        "row_number": 3,
+                        "preview_revision": self._preview_revision(),
+                        **extra,
+                        **override,
+                    }
+
+                    response = self.client.post(reverse(f"plugins:netbox_data_import:{url_name}"), payload)
+
+                    self.assertLess(response.status_code, 500, f"{url_name}/{case}")
+                    # Any profile: a dropped active-profile gate writes under the one that was posted.
+                    self.assertFalse(
+                        SourceResolution.objects.exists(),
+                        f"{url_name} wrote a resolution for a request it should refuse: {case}",
+                    )
+
     def test_duplicate_name_form_refuses_a_stale_preview_revision(self):
         """A stale HTMX name form navigates instead of replacing the frozen preview."""
         rows = [

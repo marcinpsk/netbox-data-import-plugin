@@ -422,20 +422,30 @@ class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
             row["serial"] = "SHARED-PREVIEW-SERIAL"
         session["import_rows"] = rows
         session.save()
-        return self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+        html = self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+        return [row["_row_number"] for row in devices], html
 
     def test_a_duplicate_serial_row_offers_the_ignore_action(self):
         """The operator gives the serial up on one row so the other keeps it."""
-        html = self._preview_html_with_a_shared_serial()
+        _numbers, html = self._preview_html_with_a_shared_serial()
 
         self.assertIn("Duplicate serial", html)
         self.assertIn("ignore-duplicate-serial/", html)
 
-    def test_a_duplicate_serial_row_names_the_other_row(self):
-        """Finding the other row is what makes the choice possible."""
-        html = self._preview_html_with_a_shared_serial()
+    def _device_row_cells(self, html, row_number):
+        """Return one device row's own cells: a source row also renders a manufacturer and a rack."""
+        for block in html.split("<tr")[1:]:
+            opening, _, body = block.partition(">")
+            if re.search(rf'data-row-number="{row_number}"', opening) and 'data-object-type="device"' in opening:
+                return body
+        self.fail(f"the page renders no device row {row_number}")
 
-        self.assertIn("also on row", html)
+    def test_a_duplicate_serial_row_names_the_other_row(self):
+        """A row naming itself, or a row number this one only prefixes, both strand the operator."""
+        (first, second), html = self._preview_html_with_a_shared_serial()
+
+        self.assertIn(f"also on row {second}.", self._device_row_cells(html, first))
+        self.assertIn(f"also on row {first}.", self._device_row_cells(html, second))
 
 
 class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):

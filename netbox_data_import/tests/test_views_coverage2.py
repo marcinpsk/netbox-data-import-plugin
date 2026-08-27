@@ -343,7 +343,6 @@ class SyncDeviceFieldRunsInATransactionTest(TransactionTestCase):
     """The write has to carry its own transaction, which this view is the only writer without."""
 
     def setUp(self):
-        """Create the device the request syncs a field onto."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 
         _make_superuser("vcov2_syncatomic_user")

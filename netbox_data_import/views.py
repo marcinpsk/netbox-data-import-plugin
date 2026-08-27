@@ -3,6 +3,7 @@
 import difflib
 import logging
 import time
+from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
 from django.contrib import messages
@@ -1566,6 +1567,63 @@ def _stale_preview_reason(request):
     return None
 
 
+class _PreviewRowDecision(NamedTuple):
+    """The request state a preview row decision has to establish before it may write."""
+
+    profile: object
+    ctx_data: dict
+    rows: list
+    row_number: int
+    source_id: str
+    source_row: dict
+    next_url: str
+
+
+def _preview_row_decision(request):
+    """Return the validated state for a preview row decision, or the response that refuses it.
+
+    Both decisions guard the same preview, so they read these preconditions from here: two copies
+    drift, and a gate that is missing on one of them is a write the operator never authorized.
+    """
+    ctx_data = request.session.get("import_context") or {}
+    rows = request.session.get("import_rows") or []
+    next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+    profile_id = _parse_posted_profile_id(request)
+    if profile_id is None:
+        messages.error(request, "A valid import profile is required.")
+        return None, _name_resolution_response(request, next_url)
+    if str(ctx_data.get("profile_id")) != str(profile_id):
+        messages.error(request, "The selected profile is not the active import profile.")
+        return None, _name_resolution_response(request, next_url)
+
+    profile = get_object_or_404(
+        ImportProfile.objects.restrict(request.user, "change"),
+        pk=profile_id,
+    )
+    stale_reason = _stale_preview_reason(request)
+    if stale_reason is not None:
+        # An inline render would replace the preview that the queued import has frozen.
+        messages.error(request, stale_reason)
+        return None, _navigation_response(request, next_url)
+    try:
+        row_number = int(request.POST.get("row_number", ""))
+    except (TypeError, ValueError):
+        messages.error(request, "A valid source row is required.")
+        return None, _name_resolution_response(request, next_url)
+
+    source_id = engine._str_val(request.POST.get("source_id"))
+    source_rows = [
+        row
+        for row in rows
+        if row.get("_row_number") == row_number and engine._str_val(row.get("source_id")) == source_id
+    ]
+    if not source_id or len(source_rows) != 1:
+        messages.error(request, "The source ID and row must identify one active import row.")
+        return None, _name_resolution_response(request, next_url)
+
+    return _PreviewRowDecision(profile, ctx_data, rows, row_number, source_id, source_rows[0], next_url), None
+
+
 def _field_review_row(request):
     """Return the current row and target field for a review POST."""
     preview = load_cached_preview(request)
@@ -2369,41 +2427,15 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Validate and persist the replacement device name."""
-        ctx_data = request.session.get("import_context") or {}
-        rows = request.session.get("import_rows") or []
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            messages.error(request, "A valid import profile is required.")
-            return _name_resolution_response(request, next_url)
-        if str(ctx_data.get("profile_id")) != str(profile_id):
-            messages.error(request, "The selected profile is not the active import profile.")
-            return _name_resolution_response(request, next_url)
-
-        profile = get_object_or_404(
-            ImportProfile.objects.restrict(request.user, "change"),
-            pk=profile_id,
-        )
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            messages.error(request, stale_reason)
-            # An inline render would replace the preview that the queued import has frozen.
-            return _navigation_response(request, next_url)
-        try:
-            row_number = int(request.POST.get("row_number", ""))
-        except (TypeError, ValueError):
-            messages.error(request, "A valid source row is required.")
-            return _name_resolution_response(request, next_url)
-
-        source_id = engine._str_val(request.POST.get("source_id"))
-        source_rows = [
-            row
-            for row in rows
-            if row.get("_row_number") == row_number and engine._str_val(row.get("source_id")) == source_id
-        ]
-        if not source_id or len(source_rows) != 1:
-            messages.error(request, "The source ID and row must identify one active import row.")
-            return _name_resolution_response(request, next_url)
+        decision, refused = _preview_row_decision(request)
+        if refused is not None:
+            return refused
+        profile = decision.profile
+        ctx_data = decision.ctx_data
+        rows = decision.rows
+        row_number = decision.row_number
+        source_id = decision.source_id
+        next_url = decision.next_url
 
         new_name = request.POST.get("new_name", "").strip()
         if not new_name or len(new_name) > 64:
@@ -2411,7 +2443,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
 
         resolution_values = {
-            "original_value": engine._str_val(source_rows[0].get("device_name")),
+            "original_value": engine._str_val(decision.source_row.get("device_name")),
             "resolved_fields": {"device_name": new_name},
         }
         refusal = None
@@ -2474,41 +2506,15 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Persist an empty serial for the row the operator gives it up on."""
-        ctx_data = request.session.get("import_context") or {}
-        rows = request.session.get("import_rows") or []
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            messages.error(request, "A valid import profile is required.")
-            return _name_resolution_response(request, next_url)
-        if str(ctx_data.get("profile_id")) != str(profile_id):
-            messages.error(request, "The selected profile is not the active import profile.")
-            return _name_resolution_response(request, next_url)
-
-        profile = get_object_or_404(
-            ImportProfile.objects.restrict(request.user, "change"),
-            pk=profile_id,
-        )
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            # An inline render would replace the preview that the queued import has frozen.
-            messages.error(request, stale_reason)
-            return _navigation_response(request, next_url)
-        try:
-            row_number = int(request.POST.get("row_number", ""))
-        except (TypeError, ValueError):
-            messages.error(request, "A valid source row is required.")
-            return _name_resolution_response(request, next_url)
-
-        source_id = engine._str_val(request.POST.get("source_id"))
-        source_rows = [
-            row
-            for row in rows
-            if row.get("_row_number") == row_number and engine._str_val(row.get("source_id")) == source_id
-        ]
-        if not source_id or len(source_rows) != 1:
-            messages.error(request, "The source ID and row must identify one active import row.")
-            return _name_resolution_response(request, next_url)
+        decision, refused = _preview_row_decision(request)
+        if refused is not None:
+            return refused
+        profile = decision.profile
+        ctx_data = decision.ctx_data
+        rows = decision.rows
+        row_number = decision.row_number
+        source_id = decision.source_id
+        next_url = decision.next_url
 
         preview = load_cached_preview(request)
         # The action settles the collision the operator was shown, on the serial it named.
@@ -2517,7 +2523,7 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             messages.error(request, "This row shows no duplicate serial in the current preview.")
             return _name_resolution_response(request, next_url)
 
-        original_serial = engine._str_val(source_rows[0].get("serial"))
+        original_serial = engine._str_val(decision.source_row.get("serial"))
         if not original_serial:
             messages.error(request, "This row carries no serial to give up.")
             return _name_resolution_response(request, next_url)
