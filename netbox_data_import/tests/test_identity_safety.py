@@ -167,13 +167,11 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
     def _restricted_client(self, allowed_site_name):
         """Return a client whose user may view only the named site."""
-        from dcim.models import Site
+        from dcim.models import Device, Site
         from django.test import Client
 
         user = get_user_model().objects.create_user(username="restricted-target-user", password="testpass")
         self._grant_object_permission(user, "site-scope", Site, ["view"], constraints={"name": allowed_site_name})
-        from dcim.models import Device
-
         for model, actions in ((ImportProfile, ["view", "change"]), (Device, ["view", "change"])):
             self._grant_object_permission(user, f"{model.__name__}-scope", model, actions)
         client = Client()
