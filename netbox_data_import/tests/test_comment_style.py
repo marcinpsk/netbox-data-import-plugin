@@ -1,18 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""A comment gives its non-obvious reason in one line.
+"""Reject a new multi-line comment block, and a recorded one that no longer exists.
 
-`.coderabbit.yaml` states the rule, but the reviewer has raised it in three separate rounds, each
-time after the code shipped. This guard moves the check into the test run. It reports every run of
-two or more whole-line `#` comments in the package and compares it against `comment_blocks.json`.
+A run of two or more whole-line `#` comments is a block, checked against `comment_blocks.json`. A
+block missing from that record fails as new, and a recorded block whose first line changed fails as
+stale, so neither the debt nor the record grows quietly.
 
-The recorded list only shrinks. A block that is not in it fails because it is new. A recorded block
-that has been rewritten fails because its first line no longer matches, so neither the debt nor the
-record can grow quietly. Prefer fixing the comment over adding an entry: the longer reasoning
-belongs in the commit message or the PR body.
-
-Section banners, blank `#` lines and tool pragmas are not comments about code, so they neither count
-nor join two blocks. Migrations are excluded, matching the ruff `per-file-ignores` carve-out.
+Banners, blank `#` lines and pragmas separate rather than explain, so they neither count nor join
+two blocks. Migrations are excluded, matching the ruff `per-file-ignores` carve-out.
 """
 
 import json
