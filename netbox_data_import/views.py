@@ -2092,7 +2092,8 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     permission_required = "dcim.change_device"
 
-    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face"}
+    _IP_FIELDS = ("primary_ip4", "primary_ip6", "oob_ip")
+    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face", "airflow", *_IP_FIELDS}
 
     def post(self, request):
         """Apply one previewed field value to its matched Device."""
@@ -2124,7 +2125,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             # The write carries its own transaction: nothing wraps this request, and a receiver
             # on the model can require one.
             with transaction.atomic():
-                display = self._apply_field(device, field, value, _STATUS_MAP)
+                display = self._apply_field(device, field, value, _STATUS_MAP, request.user)
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
@@ -2154,66 +2155,181 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             raise ValueError(f"The {label} is {len(text)} characters; NetBox allows {limit}.")
         return text
 
-    def _apply_field(self, device, field, value, status_map):
-        if field == "device_name":
-            new_name = self._writer_safe_text(device, "device name", "name", value)
-            if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
-                raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
-            device.name = new_name
-            device.save(update_fields=["name"])
-            return new_name
+    def _apply_field(self, device, field, value, status_map, user):
+        """Write one previewed value onto the device, through that field's own writer."""
+        if field in self._IP_FIELDS:
+            return self._apply_ip_field(device, field, value, user)
+        writer = {
+            "airflow": lambda: self._apply_airflow(device, value),
+            "device_name": lambda: self._apply_device_name(device, value),
+            "u_position": lambda: self._apply_u_position(device, value),
+            "status": lambda: self._apply_status(device, value, status_map),
+            "serial": lambda: self._apply_serial(device, value),
+            "asset_tag": lambda: self._apply_asset_tag(device, value),
+            "face": lambda: self._apply_face(device, value),
+        }.get(field)
+        if writer is None:
+            raise ValueError(f"Field '{field}' is not syncable")
+        return writer()
 
-        if field == "u_position":
-            pos = engine._coerce_position(value)
-            if pos is None:
-                raise ValueError(f"Cannot parse '{value}' as a finite number for u_position")
-            zero_u_type = _zero_u_device_type(device)
-            if zero_u_type:
-                raise ValueError(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
-            device.position = pos
-            self._reject_invalid_placement(device)
-            device.save(update_fields=["position"])
-            return f"U{device.position}"
+    def _apply_device_name(self, device, value):
+        new_name = self._writer_safe_text(device, "device name", "name", value)
+        if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
+            raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
+        device.name = new_name
+        device.save(update_fields=["name"])
+        return new_name
 
-        if field == "status":
-            v = str(value).strip().lower()
-            mapped = status_map.get(v)
-            # Also accept NetBox status slugs directly (e.g. "active", "offline")
-            if mapped is None and v in status_map.values():
-                mapped = v
-            if mapped is None:
-                raise ValueError(f"Unknown status value '{value}'")
-            device.status = mapped
-            device.save(update_fields=["status"])
-            return device.status
+    def _apply_u_position(self, device, value):
+        pos = engine._coerce_position(value)
+        if pos is None:
+            raise ValueError(f"Cannot parse '{value}' as a finite number for u_position")
+        zero_u_type = _zero_u_device_type(device)
+        if zero_u_type:
+            raise ValueError(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
+        device.position = pos
+        self._reject_invalid_placement(device)
+        device.save(update_fields=["position"])
+        return f"U{device.position}"
 
-        if field == "serial":
-            device.serial = self._writer_safe_text(device, "serial", "serial", value)
-            device.save(update_fields=["serial"])
-            return device.serial
+    @staticmethod
+    def _apply_status(device, value, status_map):
+        text = str(value).strip().lower()
+        # A NetBox status slug is accepted directly too (for example "active", "offline").
+        mapped = status_map.get(text) or (text if text in set(status_map.values()) else None)
+        if mapped is None:
+            raise ValueError(f"Unknown status value '{value}'")
+        device.status = mapped
+        device.save(update_fields=["status"])
+        return device.status
 
-        if field == "asset_tag":
-            device.asset_tag = self._writer_safe_text(device, "asset tag", "asset_tag", value) if value else None
-            device.save(update_fields=["asset_tag"])
-            return device.asset_tag
+    def _apply_serial(self, device, value):
+        device.serial = self._writer_safe_text(device, "serial", "serial", value)
+        device.save(update_fields=["serial"])
+        return device.serial
 
-        if field == "face":
-            if device.rack_id is None:
-                raise ValueError(
-                    "Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement."
-                )
-            zero_u_type = _zero_u_device_type(device)
-            if zero_u_type:
-                raise ValueError(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
-            mapped = _FACE_MAP.get(str(value).strip().lower())
-            if mapped is None:
-                raise ValueError(f"Unknown face value '{value}' — expected 'front' or 'rear'")
-            device.face = mapped
-            self._reject_invalid_placement(device)
-            device.save(update_fields=["face"])
-            return device.face
+    def _apply_asset_tag(self, device, value):
+        device.asset_tag = self._writer_safe_text(device, "asset tag", "asset_tag", value) if value else None
+        device.save(update_fields=["asset_tag"])
+        return device.asset_tag
 
-        raise ValueError(f"Field '{field}' is not syncable")
+    def _apply_face(self, device, value):
+        if device.rack_id is None:
+            raise ValueError("Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement.")
+        zero_u_type = _zero_u_device_type(device)
+        if zero_u_type:
+            raise ValueError(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
+        mapped = _FACE_MAP.get(str(value).strip().lower())
+        if mapped is None:
+            raise ValueError(f"Unknown face value '{value}' — expected 'front' or 'rear'")
+        device.face = mapped
+        self._reject_invalid_placement(device)
+        device.save(update_fields=["face"])
+        return device.face
+
+    @staticmethod
+    def _held_address(device, wanted):
+        """Return the IPAddress this device already holds for *wanted*, or None.
+
+        The address can already sit on any interface, or be another of the device's own IP
+        fields, so a second IPAddress row for it would split one address across two objects.
+        Only the host is compared: the same address with a different mask is the same address.
+        """
+        import ipaddress
+
+        from ipam.models import IPAddress
+
+        host = ipaddress.ip_interface(wanted).ip
+        candidates = list(IPAddress.objects.filter(interface__device=device).select_related("vrf"))
+        candidates += [
+            held
+            for held in (getattr(device, name, None) for name in SyncDeviceFieldView._IP_FIELDS)
+            if held is not None
+        ]
+        for candidate in candidates:
+            try:
+                if ipaddress.ip_interface(str(candidate.address)).ip == host:
+                    return candidate
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _interface_for_ip(device):
+        """Return the interface an address off the source file belongs on.
+
+        A management interface answers first: that is what the device type marks it for, and an
+        address in a source workbook is a management address far more often than not.
+        """
+        from dcim.models import InterfaceTemplate
+
+        interfaces = sorted(device.interfaces.all(), key=lambda i: (not i.mgmt_only, i.name))
+        if interfaces:
+            return interfaces[0]
+        model = device.device_type.model
+        declared = list(InterfaceTemplate.objects.filter(device_type=device.device_type).order_by("name")[:5])
+        if not declared:
+            raise ValueError(
+                f"The device type '{model}' declares no interfaces, so there is nowhere to put this "
+                f"address. Add an interface to the device type, then sync again."
+            )
+        names = ", ".join(template.name for template in declared)
+        raise ValueError(
+            f"This device has none of the interfaces its type '{model}' declares ({names}). "
+            f"Add them to the device, then sync again."
+        )
+
+    @staticmethod
+    def _apply_airflow(device, value):
+        """Write the airflow the source row states, in the wording the importer already reads."""
+        _side, airflow_map, _status = engine._get_translation_maps()
+        text = str(value).strip().lower()
+        mapped = airflow_map.get(text)
+        # The stored value is also accepted, so a row already carrying one syncs as it stands.
+        if mapped is None and text in set(airflow_map.values()):
+            mapped = text
+        if mapped is None:
+            raise ValueError(f"Unknown airflow value '{value}'")
+        device.airflow = mapped
+        device.save(update_fields=["airflow"])
+        return device.airflow
+
+    def _apply_ip_field(self, device, field, value, user):
+        """Point one of the device's IP fields at the address the source row carries."""
+        from ipam.models import IPAddress
+
+        address = engine._parse_ip_with_prefix(value)
+        if address is None:
+            raise ValueError(f"Cannot read an IP address from '{value}'")
+
+        held = self._held_address(device, address)
+        if held is not None:
+            interface = held.assigned_object
+            where = f" on {interface.name}" if getattr(interface, "name", None) else ""
+            if getattr(device, f"{field}_id", None) == held.pk:
+                return f"{held.address}{where}"
+            setattr(device, field, held)
+            device.save(update_fields=[field])
+            return f"{held.address}{where}"
+
+        existing = IPAddress.objects.filter(address=address).first()
+        if existing is not None and existing.assigned_object is not None:
+            owner = getattr(existing.assigned_object, "device", None)
+            raise ValueError(f"Address {address} is already assigned to '{owner or existing.assigned_object}'.")
+
+        interface = self._interface_for_ip(device)
+        if existing is None:
+            if not user.has_perm("ipam.add_ipaddress"):
+                raise ValueError("Permission denied: creating an IP address requires ipam.add_ipaddress.")
+            existing = IPAddress.objects.create(address=address, assigned_object=interface, vrf=interface.vrf)
+        else:
+            if not user.has_perm("ipam.change_ipaddress"):
+                raise ValueError("Permission denied: assigning an IP address requires ipam.change_ipaddress.")
+            existing.assigned_object = interface
+            existing.save(update_fields=["assigned_object_type", "assigned_object_id"])
+        setattr(device, field, existing)
+        device.save(update_fields=[field])
+        return f"{existing.address} on {interface.name}"
 
     @staticmethod
     def _reject_invalid_placement(device) -> None:

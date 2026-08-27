@@ -232,6 +232,52 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.device.refresh_from_db()
         self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.10/32")
 
+    def _sync_from_the_preview(self, field):
+        """Run one preview row action, the way the sync button in the diff table does."""
+        return self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field=field, row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+    def test_the_preview_can_sync_an_ip_onto_the_management_interface(self):
+        """The whole point of showing the difference is being able to settle it from the row."""
+        from dcim.models import Interface
+
+        Interface.objects.create(device=self.device, name="ge-0/0/0", type="1000base-t")
+        mgmt = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        self._save_rows(self._row_with_an_ip("192.0.2.30"))
+
+        response = self._sync_from_the_preview("primary_ip4")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.30/32")
+        self.assertEqual(self.device.primary_ip4.assigned_object, mgmt)
+
+    def test_the_preview_reports_a_device_type_with_no_interfaces(self):
+        """The row cannot be settled until the device type is fixed, so it has to say so."""
+        self._save_rows(self._row_with_an_ip("192.0.2.31"))
+
+        response = self._sync_from_the_preview("primary_ip4")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn(self.device.device_type.model, response.json()["error"])
+
+    def test_the_preview_can_sync_airflow(self):
+        """It showed as `(manual)` although the import writes it."""
+        rows = [dict(self.rows[0])]
+        rows[0]["airflow"] = "Front to Back"
+        self._save_rows(rows)
+
+        response = self._sync_from_the_preview("airflow")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.airflow, "front-to-rear")
+
     def test_user_can_ignore_the_exact_current_field_difference(self):
         """A reviewed value pair moves from Fields Differ to Fields Ignored."""
         response = self.client.post(
