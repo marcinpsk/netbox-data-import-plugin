@@ -916,7 +916,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.error(request, "; ".join(exc.messages))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        target = _resolved_import_target(ctx)
+        target = _resolved_import_target(ctx, request.user)
         if target is None:
             _discard_import_preview(request)
             messages.warning(request, "The saved import target is no longer available. Start a new preview.")
@@ -1535,14 +1535,21 @@ def _preview_action_error(request, next_url, message, *, status=409):
     return redirect(next_url)
 
 
-def _resolved_import_target(ctx_data):
-    """Return the engine context the saved import names, or None once that target went stale."""
+def _resolved_import_target(ctx_data, user):
+    """Return the engine context the saved import names, or None once that target went stale.
+
+    The session outlives a permission change, so each request re-reads the target in the operator's
+    own scope: a revoked ObjectPermission has to make the target unavailable, not merely unlisted.
+    """
     from dcim.models import Location, Site
     from tenancy.models import Tenant
 
-    site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
-    location = Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
-    tenant = Tenant.objects.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
+    sites = Site.objects.restrict(user, "view")
+    locations = Location.objects.restrict(user, "view")
+    tenants = Tenant.objects.restrict(user, "view")
+    site = sites.filter(pk=ctx_data.get("site_id")).first()
+    location = locations.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
+    tenant = tenants.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
     if (
         site is None
         or (ctx_data.get("location_id") and (location is None or location.site_id != site.pk))
@@ -2500,7 +2507,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             with locked_profile_policy(profile.pk):
                 # Read the target and the claims under the lock: a name saved between the check and
                 # the write would otherwise let two source rows resolve to the same device name.
-                target = _resolved_import_target(ctx_data)
+                target = _resolved_import_target(ctx_data, request.user)
                 if target is None:
                     refusal = "The saved import target is no longer available. Start a new preview."
                 else:
@@ -2583,7 +2590,7 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
                 held_since = time.monotonic()
                 # Read the target and re-judge the collision under the lock. Only the engine knows
                 # which rows it will create, and a serial match alone also counts rows it skips.
-                target = _resolved_import_target(ctx_data)
+                target = _resolved_import_target(ctx_data, request.user)
                 if target is None:
                     refusal = "The saved import target is no longer available. Start a new preview."
                 else:

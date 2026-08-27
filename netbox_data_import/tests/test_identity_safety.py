@@ -165,6 +165,45 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         )
         return job, status_response
 
+    def _restricted_client(self, allowed_site_name):
+        """Return a client whose user may view only the named site."""
+        from dcim.models import Site
+        from django.test import Client
+
+        user = get_user_model().objects.create_user(username="restricted-target-user", password="testpass")
+        self._grant_object_permission(user, "site-scope", Site, ["view"], constraints={"name": allowed_site_name})
+        from dcim.models import Device
+
+        for model, actions in ((ImportProfile, ["view", "change"]), (Device, ["view", "change"])):
+            self._grant_object_permission(user, f"{model.__name__}-scope", model, actions)
+        client = Client()
+        self.assertTrue(client.login(username="restricted-target-user", password="testpass"))
+        return client
+
+    def test_a_preview_target_outside_the_operator_scope_is_not_resolved(self):
+        """A session outlives a permission change, so the saved target is re-checked per request.
+
+        `_resolved_import_target` reloaded Site, Location and Tenant with unscoped querysets, so a
+        revoked ObjectPermission still produced a usable target for the preview and the row actions.
+        """
+        from dcim.models import Site
+
+        Site.objects.create(name="Other Safety Site", slug="other-safety-site")
+        rows = [self._device_row(2, "SCOPE-1", "scope-device", self.rack_a, 5)]
+        self._set_import_session(rows)
+        # Only the wizard state moves across: the auth keys would log the superuser back in.
+        session_data = {k: v for k, v in self.client.session.items() if k.startswith("import_")}
+
+        client = self._restricted_client("Other Safety Site")
+        session = client.session
+        for key, value in session_data.items():
+            session[key] = value
+        session.save()
+
+        response = client.get(reverse("plugins:netbox_data_import:import_preview"), follow=True)
+
+        self.assertContains(response, "no longer available")
+
     def test_execution_rechecks_the_identity_after_locking_the_device(self):
         from django.db import connection
 
@@ -993,7 +1032,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertEqual(Device.objects.get(name="refresh-device").rack, self.rack_b)
 
     def test_preview_omits_bindings_to_devices_the_user_cannot_view(self):
-        from dcim.models import Device
+        from dcim.models import Device, Site
 
         visible = Device.objects.create(
             name="visible-target",
@@ -1019,6 +1058,8 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             user, "Change binding preview profile", ImportProfile, ["change"], {"pk": self.profile.pk}
         )
         self._grant_object_permission(user, "View one bound device", Device, ["view"], {"pk": visible.pk})
+        # The preview resolves its target in the operator's scope, so the site has to be visible.
+        self._grant_object_permission(user, "View the import site", Site, ["view"], {"pk": self.site.pk})
         self.client.force_login(user)
         self._set_import_session(
             [
