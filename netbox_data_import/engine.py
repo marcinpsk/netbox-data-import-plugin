@@ -606,9 +606,7 @@ def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
     return result
 
 
-# A run of the characters an address is spelled with, bounded so a word cannot leave a shorter
-# valid address behind: `2001:db8::1backup` would otherwise read as `2001:db8::1bac`. `netaddr`
-# and `ipaddress` both validate a whole string, so neither can find an address inside a label.
+# Bounded so a word cannot leave a shorter valid address: `2001:db8::1backup` -> `2001:db8::1bac`.
 _IP_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f:.]+(?:/\d{1,3})?(?![0-9A-Za-z])")
 
 
