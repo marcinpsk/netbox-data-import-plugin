@@ -1427,6 +1427,84 @@ class MatchedDevicePreviewActionTest(TestCase):
         self.assertEqual(device_row.action, "skip", device_row.detail)
 
 
+class DuplicateSerialReportTest(TestCase):
+    """A refused row has to say which other row holds the serial, or nothing can be done about it."""
+
+    def setUp(self):
+        """Create the site and role two source rows sharing one serial need."""
+        from dcim.models import DeviceRole, Site
+
+        self.profile = _make_profile("DuplicateSerialProfile")
+        self.site = Site.objects.create(name="Dup Serial Site", slug="dup-serial-site")
+        DeviceRole.objects.create(name="Server", slug="server")
+
+    def _rows(self):
+        """Return two devices the source file gives the same serial."""
+        return [
+            {
+                "_row_number": 4,
+                "source_id": "DUP-SRC-A",
+                "device_name": "PROD-A",
+                "device_class": "Server",
+                "serial": "SHARED-SERIAL-1",
+                "make": "DupMfg",
+                "model": "DupModel",
+            },
+            {
+                "_row_number": 9,
+                "source_id": "DUP-SRC-B",
+                "device_name": "PROD-B",
+                "device_class": "Server",
+                "serial": "SHARED-SERIAL-1",
+                "make": "DupMfg",
+                "model": "DupModel",
+            },
+        ]
+
+    def _device_rows(self):
+        """Return the device rows of one preview, keyed by source ID."""
+        result = run_import(self._rows(), self.profile, {"site": self.site}, dry_run=True)
+        return {row.source_id: row for row in result.rows if row.object_type == "device"}
+
+    def test_each_refused_row_names_the_other_row_holding_the_serial(self):
+        """The operator has to find the other row to decide which one gives the serial up."""
+        rows = self._device_rows()
+
+        self.assertEqual(rows["DUP-SRC-A"].action, "error")
+        self.assertIn("row 9", rows["DUP-SRC-A"].detail)
+        self.assertIn("row 4", rows["DUP-SRC-B"].detail)
+
+    def test_each_refused_row_carries_the_other_rows_for_the_template(self):
+        """The preview offers an action per row, so it needs the collision as data, not prose."""
+        row = self._device_rows()["DUP-SRC-A"]
+
+        self.assertEqual(row.extra_data.get("identity_conflict"), "duplicate_serial")
+        self.assertEqual(row.extra_data.get("duplicate_serial"), "SHARED-SERIAL-1")
+        self.assertEqual(row.extra_data.get("duplicate_serial_rows"), [9])
+
+    def test_ignoring_the_serial_on_one_row_releases_both(self):
+        """One row gives the serial up, and the other keeps it, so the import can go ahead."""
+        from netbox_data_import.models import SourceResolution
+
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="DUP-SRC-A",
+            source_column="serial",
+            original_value="SHARED-SERIAL-1",
+            resolved_fields={"serial": ""},
+        )
+
+        from netbox_data_import.engine import derive_effective_rows
+
+        rows = self._rows()
+        derived = derive_effective_rows(rows, self.profile)
+        result = run_import(derived, self.profile, {"site": self.site}, dry_run=True)
+
+        by_source = {row.source_id: row for row in result.rows if row.object_type == "device"}
+        self.assertNotEqual(by_source["DUP-SRC-A"].action, "error", by_source["DUP-SRC-A"].detail)
+        self.assertNotEqual(by_source["DUP-SRC-B"].action, "error", by_source["DUP-SRC-B"].detail)
+
+
 class IpAlreadyAssignedTest(TestCase):
     """The writer resolves an address to one IPAddress, so only a unique address is settled."""
 

@@ -491,6 +491,16 @@
                     <i class="mdi mdi-package-variant"></i> Placement
                   </button>
                 {% endif %}
+                {# An update a matched row cannot explain through its field diff still has a device. #}
+                {% if row.object_type == 'device' and row.extra_data.netbox_device_id %}
+                  <br>
+                  <a href="{% url 'dcim:device' pk=row.extra_data.netbox_device_id %}"
+                     class="badge ndi-badge-generic ndi-matched-badge mt-1"
+                     target="_blank" rel="noopener"
+                     title="This row matched the NetBox device '{{ row.name }}'. Open it in a new tab.">
+                    <i class="mdi mdi-link-variant"></i> Matched
+                  </a>
+                {% endif %}
               </td>
               <td class="text-end" style="white-space:nowrap; min-width:180px;">
 
@@ -554,6 +564,27 @@
 
                 {% elif row.action == 'error' and row.object_type == 'device' and profile_id %}
                   {# Device error — show class mapping button if we have source_class #}
+                  {% if row.extra_data.identity_conflict == 'duplicate_serial' and row.source_id %}
+                  {# Two rows cannot both claim one serial, so one of them gives it up. #}
+                  <form method="post" action="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
+                        hx-post="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
+                        hx-target="#page-content"
+                        hx-select="#page-content"
+                        hx-swap="outerHTML show:top"
+                        hx-disabled-elt="find button"
+                        class="d-inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                    <input type="hidden" name="source_id" value="{{ row.source_id }}">
+                    <input type="hidden" name="row_number" value="{{ row.row_number }}">
+                    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                    <input type="hidden" name="next" value="{{ preview_url }}">
+                    <button type="submit" class="btn btn-sm btn-outline-warning"
+                            title="Import this row without serial '{{ row.extra_data.duplicate_serial }}', leaving it to the other row.">
+                      <i class="mdi mdi-barcode-off"></i> Ignore serial
+                    </button>
+                  </form>
+                  {% endif %}
                   {% if row.extra_data.identity_conflict == 'duplicate_name' or row.extra_data.identity_conflict == 'name_placement_conflict' %}
                   {% if row.extra_data.suggested_name and row.source_id %}
                   <form method="post" action="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}"

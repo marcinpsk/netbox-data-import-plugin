@@ -191,6 +191,8 @@ class ImportContext:
     expected_intents: dict = field(default_factory=dict)
     duplicate_source_ids: frozenset = frozenset()
     duplicate_serials: frozenset = frozenset()
+    # Maps a duplicated serial to every source row number that carries it.
+    duplicate_serial_rows: dict = field(default_factory=dict)
     duplicate_asset_tags: frozenset = frozenset()
     duplicate_rack_names: frozenset = frozenset()
     ignored_source_ids: frozenset = frozenset()
@@ -3487,17 +3489,18 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
     ambiguous_names: frozenset = frozenset(n for n, c in _name_counts.items() if c > 1)
     _reserve_device_names(rows, ctx, class_role_map, Device)
     effective_identity_values = _effective_duplicate_identity_values(rows, ctx, class_role_map, ambiguous_names, Device)
-    serial_counts = {}
+    serial_rows: dict = {}
     asset_tag_counts = {}
-    for identity in effective_identity_values.values():
+    for identity_row_number, identity in effective_identity_values.items():
         serial = identity.get("serial")
         asset_tag = identity.get("asset_tag")
         if serial:
-            serial_counts[serial] = serial_counts.get(serial, 0) + 1
+            serial_rows.setdefault(serial, []).append(identity_row_number)
         if asset_tag:
             asset_tag_key = _identity_text(asset_tag)
             asset_tag_counts[asset_tag_key] = asset_tag_counts.get(asset_tag_key, 0) + 1
-    ctx.duplicate_serials = frozenset(serial for serial, count in serial_counts.items() if count > 1)
+    ctx.duplicate_serial_rows = {serial: sorted(numbers) for serial, numbers in serial_rows.items() if len(numbers) > 1}
+    ctx.duplicate_serials = frozenset(ctx.duplicate_serial_rows)
     ctx.duplicate_asset_tags = frozenset(tag for tag, count in asset_tag_counts.items() if count > 1)
     ctx.effective_duplicate_identity = effective_identity_values
 
@@ -3552,6 +3555,12 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
 
         identity = ctx.effective_duplicate_identity.get(row.get("_row_number"), {})
         if identity.get("serial") and identity["serial"] in ctx.duplicate_serials:
+            duplicate_serial = identity["serial"]
+            others = [
+                number for number in ctx.duplicate_serial_rows.get(duplicate_serial, []) if number != row["_row_number"]
+            ]
+            # Naming the other rows is what lets the operator pick which one gives the serial up.
+            where = ", ".join(f"row {number}" for number in others)
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -3559,9 +3568,16 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                     name=device_name,
                     action="error",
                     object_type="device",
-                    detail=f"Duplicate serial '{serial}' appears more than once in this import.",
+                    detail=(
+                        f"Duplicate serial '{duplicate_serial}' appears more than once in this import"
+                        + (f", also on {where}." if where else ".")
+                    ),
                     rack_name=rack_name,
-                    extra_data={"identity_conflict": "duplicate_serial"},
+                    extra_data={
+                        "identity_conflict": "duplicate_serial",
+                        "duplicate_serial": duplicate_serial,
+                        "duplicate_serial_rows": others,
+                    },
                 )
             )
             continue

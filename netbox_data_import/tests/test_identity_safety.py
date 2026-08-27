@@ -418,6 +418,405 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         device_rows = [row for row in result.rows if row.object_type == "device"]
         self.assertEqual([row.action for row in device_rows], ["create", "create"])
 
+    def test_a_duplicate_serial_can_be_given_up_on_one_source_row(self):
+        """Two rows cannot both claim one serial, so the operator drops it from one of them."""
+        rows = [
+            self._device_row(2, "SER-A", "serial-device-a", self.rack_a, 1),
+            self._device_row(3, "SER-B", "serial-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "SHARED-SERIAL"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SER-B",
+                "row_number": 3,
+                "preview_revision": self._preview_revision(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        resolution = SourceResolution.objects.get(profile=self.profile, source_id="SER-B", source_column="serial")
+        self.assertEqual(resolution.resolved_fields, {"serial": ""})
+        resolved_rows = derive_effective_rows(rows, self.profile)
+        result = run_import(resolved_rows, self.profile, {"site": self.site}, dry_run=True)
+        device_rows = [row for row in result.rows if row.object_type == "device"]
+        self.assertEqual([row.action for row in device_rows], ["create", "create"])
+        # The row that kept the serial is the one that still carries it into NetBox.
+        self.assertEqual(
+            [row.extra_data.get("source_serial") for row in device_rows],
+            ["SHARED-SERIAL", ""],
+        )
+
+    def test_a_serial_the_preview_does_not_call_duplicated_is_kept(self):
+        """Giving up a serial is only offered for a real collision, so nothing else can drop one."""
+        rows = [
+            self._device_row(2, "SOLE-A", "sole-device-a", self.rack_a, 1),
+            self._device_row(3, "SOLE-B", "sole-device-b", self.rack_b, 2),
+        ]
+        rows[0]["serial"] = "SOLE-SERIAL-A"
+        rows[1]["serial"] = "SOLE-SERIAL-B"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SOLE-B",
+                "row_number": 3,
+                "preview_revision": self._preview_revision(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="SOLE-B").exists(),
+            "the view dropped a serial that no other row claims",
+        )
+
+    def test_the_second_side_of_a_collision_keeps_the_serial(self):
+        """One rendered page gives up one side of a collision, so the serial cannot vanish."""
+        rows = [
+            self._device_row(2, "BOTH-A", "both-device-a", self.rack_a, 1),
+            self._device_row(3, "BOTH-B", "both-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "CONTESTED-SERIAL"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+        revision = self._preview_revision()
+        url = reverse("plugins:netbox_data_import:ignore_duplicate_serial")
+
+        for source_id, row_number in (("BOTH-A", 2), ("BOTH-B", 3)):
+            self.client.post(
+                url,
+                {
+                    "profile_id": self.profile.pk,
+                    "source_id": source_id,
+                    "row_number": row_number,
+                    "preview_revision": revision,
+                },
+            )
+
+        self.assertEqual(
+            sorted(
+                SourceResolution.objects.filter(profile=self.profile, source_column="serial").values_list(
+                    "source_id", flat=True
+                )
+            ),
+            ["BOTH-A"],
+            "both sides gave up the serial, so the import lost it entirely",
+        )
+
+    def test_an_ignored_row_does_not_license_dropping_a_live_serial(self):
+        """An ignored row imports nothing, so sharing its serial is not a collision to settle."""
+        from netbox_data_import.models import IgnoredDevice
+
+        rows = [
+            self._device_row(2, "LIVE-A", "live-device-a", self.rack_a, 1),
+            self._device_row(3, "SKIPPED-B", "skipped-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "UNCONTESTED-SERIAL"
+        IgnoredDevice.objects.create(profile=self.profile, source_id="SKIPPED-B")
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        live_row = next(row for row in preview.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertIsNone(live_row.extra_data.get("identity_conflict"), live_row.to_dict())
+        self._set_import_session(rows, preview)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "LIVE-A",
+                "row_number": 2,
+                "preview_revision": self._preview_revision(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="LIVE-A").exists(),
+            "an ignored row was treated as a rival claim on the serial",
+        )
+
+    def test_ignoring_the_rival_row_withdraws_the_serial_collision(self):
+        """Ignoring one side settles the collision, so the row that still imports keeps its serial."""
+        rows = [
+            self._device_row(2, "RIVAL-A", "rival-device-a", self.rack_a, 1),
+            self._device_row(3, "RIVAL-B", "rival-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "WITHDRAWN-SERIAL"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        conflicted = next(row for row in preview.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertEqual(conflicted.extra_data.get("identity_conflict"), "duplicate_serial", conflicted.to_dict())
+        self._set_import_session(rows, preview)
+        revision = self._preview_revision()
+
+        ignored = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_device"),
+            {"profile_id": self.profile.pk, "source_id": "RIVAL-B", "device_name": "rival-device-b"},
+        )
+        self.assertEqual(ignored.status_code, 302)
+        # Ignoring a device leaves the rendered preview and its token in place.
+        self.assertEqual(self._preview_revision(), revision)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "RIVAL-A",
+                "row_number": 2,
+                "preview_revision": revision,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="RIVAL-A").exists(),
+            "an ignored rival kept authorizing the blank, so the imported row lost its serial",
+        )
+
+    def test_a_collision_the_rendered_preview_never_showed_cannot_be_settled(self):
+        """The action settles what the operator was shown, so a later collision needs a new preview."""
+        from netbox_data_import.models import IgnoredDevice
+
+        rows = [
+            self._device_row(2, "LATE-A", "late-device-a", self.rack_a, 1),
+            self._device_row(3, "LATE-B", "late-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "LATE-SERIAL"
+        IgnoredDevice.objects.create(profile=self.profile, source_id="LATE-B")
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        shown = next(row for row in preview.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertIsNone(shown.extra_data.get("identity_conflict"), shown.to_dict())
+        self._set_import_session(rows, preview)
+        revision = self._preview_revision()
+
+        restored = self.client.post(
+            reverse("plugins:netbox_data_import:unignore_device"),
+            {"profile_id": self.profile.pk, "source_id": "LATE-B"},
+        )
+        self.assertEqual(restored.status_code, 302)
+        self.assertFalse(IgnoredDevice.objects.filter(profile=self.profile, source_id="LATE-B").exists())
+        # The rival is back and now collides, but the rendered preview and its token are unchanged.
+        live = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        arrived = next(row for row in live.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertEqual(arrived.extra_data.get("identity_conflict"), "duplicate_serial", arrived.to_dict())
+        self.assertEqual(self._preview_revision(), revision)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "LATE-A",
+                "row_number": 2,
+                "preview_revision": revision,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="LATE-A").exists(),
+            "a collision the rendered preview never showed was settled anyway",
+        )
+
+    def test_a_serial_is_not_given_up_against_an_import_target_that_went_stale(self):
+        """The preview discards a stale target, so a decision cannot be judged against one either."""
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Identity Stale Tenant", slug="identity-stale-tenant")
+        rows = [
+            self._device_row(2, "STALE-A", "stale-target-a", self.rack_a, 1),
+            self._device_row(3, "STALE-B", "stale-target-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "STALE-TARGET-SERIAL"
+        preview = run_import(rows, self.profile, {"site": self.site, "tenant": tenant}, dry_run=True)
+        shown = next(row for row in preview.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertEqual(shown.extra_data.get("identity_conflict"), "duplicate_serial", shown.to_dict())
+        self._set_import_session(rows, preview, tenant=tenant)
+        revision = self._preview_revision()
+        tenant.delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "STALE-A",
+                "row_number": 2,
+                "preview_revision": revision,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="STALE-A").exists(),
+            "a serial was given up against a target the preview would have discarded",
+        )
+
+    def test_a_name_is_not_resolved_against_an_import_target_that_went_stale(self):
+        """The name check queries the saved target, so a stale one cannot clear a replacement."""
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Identity Name Tenant", slug="identity-name-tenant")
+        rows = [
+            self._device_row(2, "STALE-NAME-A", "stale-name-first", self.rack_a, 1),
+            self._device_row(3, "STALE-NAME-B", "stale-name-second", self.rack_b, 2),
+        ]
+        preview = run_import(rows, self.profile, {"site": self.site, "tenant": tenant}, dry_run=True)
+        self._set_import_session(rows, preview, tenant=tenant)
+        revision = self._preview_revision()
+        tenant.delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:resolve_duplicate_name"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "STALE-NAME-B",
+                "row_number": 3,
+                "new_name": "stale-name-replacement",
+                "preview_revision": revision,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            SourceResolution.objects.filter(profile=self.profile, source_id="STALE-NAME-B").exists(),
+            "a replacement name was cleared against a target the preview would have discarded",
+        )
+
+    def test_only_the_serial_the_preview_named_can_be_given_up(self):
+        """The row may collide on a different serial later, which the operator never authorized."""
+        rows = [
+            self._device_row(2, "SWAP-A", "swap-device-a", self.rack_a, 1),
+            self._device_row(3, "SWAP-B", "swap-device-b", self.rack_b, 2),
+            self._device_row(4, "SWAP-C", "swap-device-c", self.rack_a, 3),
+        ]
+        rows[0]["serial"] = "SWAP-FIRST"
+        rows[1]["serial"] = "SWAP-FIRST"
+        rows[2]["serial"] = "SWAP-SECOND"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        shown = next(row for row in preview.rows if row.row_number == 2 and row.object_type == "device")
+        self.assertEqual(shown.extra_data.get("duplicate_serial"), "SWAP-FIRST", shown.to_dict())
+        self._set_import_session(rows, preview)
+        revision = self._preview_revision()
+
+        # A saved resolution moves row 2 onto the other serial without rotating the token.
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="SWAP-A",
+            source_column="serial",
+            original_value="SWAP-FIRST",
+            resolved_fields={"serial": "SWAP-SECOND"},
+        )
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SWAP-A",
+                "row_number": 2,
+                "preview_revision": revision,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            SourceResolution.objects.get(profile=self.profile, source_id="SWAP-A").resolved_fields,
+            {"serial": "SWAP-SECOND"},
+            "the view gave up a serial the operator was never shown",
+        )
+
+    def test_the_locked_serial_recheck_reports_how_long_it_held_the_lock(self):
+        """The locked dry run grows with the source file, so its hold time has to reach the log."""
+        rows = [
+            self._device_row(2, "TIMED-A", "timed-device-a", self.rack_a, 1),
+            self._device_row(3, "TIMED-B", "timed-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "TIMED-SERIAL"
+        preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+        self._set_import_session(rows, preview)
+
+        with self.assertLogs("netbox_data_import.views", level="INFO") as captured:
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:ignore_duplicate_serial"),
+                {
+                    "profile_id": self.profile.pk,
+                    "source_id": "TIMED-B",
+                    "row_number": 3,
+                    "preview_revision": self._preview_revision(),
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(SourceResolution.objects.filter(profile=self.profile, source_id="TIMED-B").exists())
+        self.assertTrue(
+            any("held the profile policy lock" in line and "2 source rows" in line for line in captured.output),
+            captured.output,
+        )
+
+    def test_both_row_decisions_refuse_the_same_malformed_request(self):
+        """The two decisions share one set of preview preconditions, so they cannot drift apart."""
+        rows = [
+            self._device_row(2, "GATE-A", "gate-device-a", self.rack_a, 1),
+            self._device_row(3, "GATE-B", "gate-device-b", self.rack_b, 2),
+        ]
+        for row in rows:
+            row["serial"] = "GATE-SERIAL"
+        actions = {
+            "resolve_duplicate_name": {"new_name": "gate-replacement"},
+            "ignore_duplicate_serial": {},
+        }
+        # A twin of the active profile, so only its identity differs and both views can reach a write.
+        twin = ImportProfile.objects.create(
+            name="Gate Twin Profile",
+            adapter_config={"sheet_name": "Data", "update_existing": True, "create_missing_device_types": False},
+        )
+        ClassRoleMapping.objects.create(
+            profile=twin, source_class="Server", creates_rack=False, role_slug=self.role.slug
+        )
+        malformed = {
+            "no profile id": {"profile_id": ""},
+            "another profile": {"profile_id": twin.pk},
+            "stale revision": {"preview_revision": "a-revision-that-expired"},
+            "row number is not a number": {"row_number": "not-a-number"},
+            "row number no row carries": {"row_number": 99},
+            "source id no row carries": {"source_id": "GATE-ABSENT"},
+        }
+
+        for url_name, extra in actions.items():
+            for case, override in malformed.items():
+                with self.subTest(url_name=url_name, case=case):
+                    SourceResolution.objects.all().delete()
+                    preview = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
+                    self._set_import_session(rows, preview)
+                    payload = {
+                        "profile_id": self.profile.pk,
+                        "source_id": "GATE-B",
+                        "row_number": 3,
+                        "preview_revision": self._preview_revision(),
+                        **extra,
+                        **override,
+                    }
+
+                    response = self.client.post(reverse(f"plugins:netbox_data_import:{url_name}"), payload)
+
+                    self.assertLess(response.status_code, 500, f"{url_name}/{case}")
+                    # Any profile: a dropped active-profile gate writes under the one that was posted.
+                    self.assertFalse(
+                        SourceResolution.objects.exists(),
+                        f"{url_name} wrote a resolution for a request it should refuse: {case}",
+                    )
+
     def test_duplicate_name_form_refuses_a_stale_preview_revision(self):
         """A stale HTMX name form navigates instead of replacing the frozen preview."""
         rows = [

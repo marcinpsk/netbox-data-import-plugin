@@ -2,6 +2,8 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import difflib
 import logging
+import time
+from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
 from django.contrib import messages
@@ -900,9 +902,6 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.warning(request, "No import in progress. Please start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        from dcim.models import Location, Site
-        from tenancy.models import Tenant
-
         profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=ctx.get("profile_id")).first()
         if not profile:
             _discard_import_preview(request)
@@ -917,18 +916,12 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.error(request, "; ".join(exc.messages))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        site = Site.objects.filter(pk=ctx.get("site_id")).first()
-        location = Location.objects.filter(pk=ctx.get("location_id")).first() if ctx.get("location_id") else None
-        tenant = Tenant.objects.filter(pk=ctx.get("tenant_id")).first() if ctx.get("tenant_id") else None
-        target_is_stale = (
-            site is None
-            or (ctx.get("location_id") and (location is None or location.site_id != site.pk))
-            or (ctx.get("tenant_id") and tenant is None)
-        )
-        if target_is_stale:
+        target = _resolved_import_target(ctx)
+        if target is None:
             _discard_import_preview(request)
             messages.warning(request, "The saved import target is no longer available. Start a new preview.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        site, location, tenant = target["site"], target["location"], target["tenant"]
 
         stored_result = request.session.get("import_result")
         if use_materialized_result and isinstance(stored_result, dict):
@@ -1539,6 +1532,23 @@ def _preview_action_error(request, next_url, message, *, status=409):
     return redirect(next_url)
 
 
+def _resolved_import_target(ctx_data):
+    """Return the engine context the saved import names, or None once that target went stale."""
+    from dcim.models import Location, Site
+    from tenancy.models import Tenant
+
+    site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
+    location = Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
+    tenant = Tenant.objects.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
+    if (
+        site is None
+        or (ctx_data.get("location_id") and (location is None or location.site_id != site.pk))
+        or (ctx_data.get("tenant_id") and tenant is None)
+    ):
+        return None
+    return {"site": site, "location": location, "tenant": tenant}
+
+
 def _stale_preview_reason(request):
     """Return why the preview can no longer take a decision, or None."""
     if not _session_holds_a_preview(request):
@@ -1549,6 +1559,63 @@ def _stale_preview_reason(request):
     if not _preview_accepts_decisions(request):
         return "This preview is no longer the current one. Reload the preview and choose again."
     return None
+
+
+class _PreviewRowDecision(NamedTuple):
+    """The request state a preview row decision has to establish before it may write."""
+
+    profile: object
+    ctx_data: dict
+    rows: list
+    row_number: int
+    source_id: str
+    source_row: dict
+    next_url: str
+
+
+def _preview_row_decision(request):
+    """Return the validated state for a preview row decision, or the response that refuses it.
+
+    Both decisions guard the same preview, so they read these preconditions from here: two copies
+    drift, and a gate that is missing on one of them is a write the operator never authorized.
+    """
+    ctx_data = request.session.get("import_context") or {}
+    rows = request.session.get("import_rows") or []
+    next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
+    profile_id = _parse_posted_profile_id(request)
+    if profile_id is None:
+        messages.error(request, "A valid import profile is required.")
+        return None, _name_resolution_response(request, next_url)
+    if str(ctx_data.get("profile_id")) != str(profile_id):
+        messages.error(request, "The selected profile is not the active import profile.")
+        return None, _name_resolution_response(request, next_url)
+
+    profile = get_object_or_404(
+        ImportProfile.objects.restrict(request.user, "change"),
+        pk=profile_id,
+    )
+    stale_reason = _stale_preview_reason(request)
+    if stale_reason is not None:
+        # An inline render would replace the preview that the queued import has frozen.
+        messages.error(request, stale_reason)
+        return None, _navigation_response(request, next_url)
+    try:
+        row_number = int(request.POST.get("row_number", ""))
+    except (TypeError, ValueError):
+        messages.error(request, "A valid source row is required.")
+        return None, _name_resolution_response(request, next_url)
+
+    source_id = engine._str_val(request.POST.get("source_id"))
+    source_rows = [
+        row
+        for row in rows
+        if row.get("_row_number") == row_number and engine._str_val(row.get("source_id")) == source_id
+    ]
+    if not source_id or len(source_rows) != 1:
+        messages.error(request, "The source ID and row must identify one active import row.")
+        return None, _name_resolution_response(request, next_url)
+
+    return _PreviewRowDecision(profile, ctx_data, rows, row_number, source_id, source_rows[0], next_url), None
 
 
 def _field_review_row(request):
@@ -2051,7 +2118,10 @@ class SyncDeviceFieldView(_AjaxPermissionView):
                 return JsonResponse({"ok": False, "error": "Device not found"})
 
         try:
-            display = self._apply_field(device, field, value, _STATUS_MAP)
+            # The write carries its own transaction: nothing wraps this request, and a receiver
+            # on the model can require one.
+            with transaction.atomic():
+                display = self._apply_field(device, field, value, _STATUS_MAP)
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
@@ -2326,6 +2396,24 @@ class SyncPlacementView(_AjaxPermissionView):
 # ---------------------------------------------------------------------------
 
 
+def _device_name_already_claimed(effective_rows, row_number, new_name, target):
+    """Return why this device name is unavailable at the import target, or None when it is free."""
+    from dcim.models import Device
+
+    other_names = {
+        engine._identity_text(device_name)
+        for row in effective_rows
+        if row.get("_row_number") != row_number and (device_name := engine._effective_device_name(row))
+    }
+    if engine._identity_text(new_name) in other_names:
+        return f"Device name '{new_name}' is already used by another source row."
+    tenant = target["tenant"]
+    tenant_filter = {"tenant": tenant} if tenant is not None else {"tenant__isnull": True}
+    if Device.objects.filter(site=target["site"], name__iexact=new_name, **tenant_filter).exists():
+        return f"Device name '{new_name}' already exists at the active import site."
+    return None
+
+
 class ResolveDuplicateNameView(PermissionRequiredMixin, View):
     """Save a unique device name for one duplicate source row."""
 
@@ -2333,78 +2421,48 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Validate and persist the replacement device name."""
-        from dcim.models import Device
-
-        ctx_data = request.session.get("import_context") or {}
-        rows = request.session.get("import_rows") or []
-        next_url = _safe_next_url(request, "plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            messages.error(request, "A valid import profile is required.")
-            return _name_resolution_response(request, next_url)
-        if str(ctx_data.get("profile_id")) != str(profile_id):
-            messages.error(request, "The selected profile is not the active import profile.")
-            return _name_resolution_response(request, next_url)
-
-        profile = get_object_or_404(
-            ImportProfile.objects.restrict(request.user, "change"),
-            pk=profile_id,
-        )
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            messages.error(request, stale_reason)
-            # An inline render would replace the preview that the queued import has frozen.
-            return _navigation_response(request, next_url)
-        try:
-            row_number = int(request.POST.get("row_number", ""))
-        except (TypeError, ValueError):
-            messages.error(request, "A valid source row is required.")
-            return _name_resolution_response(request, next_url)
-
-        source_id = engine._str_val(request.POST.get("source_id"))
-        source_rows = [
-            row
-            for row in rows
-            if row.get("_row_number") == row_number and engine._str_val(row.get("source_id")) == source_id
-        ]
-        if not source_id or len(source_rows) != 1:
-            messages.error(request, "The source ID and row must identify one active import row.")
-            return _name_resolution_response(request, next_url)
+        decision, refused = _preview_row_decision(request)
+        if refused is not None:
+            return refused
+        profile = decision.profile
+        ctx_data = decision.ctx_data
+        rows = decision.rows
+        row_number = decision.row_number
+        source_id = decision.source_id
+        next_url = decision.next_url
 
         new_name = request.POST.get("new_name", "").strip()
         if not new_name or len(new_name) > 64:
             messages.error(request, "The device name must contain 1 to 64 characters.")
             return _name_resolution_response(request, next_url)
 
-        effective_rows = engine.derive_effective_rows(rows, profile)
-        other_names = {
-            engine._identity_text(device_name)
-            for row in effective_rows
-            if row.get("_row_number") != row_number and (device_name := engine._effective_device_name(row))
-        }
-        if engine._identity_text(new_name) in other_names:
-            messages.error(request, f"Device name '{new_name}' is already used by another source row.")
-            return _name_resolution_response(request, next_url)
-        tenant_filter = (
-            {"tenant_id": ctx_data.get("tenant_id")} if ctx_data.get("tenant_id") else {"tenant__isnull": True}
-        )
-        if Device.objects.filter(site_id=ctx_data.get("site_id"), name__iexact=new_name, **tenant_filter).exists():
-            messages.error(request, f"Device name '{new_name}' already exists at the active import site.")
-            return _name_resolution_response(request, next_url)
-
         resolution_values = {
-            "original_value": engine._str_val(source_rows[0].get("device_name")),
+            "original_value": engine._str_val(decision.source_row.get("device_name")),
             "resolved_fields": {"device_name": new_name},
         }
+        refusal = None
         try:
             # Serialize against an executing import, which holds the same profile row.
             with locked_profile_policy(profile.pk):
-                save_permission_scoped_object(
-                    request.user,
-                    SourceResolution,
-                    {"profile": profile, "source_id": source_id, "source_column": "device_name"},
-                    resolution_values,
-                )
+                # Read the target and the claims under the lock: a name saved between the check and
+                # the write would otherwise let two source rows resolve to the same device name.
+                target = _resolved_import_target(ctx_data)
+                if target is None:
+                    refusal = "The saved import target is no longer available. Start a new preview."
+                else:
+                    refusal = _device_name_already_claimed(
+                        engine.derive_effective_rows(rows, profile), row_number, new_name, target
+                    )
+                if refusal is None:
+                    save_permission_scoped_object(
+                        request.user,
+                        SourceResolution,
+                        {"profile": profile, "source_id": source_id, "source_column": "device_name"},
+                        resolution_values,
+                    )
+        except ImportProfile.DoesNotExist:
+            messages.error(request, "The import profile is no longer available.")
+            return _name_resolution_response(request, next_url)
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved name.")
             return _name_resolution_response(request, next_url)
@@ -2415,7 +2473,106 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             messages.error(request, "The saved name changed while this request was being processed. Try again.")
             return _name_resolution_response(request, next_url)
 
+        if refusal is not None:
+            messages.error(request, refusal)
+            return _name_resolution_response(request, next_url)
+
         messages.success(request, f"Source '{source_id}' will use device name '{new_name}'.")
+        return _name_resolution_response(request, next_url)
+
+
+def _duplicate_serial_shown(preview_rows, row_number) -> str:
+    """Return the serial the engine calls a duplicate on this source row, or an empty string."""
+    for item in preview_rows:
+        if (
+            item.row_number == row_number
+            and item.object_type == "device"
+            and item.extra_data.get("identity_conflict") == "duplicate_serial"
+        ):
+            return engine._str_val(item.extra_data.get("duplicate_serial"))
+    return ""
+
+
+class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
+    """Drop the serial from one source row so the rows sharing it stop colliding."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Persist an empty serial for the row the operator gives it up on."""
+        decision, refused = _preview_row_decision(request)
+        if refused is not None:
+            return refused
+        profile = decision.profile
+        ctx_data = decision.ctx_data
+        rows = decision.rows
+        row_number = decision.row_number
+        source_id = decision.source_id
+        next_url = decision.next_url
+
+        preview = load_cached_preview(request)
+        # The action settles the collision the operator was shown, on the serial it named.
+        shown_serial = _duplicate_serial_shown(preview[1].rows, row_number) if preview is not None else ""
+        if not shown_serial:
+            messages.error(request, "This row shows no duplicate serial in the current preview.")
+            return _name_resolution_response(request, next_url)
+
+        original_serial = engine._str_val(decision.source_row.get("serial"))
+        if not original_serial:
+            messages.error(request, "This row carries no serial to give up.")
+            return _name_resolution_response(request, next_url)
+
+        refusal = None
+        try:
+            # Serialize against an executing import, which holds the same profile row.
+            with locked_profile_policy(profile.pk):
+                held_since = time.monotonic()
+                # Read the target and re-judge the collision under the lock. Only the engine knows
+                # which rows it will create, and a serial match alone also counts rows it skips.
+                target = _resolved_import_target(ctx_data)
+                if target is None:
+                    refusal = "The saved import target is no longer available. Start a new preview."
+                else:
+                    current = engine.run_import(
+                        engine.derive_effective_rows(rows, profile),
+                        profile,
+                        target,
+                        dry_run=True,
+                        user=request.user,
+                    )
+                    if _duplicate_serial_shown(current.rows, row_number) != shown_serial:
+                        refusal = f"No other row this import creates still claims serial '{shown_serial}'."
+                    else:
+                        save_permission_scoped_object(
+                            request.user,
+                            SourceResolution,
+                            {"profile": profile, "source_id": source_id, "source_column": "serial"},
+                            {"original_value": original_serial, "resolved_fields": {"serial": ""}},
+                        )
+                # The dry run costs more as the file grows, and the import worker waits behind it.
+                logger.info(
+                    "IgnoreDuplicateSerialView: held the profile policy lock for %.2fs over %d source rows.",
+                    time.monotonic() - held_since,
+                    len(rows),
+                )
+        except ImportProfile.DoesNotExist:
+            messages.error(request, "The import profile is no longer available.")
+            return _name_resolution_response(request, next_url)
+        except ObjectPermissionDenied:
+            messages.error(request, "Permission denied: cannot create or change this saved serial.")
+            return _name_resolution_response(request, next_url)
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+            return _name_resolution_response(request, next_url)
+        except IntegrityError:
+            messages.error(request, "The saved serial changed while this request was being processed. Try again.")
+            return _name_resolution_response(request, next_url)
+
+        if refusal is not None:
+            messages.error(request, refusal)
+            return _name_resolution_response(request, next_url)
+
+        messages.success(request, f"Source '{source_id}' will import without serial '{shown_serial}'.")
         return _name_resolution_response(request, next_url)
 
 
@@ -2924,6 +3081,7 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
         resolution = self.get_object(**kwargs)
         try:
             with locked_resolution_policy(resolution.pk):
+                # atomic-exit-safe: locked-delete-committed
                 return super().post(request, *args, **kwargs)
         except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
             # The row went away between the fetch and the lock, which is the 404 the fetch would give.

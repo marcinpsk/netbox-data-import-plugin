@@ -2,6 +2,65 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-08-27)
+
+### Bug Fixes
+
+- Bind a serial decision to the serial the preview named
+  ([`2ba9f33`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2ba9f330754db45d7c1da569a85fb4b64febb6ff))
+
+- Check a replacement device name under the lock it writes with
+  ([`9933e56`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9933e563709847fef7cc4926a3725b9dfb1020a3))
+
+- Give a duplicate serial somewhere to go, and carry the sync write in a transaction
+  ([`57f43eb`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/57f43ebd93f749ea1c696f11970f83fff182f498))
+
+- Judge a serial collision by the rows the import will create
+  ([`f6f336a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f6f336a55905c1bc907ad3ebd8d518756ca88352))
+
+- Log how long the serial recheck holds the profile lock
+  ([`5c61fce`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5c61fce370862193184121e213f095aa0c5164da))
+
+- Only settle a serial collision that is still live
+  ([`c73eb97`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c73eb9793836f59245552b707ff30eb5f0f9d097))
+
+### Chores
+
+- **deps**: Bump the github-actions group with 3 updates
+  ([#113](https://github.com/marcinpsk/netbox-data-import-plugin/pull/113),
+  [`57c9c63`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/57c9c63d65b4d1108283112bee03a7ef8c603683))
+
+### Features
+
+- Name the NetBox device a preview row matched
+  ([`8de70a2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/8de70a290fd036c28ac35811cfbe707a00e93205))
+
+### Refactoring
+
+- Give the two preview row decisions one set of preconditions
+  ([`abfb3c2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/abfb3c259f2f84efcf81bd9901a69663267b2268))
+
+### Testing
+
+- Assert the matched badge carries the device link itself
+  ([`21248c6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/21248c6274ea4a1b37ccd5e91823a66796fa058b))
+
+- Audit the policy locks like any other atomic block
+  ([`6096467`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/609646709a4f06ef77f496ba53093ce64e76c407))
+
+- Read the preview row and the badge target without literals
+  ([`c96d411`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c96d411c5c37a50a4070331998157d950ba4d3a5))
+
+
+## v1.6.1 (2026-08-26)
+
+### Bug Fixes
+
+- Close the three review follow-ups deferred from #103
+  ([#115](https://github.com/marcinpsk/netbox-data-import-plugin/pull/115),
+  [`0893a85`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0893a850c675499219562ce048d864d76c3d774b))
+
+
 ## v1.6.0 (2026-08-25)
 
 ### Continuous Integration
