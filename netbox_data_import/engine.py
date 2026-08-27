@@ -3404,7 +3404,7 @@ def _write_device_row(  # noqa: C901
         )
     if ctx.user is not None and not ctx.user.has_perm("dcim.add_device"):
         return _perm_denied_row("dcim.add_device", row, device_name, "device")
-    ip_json = {ip_field: ip_str for ip_field, ip_str in (ip_fields or {}).items()}
+    ip_json = {}
     try:
         contact_review = PrimaryContactResolver.review(
             None,
@@ -3432,6 +3432,10 @@ def _write_device_row(  # noqa: C901
             device.full_clean()
             device.save()
             _bind_device_source(ctx.profile, source_id, device, asset_tag)
+            # Device.save() instantiates the type's interface templates, so an address can land now.
+            for ip_field, ip_str in (ip_fields or {}).items():
+                if not _assign_ip_to_device(device, ip_field, ip_str, ctx.user):
+                    ip_json[ip_field] = ip_str
             PrimaryContactResolver.apply(device, ctx.profile, contact_review, ctx.user)
             _store_source_id(
                 device,

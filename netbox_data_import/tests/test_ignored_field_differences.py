@@ -296,6 +296,48 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.50/32")
         self.assertEqual(self.device.primary_ip4.assigned_object, mgmt)
 
+    def _create_row_with_an_ip(self, address):
+        """Return one source row for a device that does not exist yet."""
+        row = dict(self.rows[0])
+        row.update({"_row_number": 2, "source_id": "FIELD-REVIEW-NEW", "device_name": "field-review-new"})
+        # A shared serial would auto-match the existing device and take the update branch instead.
+        row["serial"] = ""
+        row["u_position"] = 20
+        row["primary_ip4"] = address
+        return [row]
+
+    def test_a_created_device_gets_the_address_on_its_interface(self):
+        """A create row must place the address as an update row does, not store it unassigned."""
+        from dcim.models import Device, InterfaceTemplate
+
+        from netbox_data_import.models import DeviceImportSource
+
+        InterfaceTemplate.objects.create(device_type=self.device_type, name="mgmt0", type="1000base-t", mgmt_only=True)
+        rows = self._create_row_with_an_ip("192.0.2.60")
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        created = Device.objects.get(name="field-review-new")
+        self.assertIsNotNone(created.primary_ip4, "the create row must assign the address it carries")
+        self.assertEqual(str(created.primary_ip4.address), "192.0.2.60/32")
+        self.assertEqual(created.primary_ip4.assigned_object.name, "mgmt0")
+        self.assertEqual(DeviceImportSource.objects.get(device=created).unassigned_ips, {})
+
+    def test_a_created_device_keeps_an_address_it_has_nowhere_to_put(self):
+        """The device type declares no interfaces, so the value survives on the row instead."""
+        from dcim.models import Device
+
+        from netbox_data_import.models import DeviceImportSource
+
+        rows = self._create_row_with_an_ip("192.0.2.61")
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        created = Device.objects.get(name="field-review-new")
+        self.assertIsNone(created.primary_ip4)
+        stored = DeviceImportSource.objects.get(device=created)
+        self.assertEqual(stored.unassigned_ips, {"primary_ip4": "192.0.2.61/32"})
+
     def test_a_full_import_keeps_an_address_it_has_nowhere_to_put(self):
         """The device type declares no interfaces. The device still imports and the value survives.
 
