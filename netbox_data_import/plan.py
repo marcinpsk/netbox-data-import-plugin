@@ -328,9 +328,7 @@ class ImportPlan:
         object.__setattr__(self, "units", _elements(self.units, SynchronizationUnit, "Import Plan units"))
         object.__setattr__(self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Import Plan diagnostics"))
         object.__setattr__(self, "planning_context", _frozen_json(self.planning_context, "Planning context"))
-        # These reach `canonical_json` through the fingerprint, where a wrong value raises a bare
-        # TypeError that `except PlanError` does not cover. The boundary is here, and the declared
-        # type is checked rather than only JSON-serializability: a dict survives a round trip.
+        # canonical_json raises a bare TypeError past `except PlanError`, and takes a dict for a str.
         for name in ("source_fingerprint", "profile_fingerprint", "actor"):
             _plan_text(getattr(self, name), f"Import Plan {name}")
         for name in ("revision", "schema_version"):
