@@ -57,12 +57,13 @@ from .tables import (
     ImportJobTable,
     ImportProfileTable,
 )
-from . import engine
+from . import engine, ip_assignment
 from .contact_resolution import PrimaryContactResolver, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer
 from .object_permissions import (
     ObjectPermissionDenied,
     delete_permission_scoped_objects,
+    enforce_saved_object_permission,
     save_or_refetch,
     save_permission_scoped_object,
 )
@@ -2228,58 +2229,6 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         return device.face
 
     @staticmethod
-    def _held_address(device, wanted):
-        """Return the IPAddress this device already holds for *wanted*, or None.
-
-        The address can already sit on any interface, or be another of the device's own IP
-        fields, so a second IPAddress row for it would split one address across two objects.
-        Only the host is compared: the same address with a different mask is the same address.
-        """
-        import ipaddress
-
-        from ipam.models import IPAddress
-
-        host = ipaddress.ip_interface(wanted).ip
-        candidates = list(IPAddress.objects.filter(interface__device=device).select_related("vrf"))
-        candidates += [
-            held
-            for held in (getattr(device, name, None) for name in SyncDeviceFieldView._IP_FIELDS)
-            if held is not None
-        ]
-        for candidate in candidates:
-            try:
-                if ipaddress.ip_interface(str(candidate.address)).ip == host:
-                    return candidate
-            except ValueError:
-                continue
-        return None
-
-    @staticmethod
-    def _interface_for_ip(device):
-        """Return the interface an address off the source file belongs on.
-
-        A management interface answers first: that is what the device type marks it for, and an
-        address in a source workbook is a management address far more often than not.
-        """
-        from dcim.models import InterfaceTemplate
-
-        interfaces = sorted(device.interfaces.all(), key=lambda i: (not i.mgmt_only, i.name))
-        if interfaces:
-            return interfaces[0]
-        model = device.device_type.model
-        declared = list(InterfaceTemplate.objects.filter(device_type=device.device_type).order_by("name")[:5])
-        if not declared:
-            raise ValueError(
-                f"The device type '{model}' declares no interfaces, so there is nowhere to put this "
-                f"address. Add an interface to the device type, then sync again."
-            )
-        names = ", ".join(template.name for template in declared)
-        raise ValueError(
-            f"This device has none of the interfaces its type '{model}' declares ({names}). "
-            f"Add them to the device, then sync again."
-        )
-
-    @staticmethod
     def _apply_airflow(device, value):
         """Write the airflow the source row states, in the wording the importer already reads."""
         _side, airflow_map, _status = engine._get_translation_maps()
@@ -2296,40 +2245,44 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     def _apply_ip_field(self, device, field, value, user):
         """Point one of the device's IP fields at the address the source row carries."""
+        try:
+            target = ip_assignment.resolve(device, field, value)
+        except ip_assignment.IPAssignmentError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if target.already_held:
+            # The device carries it already, so only the field moves. No IPAM row is written.
+            if getattr(device, f"{field}_id", None) != target.existing.pk:
+                setattr(device, field, target.existing)
+                device.save(update_fields=[field])
+            return target.summary
+
+        address = self._saved_ip_address(target, user)
+        setattr(device, field, address)
+        device.save(update_fields=[field])
+        return f"{address.address} on {target.interface.name}"
+
+    @staticmethod
+    def _saved_ip_address(target, user):
+        """Create or re-assign the IPAddress the target names, inside the user's IPAM scope."""
         from ipam.models import IPAddress
 
-        address = engine._parse_ip_with_prefix(value)
+        address = target.existing
+        action = "change" if address is not None else "add"
         if address is None:
-            raise ValueError(f"Cannot read an IP address from '{value}'")
-
-        held = self._held_address(device, address)
-        if held is not None:
-            interface = held.assigned_object
-            where = f" on {interface.name}" if getattr(interface, "name", None) else ""
-            if getattr(device, f"{field}_id", None) == held.pk:
-                return f"{held.address}{where}"
-            setattr(device, field, held)
-            device.save(update_fields=[field])
-            return f"{held.address}{where}"
-
-        existing = IPAddress.objects.filter(address=address).first()
-        if existing is not None and existing.assigned_object is not None:
-            owner = getattr(existing.assigned_object, "device", None)
-            raise ValueError(f"Address {address} is already assigned to '{owner or existing.assigned_object}'.")
-
-        interface = self._interface_for_ip(device)
-        if existing is None:
-            if not user.has_perm("ipam.add_ipaddress"):
-                raise ValueError("Permission denied: creating an IP address requires ipam.add_ipaddress.")
-            existing = IPAddress.objects.create(address=address, assigned_object=interface, vrf=interface.vrf)
-        else:
-            if not user.has_perm("ipam.change_ipaddress"):
-                raise ValueError("Permission denied: assigning an IP address requires ipam.change_ipaddress.")
-            existing.assigned_object = interface
-            existing.save(update_fields=["assigned_object_type", "assigned_object_id"])
-        setattr(device, field, existing)
-        device.save(update_fields=[field])
-        return f"{existing.address} on {interface.name}"
+            address = IPAddress(address=target.address, vrf=target.interface.vrf)
+        address.assigned_object = target.interface
+        try:
+            address.full_clean()
+        except ValidationError as exc:
+            raise ValueError("; ".join(exc.messages)) from exc
+        address.save()
+        # Constraints are only evaluated against the saved row, so the check follows the write.
+        try:
+            enforce_saved_object_permission(address, user, action)
+        except ObjectPermissionDenied as exc:
+            raise ValueError(f"Permission denied: {exc} for this IP address.") from exc
+        return address
 
     @staticmethod
     def _reject_invalid_placement(device) -> None:

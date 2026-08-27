@@ -857,7 +857,11 @@
                           {% endif %}
                         </td>
                         <td class="ndi-diff-netbox-val">{{ vals.netbox|default:"—" }}</td>
-                        <td>{{ vals.file|default:"—" }}</td>
+                        <td>
+                          {{ vals.file|default:"—" }}
+                          {# An address needs an interface, so the row says which one before it is clicked. #}
+                          {% if vals.ip_target %}<div class="text-muted small">{{ vals.ip_target }}</div>{% endif %}
+                        </td>
                         <td>
                           {% if field_name in syncable_fields %}
                           <button type="button" class="btn btn-xs btn-outline-primary ndi-sync-btn"

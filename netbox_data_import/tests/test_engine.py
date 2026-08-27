@@ -1125,8 +1125,10 @@ class FieldDiffComputationTest(TestCase):
             asset_tag="A-001",
             ip_fields={"primary_ip4": "10.0.0.1/32"},
         )
-        diff = result.extra_data["field_diff"]
-        self.assertEqual(diff["primary_ip4"], {"netbox": "10.0.0.9/32", "file": "10.0.0.1/32"})
+        diff = result.extra_data["field_diff"]["primary_ip4"]
+        self.assertEqual(diff["netbox"], "10.0.0.9/32")
+        self.assertEqual(diff["file"], "10.0.0.1/32")
+        self.assertEqual(diff["ip_target"], "would go to mgmt", "the row must name the interface it would use")
 
     def test_field_diff_leaves_out_an_ip_the_device_already_carries(self):
         """An address that agrees is not a difference, whichever way each side spells it."""

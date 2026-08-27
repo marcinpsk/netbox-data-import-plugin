@@ -2038,6 +2038,22 @@ def _review_device_proposal(
     return review, effective_ctx, effective
 
 
+def _annotate_ip_sync_targets(matched_device, field_diff) -> None:
+    """Say where each differing address would land, so the row states it before it is clicked."""
+    from . import ip_assignment
+
+    if matched_device is None or not field_diff:
+        return
+    for ip_field in ip_assignment.IP_FIELD_FAMILY:
+        values = field_diff.get(ip_field)
+        if not isinstance(values, dict) or not values.get("file"):
+            continue
+        try:
+            values["ip_target"] = ip_assignment.resolve(matched_device, ip_field, values["file"]).placement
+        except ip_assignment.IPAssignmentError as exc:
+            values["ip_target"] = str(exc)
+
+
 def _reviewed_rack(review, matched_device):
     """Return the matched rack when a current rack difference is ignored."""
     if review is not None and "rack_name" in review.ignored:
@@ -2704,6 +2720,7 @@ def _preview_device_row(  # noqa: C901
                 for field_name, (file_snapshot, netbox_snapshot) in review.snapshots.items()
             }
 
+    _annotate_ip_sync_targets(matched_device, field_diff)
     reviewed_rack = _reviewed_rack(review, matched_device)
     rack_error_extra = {}
     if reviewed_rack is not _NOT_PROVIDED:

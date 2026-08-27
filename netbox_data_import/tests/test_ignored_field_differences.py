@@ -232,6 +232,52 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.device.refresh_from_db()
         self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.10/32")
 
+    def test_the_preview_names_the_interface_the_address_would_go_to(self):
+        """Clicking sync should hold no surprise about where the address lands."""
+        from dcim.models import Interface
+
+        Interface.objects.create(device=self.device, name="ge-0/0/0", type="1000base-t")
+        Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        self._save_rows(self._row_with_an_ip("192.0.2.40"))
+
+        _response, row = self._preview_device_row()
+
+        self.assertEqual(row.extra_data["field_diff"]["primary_ip4"]["ip_target"], "would go to mgmt0")
+
+    def test_the_preview_says_where_the_device_already_holds_the_address(self):
+        """The row differs because it is not the primary IP, not because the device lacks it."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        data_iface = Interface.objects.create(device=self.device, name="eth1", type="1000base-t")
+        IPAddress.objects.create(address="192.0.2.41/24", assigned_object=data_iface)
+        self._save_rows(self._row_with_an_ip("192.0.2.41"))
+
+        _response, row = self._preview_device_row()
+
+        self.assertEqual(row.extra_data["field_diff"]["primary_ip4"]["ip_target"], "already on eth1 as 192.0.2.41/24")
+
+    def test_the_preview_says_what_to_fix_when_there_is_nowhere_to_put_it(self):
+        """The operator can see the repair without clicking a button that cannot work."""
+        self._save_rows(self._row_with_an_ip("192.0.2.42"))
+
+        _response, row = self._preview_device_row()
+
+        self.assertIn(self.device.device_type.model, row.extra_data["field_diff"]["primary_ip4"]["ip_target"])
+        self.assertIn("declares no interfaces", row.extra_data["field_diff"]["primary_ip4"]["ip_target"])
+
+    def test_the_preview_renders_the_interface_next_to_the_difference(self):
+        """The hint is only useful where the operator is looking at the difference."""
+        from dcim.models import Interface
+
+        Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        self._save_rows(self._row_with_an_ip("192.0.2.43"))
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, "would go to mgmt0")
+
     def _sync_from_the_preview(self, field):
         """Run one preview row action, the way the sync button in the diff table does."""
         return self.client.post(

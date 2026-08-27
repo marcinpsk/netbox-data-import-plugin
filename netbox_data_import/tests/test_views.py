@@ -4394,6 +4394,101 @@ class SyncAirflowAndIPTests(TestCase):
         self.assertEqual(self.device.oob_ip.assigned_object, iface)
 
 
+class SyncIPSafetyTests(TestCase):
+    """The sync writes IPAM, so it has to refuse what NetBox itself would refuse."""
+
+    def setUp(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
+
+        self.user = User.objects.create_superuser("testuser_ipsafe", "ipsafe@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="testuser_ipsafe", password="testpass")
+        self.site = Site.objects.create(name="IP Safety Site", slug="ip-safety-site")
+        manufacturer = Manufacturer.objects.create(name="IP Safety Mfg", slug="ip-safety-mfg")
+        self.device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="IP Safety Model", slug="ip-safety-model", u_height=1
+        )
+        self.role = DeviceRole.objects.create(name="IP Safety Role", slug="ip-safety-role")
+        self.device = Device.objects.create(
+            name="ip-safety-device", site=self.site, device_type=self.device_type, role=self.role
+        )
+        self.iface = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        self.url = reverse("plugins:netbox_data_import:sync_device_field")
+
+    def _sync(self, field, value):
+        return self.client.post(self.url, {"device_id": self.device.pk, "field": field, "value": value})
+
+    def test_an_ipv6_address_is_refused_for_the_ipv4_field(self):
+        """NetBox stores the family in the field name; this would persist a v6 value in it."""
+        response = self._sync("primary_ip4", "2001:db8::1")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("IPv4", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip4)
+
+    def test_an_ipv4_address_is_refused_for_the_ipv6_field(self):
+        response = self._sync("primary_ip6", "192.0.2.1")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("IPv6", response.json()["error"])
+
+    def test_the_out_of_band_field_takes_either_family(self):
+        """NetBox puts no family on this field, so neither does the sync."""
+        response = self._sync("oob_ip", "2001:db8::2")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.oob_ip.address), "2001:db8::2/128")
+
+    def test_the_same_host_under_another_prefix_is_not_duplicated(self):
+        """The workbook states a bare address; another device already holds it inside its subnet."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        other = Device.objects.create(
+            name="ip-safety-other", site=self.site, device_type=self.device_type, role=self.role
+        )
+        other_iface = Interface.objects.create(device=other, name="eth0", type="1000base-t")
+        IPAddress.objects.create(address="192.0.2.44/24", assigned_object=other_iface)
+
+        response = self._sync("primary_ip4", "192.0.2.44")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("ip-safety-other", response.json()["error"])
+        self.assertEqual(IPAddress.objects.filter(address__net_host="192.0.2.44").count(), 1)
+
+    def test_the_same_host_in_another_vrf_is_a_different_address(self):
+        """VRFs make the host ambiguous, so a row from another VRF must not be taken."""
+        from ipam.models import VRF, IPAddress
+
+        other_vrf = VRF.objects.create(name="IP Safety VRF B")
+        stray = IPAddress.objects.create(address="192.0.2.55/32", vrf=other_vrf)
+
+        response = self._sync("primary_ip4", "192.0.2.55")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertNotEqual(self.device.primary_ip4.pk, stray.pk)
+        self.assertIsNone(self.device.primary_ip4.vrf)
+        stray.refresh_from_db()
+        self.assertIsNone(stray.assigned_object)
+
+    def test_the_interface_vrf_scopes_the_address_it_creates(self):
+        """An address on a VRF interface belongs to that VRF, or it is a different address."""
+        from ipam.models import VRF
+
+        vrf = VRF.objects.create(name="IP Safety VRF A")
+        self.iface.vrf = vrf
+        self.iface.save(update_fields=["vrf"])
+
+        response = self._sync("primary_ip4", "192.0.2.66")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.vrf, vrf)
+
+
 class SyncRackAndPlacementTests(TestCase):
     """Tests for rack_name sync, face dependency guard, and SyncPlacementView."""
 
