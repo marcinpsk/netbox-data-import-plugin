@@ -2129,8 +2129,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
                 return JsonResponse({"ok": False, "error": "Device not found"})
 
         try:
-            # The write carries its own transaction: nothing wraps this request, and a receiver
-            # on the model can require one.
+            # Nothing wraps this request, and a receiver on the model can require a transaction.
             with transaction.atomic():
                 display = self._apply_field(device, field, value, _STATUS_MAP, request.user)
         except ValueError as exc:
