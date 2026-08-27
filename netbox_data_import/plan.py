@@ -104,6 +104,24 @@ def _frozen_json(value: Any, label: str) -> Any:
         raise PlanInvalid(f"{label} must be JSON-serializable plan data: {exc}") from exc
 
 
+def _plan_text(value, label: str) -> str:
+    """Return *value* as the string the field declares."""
+    if not isinstance(value, str):
+        raise PlanInvalid(f"{label} must be a string, not {type(value).__name__}.")
+    return value
+
+
+def _plan_int(value, label: str) -> int:
+    """Return *value* as the integer the field declares.
+
+    A bool is an int in Python, and `from_dict` refuses one, so a plan built from a bool could not
+    survive its own serialization.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PlanInvalid(f"{label} must be an integer, not {type(value).__name__}.")
+    return value
+
+
 def _elements(value, kind, label: str) -> tuple:
     """Return *value* as a tuple, rejecting any element that is not an instance of *kind*."""
     if isinstance(value, str) or not isinstance(value, (list, tuple)):
@@ -310,10 +328,13 @@ class ImportPlan:
         object.__setattr__(self, "units", _elements(self.units, SynchronizationUnit, "Import Plan units"))
         object.__setattr__(self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Import Plan diagnostics"))
         object.__setattr__(self, "planning_context", _frozen_json(self.planning_context, "Planning context"))
-        # These reach `canonical_json` through the fingerprint, where a bad value would raise a bare
-        # TypeError that `except PlanError` does not cover. The boundary is here.
-        for name in ("source_fingerprint", "profile_fingerprint", "actor", "revision", "schema_version"):
-            object.__setattr__(self, name, _frozen_json(getattr(self, name), f"Import Plan {name}"))
+        # These reach `canonical_json` through the fingerprint, where a wrong value raises a bare
+        # TypeError that `except PlanError` does not cover. The boundary is here, and the declared
+        # type is checked rather than only JSON-serializability: a dict survives a round trip.
+        for name in ("source_fingerprint", "profile_fingerprint", "actor"):
+            _plan_text(getattr(self, name), f"Import Plan {name}")
+        for name in ("revision", "schema_version"):
+            _plan_int(getattr(self, name), f"Import Plan {name}")
         counts = Counter(unit.identity for unit in self.units)
         duplicates = sorted(identity for identity, count in counts.items() if count > 1)
         if duplicates:

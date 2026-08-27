@@ -116,6 +116,27 @@ class PlanStructureTest(SimpleTestCase):
                 with self.assertRaises(PlanInvalid):
                     ImportPlan(**{field_name: object()})
 
+    def test_a_plan_rejects_a_scalar_field_of_the_wrong_shape(self):
+        """JSON-serializable is not enough: each scalar has a declared type the plan relies on.
+
+        `actor={"id": 1}` survived a JSON round trip and froze to a mapping, and `fingerprint` then
+        raised a bare `TypeError` out of `canonical_json`. A bool schema version was accepted here
+        while `from_dict` refuses one, so a plan could not survive its own serialization.
+        """
+        for field_name, value in (
+            ("source_fingerprint", 7),
+            ("profile_fingerprint", ["a"]),
+            ("actor", {"id": 1}),
+            ("actor", None),
+            ("revision", "1"),
+            ("revision", True),
+            ("schema_version", True),
+            ("schema_version", 1.0),
+        ):
+            with self.subTest(field=field_name, value=value):
+                with self.assertRaises(PlanInvalid):
+                    ImportPlan(**{field_name: value})
+
     def test_a_plan_keeps_the_scalar_values_it_accepts(self):
         """The check must not reshape a value a caller legitimately passes."""
         plan = ImportPlan(
