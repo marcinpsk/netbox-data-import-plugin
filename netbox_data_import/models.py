@@ -296,8 +296,7 @@ class ImportProfile(NetBoxModel):
             raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
         stored = self._validate_source_adapter_immutability()
         if stored is None:
-            # A creation rule only: the adapter is immutable, so a stored profile keeps validating
-            # once the release that implements its Target Module ships.
+            # A creation rule only: the adapter is immutable, so a stored profile keeps validating.
             validate_adapter_target_module(self.source_adapter)
         self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
 
@@ -499,8 +498,7 @@ class SourceDocument(models.Model):
         it and the protecting foreign key backs that up.
         """
         cutoff = (now or timezone.now()) - cls.RETENTION
-        # The protecting reverse relation blocks fast deletion, so the collector reads each row.
-        # Deferring the stored bytes keeps one purge from loading every workbook into memory.
+        # The protecting relation forces a row-by-row collect, so defer the bytes one purge would load.
         stale = cls.objects.filter(import_executions__isnull=True, created__lt=cutoff).defer("content")
         return stale.delete()[0]
 
@@ -560,8 +558,7 @@ class ImportExecution(models.Model):
     outcome = models.CharField(max_length=16, choices=ExecutionOutcome.CHOICES, null=True, blank=True)
     applied_changes = models.JSONField(null=True, blank=True)
     failure_detail = models.JSONField(null=True, blank=True)
-    # Set by link_job, never at reservation time: the reservation commits before the Job exists
-    # (section 4.7), and deleting the Job later nulls the reference this flag outlives.
+    # Set by link_job: the reservation commits before the Job exists, and outlives a deleted Job.
     job_backed = models.BooleanField(default=False)
     job = models.OneToOneField(
         "core.Job", on_delete=models.SET_NULL, null=True, blank=True, related_name="import_execution"
