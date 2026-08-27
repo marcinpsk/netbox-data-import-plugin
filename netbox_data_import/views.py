@@ -3905,12 +3905,12 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
             messages.error(request, "The selected profile is not the active import profile.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        from dcim.models import Site
-
-        site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
-        if site is None:
-            messages.error(request, "The active import site was not found.")
+        target = _resolved_import_target(ctx_data, request.user)
+        if target is None:
+            messages.error(request, "The saved import target is no longer available. Start a new preview.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        site = target["site"]
+        tenant_id = target["tenant"].pk if target["tenant"] else None
         visible_devices = Device.objects.restrict(request.user, "view")
 
         ignored_source_ids = set(profile.ignored_devices.values_list("source_id", flat=True))
@@ -3982,7 +3982,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                 safe_serial,
                 safe_asset_tag,
                 site=site,
-                tenant_id=ctx_data.get("tenant_id"),
+                tenant_id=tenant_id,
                 device_queryset=visible_devices,
             )
             if is_ambiguous:
@@ -4067,8 +4067,6 @@ class SyncSingleRowView(_AjaxPermissionView):
         """Execute a single import row identified by ``row_number`` and return JSON."""
         from django.db import transaction
         from django.http import JsonResponse
-        from dcim.models import Location, Site
-        from tenancy.models import Tenant
 
         rows = request.session.get("import_rows")
         ctx_data = request.session.get("import_context")
@@ -4118,15 +4116,12 @@ class SyncSingleRowView(_AjaxPermissionView):
                 status=400,
             )
 
-        site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
-        if not site:
-            return JsonResponse({"ok": False, "error": "Site not found"}, status=400)
-
-        location = (
-            Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
-        )
-        tenant = Tenant.objects.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
-        context = {"site": site, "location": location, "tenant": tenant}
+        context = _resolved_import_target(ctx_data, request.user)
+        if context is None:
+            return JsonResponse(
+                {"ok": False, "error": "The saved import target is no longer available. Start a new preview."},
+                status=400,
+            )
 
         try:
             with transaction.atomic():

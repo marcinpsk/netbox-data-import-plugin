@@ -167,23 +167,24 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
 
     def _restricted_client(self, allowed_site_name):
         """Return a client whose user may view only the named site."""
-        from dcim.models import Device, Site
+        from dcim.models import Device, Rack, Site
         from django.test import Client
 
         user = get_user_model().objects.create_user(username="restricted-target-user", password="testpass")
         self._grant_object_permission(user, "site-scope", Site, ["view"], constraints={"name": allowed_site_name})
-        for model, actions in ((ImportProfile, ["view", "change"]), (Device, ["view", "change"])):
+        for model, actions in (
+            (ImportProfile, ["view", "change"]),
+            (Device, ["view", "change", "add"]),
+            (Rack, ["view"]),
+            (DeviceExistingMatch, ["view", "add"]),
+        ):
             self._grant_object_permission(user, f"{model.__name__}-scope", model, actions)
         client = Client()
         self.assertTrue(client.login(username="restricted-target-user", password="testpass"))
         return client
 
     def test_a_preview_target_outside_the_operator_scope_is_not_resolved(self):
-        """A session outlives a permission change, so the saved target is re-checked per request.
-
-        `_resolved_import_target` reloaded Site, Location and Tenant with unscoped querysets, so a
-        revoked ObjectPermission still produced a usable target for the preview and the row actions.
-        """
+        """A saved target outside the operator's view scope is not resolved."""
         from dcim.models import Site
 
         Site.objects.create(name="Other Safety Site", slug="other-safety-site")
@@ -201,6 +202,62 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         response = client.get(reverse("plugins:netbox_data_import:import_preview"), follow=True)
 
         self.assertContains(response, "no longer available")
+
+    def test_a_single_row_sync_refuses_a_target_outside_the_operator_scope(self):
+        """The row actions read the same saved target, so each one has to re-scope it as well."""
+        from dcim.models import Device, Site
+
+        Site.objects.create(name="Other Safety Site", slug="other-safety-site")
+        rows = [self._device_row(2, "SCOPE-2", "scope-sync-device", self.rack_a, 6)]
+        self._set_import_session(rows)
+        session_data = {k: v for k, v in self.client.session.items() if k.startswith("import_")}
+
+        client = self._restricted_client("Other Safety Site")
+        session = client.session
+        for key, value in session_data.items():
+            session[key] = value
+        session.save()
+
+        response = client.post(
+            reverse("plugins:netbox_data_import:sync_single_row"),
+            {"row_number": 2},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no longer available", response.json()["error"])
+        self.assertFalse(Device.objects.filter(name="scope-sync-device").exists())
+
+    def test_auto_matching_refuses_a_target_outside_the_operator_scope(self):
+        """Auto-matching reads the same saved target, so it is scoped the same way."""
+        from dcim.models import Device, Site
+
+        Site.objects.create(name="Other Safety Site", slug="other-safety-site")
+        existing = Device.objects.create(
+            name="scope-match-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            serial="SCOPE-MATCH-SERIAL",
+        )
+        row = self._device_row(2, "SCOPE-3", "scope-match-device", self.rack_a, 7)
+        row["serial"] = existing.serial
+        self._set_import_session([row])
+        session_data = {k: v for k, v in self.client.session.items() if k.startswith("import_")}
+
+        client = self._restricted_client("Other Safety Site")
+        session = client.session
+        for key, value in session_data.items():
+            session[key] = value
+        session.save()
+
+        response = client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": self.profile.pk},
+            follow=True,
+        )
+
+        self.assertContains(response, "The saved import target is no longer available.")
+        self.assertFalse(self.profile.device_matches.filter(source_id="SCOPE-3").exists())
 
     def test_execution_rechecks_the_identity_after_locking_the_device(self):
         from django.db import connection
@@ -3225,7 +3282,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         )
 
     def test_auto_match_enforces_constrained_binding_add_permission(self):
-        from dcim.models import Device
+        from dcim.models import Device, Site
 
         allowed_profile = ImportProfile.objects.create(
             name="Allowed Binding Profile", adapter_config={"sheet_name": "Data"}
@@ -3253,6 +3310,7 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
             {"profile_id": allowed_profile.pk},
         )
         self._grant_object_permission(user, "View constrained binding devices", Device, ["view"])
+        self._grant_object_permission(user, "View constrained binding site", Site, ["view"])
         row = self._device_row(2, "CONSTRAINED-BINDING", existing.name, self.rack_a, 1)
         row.update(
             {
@@ -4230,7 +4288,9 @@ class IdentitySafetyTest(IsolatedRQQueueTestMixin, TestCase):
         self.assertEqual(invalid_number.status_code, 400)
         self.assertEqual(missing_site.status_code, 400)
         self.assertEqual(invalid_number.json()["error"], "Invalid row number")
-        self.assertEqual(missing_site.json()["error"], "Site not found")
+        self.assertEqual(
+            missing_site.json()["error"], "The saved import target is no longer available. Start a new preview."
+        )
 
     def test_hidden_strong_identity_is_rejected_in_preview_write_and_duplicate_name_preflight(self):
         from dcim.models import Device
