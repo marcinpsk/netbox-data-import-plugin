@@ -436,7 +436,7 @@ class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
         """Return one device row's own cells: a source row also renders a manufacturer and a rack."""
         for block in html.split("<tr")[1:]:
             opening, _, body = block.partition(">")
-            if re.search(rf'data-row-number="{row_number}"', opening) and 'data-object-type="device"' in opening:
+            if f'data-row-number="{row_number}"' in opening and 'data-object-type="device"' in opening:
                 return body
         self.fail(f"the page renders no device row {row_number}")
 
@@ -483,7 +483,7 @@ class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertIsNotNone(badge, "the matched row must carry the badge")
         href = re.search(r'href="([^"]*)"', badge.group(0))
         self.assertIsNotNone(href, badge.group(0))
-        self.assertEqual(href.group(1), f"/dcim/devices/{device.pk}/")
+        self.assertEqual(href.group(1), device.get_absolute_url())
 
     def test_a_row_that_matched_nothing_carries_no_badge(self):
         """A device this import creates has nothing to point at."""
