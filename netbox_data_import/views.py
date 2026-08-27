@@ -989,6 +989,8 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         conflicts_by_row = {
             str(r.row_number): r.extra_data.get("conflicts", {}) for r in result.rows if r.extra_data.get("conflicts")
         }
+        # The modal names a field for the operator; the catalog is where those names live.
+        target_field_labels = {key: CATALOG.display(key) for key, _label in CATALOG.choices()}
         candidate_values_by_row = {
             str(r.row_number): r.extra_data.get("candidate_values", {})
             for r in result.rows
@@ -1055,6 +1057,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_match_source_ids": device_match_source_ids,
                 "device_match_info": device_match_info,
                 "conflicts_by_row": conflicts_by_row,
+                "target_field_labels": target_field_labels,
                 "candidate_values_by_row": candidate_values_by_row,
                 "contact_suggestions_by_row": contact_suggestions_by_row,
                 "contact_role_suggestions_by_row": contact_role_suggestions_by_row,

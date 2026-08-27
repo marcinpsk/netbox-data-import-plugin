@@ -690,8 +690,8 @@
                   {% endif %}
                 {% endif %}
 
-                {# Split button: show on all unlinked device rows regardless of separator format #}
-                {% if row.object_type == 'device' and row.source_id and profile_id and row.action != 'update' and row.action != 'skip' and row.action != 'ignore' %}
+                {# A matched row is where the file name and NetBox visibly disagree, so it needs this too. #}
+                {% if row.object_type == 'device' and row.source_id and profile_id and row.action != 'ignore' %}
                   <button type="button" class="btn btn-sm btn-outline-info ms-1"
                           data-ndi-modal="#splitNameModal"
                           data-source-id="{{ row.source_id}}"
@@ -1118,6 +1118,7 @@
 {{ existing_resolutions|json_script:"ndi-existing-resolutions" }}
 {{ device_match_info|json_script:"ndi-device-match-info" }}
 {{ conflicts_by_row|json_script:"ndi-conflicts-by-row" }}
+{{ target_field_labels|json_script:"ndi-target-field-labels" }}
 {{ candidate_values_by_row|json_script:"ndi-candidate-values-by-row" }}
 {{ contact_suggestions_by_row|json_script:"ndi-contact-suggestions-by-row" }}
 {{ contact_role_suggestions_by_row|json_script:"ndi-contact-role-suggestions-by-row" }}
@@ -2609,96 +2610,6 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
 </script>
 <script src="{% static 'netbox_data_import/js/contact_candidate_modal.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/preview_row_actions.js' %}?v={{ plugin_version }}"></script>
-<script>
-(function () {
-  var CONFLICTS_BY_ROW = JSON.parse(
-    (document.getElementById('ndi-conflicts-by-row') || {textContent: '{}'}).textContent
-  );
-
-  var conflictModal = document.getElementById('conflictModal');
-  if (!conflictModal) return;
-
-  conflictModal.addEventListener('show.bs.modal', function (e) {
-    var trigger = e.relatedTarget;
-    if (!trigger) return;
-
-    var rowNumber = trigger.dataset.rowNumber;
-    var sourceId = trigger.dataset.sourceId;
-    document.getElementById('conf_source_id').value = sourceId || '';
-
-    var conflicts = CONFLICTS_BY_ROW[rowNumber] || {};
-    var body = document.getElementById('conflictModalBody');
-    body.innerHTML = '';
-
-    var FIELD_LABELS = {
-      serial: 'Serial Number', asset_tag: 'Asset Tag', device_name: 'Device Name',
-      rack_name: 'Rack', u_position: 'U Position', u_height: 'U Height',
-      face: 'Face', airflow: 'Airflow', status: 'Status', make: 'Make', model: 'Model',
-    };
-
-    for (var fieldName in conflicts) {
-      var candidates = conflicts[fieldName];
-      var section = document.createElement('div');
-      section.className = 'mb-3';
-
-      var heading = document.createElement('h6');
-      heading.textContent = FIELD_LABELS[fieldName] || fieldName;
-      section.appendChild(heading);
-
-      var table = document.createElement('table');
-      table.className = 'table table-sm table-bordered mb-0';
-
-      for (var sourceName in candidates) {
-        var value = candidates[sourceName];
-        var tr = document.createElement('tr');
-
-        var tdSource = document.createElement('td');
-        tdSource.className = 'text-muted';
-        tdSource.textContent = sourceName;
-
-        var tdValue = document.createElement('td');
-        tdValue.textContent = value;
-
-        var tdBtn = document.createElement('td');
-        tdBtn.style.width = '100px';
-        var useBtn = document.createElement('button');
-        useBtn.type = 'button';
-        useBtn.className = 'btn btn-sm btn-outline-primary ndi-conflict-resolve-btn';
-        useBtn.textContent = 'Use this';
-        useBtn.dataset.fieldName = fieldName;
-        useBtn.dataset.value = value;
-        tdBtn.appendChild(useBtn);
-
-        tr.appendChild(tdSource);
-        tr.appendChild(tdValue);
-        tr.appendChild(tdBtn);
-        table.appendChild(tr);
-      }
-
-      section.appendChild(table);
-      body.appendChild(section);
-    }
-  });
-
-  // Bound once: an HTMX swap re-runs this script, and a second listener would post twice.
-  if (window.ndiConflictResolveBound) return;
-  window.ndiConflictResolveBound = true;
-
-  document.addEventListener('click', function (e) {
-    var btn = e.target.closest('.ndi-conflict-resolve-btn');
-    if (!btn) return;
-
-    var fieldName = btn.dataset.fieldName;
-    var value = btn.dataset.value;
-    var resolved = {};
-    resolved[fieldName] = value;
-
-    document.getElementById('conf_source_column').value = '_merge_' + fieldName;
-    document.getElementById('conf_original_value').value = '';
-    document.getElementById('conf_resolved_fields').value = JSON.stringify(resolved);
-    document.getElementById('conflictForm').submit();
-  });
-})();
-</script>
+<script src="{% static 'netbox_data_import/js/conflict_modal.js' %}?v={{ plugin_version }}"></script>
 
 {% endblock %}

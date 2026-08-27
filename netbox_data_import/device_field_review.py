@@ -96,6 +96,29 @@ def _device_role_value(device) -> str:
     return _text(device.role.slug) if getattr(device, "role_id", None) else ""
 
 
+def _device_ip_value(target_field: str):
+    """Return a reader for one of the Device's IP fields."""
+
+    def read(device):
+        current = getattr(device, target_field, None)
+        return _text(current.address) if current is not None else ""
+
+    return read
+
+
+def _ip_normalize(value: Any) -> str:
+    """Return an address in the one spelling both sides compare on."""
+    import ipaddress
+
+    text = _text(value)
+    if not text:
+        return ""
+    try:
+        return str(ipaddress.ip_interface(text))
+    except ValueError:
+        return text
+
+
 @dataclass(frozen=True)
 class FieldDefinition:
     """One source of truth for a Device field's review behavior."""
@@ -148,6 +171,14 @@ _FIELD_DEFINITIONS: tuple[FieldDefinition, ...] = (
         display=_device_type_display,
     ),
     FieldDefinition("role", _device_role_value),
+    # The writer assigns these, so they are differences the preview has to report.
+    FieldDefinition(
+        "primary_ip4", _device_ip_value("primary_ip4"), normalize=_ip_normalize, provided=_provided_nonempty
+    ),
+    FieldDefinition(
+        "primary_ip6", _device_ip_value("primary_ip6"), normalize=_ip_normalize, provided=_provided_nonempty
+    ),
+    FieldDefinition("oob_ip", _device_ip_value("oob_ip"), normalize=_ip_normalize, provided=_provided_nonempty),
     FieldDefinition("tenant", lambda device: device.tenant, normalize=_identity, display=_related_display),
     FieldDefinition("location", lambda device: device.location, normalize=_identity, display=_related_display),
     # These values are shown by the legacy field-diff helper, but the Device

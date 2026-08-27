@@ -606,27 +606,41 @@ def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
     return result
 
 
-def _parse_ip_with_prefix(raw_value: str) -> str | None:
-    """Parse an IP address string, adding /32 or /128 prefix if absent.
+# A run of the characters an address is spelled with. `netaddr` and `ipaddress` both validate a
+# whole string, so neither can find the address inside `NA4_Management - 512 - 172.30.150.150`.
+_IP_TOKEN = re.compile(r"[0-9A-Fa-f:.]+(?:/\d{1,3})?")
 
-    Returns a normalised 'address/prefix' string or None if unparseable.
-    """
+
+def _normalized_ip(token: str) -> str | None:
+    """Return *token* as 'address/prefix', or None when it is not one address."""
     import ipaddress
 
+    try:
+        if "/" in token:
+            return str(ipaddress.ip_interface(token))
+        addr = ipaddress.ip_address(token)
+    except ValueError:
+        return None
+    return f"{addr}/32" if addr.version == 4 else f"{addr}/128"
+
+
+def _parse_ip_with_prefix(raw_value: str) -> str | None:
+    """Return the one address a source value names, as 'address/prefix', or None.
+
+    Sources export an address inside a label or with a separator appended, so the whole value is
+    tried first and the addresses spelled inside it only after that.
+    """
     raw = str(raw_value).strip()
     if not raw:
         return None
-    try:
-        # Try parsing as IP network (accepts CIDR notation)
-        if "/" in raw:
-            net = ipaddress.ip_interface(raw)
-            return str(net)
-        else:
-            addr = ipaddress.ip_address(raw)
-            prefix = "/32" if addr.version == 4 else "/128"
-            return f"{addr}{prefix}"
-    except ValueError:
-        return None
+    whole = _normalized_ip(raw)
+    if whole is not None:
+        return whole
+    for token in _IP_TOKEN.findall(raw):
+        found = _normalized_ip(token)
+        if found is not None:
+            return found
+    return None
 
 
 def _normalize_mapping_text(value: str) -> str:
@@ -1910,6 +1924,7 @@ def _compute_field_diff(  # noqa: C901
     role_slug=_NOT_PROVIDED,
     tenant=_NOT_PROVIDED,
     location=_NOT_PROVIDED,
+    ip_fields=None,
 ):
     """Return a dict of fields that differ between the XLS row and the existing NetBox device."""
     proposal = {
@@ -1937,6 +1952,7 @@ def _compute_field_diff(  # noqa: C901
         proposal["tenant"] = tenant
     if location is not _NOT_PROVIDED:
         proposal["location"] = location
+    proposal.update(ip_fields or {})
     return DeviceFieldReviewer.field_diff(
         matched_device,
         proposal,
@@ -1964,6 +1980,7 @@ def _review_device_proposal(
     make,
     model,
     role_slug=_NOT_PROVIDED,
+    ip_fields=None,
 ):
     """Review one matched Device proposal and return its effective write values."""
     if ctx.field_reviewer is None:
@@ -1984,6 +2001,7 @@ def _review_device_proposal(
                 "role": role_slug,
                 "tenant": ctx.tenant,
                 "location": ctx.location,
+                **(ip_fields or {}),
             },
         )
     proposal = {
@@ -2000,6 +2018,7 @@ def _review_device_proposal(
         "device_type": (mfg_slug, dt_slug, make, model),
         "tenant": ctx.tenant,
         "location": ctx.location,
+        **(ip_fields or {}),
     }
     if role_slug is not _NOT_PROVIDED:
         proposal["role"] = role_slug
@@ -2488,6 +2507,7 @@ def _preview_device_row(  # noqa: C901
             make=make,
             model=model,
             role_slug=role_slug,
+            ip_fields=ip_fields,
         )
         rack_name = effective["rack_name"]
         serial = effective["serial"]
@@ -2667,6 +2687,7 @@ def _preview_device_row(  # noqa: C901
                 role_slug=role_slug,
                 tenant=review_ctx.tenant,
                 location=review_ctx.location,
+                ip_fields=ip_fields,
             )
         else:
             field_diff = {**review.differing, **review.informational}
@@ -3050,6 +3071,7 @@ def _write_device_row(  # noqa: C901
             make=make,
             model=model,
             role_slug=crm.role_slug,
+            ip_fields=ip_fields,
         )
         rack_name = effective["rack_name"]
         serial = effective["serial"]

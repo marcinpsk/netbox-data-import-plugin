@@ -752,6 +752,38 @@ class ParseIPWithPrefixTest(TestCase):
         self.assertEqual(_parse_ip_with_prefix("192.168.1.1/24"), "192.168.1.1/24")
 
 
+class IPBuriedInSourceTextTest(TestCase):
+    """Source systems export an address inside a label, and the row still names one address."""
+
+    def _parse(self, raw):
+        from netbox_data_import.engine import _parse_ip_with_prefix
+
+        return _parse_ip_with_prefix(raw)
+
+    def test_a_trailing_suffix_the_octets_do_not_own_is_dropped(self):
+        """`192.0.2.99_5` is one address and a separator the exporter left behind."""
+        self.assertEqual(self._parse("192.0.2.99_5"), "192.0.2.99/32")
+
+    def test_an_address_after_a_descriptive_prefix_is_read(self):
+        """A VLAN label in front of the address must not cost the row its IP."""
+        self.assertEqual(self._parse("Site_Mgmt - 512 - 192.0.2.150"), "192.0.2.150/32")
+
+    def test_a_trailing_comment_is_dropped(self):
+        self.assertEqual(self._parse("192.0.2.150 (mgmt)"), "192.0.2.150/32")
+
+    def test_a_buried_address_keeps_the_prefix_length_it_carries(self):
+        self.assertEqual(self._parse("mgmt: 192.0.2.66/28"), "192.0.2.66/28")
+
+    def test_a_buried_ipv6_address_is_read(self):
+        self.assertEqual(self._parse("mgmt 2001:db8::1 primary"), "2001:db8::1/128")
+
+    def test_text_carrying_no_address_is_still_refused(self):
+        """Reading an address out of a label must not invent one out of any text."""
+        for raw in ("not-an-ip", "", "Site_Mgmt - 512", "12:30", "999.999.999.999"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(self._parse(raw))
+
+
 class EnsureDeviceTypeExecuteModeTest(TestCase):
     """Tests that _ensure_device_type never appends RowResult rows in execute mode."""
 
@@ -1041,8 +1073,19 @@ class FieldDiffComputationTest(TestCase):
         self.assertEqual(result.action, "skip")
         self.assertNotIn("field_diff", result.extra_data)
 
-    def test_field_diff_excludes_ip_fields(self):
-        """field_diff must never include IP field keys even when ip_fields are passed."""
+    def _assign_primary_ip4(self, device, address):
+        """Give a device the address on a real interface, the way the writer leaves it."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        interface = Interface.objects.create(device=device, name="mgmt", type="1000base-t")
+        ip = IPAddress.objects.create(address=address, assigned_object=interface)
+        device.primary_ip4 = ip
+        device.save()
+        return ip
+
+    def test_field_diff_reports_an_ip_the_import_would_assign(self):
+        """The import writes this field, so a preview that hides it cannot say what it will do."""
         self._make_existing_device(serial="OLD123", asset_tag="OLD-TAG")
         result = self._call_preview(
             "existing-server",
@@ -1051,9 +1094,46 @@ class FieldDiffComputationTest(TestCase):
             ip_fields={"primary_ip4": "10.0.0.1/32"},
         )
         self.assertEqual(result.action, "update")
-        self.assertIn("field_diff", result.extra_data)
         diff = result.extra_data["field_diff"]
-        self.assertNotIn("primary_ip4", diff)
+        self.assertIn("primary_ip4", diff)
+        self.assertEqual(diff["primary_ip4"]["file"], "10.0.0.1/32")
+        self.assertEqual(diff["primary_ip4"]["netbox"], "")
+
+    def test_field_diff_reports_an_ip_the_import_would_replace(self):
+        """The operator has to see which address the row takes the device away from."""
+        device = self._make_existing_device(serial="OLD123", asset_tag="OLD-TAG")
+        self._assign_primary_ip4(device, "10.0.0.9/32")
+        result = self._call_preview(
+            "existing-server",
+            serial="NEW456",
+            asset_tag="A-001",
+            ip_fields={"primary_ip4": "10.0.0.1/32"},
+        )
+        diff = result.extra_data["field_diff"]
+        self.assertEqual(diff["primary_ip4"], {"netbox": "10.0.0.9/32", "file": "10.0.0.1/32"})
+
+    def test_field_diff_leaves_out_an_ip_the_device_already_carries(self):
+        """An address that agrees is not a difference, whichever way each side spells it."""
+        device = self._make_existing_device(serial="OLD123", asset_tag="OLD-TAG")
+        self._assign_primary_ip4(device, "10.0.0.1/32")
+        result = self._call_preview(
+            "existing-server",
+            serial="NEW456",
+            asset_tag="A-001",
+            ip_fields={"primary_ip4": "10.0.0.1/32"},
+        )
+        self.assertNotIn("primary_ip4", result.extra_data["field_diff"])
+
+    def test_field_diff_leaves_out_an_ip_field_the_row_does_not_supply(self):
+        """A profile that maps no IPv6 column must not report an empty IPv6 difference."""
+        self._make_existing_device(serial="OLD123", asset_tag="OLD-TAG")
+        result = self._call_preview(
+            "existing-server",
+            serial="NEW456",
+            asset_tag="A-001",
+            ip_fields={"primary_ip4": "10.0.0.1/32"},
+        )
+        diff = result.extra_data["field_diff"]
         self.assertNotIn("primary_ip6", diff)
         self.assertNotIn("oob_ip", diff)
 
