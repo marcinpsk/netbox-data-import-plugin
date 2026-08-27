@@ -407,6 +407,93 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertNotIn(">Skip<", main_row)
 
 
+class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
+    """A refused row needs an action on it, or the operator can do nothing about the collision."""
+
+    def _preview_html_with_a_shared_serial(self):
+        """Give two workbook rows one serial and render the preview."""
+        self._setup_session()
+        session = self.client.session
+        rows = session["import_rows"]
+        # A row that already carries a serial is a device row, not the Cabinet row.
+        devices = [row for row in rows if row.get("serial")][:2]
+        self.assertEqual(len(devices), 2, "the sample workbook must carry two device rows")
+        for row in devices:
+            row["serial"] = "SHARED-PREVIEW-SERIAL"
+        session["import_rows"] = rows
+        session.save()
+        html = self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+        return [row["_row_number"] for row in devices], html
+
+    def test_a_duplicate_serial_row_offers_the_ignore_action(self):
+        """The operator gives the serial up on one row so the other keeps it."""
+        _numbers, html = self._preview_html_with_a_shared_serial()
+
+        self.assertIn("Duplicate serial", html)
+        self.assertIn("ignore-duplicate-serial/", html)
+
+    def _device_row_cells(self, html, row_number):
+        """Return one device row's own cells: a source row also renders a manufacturer and a rack."""
+        for block in html.split("<tr")[1:]:
+            opening, _, body = block.partition(">")
+            if f'data-row-number="{row_number}"' in opening and 'data-object-type="device"' in opening:
+                return body
+        self.fail(f"the page renders no device row {row_number}")
+
+    def test_a_duplicate_serial_row_names_the_other_row(self):
+        """A row naming itself, or a row number this one only prefixes, both strand the operator."""
+        (first, second), html = self._preview_html_with_a_shared_serial()
+
+        self.assertIn(f"also on row {second}.", self._device_row_cells(html, first))
+        self.assertIn(f"also on row {first}.", self._device_row_cells(html, second))
+
+
+class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
+    """A row that matched a NetBox device says so, whatever its field diff turns out to be."""
+
+    def _preview_html(self):
+        """Return the rendered preview for the current session."""
+        return self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+
+    def _match_a_workbook_device(self):
+        """Create the NetBox device one workbook row names, so that row matches it."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        self._setup_session()
+        rows = self.client.session["import_rows"]
+        row = next(r for r in rows if r.get("device_name") and r.get("u_position"))
+        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        manufacturer = Manufacturer.objects.create(name="MatchMfg", slug="match-mfg")
+        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="MatchModel", slug="match-model")
+        role = DeviceRole.objects.create(name="MatchRole", slug="match-role")
+        device = Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
+        return row, device
+
+    def _badge_tag(self, html):
+        """Return the badge anchor itself, so a link elsewhere on the page cannot answer for it."""
+        return re.search(r'<a\b[^>]*\bclass="[^"]*ndi-matched-badge[^"]*"[^>]*>', html)
+
+    def test_a_row_that_matched_a_device_carries_the_badge(self):
+        """The row reports an update the field diff cannot explain, so it names what it matched."""
+        _row, device = self._match_a_workbook_device()
+
+        html = self._preview_html()
+
+        badge = self._badge_tag(html)
+        self.assertIsNotNone(badge, "the matched row must carry the badge")
+        href = re.search(r'href="([^"]*)"', badge.group(0))
+        self.assertIsNotNone(href, badge.group(0))
+        self.assertEqual(href.group(1), device.get_absolute_url())
+
+    def test_a_row_that_matched_nothing_carries_no_badge(self):
+        """A device this import creates has nothing to point at."""
+        self._setup_session()
+
+        html = self._preview_html()
+
+        self.assertIsNone(self._badge_tag(html))
+
+
 class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
     """Sync placement sits in the collapsed detail row, so the main row has to advertise it."""
 

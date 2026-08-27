@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.test import Client, TestCase
+from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
@@ -337,6 +337,49 @@ class SyncDeviceFieldBareExceptionTest(TestCase):
             resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
         self.assertEqual(resp.status_code, 500)
         self.assertIn("internal", resp.json()["error"].lower())
+
+
+class SyncDeviceFieldRunsInATransactionTest(TransactionTestCase):
+    """The write has to carry its own transaction, which this view is the only writer without."""
+
+    def setUp(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        _make_superuser("vcov2_syncatomic_user")
+        self.client = Client()
+        self.client.login(username="vcov2_syncatomic_user", password="testpass")
+        site = Site.objects.create(name="SyncAtomic-Site", slug="syncatomic-site")
+        mfg = Manufacturer.objects.create(name="SyncAtomicMfg", slug="syncatomic-mfg")
+        device_type = DeviceType.objects.create(
+            manufacturer=mfg, model="SyncAtomicModel", slug="syncatomic-model", u_height=1
+        )
+        role = DeviceRole.objects.create(name="SyncAtomicRole", slug="syncatomic-role", color="000000")
+        self.device = Device.objects.create(name="syncatomic-device", site=site, device_type=device_type, role=role)
+        self.url = reverse("plugins:netbox_data_import:sync_device_field")
+
+    def test_the_field_write_runs_inside_a_transaction(self):
+        """A pre_save receiver may refuse to run outside one, and change logging expects one too."""
+        from dcim.models import Device
+        from django.db import connection
+        from django.db.models.signals import pre_save
+
+        atomic_while_saving = []
+
+        def record_the_transaction_state(sender, instance, **kwargs):
+            """Stand in for a receiver that requires the write to be atomic."""
+            if instance.pk == self.device.pk:
+                atomic_while_saving.append(connection.in_atomic_block)
+
+        pre_save.connect(record_the_transaction_state, sender=Device)
+        self.addCleanup(pre_save.disconnect, record_the_transaction_state, sender=Device)
+
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-ATOMIC"})
+
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        self.assertTrue(response.json().get("ok"), response.json())
+        self.assertEqual(atomic_while_saving, [True], "the device write must run inside a transaction")
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.serial, "SN-ATOMIC")
 
 
 class SyncDeviceFieldErrorPathsTest(TestCase):

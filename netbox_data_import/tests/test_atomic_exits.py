@@ -3,7 +3,7 @@
 """Every normal exit from a `transaction.atomic()` block has to be audited.
 
 `atomic()` commits when its block ends normally, and `return`, `break` and `continue` all end it
-normally. A denial written as an early `return` therefore commits whatever the request already
+normally. The `locked_*_policy` helpers wrap `atomic()`, so this scanner treats them the same. A denial written as an early `return` therefore commits whatever the request already
 wrote. Two such bugs shipped before this guard existed.
 
 The scanner refuses to guess whether a write happened: the write that caused one of those bugs sat
@@ -49,6 +49,12 @@ AUDITED_EXITS = {
     ("SyncSingleRowView.post", "stale-preview-after-dry-run"): (
         "The only call before this return is run_import with dry_run True, which writes nothing."
     ),
+    ("ImportProfile.delete", "locked-cascade-committed"): (
+        "The success path: the lock only orders the cascade, so committing the delete is the point."
+    ),
+    ("SourceResolutionDeleteView.post", "locked-delete-committed"): (
+        "The success path: NetBox's delete view runs under the lock, so committing it is the point."
+    ),
     ("PrimaryContactResolver.apply", "success-commit-intended"): (
         "The success path of the block: committing the planned Contact writes is the point."
     ),
@@ -67,9 +73,14 @@ def _markers_by_line(source):
     return markers
 
 
+# `locked_profile_policy` and `locked_resolution_policy` wrap `transaction.atomic()`, so a normal
+# exit inside one commits exactly like a bare `atomic()` block and has to be audited the same way.
+_ATOMIC_OPENERS = frozenset({"atomic", "locked_profile_policy", "locked_resolution_policy"})
+
+
 def _is_atomic_reference(node):
-    """Return True for `transaction.atomic` and for a bare imported `atomic`."""
-    return getattr(node, "attr", None) == "atomic" or getattr(node, "id", None) == "atomic"
+    """Return True for `transaction.atomic`, a bare imported `atomic`, and the policy locks."""
+    return getattr(node, "attr", None) in _ATOMIC_OPENERS or getattr(node, "id", None) in _ATOMIC_OPENERS
 
 
 def _opens_atomic(node):
@@ -245,6 +256,15 @@ class AtomicExitScannerTest(SimpleTestCase):
             "            transaction.set_rollback(True)\n"
             "        return denied\n"
         )
+        self.assertEqual([row[0] for row in self._report(source)], ["f"])
+
+    def test_a_policy_lock_opens_a_block_it_must_audit(self):
+        """`locked_profile_policy` wraps `atomic()`, so a return inside it commits the same way."""
+        source = "def f():\n    with locked_profile_policy(pk):\n        obj.save()\n        return denied\n"
+        self.assertEqual([row[0] for row in self._report(source)], ["f"])
+
+    def test_a_resolution_lock_opens_a_block_it_must_audit(self):
+        source = "def f():\n    with locked_resolution_policy(pk):\n        obj.save()\n        return denied\n"
         self.assertEqual([row[0] for row in self._report(source)], ["f"])
 
     def test_a_raise_needs_no_marker(self):
