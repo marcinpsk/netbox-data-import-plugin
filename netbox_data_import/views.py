@@ -347,11 +347,7 @@ def _validate_model_instance(instance, label):
 
 
 def _legacy_adapter_config(profile_data):
-    """Return the pre-cutover scalar keys rewritten as a flat-workbook adapter configuration.
-
-    Releases up to 1.5.2 exported these settings as top-level `profile` keys. Database rows were
-    moved into `adapter_config` by migration 0022; an exported file has no such upgrade path.
-    """
+    """Return the top-level `profile` keys releases up to 1.5.2 exported, as adapter configuration."""
     from .adapter_forms import FlatWorkbookConfigForm
 
     # The legacy keys are exactly the flat-workbook adapter's own settings.
@@ -856,8 +852,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
             engine.derive_effective_rows(rows, profile), profile, context, dry_run=True, user=request.user
         )
 
-        # The session keeps the pristine parsed rows; every reader derives from them.
-        # Rows need JSON-safe serialization (handle datetime from Excel)
+        # The session keeps the pristine parsed rows, JSON-safe; every reader derives from them.
         record_recalculated_preview(request.session, result)
         request.session["import_rows"] = _serialize_rows(rows)
         request.session["import_context"] = {
@@ -940,8 +935,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             result = engine.ImportResult.from_session_dict(stored_result)
         else:
             context_obj = {"site": site, "location": location, "tenant": tenant}
-            # Derived, never stored: writing this back would bake the resolution into the session
-            # and stop a later edit from dropping a field.
+            # Derived, never stored: writing it back would bake the resolution in and block a later edit.
             rows = engine.derive_effective_rows(rows, profile)
             result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
             record_recalculated_preview(request.session, result)
@@ -3703,8 +3697,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
         ignored_source_ids = set(profile.ignored_devices.values_list("source_id", flat=True))
         class_mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         eligible_rows = []
-        # Match on the resolved identity: binding a source ID to the pristine name would override
-        # the resolution the operator approved in the preview.
+        # Match on the resolved identity: the pristine name would override the approved resolution.
         for row in engine.derive_effective_rows(rows, profile):
             source_id = engine._str_val(row.get("source_id"))
             mapping = class_mappings.get(engine._str_val(row.get("device_class")))
