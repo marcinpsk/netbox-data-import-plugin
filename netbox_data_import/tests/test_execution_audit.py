@@ -210,7 +210,7 @@ class ImportExecutionReservationTest(TransactionTestCase):
         self.assertEqual(ImportExecution.objects.count(), 0)
 
     def test_a_reservation_missing_the_profile_entirely_is_refused(self):
-        """Omitting the key must raise the same reservation error, not a KeyError."""
+        """Omitting the profile must raise the same reservation error, not a KeyError."""
         fields = _reservation(self.profile, self.document, self.actor)
         fields.pop("profile")
         with self.assertRaises(ValueError):

@@ -923,10 +923,7 @@ class ImportResultsViewTest(BaseViewTestCase):
 
 
 class ImportExecutionListViewTest(BaseViewTestCase):
-    """Tests for ImportExecutionListView."""
-
     def test_execution_list_returns_200(self):
-        """Import history page returns 200."""
         url = reverse("plugins:netbox_data_import:importexecution_list")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
@@ -2692,14 +2689,13 @@ class ModelsStrTest(BaseViewTestCase):
         self.assertIn("dell-str", s)
 
     def test_import_execution_str(self):
-        """ImportExecution.__str__ contains the pk."""
         from netbox_data_import.models import ImportExecution
 
         execution = ImportExecution.objects.create(profile=self.profile, input_filename="test.xlsx")
         self.assertIn(str(execution.pk), str(execution))
 
     def test_import_execution_absolute_url(self):
-        """ImportExecution.get_absolute_url returns the associated profile's URL."""
+        """It has no detail route of its own, so it points at the profile."""
         from netbox_data_import.models import ImportExecution
 
         execution = ImportExecution.objects.create(profile=self.profile)

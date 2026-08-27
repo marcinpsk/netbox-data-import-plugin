@@ -19,11 +19,7 @@ class NetBoxDataImportConfig(PluginConfig):
     graphql_schema = "graphql.schema.schema"
 
     def ready(self):
-        """Import the jobs module so its @system_job registration runs at startup.
-
-        NetBox loads a fixed set of plugin resources and `jobs` is not one of them, so without this
-        the retention schedule would never be registered.
-        """
+        """Import the jobs module, which NetBox does not load, so its @system_job registration runs."""
         super().ready()
 
         from . import jobs  # noqa: F401

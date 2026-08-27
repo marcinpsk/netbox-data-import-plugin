@@ -1573,10 +1573,7 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                 rack = None
                 action = "create"
                 detail = f"Would create rack '{rack_name}' ({u_height}U{rack_type_label}) at site '{ctx.site}'"
-            # Publish the rack as this import would leave it, so a device row is checked against
-            # the space this batch gives it, not the space it has now. The candidate copies the
-            # stored row, keeping its primary key, and is None only when the profile updates
-            # nothing. `rack` itself stays untouched, so the row still reports the stored state.
+            # Publish the rack as this batch leaves it, so a device row is checked against that space.
             ctx.rack_map[_identity_text(rack_name)] = candidate if candidate is not None else rack
             ctx.result.rows.append(
                 RowResult(
