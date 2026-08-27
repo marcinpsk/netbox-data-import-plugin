@@ -1,0 +1,107 @@
+{
+  "netbox_data_import/adapter_forms.py": [
+    "# Approved exception to the NetBox base-class rule: this validates adapter configuration rather"
+  ],
+  "netbox_data_import/api/serializers.py": [
+    "# Normalize unconditionally: this serializer never calls Model.full_clean, so an absent key"
+  ],
+  "netbox_data_import/api/views.py": [
+    "# ValidatedModelSerializer.validate() writes the request values onto the instance, so only"
+  ],
+  "netbox_data_import/catalog.py": [
+    "# A candidate target supplies review candidates rather than a written value. ColumnTransformRule"
+  ],
+  "netbox_data_import/contact_resolution.py": [
+    "# A header says which field a value can feed, never which of several same-shaped values",
+    "# The configured lookup field answers first. A row carrying only a name matches nothing",
+    "# The profile memoizes the role, and one instance serves both review and apply. Re-read it",
+    "# `name` is proposed from its header, because any text is a valid name. The `email` and `phone`"
+  ],
+  "netbox_data_import/device_field_review.py": [
+    "# Keep this registry private. Callers use DeviceFieldReviewer instead of",
+    "# These values are shown by the legacy field-diff helper, but the Device"
+  ],
+  "netbox_data_import/engine.py": [
+    "# A rack this import has not created yet holds no devices, so only its own unit",
+    "# A zero-U type has its position and face cleared whatever the row says, and a row that",
+    "# Captures the previewed identity action for each row. Execute mode must",
+    "# Identify device names that appear in multiple rows. When the same name occurs",
+    "# Keep the source placement available for review. Apply zero-U semantics only",
+    "# Keep the unsaved candidate so device rows can be placement-checked against",
+    "# Maps ``(normalized rack identity, position)`` to claimed faces. This",
+    "# Memoizes ``DeviceType.u_height == 0`` lookups by ``(mfg_slug, dt_slug)``",
+    "# Only set when a placement sync has nothing to write, so an older preview",
+    "# The lock covers one row, so re-run the predicate: a device written between",
+    "# The split modal's data-source-column attribute stores the target field",
+    "# Tracks ``(rack_name, position, face) -> (row_number, device_name)`` for",
+    "# Two resolutions can share a source_id, and a later one overrides the fields an earlier one",
+    "# _find_existing_device checks DeviceExistingMatch → serial → asset_tag → name in that order,"
+  ],
+  "netbox_data_import/jobs.py": [
+    "# Every resolution write takes this same lock, so none can commit between this check"
+  ],
+  "netbox_data_import/models.py": [
+    "# A creation rule only: the adapter is immutable, so a stored profile keeps validating"
+  ],
+  "netbox_data_import/tests/test_adapter_config_migration.py": [
+    "# A TransactionTestCase does not roll back schema changes, and a failure inside setUp"
+  ],
+  "netbox_data_import/tests/test_api.py": [
+    "# New API tests: profile_id filter for IgnoredDevice, ColumnTransformRule,"
+  ],
+  "netbox_data_import/tests/test_atomic_exits.py": [
+    "# (qualified function, marker id) -> why this exit commits nothing it should not.",
+    "# `locked_profile_policy` and `locked_resolution_policy` wrap `transaction.atomic()`, so a normal"
+  ],
+  "netbox_data_import/tests/test_engine_extended.py": [
+    "# If the savepoint were missing, the outer atomic would be tainted and",
+    "# Map \"Server\" class to the existing role used above so the device-role",
+    "# Map a \"Face\" column so the engine reads face from rows; without this",
+    "# Mutating the cache to a sentinel proves the second call returns the cached",
+    "# Pre-create a device occupying U1/front so subsequent inserts at the same",
+    "# The fallback normalization only normalizes the stored value, not the input,",
+    "# _check_rack_position_conflict only touches ctx.claimed_positions, so"
+  ],
+  "netbox_data_import/tests/test_identity_safety.py": [
+    "# Stand in for a device that another writer commits between identity",
+    "# With no import in progress the stored profile ID is None, so a posted"
+  ],
+  "netbox_data_import/tests/test_migrations.py": [
+    "# Django refuses to reverse these data migrations, so the walk back fakes each one, newest",
+    "# Register before the first walk down: a failure inside setUp skips tearDown, and a worker"
+  ],
+  "netbox_data_import/tests/test_parallel_test_setup.py": [
+    "# No path argument, so `-n auto` resolves against the root conftest alone. Collecting the",
+    "# `--ignore` leaves nothing to collect, so pytest exits 5. Any other status means the run broke"
+  ],
+  "netbox_data_import/tests/test_serial_display.py": [
+    "# NetBox uses ObjectPermissionBackend — regular users need ObjectPermission",
+    "# _device_search_q tokenises on '-', so other devices sharing tokens"
+  ],
+  "netbox_data_import/tests/test_views.py": [
+    "# Pre-seed: device already placed in the rack with a known position and face.",
+    "# _device_search_q tokenises on '-', so other devices sharing tokens may",
+    "# _device_search_q tokenises on '-', so other devices sharing tokens may",
+    "# device_match_info intentionally normalizes blank serial values to \"\"",
+    "# search_objects returns the raw model value (null for no serial), while"
+  ],
+  "netbox_data_import/tests/test_views_coverage2.py": [
+    "# NetBox's BulkImportView form requires a 'format' field; include it so",
+    "# The warning message format is \"Created X, skipped Y, N errors: ...\"",
+    "# Verify the seek(0)+super().post() fallback actually ran:"
+  ],
+  "netbox_data_import/views.py": [
+    "# A JSON caller renders the reason itself, so a queued message would surface later",
+    "# Flat format: let NetBox's BulkImportView handle it.",
+    "# Input failed YAML parsing — let NetBox's BulkImportView handle it",
+    "# Only include fields that are explicitly present in the YAML so that a",
+    "# Re-apply all column mappings to the in-session rows so the new",
+    "# Read the target and re-judge the collision under the lock. Only the engine knows",
+    "# Read the target and the claims under the lock: a name saved between the check and",
+    "# Scalar profile fields handled by _apply_profile_yaml_data.",
+    "# The action views below (Ignore/Unignore/Sync/Quick*) are lightweight POST",
+    "# The catalog accepts any non-empty name after a family prefix, so it cannot bound length.",
+    "# The rendered row keeps the action it had before this decision, so the page must",
+    "# These views intentionally use raw django.views.View rather than a NetBox"
+  ]
+}
