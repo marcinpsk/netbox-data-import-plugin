@@ -157,11 +157,7 @@ def set_import_source(device, profile, source_id="", extra_columns=None, unassig
 
 
 def client_with_object_permission(username, model, *, granted, actions=("view",)):
-    """Return a logged-in client for a user created by :func:`user_with_object_permission`.
-
-    A permission test that ignores the ``login()`` result can pass on a login redirect
-    instead of on the permission check, so the login failure has to stop the test here.
-    """
+    """Return a logged-in client, failing here so no test can pass on a login redirect."""
     from django.test import Client
 
     password = "testpass"

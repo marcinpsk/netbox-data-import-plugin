@@ -310,6 +310,10 @@ class ImportPlan:
         object.__setattr__(self, "units", _elements(self.units, SynchronizationUnit, "Import Plan units"))
         object.__setattr__(self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Import Plan diagnostics"))
         object.__setattr__(self, "planning_context", _frozen_json(self.planning_context, "Planning context"))
+        # These reach `canonical_json` through the fingerprint, where a bad value would raise a bare
+        # TypeError that `except PlanError` does not cover. The boundary is here.
+        for name in ("source_fingerprint", "profile_fingerprint", "actor", "revision", "schema_version"):
+            object.__setattr__(self, name, _frozen_json(getattr(self, name), f"Import Plan {name}"))
         counts = Counter(unit.identity for unit in self.units)
         duplicates = sorted(identity for identity, count in counts.items() if count > 1)
         if duplicates:

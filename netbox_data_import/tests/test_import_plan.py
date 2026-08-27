@@ -105,6 +105,28 @@ class PlanStructureTest(SimpleTestCase):
                     with self.assertRaises(PlanInvalid):
                         ImportPlan(**{field_name: value})
 
+    def test_a_plan_rejects_a_scalar_field_that_is_not_plan_data(self):
+        """The module contract is that every value in a plan survives a canonical JSON round trip.
+
+        A caller passing `actor=request.user` built a plan, and the failure then surfaced as a bare
+        `TypeError` out of `canonical_json` inside `fingerprint`, which `except PlanError` misses.
+        """
+        for field_name in ("source_fingerprint", "profile_fingerprint", "actor", "revision", "schema_version"):
+            with self.subTest(field=field_name):
+                with self.assertRaises(PlanInvalid):
+                    ImportPlan(**{field_name: object()})
+
+    def test_a_plan_keeps_the_scalar_values_it_accepts(self):
+        """The check must not reshape a value a caller legitimately passes."""
+        plan = ImportPlan(
+            source_fingerprint="abc", profile_fingerprint="def", actor="operator", revision=3, schema_version=1
+        )
+
+        self.assertEqual(
+            (plan.source_fingerprint, plan.profile_fingerprint, plan.actor, plan.revision, plan.schema_version),
+            ("abc", "def", "operator", 3, 1),
+        )
+
     def test_an_unknown_disposition_is_rejected(self):
         """Section 4.2 fixes the disposition vocabulary."""
         with self.assertRaises(PlanInvalid):

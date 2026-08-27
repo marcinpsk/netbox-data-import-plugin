@@ -454,8 +454,7 @@ class SourceDocument(models.Model):
 
     RETENTION = timedelta(days=30)
 
-    # An execution's input is permanent audit input, so deleting the profile orphans the row rather
-    # than cascading into the protecting reference. Retention then reclaims an unreferenced orphan.
+    # Audit input outlives its profile, so a delete orphans the row and retention reclaims it.
     profile = models.ForeignKey(
         ImportProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name="source_documents"
     )

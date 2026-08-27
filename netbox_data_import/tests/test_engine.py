@@ -1422,7 +1422,6 @@ class RackExpandedInTheSameBatchTest(TestCase):
         ]
 
     def _device_row(self, result):
-        """Return the one device row of *result*."""
         return next(row for row in result.rows if row.object_type == "device")
 
     def test_the_preview_places_the_device_in_the_space_the_batch_adds(self):
