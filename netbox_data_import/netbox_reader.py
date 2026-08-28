@@ -16,8 +16,34 @@ from __future__ import annotations
 class NetBoxReader:
     """Permission-scoped reads of the NetBox objects planning compares against."""
 
-    def __init__(self, actor):
+    def __init__(self, actor, site=None, location=None, tenant=None):
         self._actor = actor
+        self._site = site
+        self._location = location
+        self._tenant = tenant
+
+    def for_target(self, *, site, location=None, tenant=None) -> NetBoxReader:
+        """Return this reader bound to the import target as well as the actor.
+
+        Section 2.1 fixes `TargetModule.plan` at four parameters and none of them is the target, so
+        the accessor of target state carries which target state is relevant.
+        """
+        return type(self)(self._actor, site=site, location=location, tenant=tenant)
+
+    @property
+    def site(self):
+        """Return the site this import writes into, or None before a target is bound."""
+        return self._site
+
+    @property
+    def location(self):
+        """Return the location this import writes into, if the operator chose one."""
+        return self._location
+
+    @property
+    def tenant(self):
+        """Return the tenant this import writes into, if the operator chose one."""
+        return self._tenant
 
     @classmethod
     def for_actor(cls, actor) -> NetBoxReader:
