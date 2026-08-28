@@ -353,7 +353,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             role=self.role,
             face=DeviceFaceChoices.FACE_FRONT,
         )
-        diff, informational = _compute_field_differences(
+        diff, _ = _compute_field_differences(
             matched_device=device,
             device_name="face-diff-device2",
             serial="",
@@ -379,7 +379,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             role=self.role,
             airflow=DeviceAirflowChoices.AIRFLOW_FRONT_TO_REAR,
         )
-        diff, informational = _compute_field_differences(
+        diff, _ = _compute_field_differences(
             matched_device=device,
             device_name="airflow-diff-device2",
             serial="",
@@ -403,7 +403,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             device_type=self.dt,
             role=self.role,
         )
-        diff, informational = _compute_field_differences(
+        _, informational = _compute_field_differences(
             matched_device=device,
             device_name="uheight-diff-device2",
             serial="",
@@ -428,7 +428,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             device_type=self.dt,
             role=self.role,
         )
-        diff, informational = _compute_field_differences(
+        _, informational = _compute_field_differences(
             matched_device=device,
             device_name="uheight-none-device2",
             serial="",
