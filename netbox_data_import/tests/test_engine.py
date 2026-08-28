@@ -784,6 +784,14 @@ class IPBuriedInSourceTextTest(TestCase):
             with self.subTest(raw=raw):
                 self.assertIsNone(self._parse(raw))
 
+    def test_a_long_run_of_address_characters_names_no_address(self):
+        """A cell can carry thousands of address characters without carrying one address."""
+        self.assertIsNone(self._parse("." * 4000 + "a" * 4000))
+
+    def test_an_address_after_a_long_run_of_other_text_is_still_read(self):
+        """Capping the token length must not cost a row the address its cell really carries."""
+        self.assertEqual(self._parse("x" * 4000 + " 192.0.2.10"), "192.0.2.10/32")
+
     def test_an_address_a_word_runs_into_is_refused_rather_than_truncated(self):
         """Hex letters continue an address, so a word can leave a shorter valid one behind.
 

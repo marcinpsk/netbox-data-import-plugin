@@ -504,8 +504,8 @@ def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
     return result
 
 
-# Bounded so a word cannot leave a shorter valid address: `2001:db8::1backup` -> `2001:db8::1bac`.
-_IP_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f:.]+(?:/\d{1,3})?(?![0-9A-Za-z])")
+# Bounded at both ends: a word cannot leave a shorter valid address, and 45 covers the longest one.
+_IP_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f:.]{1,45}(?:/\d{1,3})?(?![0-9A-Za-z])")
 
 
 def _normalized_ip(token: str) -> str | None:
