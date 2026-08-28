@@ -190,10 +190,12 @@ class ImportContext:
     # not change a previewed create into an update, or update another object.
     expected_intents: dict = field(default_factory=dict)
     duplicate_source_ids: frozenset = frozenset()
+    duplicate_source_id_rows: dict = field(default_factory=dict)
     duplicate_serials: frozenset = frozenset()
     # Maps a duplicated serial to every source row number that carries it.
     duplicate_serial_rows: dict = field(default_factory=dict)
     duplicate_asset_tags: frozenset = frozenset()
+    duplicate_asset_tag_rows: dict = field(default_factory=dict)
     duplicate_rack_names: frozenset = frozenset()
     ignored_source_ids: frozenset = frozenset()
     claimed_device_ids: dict = field(default_factory=dict)
@@ -211,6 +213,14 @@ class ImportContext:
 # ---------------------------------------------------------------------------
 
 _NONE_LIKE = frozenset({"none", "nan", "null", "n/a", "#n/a"})
+
+
+def _duplicate_value_detail(label: str, value: str, other_rows: list[int]) -> str:
+    """Name a duplicated identity value and every other source row that carries it."""
+    where = ", ".join(f"row {number}" for number in other_rows)
+    return f"Duplicate {label} '{value}' appears more than once in this import" + (
+        f", also on {where}." if where else "."
+    )
 
 
 def _str_val(v) -> str:
@@ -1507,6 +1517,9 @@ def _pass2_process_racks(rows, ctx, class_role_map):
             continue
 
         if source_id and source_id in ctx.duplicate_source_ids:
+            other_rows = [
+                number for number in ctx.duplicate_source_id_rows.get(source_id, []) if number != row["_row_number"]
+            ]
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -1514,8 +1527,11 @@ def _pass2_process_racks(rows, ctx, class_role_map):
                     name=rack_name,
                     action="error",
                     object_type="rack",
-                    detail=f"Duplicate source ID '{source_id}' appears more than once in this import.",
-                    extra_data={"identity_conflict": "duplicate_source_id"},
+                    detail=_duplicate_value_detail("source ID", source_id, other_rows),
+                    extra_data={
+                        "identity_conflict": "duplicate_source_id",
+                        "duplicate_source_id_rows": other_rows,
+                    },
                 )
             )
             continue
@@ -3545,7 +3561,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
     _reserve_device_names(rows, ctx, class_role_map, Device)
     effective_identity_values = _effective_duplicate_identity_values(rows, ctx, class_role_map, ambiguous_names, Device)
     serial_rows: dict = {}
-    asset_tag_counts = {}
+    asset_tag_rows = {}
     for identity_row_number, identity in effective_identity_values.items():
         serial = identity.get("serial")
         asset_tag = identity.get("asset_tag")
@@ -3553,10 +3569,13 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
             serial_rows.setdefault(serial, []).append(identity_row_number)
         if asset_tag:
             asset_tag_key = _identity_text(asset_tag)
-            asset_tag_counts[asset_tag_key] = asset_tag_counts.get(asset_tag_key, 0) + 1
+            asset_tag_rows.setdefault(asset_tag_key, []).append(identity_row_number)
     ctx.duplicate_serial_rows = {serial: sorted(numbers) for serial, numbers in serial_rows.items() if len(numbers) > 1}
     ctx.duplicate_serials = frozenset(ctx.duplicate_serial_rows)
-    ctx.duplicate_asset_tags = frozenset(tag for tag, count in asset_tag_counts.items() if count > 1)
+    ctx.duplicate_asset_tag_rows = {
+        asset_tag: sorted(numbers) for asset_tag, numbers in asset_tag_rows.items() if len(numbers) > 1
+    }
+    ctx.duplicate_asset_tags = frozenset(ctx.duplicate_asset_tag_rows)
     ctx.effective_duplicate_identity = effective_identity_values
 
     total_rows = len(rows)
@@ -3594,6 +3613,9 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
             continue
 
         if source_id and source_id in ctx.duplicate_source_ids:
+            other_rows = [
+                number for number in ctx.duplicate_source_id_rows.get(source_id, []) if number != row["_row_number"]
+            ]
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -3601,9 +3623,12 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                     name=device_name,
                     action="error",
                     object_type="device",
-                    detail=f"Duplicate source ID '{source_id}' appears more than once in this import.",
+                    detail=_duplicate_value_detail("source ID", source_id, other_rows),
                     rack_name=rack_name,
-                    extra_data={"identity_conflict": "duplicate_source_id"},
+                    extra_data={
+                        "identity_conflict": "duplicate_source_id",
+                        "duplicate_source_id_rows": other_rows,
+                    },
                 )
             )
             continue
@@ -3614,8 +3639,6 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
             others = [
                 number for number in ctx.duplicate_serial_rows.get(duplicate_serial, []) if number != row["_row_number"]
             ]
-            # Naming the other rows is what lets the operator pick which one gives the serial up.
-            where = ", ".join(f"row {number}" for number in others)
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -3623,10 +3646,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                     name=device_name,
                     action="error",
                     object_type="device",
-                    detail=(
-                        f"Duplicate serial '{duplicate_serial}' appears more than once in this import"
-                        + (f", also on {where}." if where else ".")
-                    ),
+                    detail=_duplicate_value_detail("serial", duplicate_serial, others),
                     rack_name=rack_name,
                     extra_data={
                         "identity_conflict": "duplicate_serial",
@@ -3640,6 +3660,9 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
         effective_asset_tag = identity.get("asset_tag")
         asset_tag_key = _identity_text(effective_asset_tag) if effective_asset_tag else ""
         if asset_tag_key and asset_tag_key in ctx.duplicate_asset_tags:
+            other_rows = [
+                number for number in ctx.duplicate_asset_tag_rows.get(asset_tag_key, []) if number != row["_row_number"]
+            ]
             ctx.result.rows.append(
                 RowResult(
                     row_number=row["_row_number"],
@@ -3647,9 +3670,12 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                     name=device_name,
                     action="error",
                     object_type="device",
-                    detail=f"Duplicate asset tag '{asset_tag}' appears more than once in this import.",
+                    detail=_duplicate_value_detail("asset tag", effective_asset_tag, other_rows),
                     rack_name=rack_name,
-                    extra_data={"identity_conflict": "duplicate_asset_tag"},
+                    extra_data={
+                        "identity_conflict": "duplicate_asset_tag",
+                        "duplicate_asset_tag_rows": other_rows,
+                    },
                 )
             )
             continue
@@ -4196,7 +4222,7 @@ def run_import(
         _str_val(source_id)
         for source_id in IgnoredDevice.objects.filter(profile=profile).values_list("source_id", flat=True)
     )
-    source_id_counts = {}
+    source_id_rows = {}
     rack_name_counts = {}
     for row in rows:
         source_id = _str_val(row.get("source_id"))
@@ -4205,7 +4231,7 @@ def run_import(
             continue
         if crm.creates_rack:
             if source_id:
-                source_id_counts[source_id] = source_id_counts.get(source_id, 0) + 1
+                source_id_rows.setdefault(source_id, []).append(row["_row_number"])
             rack_name = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
             if rack_name:
                 rack_key = _identity_text(rack_name)
@@ -4214,7 +4240,10 @@ def run_import(
         if not _is_writing_device_row(row, crm, ignored_source_ids):
             continue
         if source_id:
-            source_id_counts[source_id] = source_id_counts.get(source_id, 0) + 1
+            source_id_rows.setdefault(source_id, []).append(row["_row_number"])
+    duplicate_source_id_rows = {
+        source_id: sorted(numbers) for source_id, numbers in source_id_rows.items() if len(numbers) > 1
+    }
     ctx = ImportContext(
         profile=profile,
         site=context["site"],
@@ -4224,7 +4253,8 @@ def run_import(
         result=ImportResult(),
         user=user,
         expected_intents=expected_intents or {},
-        duplicate_source_ids=frozenset(source_id for source_id, count in source_id_counts.items() if count > 1),
+        duplicate_source_ids=frozenset(duplicate_source_id_rows),
+        duplicate_source_id_rows=duplicate_source_id_rows,
         duplicate_rack_names=frozenset(name for name, count in rack_name_counts.items() if count > 1),
         ignored_source_ids=ignored_source_ids,
         candidate_source_columns=_build_candidate_source_columns(profile),

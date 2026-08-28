@@ -373,7 +373,7 @@
             </tr>
           </thead>
           <tbody id="previewRowsBody">
-            {% for row in result.rows %}
+            {% for row in preview_rows %}
             {# Row numbers repeat across object types, so the id comes from the render order. #}
             <tr id="prow-{{ forloop.counter }}" data-action="{{ row.action }}"
                 data-object-type="{{ row.object_type }}" data-row-number="{{ row.row_number }}" class="
@@ -836,6 +836,52 @@
                             data-source-id="{{ row.source_id }}">
                       <i class="mdi mdi-check-decagram"></i> Pick a value
                     </button>
+                  </div>
+                  {% endif %}
+                  {% if row.extra_data.conflict_rows %}
+                  <div class="mb-2 ndi-conflict-row-detail">
+                    <div class="small mb-1">
+                      <i class="mdi mdi-table-compare text-warning"></i>
+                      Rows in this conflict
+                    </div>
+                    <div class="table-responsive">
+                      <table class="table table-sm table-bordered align-middle mb-1 ndi-conflict-row-table">
+                        <thead>
+                          <tr class="text-muted">
+                            <th>Row</th>
+                            <th>Name</th>
+                            <th>Source ID</th>
+                            <th>Serial</th>
+                            <th>Asset tag</th>
+                            <th>Rack / position</th>
+                            <th>Action / detail</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for conflict_row in row.extra_data.conflict_rows %}
+                          <tr class="ndi-conflict-comparison-row{% if conflict_row.is_current %} table-warning{% endif %}">
+                            <td class="text-nowrap">
+                              Row {{ conflict_row.row_number }}
+                              {% if conflict_row.is_current %}
+                              <span class="badge text-bg-warning">Current row</span>
+                              {% endif %}
+                            </td>
+                            <td>{{ conflict_row.name|default:"—" }}</td>
+                            <td><code class="small">{{ conflict_row.source_id|default:"—" }}</code></td>
+                            <td><code class="small">{{ conflict_row.serial|default:"—" }}</code></td>
+                            <td><code class="small">{{ conflict_row.asset_tag|default:"—" }}</code></td>
+                            <td class="text-nowrap">
+                              {{ conflict_row.rack_name|default:"—" }}{% if conflict_row.u_position %}, U{{ conflict_row.u_position }}{% endif %}{% if conflict_row.face %}, {{ conflict_row.face }}{% endif %}
+                            </td>
+                            <td>
+                              <span class="badge ndi-badge-{{ conflict_row.action }}">{{ conflict_row.action|title }}</span>
+                              <span class="small text-muted">{{ conflict_row.detail }}</span>
+                            </td>
+                          </tr>
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                   {% endif %}
                   {# `netbox_device_id` is set for device rows only, so the summary reads the action. #}
