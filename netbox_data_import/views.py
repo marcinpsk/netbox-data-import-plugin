@@ -57,7 +57,7 @@ from .tables import (
     ImportJobTable,
     ImportProfileTable,
 )
-from . import engine
+from . import engine, ip_assignment
 from .contact_resolution import PrimaryContactResolver, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer
 from .object_permissions import (
@@ -349,11 +349,7 @@ def _validate_model_instance(instance, label):
 
 
 def _legacy_adapter_config(profile_data):
-    """Return the pre-cutover scalar keys rewritten as a flat-workbook adapter configuration.
-
-    Releases up to 1.5.2 exported these settings as top-level `profile` keys. Database rows were
-    moved into `adapter_config` by migration 0022; an exported file has no such upgrade path.
-    """
+    """Return the top-level `profile` keys releases up to 1.5.2 exported, as adapter configuration."""
     from .adapter_forms import FlatWorkbookConfigForm
 
     # The legacy keys are exactly the flat-workbook adapter's own settings.
@@ -858,8 +854,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
             engine.derive_effective_rows(rows, profile), profile, context, dry_run=True, user=request.user
         )
 
-        # The session keeps the pristine parsed rows; every reader derives from them.
-        # Rows need JSON-safe serialization (handle datetime from Excel)
+        # The session keeps the pristine parsed rows, JSON-safe; every reader derives from them.
         record_recalculated_preview(request.session, result)
         request.session["import_rows"] = _serialize_rows(rows)
         request.session["import_context"] = {
@@ -921,7 +916,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.error(request, "; ".join(exc.messages))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        target = _resolved_import_target(ctx)
+        target = _resolved_import_target(ctx, request.user)
         if target is None:
             _discard_import_preview(request)
             messages.warning(request, "The saved import target is no longer available. Start a new preview.")
@@ -933,8 +928,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             result = engine.ImportResult.from_session_dict(stored_result)
         else:
             context_obj = {"site": site, "location": location, "tenant": tenant}
-            # Derived, never stored: writing this back would bake the resolution into the session
-            # and stop a later edit from dropping a field.
+            # Derived, never stored: writing it back would bake the resolution in and block a later edit.
             rows = engine.derive_effective_rows(rows, profile)
             result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
             record_recalculated_preview(request.session, result)
@@ -995,6 +989,8 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         conflicts_by_row = {
             str(r.row_number): r.extra_data.get("conflicts", {}) for r in result.rows if r.extra_data.get("conflicts")
         }
+        # The modal names a field for the operator; the catalog is where those names live.
+        target_field_labels = {key: CATALOG.display(key) for key, _label in CATALOG.choices()}
         candidate_values_by_row = {
             str(r.row_number): r.extra_data.get("candidate_values", {})
             for r in result.rows
@@ -1061,6 +1057,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_match_source_ids": device_match_source_ids,
                 "device_match_info": device_match_info,
                 "conflicts_by_row": conflicts_by_row,
+                "target_field_labels": target_field_labels,
                 "candidate_values_by_row": candidate_values_by_row,
                 "contact_suggestions_by_row": contact_suggestions_by_row,
                 "contact_role_suggestions_by_row": contact_role_suggestions_by_row,
@@ -1538,14 +1535,21 @@ def _preview_action_error(request, next_url, message, *, status=409):
     return redirect(next_url)
 
 
-def _resolved_import_target(ctx_data):
-    """Return the engine context the saved import names, or None once that target went stale."""
+def _resolved_import_target(ctx_data, user):
+    """Return the engine context the saved import names, or None once that target went stale.
+
+    The session outlives a permission change, so each request re-reads the target in the operator's
+    own scope: a revoked ObjectPermission has to make the target unavailable, not merely unlisted.
+    """
     from dcim.models import Location, Site
     from tenancy.models import Tenant
 
-    site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
-    location = Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
-    tenant = Tenant.objects.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
+    sites = Site.objects.restrict(user, "view")
+    locations = Location.objects.restrict(user, "view")
+    tenants = Tenant.objects.restrict(user, "view")
+    site = sites.filter(pk=ctx_data.get("site_id")).first()
+    location = locations.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
+    tenant = tenants.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
     if (
         site is None
         or (ctx_data.get("location_id") and (location is None or location.site_id != site.pk))
@@ -2095,7 +2099,8 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     permission_required = "dcim.change_device"
 
-    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face"}
+    _IP_FIELDS = ("primary_ip4", "primary_ip6", "oob_ip")
+    _ALLOWED_FIELDS = {"device_name", "u_position", "status", "serial", "asset_tag", "face", "airflow", *_IP_FIELDS}
 
     def post(self, request):
         """Apply one previewed field value to its matched Device."""
@@ -2124,10 +2129,9 @@ class SyncDeviceFieldView(_AjaxPermissionView):
                 return JsonResponse({"ok": False, "error": "Device not found"})
 
         try:
-            # The write carries its own transaction: nothing wraps this request, and a receiver
-            # on the model can require one.
+            # Nothing wraps this request, and a receiver on the model can require a transaction.
             with transaction.atomic():
-                display = self._apply_field(device, field, value, _STATUS_MAP)
+                display = self._apply_field(device, field, value, _STATUS_MAP, request.user)
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
@@ -2157,66 +2161,116 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             raise ValueError(f"The {label} is {len(text)} characters; NetBox allows {limit}.")
         return text
 
-    def _apply_field(self, device, field, value, status_map):
-        if field == "device_name":
-            new_name = self._writer_safe_text(device, "device name", "name", value)
-            if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
-                raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
-            device.name = new_name
-            device.save(update_fields=["name"])
-            return new_name
+    def _apply_field(self, device, field, value, status_map, user):
+        """Write one previewed value onto the device, through that field's own writer."""
+        if field in self._IP_FIELDS:
+            return self._apply_ip_field(device, field, value, user)
+        writer = {
+            "airflow": lambda: self._apply_airflow(device, value),
+            "device_name": lambda: self._apply_device_name(device, value),
+            "u_position": lambda: self._apply_u_position(device, value),
+            "status": lambda: self._apply_status(device, value, status_map),
+            "serial": lambda: self._apply_serial(device, value),
+            "asset_tag": lambda: self._apply_asset_tag(device, value),
+            "face": lambda: self._apply_face(device, value),
+        }.get(field)
+        if writer is None:
+            raise ValueError(f"Field '{field}' is not syncable")
+        return writer()
 
-        if field == "u_position":
-            pos = engine._coerce_position(value)
-            if pos is None:
-                raise ValueError(f"Cannot parse '{value}' as a finite number for u_position")
-            zero_u_type = _zero_u_device_type(device)
-            if zero_u_type:
-                raise ValueError(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
-            device.position = pos
-            self._reject_invalid_placement(device)
-            device.save(update_fields=["position"])
-            return f"U{device.position}"
+    def _apply_device_name(self, device, value):
+        new_name = self._writer_safe_text(device, "device name", "name", value)
+        if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
+            raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
+        device.name = new_name
+        device.save(update_fields=["name"])
+        return new_name
 
-        if field == "status":
-            v = str(value).strip().lower()
-            mapped = status_map.get(v)
-            # Also accept NetBox status slugs directly (e.g. "active", "offline")
-            if mapped is None and v in status_map.values():
-                mapped = v
-            if mapped is None:
-                raise ValueError(f"Unknown status value '{value}'")
-            device.status = mapped
-            device.save(update_fields=["status"])
-            return device.status
+    def _apply_u_position(self, device, value):
+        pos = engine._coerce_position(value)
+        if pos is None:
+            raise ValueError(f"Cannot parse '{value}' as a finite number for u_position")
+        zero_u_type = _zero_u_device_type(device)
+        if zero_u_type:
+            raise ValueError(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
+        device.position = pos
+        self._reject_invalid_placement(device)
+        device.save(update_fields=["position"])
+        return f"U{device.position}"
 
-        if field == "serial":
-            device.serial = self._writer_safe_text(device, "serial", "serial", value)
-            device.save(update_fields=["serial"])
-            return device.serial
+    @staticmethod
+    def _apply_status(device, value, status_map):
+        text = str(value).strip().lower()
+        # A NetBox status slug is accepted directly too (for example "active", "offline").
+        mapped = status_map.get(text) or (text if text in set(status_map.values()) else None)
+        if mapped is None:
+            raise ValueError(f"Unknown status value '{value}'")
+        device.status = mapped
+        device.save(update_fields=["status"])
+        return device.status
 
-        if field == "asset_tag":
-            device.asset_tag = self._writer_safe_text(device, "asset tag", "asset_tag", value) if value else None
-            device.save(update_fields=["asset_tag"])
-            return device.asset_tag
+    def _apply_serial(self, device, value):
+        device.serial = self._writer_safe_text(device, "serial", "serial", value)
+        device.save(update_fields=["serial"])
+        return device.serial
 
-        if field == "face":
-            if device.rack_id is None:
-                raise ValueError(
-                    "Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement."
-                )
-            zero_u_type = _zero_u_device_type(device)
-            if zero_u_type:
-                raise ValueError(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
-            mapped = _FACE_MAP.get(str(value).strip().lower())
-            if mapped is None:
-                raise ValueError(f"Unknown face value '{value}' — expected 'front' or 'rear'")
-            device.face = mapped
-            self._reject_invalid_placement(device)
-            device.save(update_fields=["face"])
-            return device.face
+    def _apply_asset_tag(self, device, value):
+        device.asset_tag = self._writer_safe_text(device, "asset tag", "asset_tag", value) if value else None
+        device.save(update_fields=["asset_tag"])
+        return device.asset_tag
 
-        raise ValueError(f"Field '{field}' is not syncable")
+    def _apply_face(self, device, value):
+        if device.rack_id is None:
+            raise ValueError("Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement.")
+        zero_u_type = _zero_u_device_type(device)
+        if zero_u_type:
+            raise ValueError(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
+        mapped = _FACE_MAP.get(str(value).strip().lower())
+        if mapped is None:
+            raise ValueError(f"Unknown face value '{value}' — expected 'front' or 'rear'")
+        device.face = mapped
+        self._reject_invalid_placement(device)
+        device.save(update_fields=["face"])
+        return device.face
+
+    @staticmethod
+    def _apply_airflow(device, value):
+        """Write the airflow the source row states, in the wording the importer already reads."""
+        _side, airflow_map, _status = engine._get_translation_maps()
+        text = str(value).strip().lower()
+        mapped = airflow_map.get(text)
+        # The stored value is also accepted, so a row already carrying one syncs as it stands.
+        if mapped is None and text in set(airflow_map.values()):
+            mapped = text
+        if mapped is None:
+            raise ValueError(f"Unknown airflow value '{value}'")
+        device.airflow = mapped
+        device.save(update_fields=["airflow"])
+        return device.airflow
+
+    def _apply_ip_field(self, device, field, value, user):
+        """Point one of the device's IP fields at the address the source row carries."""
+        try:
+            target = ip_assignment.resolve(device, field, value)
+        except ip_assignment.IPAssignmentError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if target.already_held:
+            # The device carries it already, so only the field moves. No IPAM row is written.
+            if getattr(device, f"{field}_id", None) != target.existing.pk:
+                setattr(device, field, target.existing)
+                device.save(update_fields=[field])
+            return target.summary
+
+        try:
+            address = ip_assignment.apply(target, user)
+        except ValidationError as exc:
+            raise ValueError("; ".join(exc.messages)) from exc
+        except ObjectPermissionDenied as exc:
+            raise ValueError(f"Permission denied: {exc} for this IP address.") from exc
+        setattr(device, field, address)
+        device.save(update_fields=[field])
+        return f"{address.address} on {target.interface.name}"
 
     @staticmethod
     def _reject_invalid_placement(device) -> None:
@@ -2452,7 +2506,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
             with locked_profile_policy(profile.pk):
                 # Read the target and the claims under the lock: a name saved between the check and
                 # the write would otherwise let two source rows resolve to the same device name.
-                target = _resolved_import_target(ctx_data)
+                target = _resolved_import_target(ctx_data, request.user)
                 if target is None:
                     refusal = "The saved import target is no longer available. Start a new preview."
                 else:
@@ -2535,7 +2589,7 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
                 held_since = time.monotonic()
                 # Read the target and re-judge the collision under the lock. Only the engine knows
                 # which rows it will create, and a serial match alone also counts rows it skips.
-                target = _resolved_import_target(ctx_data)
+                target = _resolved_import_target(ctx_data, request.user)
                 if target is None:
                     refusal = "The saved import target is no longer available. Start a new preview."
                 else:
@@ -3850,19 +3904,18 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
             messages.error(request, "The selected profile is not the active import profile.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        from dcim.models import Site
-
-        site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
-        if site is None:
-            messages.error(request, "The active import site was not found.")
+        target = _resolved_import_target(ctx_data, request.user)
+        if target is None:
+            messages.error(request, "The saved import target is no longer available. Start a new preview.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        site = target["site"]
+        tenant_id = target["tenant"].pk if target["tenant"] else None
         visible_devices = Device.objects.restrict(request.user, "view")
 
         ignored_source_ids = set(profile.ignored_devices.values_list("source_id", flat=True))
         class_mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         eligible_rows = []
-        # Match on the resolved identity: binding a source ID to the pristine name would override
-        # the resolution the operator approved in the preview.
+        # Match on the resolved identity: the pristine name would override the approved resolution.
         for row in engine.derive_effective_rows(rows, profile):
             source_id = engine._str_val(row.get("source_id"))
             mapping = class_mappings.get(engine._str_val(row.get("device_class")))
@@ -3928,7 +3981,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
                 safe_serial,
                 safe_asset_tag,
                 site=site,
-                tenant_id=ctx_data.get("tenant_id"),
+                tenant_id=tenant_id,
                 device_queryset=visible_devices,
             )
             if is_ambiguous:
@@ -4013,8 +4066,6 @@ class SyncSingleRowView(_AjaxPermissionView):
         """Execute a single import row identified by ``row_number`` and return JSON."""
         from django.db import transaction
         from django.http import JsonResponse
-        from dcim.models import Location, Site
-        from tenancy.models import Tenant
 
         rows = request.session.get("import_rows")
         ctx_data = request.session.get("import_context")
@@ -4064,15 +4115,12 @@ class SyncSingleRowView(_AjaxPermissionView):
                 status=400,
             )
 
-        site = Site.objects.filter(pk=ctx_data.get("site_id")).first()
-        if not site:
-            return JsonResponse({"ok": False, "error": "Site not found"}, status=400)
-
-        location = (
-            Location.objects.filter(pk=ctx_data.get("location_id")).first() if ctx_data.get("location_id") else None
-        )
-        tenant = Tenant.objects.filter(pk=ctx_data.get("tenant_id")).first() if ctx_data.get("tenant_id") else None
-        context = {"site": site, "location": location, "tenant": tenant}
+        context = _resolved_import_target(ctx_data, request.user)
+        if context is None:
+            return JsonResponse(
+                {"ok": False, "error": "The saved import target is no longer available. Start a new preview."},
+                status=400,
+            )
 
         try:
             with transaction.atomic():

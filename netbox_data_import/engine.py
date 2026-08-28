@@ -606,27 +606,40 @@ def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
     return result
 
 
-def _parse_ip_with_prefix(raw_value: str) -> str | None:
-    """Parse an IP address string, adding /32 or /128 prefix if absent.
+# Bounded so a word cannot leave a shorter valid address: `2001:db8::1backup` -> `2001:db8::1bac`.
+_IP_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f:.]+(?:/\d{1,3})?(?![0-9A-Za-z])")
 
-    Returns a normalised 'address/prefix' string or None if unparseable.
-    """
+
+def _normalized_ip(token: str) -> str | None:
+    """Return *token* as 'address/prefix', or None when it is not one address."""
     import ipaddress
 
+    try:
+        if "/" in token:
+            return str(ipaddress.ip_interface(token))
+        addr = ipaddress.ip_address(token)
+    except ValueError:
+        return None
+    return f"{addr}/32" if addr.version == 4 else f"{addr}/128"
+
+
+def _parse_ip_with_prefix(raw_value: str) -> str | None:
+    """Return the one address a source value names, as 'address/prefix', or None.
+
+    Sources export an address inside a label or with a separator appended, so the whole value is
+    tried first and the addresses spelled inside it only after that.
+    """
     raw = str(raw_value).strip()
     if not raw:
         return None
-    try:
-        # Try parsing as IP network (accepts CIDR notation)
-        if "/" in raw:
-            net = ipaddress.ip_interface(raw)
-            return str(net)
-        else:
-            addr = ipaddress.ip_address(raw)
-            prefix = "/32" if addr.version == 4 else "/128"
-            return f"{addr}{prefix}"
-    except ValueError:
-        return None
+    whole = _normalized_ip(raw)
+    if whole is not None:
+        return whole
+    for token in _IP_TOKEN.findall(raw):
+        found = _normalized_ip(token)
+        if found is not None:
+            return found
+    return None
 
 
 def _normalize_mapping_text(value: str) -> str:
@@ -1910,6 +1923,7 @@ def _compute_field_diff(  # noqa: C901
     role_slug=_NOT_PROVIDED,
     tenant=_NOT_PROVIDED,
     location=_NOT_PROVIDED,
+    ip_fields=None,
 ):
     """Return a dict of fields that differ between the XLS row and the existing NetBox device."""
     proposal = {
@@ -1937,6 +1951,7 @@ def _compute_field_diff(  # noqa: C901
         proposal["tenant"] = tenant
     if location is not _NOT_PROVIDED:
         proposal["location"] = location
+    proposal.update(ip_fields or {})
     return DeviceFieldReviewer.field_diff(
         matched_device,
         proposal,
@@ -1964,6 +1979,7 @@ def _review_device_proposal(
     make,
     model,
     role_slug=_NOT_PROVIDED,
+    ip_fields=None,
 ):
     """Review one matched Device proposal and return its effective write values."""
     if ctx.field_reviewer is None:
@@ -1984,6 +2000,7 @@ def _review_device_proposal(
                 "role": role_slug,
                 "tenant": ctx.tenant,
                 "location": ctx.location,
+                **(ip_fields or {}),
             },
         )
     proposal = {
@@ -2000,6 +2017,7 @@ def _review_device_proposal(
         "device_type": (mfg_slug, dt_slug, make, model),
         "tenant": ctx.tenant,
         "location": ctx.location,
+        **(ip_fields or {}),
     }
     if role_slug is not _NOT_PROVIDED:
         proposal["role"] = role_slug
@@ -2016,6 +2034,22 @@ def _review_device_proposal(
         tenant=effective.get("tenant", ctx.tenant),
     )
     return review, effective_ctx, effective
+
+
+def _annotate_ip_sync_targets(matched_device, field_diff) -> None:
+    """Say where each differing address would land, so the row states it before it is clicked."""
+    from . import ip_assignment
+
+    if matched_device is None or not field_diff:
+        return
+    for ip_field in ip_assignment.IP_FIELD_FAMILY:
+        values = field_diff.get(ip_field)
+        if not isinstance(values, dict) or not values.get("file"):
+            continue
+        try:
+            values["ip_target"] = ip_assignment.resolve(matched_device, ip_field, values["file"]).placement
+        except ip_assignment.IPAssignmentError as exc:
+            values["ip_target"] = str(exc)
 
 
 def _reviewed_rack(review, matched_device):
@@ -2488,6 +2522,7 @@ def _preview_device_row(  # noqa: C901
             make=make,
             model=model,
             role_slug=role_slug,
+            ip_fields=ip_fields,
         )
         rack_name = effective["rack_name"]
         serial = effective["serial"]
@@ -2667,6 +2702,7 @@ def _preview_device_row(  # noqa: C901
                 role_slug=role_slug,
                 tenant=review_ctx.tenant,
                 location=review_ctx.location,
+                ip_fields=ip_fields,
             )
         else:
             field_diff = {**review.differing, **review.informational}
@@ -2682,6 +2718,7 @@ def _preview_device_row(  # noqa: C901
                 for field_name, (file_snapshot, netbox_snapshot) in review.snapshots.items()
             }
 
+    _annotate_ip_sync_targets(matched_device, field_diff)
     reviewed_rack = _reviewed_rack(review, matched_device)
     rack_error_extra = {}
     if reviewed_rack is not _NOT_PROVIDED:
@@ -3050,6 +3087,7 @@ def _write_device_row(  # noqa: C901
             make=make,
             model=model,
             role_slug=crm.role_slug,
+            ip_fields=ip_fields,
         )
         rack_name = effective["rack_name"]
         serial = effective["serial"]
@@ -3061,6 +3099,9 @@ def _write_device_row(  # noqa: C901
         effective_type = effective["device_type"]
         mfg_slug, dt_slug = effective_type[:2]
         role_slug = effective["role"]
+        # An ignored difference means leave the field alone; the writer reads these separately.
+        if review is not None:
+            ip_fields = {name: value for name, value in (ip_fields or {}).items() if name not in review.ignored}
         if review is not None and "device_type" in review.ignored:
             device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
             if device_type is None:
@@ -3286,7 +3327,7 @@ def _write_device_row(  # noqa: C901
                     device.save()
                     _bind_device_source(ctx.profile, source_id, device, asset_tag)
                     for ip_field, ip_str in (ip_fields or {}).items():
-                        assigned = _assign_ip_to_device(device, ip_field, ip_str)
+                        assigned = _assign_ip_to_device(device, ip_field, ip_str, ctx.user)
                         if not assigned:
                             ip_json[ip_field] = ip_str
                     PrimaryContactResolver.apply(device, ctx.profile, contact_review, ctx.user)
@@ -3361,7 +3402,7 @@ def _write_device_row(  # noqa: C901
         )
     if ctx.user is not None and not ctx.user.has_perm("dcim.add_device"):
         return _perm_denied_row("dcim.add_device", row, device_name, "device")
-    ip_json = {ip_field: ip_str for ip_field, ip_str in (ip_fields or {}).items()}
+    ip_json = {}
     try:
         contact_review = PrimaryContactResolver.review(
             None,
@@ -3389,6 +3430,10 @@ def _write_device_row(  # noqa: C901
             device.full_clean()
             device.save()
             _bind_device_source(ctx.profile, source_id, device, asset_tag)
+            # Device.save() instantiates the type's interface templates, so an address can land now.
+            for ip_field, ip_str in (ip_fields or {}).items():
+                if not _assign_ip_to_device(device, ip_field, ip_str, ctx.user):
+                    ip_json[ip_field] = ip_str
             PrimaryContactResolver.apply(device, ctx.profile, contact_review, ctx.user)
             _store_source_id(
                 device,
@@ -3419,43 +3464,26 @@ def _write_device_row(  # noqa: C901
     )
 
 
-def _assign_ip_to_device(device, ip_field: str, ip_str: str):
-    """Attempt to assign an IP natively to a device; returns True on success.
+def _assign_ip_to_device(device, ip_field: str, ip_str: str, user=None):
+    """Put one address on an interface of *device*; return whether it landed.
 
-    For existing devices: search interfaces for a subnet containing ip_str.
-    If found, create/get the IPAddress and set it on the device field.
-    If not found, returns False (caller should store in JSON).
+    False means there is nowhere to put it, and the caller records the value as unassigned so the
+    row does not lose it. The preview names the same interface through the same resolver.
     """
-    from ipam.models import IPAddress
-    import ipaddress
+    from . import ip_assignment
 
     try:
-        target_interface = ipaddress.ip_interface(ip_str)
-    except ValueError:
+        target = ip_assignment.resolve(device, ip_field, ip_str)
+    except ip_assignment.IPAssignmentError:
         return False
-
-    # Search device interfaces for one whose assigned IPs or subnet matches
-    for iface in device.interfaces.prefetch_related("ip_addresses").all():
-        for existing_ip in iface.ip_addresses.all():
-            try:
-                existing_net = ipaddress.ip_interface(str(existing_ip.address)).network
-                if target_interface.ip in existing_net:
-                    # Found a matching interface - handle IPAddress safely
-                    vrf = getattr(iface, "vrf", None)
-                    ip_obj = IPAddress.objects.filter(address=ip_str, vrf=vrf).first()
-                    if ip_obj is None:
-                        ip_obj = IPAddress.objects.create(address=ip_str, assigned_object=iface, vrf=vrf)
-                    elif ip_obj.assigned_object is None:
-                        ip_obj.assigned_object = iface
-                        ip_obj.save(update_fields=["assigned_object_type", "assigned_object_id"])
-                    elif getattr(ip_obj.assigned_object, "device_id", None) != device.pk:
-                        return False
-                    setattr(device, ip_field, ip_obj)
-                    device.save(update_fields=[ip_field])
-                    return True
-            except (ValueError, AttributeError):
-                continue
-    return False
+    if target.already_held:
+        if getattr(device, f"{ip_field}_id", None) != target.existing.pk:
+            setattr(device, ip_field, target.existing)
+            device.save(update_fields=[ip_field])
+        return True
+    setattr(device, ip_field, ip_assignment.apply(target, user))
+    device.save(update_fields=[ip_field])
+    return True
 
 
 def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901

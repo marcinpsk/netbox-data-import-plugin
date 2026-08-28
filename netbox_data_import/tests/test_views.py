@@ -4151,6 +4151,365 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertIn("already exists", data["error"])
 
 
+class SyncAirflowAndIPTests(TestCase):
+    """Airflow and the IP fields are written by the import, so the preview can sync them too."""
+
+    def setUp(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        self.user = User.objects.create_superuser("testuser_ipsync", "ipsync@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="testuser_ipsync", password="testpass")
+
+        self.site = Site.objects.create(name="IP Sync Site", slug="ip-sync-site")
+        manufacturer = Manufacturer.objects.create(name="IP Sync Mfg", slug="ip-sync-mfg")
+        self.device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="IP Sync Model", slug="ip-sync-model", u_height=1
+        )
+        role = DeviceRole.objects.create(name="IP Sync Role", slug="ip-sync-role")
+        self.device = Device.objects.create(
+            name="ip-sync-device", site=self.site, device_type=self.device_type, role=role
+        )
+        self.url = reverse("plugins:netbox_data_import:sync_device_field")
+
+    def _sync(self, field, value):
+        return self.client.post(self.url, {"device_id": self.device.pk, "field": field, "value": value})
+
+    def _add_interface(self, name, *, mgmt_only=False):
+        from dcim.models import Interface
+
+        return Interface.objects.create(device=self.device, name=name, type="1000base-t", mgmt_only=mgmt_only)
+
+    def test_airflow_is_syncable(self):
+        """The import writes airflow, so a differing row must offer more than `(manual)`."""
+        response = self._sync("airflow", "front-to-rear")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.airflow, "front-to-rear")
+
+    def test_airflow_accepts_the_wording_the_source_file_uses(self):
+        """The workbook says `Front to Back`, which is what the importer already translates."""
+        response = self._sync("airflow", "Front to Back")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.airflow, "front-to-rear")
+
+    def test_an_unknown_airflow_value_is_refused(self):
+        response = self._sync("airflow", "sideways")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("sideways", response.json()["error"])
+
+    def test_the_ip_lands_on_the_management_interface_first(self):
+        """A management interface is what an address off the source file usually belongs on."""
+        self._add_interface("ge-0/0/0")
+        mgmt = self._add_interface("mgmt0", mgmt_only=True)
+
+        response = self._sync("primary_ip4", "192.0.2.10/32")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.10/32")
+        self.assertEqual(self.device.primary_ip4.assigned_object, mgmt)
+        self.assertIn("mgmt0", response.json()["display"])
+
+    def test_the_ip_falls_back_to_the_only_interface_there_is(self):
+        """A device type that marks nothing as management still has somewhere to put it."""
+        only = self._add_interface("eth0")
+
+        response = self._sync("primary_ip4", "192.0.2.11/32")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.assigned_object, only)
+
+    def test_a_device_type_declaring_no_interfaces_reports_what_to_fix(self):
+        """The operator can only fix this on the device type, so the error has to name it."""
+        response = self._sync("primary_ip4", "192.0.2.12/32")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("IP Sync Model", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip4)
+
+    def test_a_device_missing_the_interfaces_its_type_declares_reports_that_instead(self):
+        """The type is right and the device is behind it, which is a different repair."""
+        from dcim.models import InterfaceTemplate
+
+        InterfaceTemplate.objects.create(device_type=self.device_type, name="mgmt0", type="1000base-t")
+
+        response = self._sync("primary_ip4", "192.0.2.13/32")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("mgmt0", response.json()["error"])
+
+    def test_an_address_another_device_already_holds_is_refused(self):
+        """Moving it would silently take the address off the other device."""
+        from dcim.models import Device, DeviceRole, Interface
+        from ipam.models import IPAddress
+
+        other = Device.objects.create(
+            name="ip-sync-other",
+            site=self.site,
+            device_type=self.device_type,
+            role=DeviceRole.objects.get(slug="ip-sync-role"),
+        )
+        other_iface = Interface.objects.create(device=other, name="eth0", type="1000base-t")
+        IPAddress.objects.create(address="192.0.2.14/32", assigned_object=other_iface)
+        self._add_interface("eth0")
+
+        response = self._sync("primary_ip4", "192.0.2.14/32")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("ip-sync-other", response.json()["error"])
+
+    def test_an_unassigned_address_that_already_exists_is_reused(self):
+        """NetBox refuses a duplicate address, so creating a second one would just fail."""
+        from ipam.models import IPAddress
+
+        existing = IPAddress.objects.create(address="192.0.2.15/32")
+        iface = self._add_interface("eth0")
+
+        response = self._sync("primary_ip4", "192.0.2.15/32")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        existing.refresh_from_db()
+        self.assertEqual(existing.assigned_object, iface)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.pk, existing.pk)
+
+    def test_an_address_the_source_buried_in_a_label_still_syncs(self):
+        """The preview recovers it, so the sync has to accept the same value."""
+        iface = self._add_interface("eth0")
+
+        response = self._sync("primary_ip4", "Site_Mgmt - 512 - 192.0.2.16")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.16/32")
+        self.assertEqual(self.device.primary_ip4.assigned_object, iface)
+
+    def test_an_address_already_on_another_interface_of_this_device_is_promoted(self):
+        """The device already holds it, just not as this field. Re-creating it would duplicate."""
+        from ipam.models import IPAddress
+
+        self._add_interface("mgmt0", mgmt_only=True)
+        data_iface = self._add_interface("eth1")
+        existing = IPAddress.objects.create(address="192.0.2.20/32", assigned_object=data_iface)
+
+        response = self._sync("primary_ip4", "192.0.2.20/32")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.pk, existing.pk)
+        existing.refresh_from_db()
+        self.assertEqual(existing.assigned_object, data_iface, "the address must not move interface")
+        self.assertEqual(IPAddress.objects.filter(address="192.0.2.20/32").count(), 1)
+        self.assertIn("eth1", response.json()["display"])
+
+    def test_an_address_the_device_holds_as_its_out_of_band_ip_is_reused(self):
+        """The same address can be the OOB IP and the primary; it is still one IPAddress row."""
+        from ipam.models import IPAddress
+
+        iface = self._add_interface("mgmt0", mgmt_only=True)
+        existing = IPAddress.objects.create(address="192.0.2.21/32", assigned_object=iface)
+        self.device.oob_ip = existing
+        self.device.save(update_fields=["oob_ip"])
+
+        response = self._sync("primary_ip4", "192.0.2.21/32")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.pk, existing.pk)
+        self.assertEqual(IPAddress.objects.filter(address="192.0.2.21/32").count(), 1)
+
+    def test_an_address_the_device_holds_under_a_different_mask_is_reused(self):
+        """The workbook states a bare address, which the preview reads as /32.
+
+        The device holds the same host inside its real subnet. Creating a second IPAddress for it
+        would split one address across two rows and leave NetBox reporting a duplicate.
+        """
+        from ipam.models import IPAddress
+
+        iface = self._add_interface("mgmt0", mgmt_only=True)
+        existing = IPAddress.objects.create(address="192.0.2.24/24", assigned_object=iface)
+
+        response = self._sync("primary_ip4", "192.0.2.24")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.pk, existing.pk)
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.24/24")
+        self.assertEqual(IPAddress.objects.filter(address__net_host="192.0.2.24").count(), 1)
+
+    def test_an_address_the_field_already_carries_is_a_no_op(self):
+        """Nothing to write, and the answer has to say so rather than report a change."""
+        from ipam.models import IPAddress
+
+        iface = self._add_interface("mgmt0", mgmt_only=True)
+        existing = IPAddress.objects.create(address="192.0.2.22/32", assigned_object=iface)
+        self.device.primary_ip4 = existing
+        self.device.save(update_fields=["primary_ip4"])
+
+        response = self._sync("primary_ip4", "192.0.2.22/32")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.pk, existing.pk)
+        self.assertEqual(IPAddress.objects.filter(address="192.0.2.22/32").count(), 1)
+
+    def test_an_address_on_a_device_interface_is_kept_even_with_no_management_interface(self):
+        """The lookup runs before the interface choice, so ordering cannot move a held address."""
+        from ipam.models import IPAddress
+
+        data_iface = self._add_interface("eth0")
+        existing = IPAddress.objects.create(address="192.0.2.23/32", assigned_object=data_iface)
+        self._add_interface("mgmt0", mgmt_only=True)
+
+        response = self._sync("primary_ip4", "192.0.2.23/32")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        existing.refresh_from_db()
+        self.assertEqual(existing.assigned_object, data_iface)
+
+    def test_a_value_carrying_no_address_is_refused(self):
+        self._add_interface("eth0")
+
+        response = self._sync("primary_ip4", "not-an-address")
+
+        self.assertFalse(response.json()["ok"])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip4)
+
+    def test_the_out_of_band_field_uses_the_same_path(self):
+        iface = self._add_interface("eth0")
+
+        response = self._sync("oob_ip", "192.0.2.17/32")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.oob_ip.assigned_object, iface)
+
+
+class SyncIPSafetyTests(TestCase):
+    """The sync writes IPAM, so it has to refuse what NetBox itself would refuse."""
+
+    def setUp(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
+
+        self.user = User.objects.create_superuser("testuser_ipsafe", "ipsafe@example.com", "testpass")
+        self.client = Client()
+        self.client.login(username="testuser_ipsafe", password="testpass")
+        self.site = Site.objects.create(name="IP Safety Site", slug="ip-safety-site")
+        manufacturer = Manufacturer.objects.create(name="IP Safety Mfg", slug="ip-safety-mfg")
+        self.device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="IP Safety Model", slug="ip-safety-model", u_height=1
+        )
+        self.role = DeviceRole.objects.create(name="IP Safety Role", slug="ip-safety-role")
+        self.device = Device.objects.create(
+            name="ip-safety-device", site=self.site, device_type=self.device_type, role=self.role
+        )
+        self.iface = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        self.url = reverse("plugins:netbox_data_import:sync_device_field")
+
+    def _sync(self, field, value):
+        return self.client.post(self.url, {"device_id": self.device.pk, "field": field, "value": value})
+
+    def test_an_ipv6_address_is_refused_for_the_ipv4_field(self):
+        """NetBox stores the family in the field name; this would persist a v6 value in it."""
+        response = self._sync("primary_ip4", "2001:db8::1")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("IPv4", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip4)
+
+    def test_an_ipv4_address_is_refused_for_the_ipv6_field(self):
+        response = self._sync("primary_ip6", "192.0.2.1")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("IPv6", response.json()["error"])
+
+    def test_the_out_of_band_field_takes_either_family(self):
+        """NetBox puts no family on this field, so neither does the sync."""
+        response = self._sync("oob_ip", "2001:db8::2")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.oob_ip.address), "2001:db8::2/128")
+
+    def test_an_address_the_device_points_at_but_no_interface_holds_is_repaired(self):
+        """NetBox requires the field's address to sit on an interface of that device.
+
+        A row written before that rule was enforced leaves the device pointing at an unassigned
+        address. Promoting it onto a second field would persist a state NetBox's own forms refuse.
+        """
+        from ipam.models import IPAddress
+
+        stranded = IPAddress.objects.create(address="192.0.2.77/32")
+        self.device.oob_ip = stranded
+        self.device.save(update_fields=["oob_ip"])
+
+        response = self._sync("primary_ip4", "192.0.2.77")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        stranded.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.pk, stranded.pk)
+        self.assertEqual(stranded.assigned_object, self.iface, "the address must be put on an interface")
+        self.assertEqual(IPAddress.objects.filter(address__net_host="192.0.2.77").count(), 1)
+
+    def test_the_same_host_under_another_prefix_is_not_duplicated(self):
+        """The workbook states a bare address; another device already holds it inside its subnet."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        other = Device.objects.create(
+            name="ip-safety-other", site=self.site, device_type=self.device_type, role=self.role
+        )
+        other_iface = Interface.objects.create(device=other, name="eth0", type="1000base-t")
+        IPAddress.objects.create(address="192.0.2.44/24", assigned_object=other_iface)
+
+        response = self._sync("primary_ip4", "192.0.2.44")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("ip-safety-other", response.json()["error"])
+        self.assertEqual(IPAddress.objects.filter(address__net_host="192.0.2.44").count(), 1)
+
+    def test_the_same_host_in_another_vrf_is_a_different_address(self):
+        """VRFs make the host ambiguous, so a row from another VRF must not be taken."""
+        from ipam.models import VRF, IPAddress
+
+        other_vrf = VRF.objects.create(name="IP Safety VRF B")
+        stray = IPAddress.objects.create(address="192.0.2.55/32", vrf=other_vrf)
+
+        response = self._sync("primary_ip4", "192.0.2.55")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertNotEqual(self.device.primary_ip4.pk, stray.pk)
+        self.assertIsNone(self.device.primary_ip4.vrf)
+        stray.refresh_from_db()
+        self.assertIsNone(stray.assigned_object)
+
+    def test_the_interface_vrf_scopes_the_address_it_creates(self):
+        """An address on a VRF interface belongs to that VRF, or it is a different address."""
+        from ipam.models import VRF
+
+        vrf = VRF.objects.create(name="IP Safety VRF A")
+        self.iface.vrf = vrf
+        self.iface.save(update_fields=["vrf"])
+
+        response = self._sync("primary_ip4", "192.0.2.66")
+
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.primary_ip4.vrf, vrf)
+
+
 class SyncRackAndPlacementTests(TestCase):
     """Tests for rack_name sync, face dependency guard, and SyncPlacementView."""
 

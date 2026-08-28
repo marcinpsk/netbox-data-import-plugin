@@ -192,6 +192,216 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             "a refused field review must not leave the device binding behind",
         )
 
+    def _row_with_an_ip(self, address="192.0.2.10"):
+        """Return the source rows with one mapped IPv4 column."""
+        rows = [dict(self.rows[0])]
+        rows[0]["primary_ip4"] = address
+        return rows
+
+    def _give_the_device_an_address(self, address):
+        """Assign an address on a real interface, the way the writer leaves one."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        interface, _ = Interface.objects.get_or_create(device=self.device, name="mgmt", type="1000base-t")
+        ip = IPAddress.objects.create(address=address, assigned_object=interface)
+        self.device.primary_ip4 = ip
+        self.device.save()
+        return ip
+
+    def test_an_ignored_ip_difference_is_not_written(self):
+        """Ignoring a difference has to stop the write, or the control is a lie."""
+        self._give_the_device_an_address("192.0.2.99/24")
+        rows = self._row_with_an_ip()
+        self._save_rows(rows)
+        self._ignore_and_recalculate(target_field="primary_ip4")
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.99/24")
+
+    def test_an_ip_difference_that_is_not_ignored_is_still_written(self):
+        """The guard must stop the ignored field only, not every address the row carries."""
+        self._give_the_device_an_address("192.0.2.99/24")
+        rows = self._row_with_an_ip()
+        self._save_rows(rows)
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.10/32")
+
+    def test_the_preview_names_the_interface_the_address_would_go_to(self):
+        """Clicking sync should hold no surprise about where the address lands."""
+        from dcim.models import Interface
+
+        Interface.objects.create(device=self.device, name="ge-0/0/0", type="1000base-t")
+        Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        self._save_rows(self._row_with_an_ip("192.0.2.40"))
+
+        _response, row = self._preview_device_row()
+
+        self.assertEqual(row.extra_data["field_diff"]["primary_ip4"]["ip_target"], "would go to mgmt0")
+
+    def test_the_preview_says_where_the_device_already_holds_the_address(self):
+        """The row differs because it is not the primary IP, not because the device lacks it."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        data_iface = Interface.objects.create(device=self.device, name="eth1", type="1000base-t")
+        IPAddress.objects.create(address="192.0.2.41/24", assigned_object=data_iface)
+        self._save_rows(self._row_with_an_ip("192.0.2.41"))
+
+        _response, row = self._preview_device_row()
+
+        self.assertEqual(row.extra_data["field_diff"]["primary_ip4"]["ip_target"], "already on eth1 as 192.0.2.41/24")
+
+    def test_the_preview_says_what_to_fix_when_there_is_nowhere_to_put_it(self):
+        """The operator can see the repair without clicking a button that cannot work."""
+        self._save_rows(self._row_with_an_ip("192.0.2.42"))
+
+        _response, row = self._preview_device_row()
+
+        self.assertIn(self.device.device_type.model, row.extra_data["field_diff"]["primary_ip4"]["ip_target"])
+        self.assertIn("declares no interfaces", row.extra_data["field_diff"]["primary_ip4"]["ip_target"])
+
+    def test_the_preview_renders_the_interface_next_to_the_difference(self):
+        """The hint is only useful where the operator is looking at the difference."""
+        from dcim.models import Interface
+
+        Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        self._save_rows(self._row_with_an_ip("192.0.2.43"))
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, "would go to mgmt0")
+
+    def test_a_full_import_puts_the_address_where_the_preview_said_it_would(self):
+        """The preview names an interface; an import that does something else makes it a lie."""
+        from dcim.models import Interface
+
+        Interface.objects.create(device=self.device, name="ge-0/0/0", type="1000base-t")
+        mgmt = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        rows = self._row_with_an_ip("192.0.2.50")
+        self._save_rows(rows)
+        _response, row = self._preview_device_row()
+        self.assertEqual(row.extra_data["field_diff"]["primary_ip4"]["ip_target"], "would go to mgmt0")
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertIsNotNone(self.device.primary_ip4, "the import must assign the address it previewed")
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.50/32")
+        self.assertEqual(self.device.primary_ip4.assigned_object, mgmt)
+
+    def _create_row_with_an_ip(self, address):
+        """Return one source row for a device that does not exist yet."""
+        row = dict(self.rows[0])
+        row.update({"_row_number": 2, "source_id": "FIELD-REVIEW-NEW", "device_name": "field-review-new"})
+        # A shared serial would auto-match the existing device and take the update branch instead.
+        row["serial"] = ""
+        row["u_position"] = 20
+        row["primary_ip4"] = address
+        return [row]
+
+    def test_a_created_device_gets_the_address_on_its_interface(self):
+        """A create row must place the address as an update row does, not store it unassigned."""
+        from dcim.models import Device, InterfaceTemplate
+
+        from netbox_data_import.models import DeviceImportSource
+
+        InterfaceTemplate.objects.create(device_type=self.device_type, name="mgmt0", type="1000base-t", mgmt_only=True)
+        rows = self._create_row_with_an_ip("192.0.2.60")
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        created = Device.objects.get(name="field-review-new")
+        self.assertIsNotNone(created.primary_ip4, "the create row must assign the address it carries")
+        self.assertEqual(str(created.primary_ip4.address), "192.0.2.60/32")
+        self.assertEqual(created.primary_ip4.assigned_object.name, "mgmt0")
+        self.assertEqual(DeviceImportSource.objects.get(device=created).unassigned_ips, {})
+
+    def test_a_created_device_keeps_an_address_it_has_nowhere_to_put(self):
+        """The device type declares no interfaces, so the value survives on the row instead."""
+        from dcim.models import Device
+
+        from netbox_data_import.models import DeviceImportSource
+
+        rows = self._create_row_with_an_ip("192.0.2.61")
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        created = Device.objects.get(name="field-review-new")
+        self.assertIsNone(created.primary_ip4)
+        stored = DeviceImportSource.objects.get(device=created)
+        self.assertEqual(stored.unassigned_ips, {"primary_ip4": "192.0.2.61/32"})
+
+    def test_a_full_import_keeps_an_address_it_has_nowhere_to_put(self):
+        """The device type declares no interfaces. The device still imports and the value survives.
+
+        The preview already names this repair on the row, so the import does not have to fail the
+        device over it. Losing the address would be the real damage.
+        """
+        from netbox_data_import.models import DeviceImportSource
+
+        rows = self._row_with_an_ip("192.0.2.51")
+        self._save_rows(rows)
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.primary_ip4)
+        stored = DeviceImportSource.objects.get(device=self.device)
+        self.assertEqual(stored.unassigned_ips, {"primary_ip4": "192.0.2.51/32"})
+
+    def _sync_from_the_preview(self, field):
+        """Run one preview row action, the way the sync button in the diff table does."""
+        return self.client.post(
+            reverse("plugins:netbox_data_import:sync_device_field"),
+            self._json_action(field=field, row_number=1),
+            HTTP_ACCEPT="application/json",
+        )
+
+    def test_the_preview_can_sync_an_ip_onto_the_management_interface(self):
+        """The whole point of showing the difference is being able to settle it from the row."""
+        from dcim.models import Interface
+
+        Interface.objects.create(device=self.device, name="ge-0/0/0", type="1000base-t")
+        mgmt = Interface.objects.create(device=self.device, name="mgmt0", type="1000base-t", mgmt_only=True)
+        self._save_rows(self._row_with_an_ip("192.0.2.30"))
+
+        response = self._sync_from_the_preview("primary_ip4")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.30/32")
+        self.assertEqual(self.device.primary_ip4.assigned_object, mgmt)
+
+    def test_the_preview_reports_a_device_type_with_no_interfaces(self):
+        """The row cannot be settled until the device type is fixed, so it has to say so."""
+        self._save_rows(self._row_with_an_ip("192.0.2.31"))
+
+        response = self._sync_from_the_preview("primary_ip4")
+
+        self.assertFalse(response.json()["ok"])
+        self.assertIn(self.device.device_type.model, response.json()["error"])
+
+    def test_the_preview_can_sync_airflow(self):
+        """It showed as `(manual)` although the import writes it."""
+        rows = [dict(self.rows[0])]
+        rows[0]["airflow"] = "Front to Back"
+        self._save_rows(rows)
+
+        response = self._sync_from_the_preview("airflow")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"], response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.airflow, "front-to-rear")
+
     def test_user_can_ignore_the_exact_current_field_difference(self):
         """A reviewed value pair moves from Fields Differ to Fields Ignored."""
         response = self.client.post(

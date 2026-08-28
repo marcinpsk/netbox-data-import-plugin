@@ -6,12 +6,14 @@ The setup form posts with `hx-boost`, and htmx swaps the body while it discards 
 head. Anything a page needs must therefore render inside the body.
 """
 
+import json
 import re
 from pathlib import Path
 
 from django.test import SimpleTestCase
 from django.urls import reverse
 
+from netbox_data_import.catalog import CATALOG
 from netbox_data_import.tests.test_views import BaseViewTestCase, PreviewSessionMixin
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "templates" / "netbox_data_import"
@@ -446,6 +448,93 @@ class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
 
         self.assertIn(f"also on row {second}.", self._device_row_cells(html, first))
         self.assertIn(f"also on row {first}.", self._device_row_cells(html, second))
+
+
+class SplitNameReachesAMatchedRowTest(PreviewSessionMixin, BaseViewTestCase):
+    """The file name is worth splitting exactly when NetBox already disagrees with it."""
+
+    def _device_rows(self, html):
+        """Return (action, opening tag, cells) for every device row the page renders."""
+        rows = []
+        for block in html.split("<tr")[1:]:
+            opening, _, body = block.partition(">")
+            if 'data-object-type="device"' not in opening:
+                continue
+            action = re.search(r'data-action="([^"]*)"', opening)
+            rows.append((action.group(1) if action else "", opening, body))
+        return rows
+
+    def _preview_html(self):
+        return self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+
+    def _match_a_workbook_device(self):
+        """Create the NetBox device one workbook row names, so that row stops being a create."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+
+        row = next(r for r in self.client.session["import_rows"] if r.get("device_name") and r.get("u_position"))
+        site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
+        manufacturer = Manufacturer.objects.create(name="SplitMfg", slug="split-mfg")
+        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="SplitModel", slug="split-model")
+        role = DeviceRole.objects.create(name="SplitRole", slug="split-role")
+        Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
+        return row
+
+    def test_every_device_row_the_import_writes_offers_the_split(self):
+        """Hiding it on matched rows removed it exactly where the name disagreement shows up."""
+        self._setup_session()
+        self._match_a_workbook_device()
+
+        rows = self._device_rows(self._preview_html())
+
+        matched = [(action, body) for action, _opening, body in rows if action not in ("create", "ignore")]
+        self.assertTrue(matched, "the workbook must produce at least one matched device row")
+        for action, body in matched:
+            with self.subTest(action=action):
+                self.assertIn("#splitNameModal", body)
+
+
+class SplitNameSkipsAnIgnoredRowTest(SimpleTestCase):
+    """An ignored row writes nothing, so it has no name for a resolution to govern."""
+
+    TEMPLATE = TEMPLATE_DIR / "import_preview.html"
+
+    def test_the_split_control_still_excludes_an_ignored_row(self):
+        """Widening this condition to reach matched rows must not also reach ignored ones."""
+        source = self.TEMPLATE.read_text()
+        self.assertIn("#splitNameModal", source, "the preview must render the split control")
+        # The guard is the last `{% if %}` before the control, whatever else the markup grows.
+        head = source[: source.index("#splitNameModal")]
+        guard = re.search(r"\{% if ([^%]*?)%\}(?!.*\{% if )", head, re.DOTALL)
+        self.assertIsNotNone(guard, "the preview must guard the split control")
+        self.assertIn("row.action != 'ignore'", guard.group(1))
+        self.assertIn("row.object_type == 'device'", guard.group(1))
+        # A row can reach `skip` with no name at all, and the modal would open on an empty value.
+        self.assertIn("row.name", guard.group(1))
+
+
+class ConflictModalReadsTheCatalogTest(PreviewSessionMixin, BaseViewTestCase):
+    """The modal names a field for the operator, so it must not fall back to the raw key."""
+
+    def test_the_page_publishes_the_catalog_label_for_every_target_field(self):
+        """A hardcoded map in the template goes stale the moment the catalog gains a field."""
+        self._setup_session()
+
+        html = self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+
+        block = re.search(r'id="ndi-target-field-labels"[^>]*>(.*?)</script>', html, re.DOTALL)
+        self.assertIsNotNone(block, "the preview must publish the target field labels")
+        labels = json.loads(block.group(1))
+        self.assertEqual(labels["device_name"], CATALOG.display("device_name"))
+        self.assertEqual(labels["primary_ip4"], CATALOG.display("primary_ip4"))
+        self.assertEqual(labels["serial"], CATALOG.display("serial"))
+
+    def test_the_page_loads_the_conflict_modal_asset(self):
+        """The behaviour is tested as a module, so the page has to be the thing that loads it."""
+        self._setup_session()
+
+        html = self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
+
+        self.assertIn("netbox_data_import/js/conflict_modal.js", html)
 
 
 class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
