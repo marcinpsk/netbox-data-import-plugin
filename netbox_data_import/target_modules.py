@@ -12,6 +12,7 @@ module is the behaviour behind that declaration.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .catalog import OutputKind
@@ -19,6 +20,18 @@ from .plan import Diagnostic, Disposition, PlannedChange, Severity, Synchronizat
 from .values import normalize_for_compare
 
 DEFAULT_RACK_HEIGHT = 42
+
+
+class PreconditionFailed(Exception):
+    """Target state moved between planning and the write, so the change no longer applies."""
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """What a Target Module needs while the coordinator's transaction is open."""
+
+    actor: Any
+    reader: Any
 
 
 class TargetModuleRuntime(Protocol):
@@ -162,6 +175,38 @@ class RackModule:
             changes=(self._change(identity, "update", name, height, serial, netbox_reader, rack),),
         )
 
+    def apply(self, planned_change: PlannedChange, execution_context) -> Any:
+        """Apply one rack change, having locked its row and rechecked its preconditions."""
+        from dcim.models import Rack
+
+        from .object_permissions import enforce_saved_object_permission
+
+        payload = planned_change.payload
+        rack_id = planned_change.preconditions.get("rack_id")
+        if rack_id is None:
+            rack = Rack(site_id=payload["site_id"], location_id=payload["location_id"])
+            action = "add"
+        else:
+            # `of=("self",)` because NetBox's default Rack queryset outer-joins, which cannot be locked.
+            rack = Rack.objects.filter(pk=rack_id).select_for_update(of=("self",)).first()
+            if rack is None:
+                raise PreconditionFailed(f"Rack {rack_id} is gone, so '{payload['name']}' cannot be updated.")
+            if rack.u_height != planned_change.preconditions.get("u_height"):
+                raise PreconditionFailed(f"Rack '{rack.name}' changed height since the plan was made.")
+            action = "change"
+
+        rack.name = payload["name"]
+        rack.u_height = payload["u_height"]
+        if payload["serial"]:
+            rack.serial = payload["serial"]
+        if payload["tenant_id"] is not None:
+            rack.tenant_id = payload["tenant_id"]
+        rack.full_clean()
+        rack.save()
+        # An ObjectPermission's constraints are only evaluated against the saved row.
+        enforce_saved_object_permission(rack, execution_context.actor, action)
+        return rack
+
     @staticmethod
     def _differs(rack, height: int, serial: str) -> bool:
         """Return whether the stored rack already matches what the row asks for."""
@@ -199,4 +244,10 @@ class RackModule:
         )
 
 
-__all__ = ("DEFAULT_RACK_HEIGHT", "RackModule", "TargetModuleRuntime")
+__all__ = (
+    "DEFAULT_RACK_HEIGHT",
+    "ExecutionContext",
+    "PreconditionFailed",
+    "RackModule",
+    "TargetModuleRuntime",
+)
