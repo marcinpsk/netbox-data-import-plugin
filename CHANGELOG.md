@@ -2,6 +2,56 @@
 
 <!-- version list -->
 
+## v1.8.0 (2026-08-28)
+
+### Bug Fixes
+
+- Assign IP fields when the import creates a device
+  ([`417b9b7`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/417b9b7578c7dc4188e72bc7a41660e704580cc1))
+
+- Honour an ignored IP difference and refuse a truncated address
+  ([`73b2164`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/73b216423a586dedc7372ec7a6efe6b8c5eea414))
+
+- Import the address onto the interface the preview named
+  ([`eae2b49`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/eae2b49dc5bba9ae8203d35e36114eb7e8ecc79b))
+
+- Resolve the saved import target in the operator's own scope
+  ([`9ea9599`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9ea9599bbd864a2be1a6dd77b1bfacfb3d20e3d9))
+
+- Scope an address by VRF and family, and name its interface in the preview
+  ([`7ff2a96`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7ff2a96a71ec9db3deba80dd8166117cce8f6496))
+
+- Scope the saved import target in the two remaining row actions
+  ([`835e497`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/835e49743979fcd74e7850bdc77043c547648e30))
+
+- Show and recover the IP a row carries, and reach the split from a matched row
+  ([`4aa0e17`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4aa0e17bcb39f7da640794ba6bd5bf708dd511e3))
+
+### Code Style
+
+- Group the restricted-client test imports
+  ([`d9ff411`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d9ff4117a37cad1b2b72a323c0d1fa99872764a1))
+
+- Keep the comment guard docstring to its runtime contract
+  ([`5684a0c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5684a0cb2972f2f66c6bf2b9195d4bd8ed6c52af))
+
+- State the IP token boundary in one line
+  ([`11fd295`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/11fd295498f87cddf6ec727abc1b36ce270ee9c9))
+
+- State the sync transaction reason in one line
+  ([`7dc2399`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7dc2399b3337e901ba11abfeb3a8ce578e267911))
+
+### Features
+
+- Sync an address onto a device interface, and sync airflow
+  ([`eff29c4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/eff29c4e89df5b8226fafd1863f4cee5af819b45))
+
+### Testing
+
+- Guard the one-line comment rule with a shrinking record
+  ([`e15f081`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e15f0819860d395591aaaa96b855a36b3e1fac14))
+
+
 ## v1.7.0 (2026-08-27)
 
 ### Bug Fixes
