@@ -469,7 +469,19 @@
                   </button>
                   {% endwith %}
                 {% endif %}
-                {% if not row.extra_data.field_diff and not row.extra_data.field_ignored %}
+                {% if row.extra_data.field_informational %}
+                  {% with informational=row.extra_data.field_informational %}
+                  <br>
+                  <button type="button" class="badge ndi-badge-skip ndi-diff-toggle mt-1"
+                          data-diff-target="diff-{{ forloop.counter }}"
+                          aria-controls="diff-{{ forloop.counter }}"
+                          aria-expanded="false"
+                          title="Click to see the differences this row does not write">
+                    <i class="mdi mdi-information-outline"></i> {{ informational|length }} field(s) not written
+                  </button>
+                  {% endwith %}
+                {% endif %}
+                {% if not row.extra_data.field_diff and not row.extra_data.field_ignored and not row.extra_data.field_informational %}
                   {# The row click is a pointer shortcut, so the keyboard needs a real control. #}
                   <br>
                   <button type="button" class="badge ndi-diff-badge ndi-diff-toggle mt-1"
@@ -855,6 +867,7 @@
                             <th>Asset tag</th>
                             <th>Rack / position</th>
                             <th>Action / detail</th>
+                            <th>Resolve</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -877,6 +890,31 @@
                               <span class="badge ndi-badge-{{ conflict_row.action }}">{{ conflict_row.action|title }}</span>
                               <span class="small text-muted">{{ conflict_row.detail }}</span>
                             </td>
+                            <td class="text-nowrap">
+                              {% if conflict_row.identity_conflict == 'duplicate_serial' and conflict_row.source_id and profile_id %}
+                              {# The operator picks which of the colliding rows gives the serial up. #}
+                              <form method="post" action="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
+                                    hx-post="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
+                                    hx-target="#page-content"
+                                    hx-select="#page-content"
+                                    hx-swap="outerHTML show:top"
+                                    hx-disabled-elt="find button"
+                                    class="d-inline ndi-conflict-comparison-action">
+                                {% csrf_token %}
+                                <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                                <input type="hidden" name="source_id" value="{{ conflict_row.source_id }}">
+                                <input type="hidden" name="row_number" value="{{ conflict_row.row_number }}">
+                                <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                                <input type="hidden" name="next" value="{{ preview_url }}">
+                                <button type="submit" class="btn btn-xs btn-outline-warning"
+                                        title="Import row {{ conflict_row.row_number }} without serial '{{ conflict_row.duplicate_serial }}', leaving it to the other row.">
+                                  <i class="mdi mdi-barcode-off"></i> Ignore serial
+                                </button>
+                              </form>
+                              {% else %}
+                              <span class="text-muted small">—</span>
+                              {% endif %}
+                            </td>
                           </tr>
                           {% endfor %}
                         </tbody>
@@ -889,7 +927,7 @@
                   <div class="text-muted small">
                     This row creates a new object, so there is nothing to compare against NetBox.
                   </div>
-                  {% elif not row.extra_data.field_diff and not row.extra_data.field_ignored %}
+                  {% elif not row.extra_data.field_diff and not row.extra_data.field_ignored and not row.extra_data.field_informational %}
                   {% if not row.extra_data.netbox_device_id or not row.rack_name %}
                   {% if row.action == 'update' %}
                   <div class="text-muted small">
@@ -924,7 +962,7 @@
                     <span class="text-muted small ms-2">rack=<strong>{{ row.rack_name }}</strong>{% if row.extra_data.u_position %}, U{{ row.extra_data.u_position }}{% endif %}{% if row.extra_data.face %}, {{ row.extra_data.face }}{% endif %}</span>
                   </div>
                   {% endif %}
-                  {% if row.extra_data.field_diff or row.extra_data.field_ignored %}
+                  {% if row.extra_data.field_diff or row.extra_data.field_ignored or row.extra_data.field_informational %}
                   <table class="table table-sm table-borderless ndi-diff-table mb-0">
                     <thead>
                       <tr class="text-muted">
@@ -937,12 +975,7 @@
                     <tbody>
                       {% for field_name, vals in row.extra_data.field_diff.items %}
                       <tr id="diff-field-{{ forloop.parentloop.counter }}-{{ field_name }}">
-                        <td class="text-muted">
-                          {{ field_name }}
-                          {% if field_name in row.extra_data.field_informational %}
-                          <span class="small">(not written)</span>
-                          {% endif %}
-                        </td>
+                        <td class="text-muted">{{ field_name }}</td>
                         <td class="ndi-diff-netbox-val">{{ vals.netbox|default:"—" }}</td>
                         <td>
                           {{ vals.file|default:"—" }}
@@ -951,10 +984,6 @@
                         </td>
                         <td>
                           {% if field_name in syncable_fields %}
-                          {# Nested: a flat `and not in` reads False when the row has no informational field. #}
-                          {% if field_name in row.extra_data.field_informational %}
-                          <span class="text-muted small">(not written)</span>
-                          {% else %}
                           <button type="button" class="btn btn-xs btn-outline-primary ndi-sync-btn"
                                   data-action-url="{% url 'plugins:netbox_data_import:sync_device_field' %}"
                                   data-field="{{ field_name }}"
@@ -962,10 +991,30 @@
                                   title="Sync this field to NetBox now">
                             <i class="mdi mdi-sync"></i>
                           </button>
-                          {% endif %}
                           {% else %}
                           <span class="text-muted small">(manual)</span>
                           {% endif %}
+                          {% if row.source_id and field_name in reviewable_fields %}
+                          <form method="post" action="{% url 'plugins:netbox_data_import:ignore_field_difference' %}" class="d-inline ms-1 ndi-field-review-form">
+                            {% csrf_token %}
+                            <input type="hidden" name="row_number" value="{{ row.row_number }}">
+                            <input type="hidden" name="target_field" value="{{ field_name }}">
+                            <input type="hidden" name="next" value="{{ preview_url }}">
+                            <button type="submit" class="btn btn-xs btn-outline-secondary" title="Ignore this exact value difference">
+                              <i class="mdi mdi-eye-off"></i> Ignore
+                            </button>
+                          </form>
+                          {% endif %}
+                        </td>
+                      </tr>
+                      {% endfor %}
+                      {% for field_name, vals in row.extra_data.field_informational.items %}
+                      <tr id="informational-field-{{ forloop.parentloop.counter }}-{{ field_name }}">
+                        <td class="text-muted">{{ field_name }} <span class="small">(not written)</span></td>
+                        <td class="ndi-diff-netbox-val">{{ vals.netbox|default:"—" }}</td>
+                        <td>{{ vals.file|default:"—" }}</td>
+                        <td>
+                          <span class="text-muted small">(not written)</span>
                           {% if row.source_id and field_name in reviewable_fields %}
                           <form method="post" action="{% url 'plugins:netbox_data_import:ignore_field_difference' %}" class="d-inline ms-1 ndi-field-review-form">
                             {% csrf_token %}

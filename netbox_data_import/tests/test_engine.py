@@ -1228,7 +1228,7 @@ class FieldDiffComputationTest(TestCase):
         """
         from unittest.mock import MagicMock
 
-        from netbox_data_import.engine import _compute_field_diff
+        from netbox_data_import.engine import _compute_field_differences
 
         mock_device = MagicMock()
         mock_device.name = "some-device"
@@ -1240,7 +1240,7 @@ class FieldDiffComputationTest(TestCase):
         mock_device.position = None
         mock_device.device_type_id = None
 
-        diff = _compute_field_diff(
+        diff, _informational = _compute_field_differences(
             matched_device=mock_device,
             device_name="some-device",
             serial="35",

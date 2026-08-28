@@ -1236,6 +1236,16 @@ def _ip_already_assigned(device, ip_field, ip_str) -> bool:
     )
 
 
+def _writable_ip_fields(ip_fields, review) -> dict:
+    """Return the address fields the writer may store.
+
+    An ignored difference means leave the field alone, so the preview and the writer both
+    have to drop it. Deciding it in two places let them disagree and abort a whole import.
+    """
+    ignored = review.ignored if review is not None else ()
+    return {name: value for name, value in (ip_fields or {}).items() if name not in ignored}
+
+
 def _device_binding_is_current(profile, source_id, device, asset_tag) -> bool:
     """Return whether the source-to-device binding this row would write already exists."""
     if not source_id:
@@ -1280,7 +1290,8 @@ def _matched_device_writes_nothing(
     plan = contact_review.plan if contact_review is not None else None
     if plan is not None and not (plan["contact_action"] == "reuse" and plan["assignment_action"] == "unchanged"):
         return False
-    if any(not _ip_already_assigned(device, ip_field, ip_str) for ip_field, ip_str in (ip_fields or {}).items()):
+    writable_ips = _writable_ip_fields(ip_fields, review)
+    if any(not _ip_already_assigned(device, ip_field, ip_str) for ip_field, ip_str in writable_ips.items()):
         return False
     custom_field = profile.adapter_settings.custom_field_name
     if custom_field and source_id and device.custom_field_data.get(custom_field) != source_id:
@@ -1923,7 +1934,7 @@ def _result_position(value):
 _NOT_PROVIDED = object()
 
 
-def _compute_field_diff(  # noqa: C901
+def _compute_field_differences(  # noqa: C901
     matched_device,
     device_name,
     serial,
@@ -1968,10 +1979,9 @@ def _compute_field_diff(  # noqa: C901
     if location is not _NOT_PROVIDED:
         proposal["location"] = location
     proposal.update(ip_fields or {})
-    return DeviceFieldReviewer.field_diff(
+    return DeviceFieldReviewer.field_differences(
         matched_device,
         proposal,
-        include_informational=True,
         display_overrides=display_overrides,
     )
 
@@ -2727,7 +2737,7 @@ def _preview_device_row(  # noqa: C901
     field_snapshots: dict | None = None
     if matched_device is not None and action != "skip":
         if review is None:
-            field_diff = _compute_field_diff(
+            field_diff, field_informational = _compute_field_differences(
                 matched_device,
                 device_name,
                 serial,
@@ -2745,7 +2755,7 @@ def _preview_device_row(  # noqa: C901
                 ip_fields=ip_fields,
             )
         else:
-            field_diff = {**review.differing, **review.informational}
+            field_diff = review.differing
             field_ignored = review.ignored
             field_informational = review.informational
             field_non_writable = {
@@ -3140,9 +3150,7 @@ def _write_device_row(  # noqa: C901
         effective_type = effective["device_type"]
         mfg_slug, dt_slug = effective_type[:2]
         role_slug = effective["role"]
-        # An ignored difference means leave the field alone; the writer reads these separately.
-        if review is not None:
-            ip_fields = {name: value for name, value in (ip_fields or {}).items() if name not in review.ignored}
+        ip_fields = _writable_ip_fields(ip_fields, review)
         if review is not None and "device_type" in review.ignored:
             device_type = _cached_device_type(ctx, DeviceType, mfg_slug, dt_slug)
             if device_type is None:

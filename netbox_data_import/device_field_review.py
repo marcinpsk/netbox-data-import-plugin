@@ -265,6 +265,21 @@ class DeviceFieldReviewer:
         return self._review_device_ids.get(_text(source_id), frozenset())
 
     @staticmethod
+    def field_differences(
+        matched_device,
+        proposal: Mapping[str, Any],
+        *,
+        display_overrides: Mapping[str, str] | None = None,
+    ):
+        """Return the writable differences and the reported-only ones as two maps."""
+        differing, informational, _ = DeviceFieldReviewer._compare(
+            matched_device,
+            proposal,
+            display_overrides=display_overrides,
+        )
+        return differing, informational
+
+    @staticmethod
     def field_diff(
         matched_device,
         proposal: Mapping[str, Any],
@@ -273,7 +288,7 @@ class DeviceFieldReviewer:
         display_overrides: Mapping[str, str] | None = None,
     ):
         """Return current differences without loading persisted review records."""
-        differing, informational, _ = DeviceFieldReviewer._compare(
+        differing, informational = DeviceFieldReviewer.field_differences(
             matched_device,
             proposal,
             display_overrides=display_overrides,

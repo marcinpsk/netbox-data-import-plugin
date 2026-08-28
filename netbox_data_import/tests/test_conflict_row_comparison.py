@@ -482,3 +482,33 @@ class ConflictRowComparisonTest(BaseViewTestCase):
         self.assertIn("Row 3", current_line)
         self.assertIn("Row 2", other_line)
         self.assertIn("Current row", current_line)
+
+
+class ConflictComparisonCarriesItsActionTest(ConflictRowComparisonTest):
+    """A comparison that only states facts leaves the operator to find the control elsewhere."""
+
+    def _comparison_row_html(self, detail, name):
+        """Return the raw markup of the comparison line for one source row."""
+        lines = re.findall(r'<tr class="ndi-conflict-comparison-row[^"]*">(.*?)</tr>', detail, re.DOTALL)
+        name_cell = re.compile(rf"<td>\s*{re.escape(name)}\s*</td>")
+        matching = [line for line in lines if name_cell.search(line)]
+        self.assertEqual(len(matching), 1, f"the comparison must contain one line for {name}")
+        return matching[0]
+
+    def test_every_row_in_a_serial_collision_can_give_the_serial_up(self):
+        """The engine marks both rows, so the operator picks which one loses the serial."""
+        response = self._preview()
+        detail = self._detail_for(response, "serial-device-b")
+        for name, row_number in (("serial-device-b", 3), ("serial-device-a", 2)):
+            line = self._comparison_row_html(detail, name)
+            self.assertIn("ndi-conflict-comparison-action", line, name)
+            self.assertIn(f'name="row_number" value="{row_number}"', line, name)
+            self.assertIn("Ignore serial", line, name)
+
+    def test_a_conflict_with_no_safe_endpoint_offers_no_action(self):
+        """Offering a control that cannot resolve the conflict is worse than offering none."""
+        response = self._preview()
+        detail = self._detail_for(response, "source-device-a")
+        for name in ("source-device-a", "Source-Rack-B"):
+            line = self._comparison_row_html(detail, name)
+            self.assertNotIn("ndi-conflict-comparison-action", line, name)

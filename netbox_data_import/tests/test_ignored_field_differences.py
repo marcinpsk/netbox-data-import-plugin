@@ -1037,7 +1037,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             {"netbox": "1", "file": "2"},
         )
         self.assertTrue(device_row.extra_data["field_non_writable"]["u_height"])
-        self.assertIn("device_name", device_row.extra_data["field_diff"])
+        self.assertIn("device_name", device_row.extra_data["field_informational"])
         self.assertContains(preview_response, "1 field(s) ignored")
         self.assertContains(preview_response, "(not written)")
 
@@ -1169,7 +1169,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         _response, device_row = self._preview_device_row()
         self.assertEqual(device_row.action, "update", device_row.to_dict())
         self.assertIn("device_type", device_row.extra_data["field_diff"])
-        self.assertEqual(device_row.extra_data["field_diff"]["u_position"], {"netbox": "5", "file": "7"})
+        self.assertEqual(device_row.extra_data["field_informational"]["u_position"], {"netbox": "5", "file": "7"})
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),
@@ -1230,7 +1230,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.rows[0]["u_height"] = 1
         self._save_rows(self.rows)
         _response, device_row = self._preview_device_row()
-        self.assertEqual(device_row.extra_data["field_diff"]["u_height"], {"netbox": "0", "file": "1"})
+        self.assertEqual(device_row.extra_data["field_informational"]["u_height"], {"netbox": "0", "file": "1"})
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),
@@ -1246,7 +1246,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.rows[0]["u_height"] = 2
         self._save_rows(self.rows)
         _response, device_row = self._preview_device_row()
-        self.assertEqual(device_row.extra_data["field_diff"]["u_height"], {"netbox": "0", "file": "2"})
+        self.assertEqual(device_row.extra_data["field_informational"]["u_height"], {"netbox": "0", "file": "2"})
 
     def test_field_review_hint_follows_a_case_insensitive_name_match(self):
         """A field review keeps a name-matched device after its source name changes."""
@@ -1283,7 +1283,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
 
         self.assertEqual(device_row.action, "update", device_row.to_dict())
         self.assertEqual(device_row.extra_data["netbox_device_id"], self.device.pk)
-        self.assertIn("device_name", device_row.extra_data["field_diff"])
+        self.assertIn("device_name", device_row.extra_data["field_informational"])
         self.assertIn("u_position", device_row.extra_data["field_ignored"])
 
         response = self.client.post(
@@ -1300,7 +1300,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         _response, device_row = self._preview_device_row()
         self.assertEqual(device_row.action, "update", device_row.to_dict())
         self.assertEqual(device_row.extra_data["netbox_device_id"], self.device.pk)
-        self.assertIn("device_name", device_row.extra_data["field_diff"])
+        self.assertIn("device_name", device_row.extra_data["field_informational"])
         self.assertIn("u_position", device_row.extra_data["field_diff"])
 
     def test_ignored_missing_device_type_keeps_the_current_relation(self):
@@ -1627,7 +1627,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         _response, preview_row = self._preview_device_row()
         self.assertEqual(preview_row.action, "update", preview_row.to_dict())
         self.assertNotIn("u_position", preview_row.extra_data.get("field_ignored", {}))
-        self.assertIn("u_position", preview_row.extra_data["field_diff"])
+        self.assertIn("u_position", preview_row.extra_data["field_informational"])
 
         result = run_import(self.rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
 
@@ -2494,3 +2494,130 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.device.refresh_from_db()
         self.assertEqual(self.device.location, current_location)
         self.assertEqual(self.device.rack, self.rack)
+
+
+class IgnoredIPPreviewAndWriteAgreeTest(TestCase):
+    """The preview and the writer must decide one action for an ignored address."""
+
+    def setUp(self):
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        from netbox_data_import.models import DeviceImportSource
+
+        self.user = get_user_model().objects.create_superuser(
+            username="ignored-ip-user",
+            email="ignored-ip@example.invalid",
+            password="testpass",
+        )
+        self.client = Client()
+        self.client.force_login(self.user)
+        self.site = Site.objects.create(name="Ignored IP Site", slug="ignored-ip-site")
+        manufacturer = Manufacturer.objects.create(name="Ignored IP Vendor", slug="ignored-ip-vendor")
+        # A vertical PDU: zero-U, so the writer drops the position and the face.
+        self.device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Ignored IP PDU",
+            slug="ignored-ip-vendor-ignored-ip-pdu",
+            u_height=0,
+        )
+        self.role = DeviceRole.objects.create(name="Ignored IP Role", slug="ignored-ip-role")
+        self.rack = Rack.objects.create(name="Ignored IP Rack", site=self.site, u_height=42)
+        self.device = Device.objects.create(
+            name="ignored-ip-pdu",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            rack=self.rack,
+            status="active",
+        )
+        self.profile = ImportProfile.objects.create(
+            name="Ignored IP Profile",
+            adapter_config={"update_existing": True, "create_missing_device_types": False},
+        )
+        ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="PDU",
+            role_slug=self.role.slug,
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="IGNORED-IP-ROW",
+            netbox_device_id=self.device.pk,
+            device_name=self.device.name,
+        )
+        # Everything else this row would store is already stored, so only the address is left.
+        DeviceImportSource.objects.create(
+            device=self.device,
+            profile=self.profile,
+            source_id="IGNORED-IP-ROW",
+        )
+        self.rows = [
+            {
+                "_row_number": 1,
+                "source_id": "IGNORED-IP-ROW",
+                "device_name": self.device.name,
+                "device_class": "PDU",
+                "rack_name": self.rack.name,
+                "make": manufacturer.name,
+                "model": self.device_type.model,
+                "u_height": 0,
+                "u_position": None,
+                "face": "",
+                "status": "active",
+                "serial": "",
+                "asset_tag": "",
+                "primary_ip4": "192.0.2.77",
+            }
+        ]
+        session = self.client.session
+        session["import_rows"] = _serialize_rows(self.rows)
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "ignored-ip.xlsx",
+        }
+        session["import_result"] = run_import(
+            self.rows, self.profile, {"site": self.site}, dry_run=True, user=self.user
+        ).to_session_dict()
+        session["import_preview_pending"] = True
+        session.save()
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+    def _ignore_the_address(self):
+        """Ignore the address difference through the view an operator clicks."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:ignore_field_difference"),
+            {
+                "profile_id": self.profile.pk,
+                "row_number": 1,
+                "target_field": "primary_ip4",
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+        )
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_preview"))
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+    def test_an_ignored_address_does_not_abort_the_import(self):
+        """An ignored address left the preview saying update and the writer saying skip."""
+        from netbox_data_import.views import _import_intents
+
+        self._ignore_the_address()
+
+        preview = run_import(self.rows, self.profile, {"site": self.site}, dry_run=True, user=self.user)
+        previewed = next(row for row in preview.rows if row.object_type == "device")
+        self.assertIn("primary_ip4", previewed.extra_data["field_ignored"], previewed.to_dict())
+
+        result = run_import(
+            self.rows,
+            self.profile,
+            {"site": self.site},
+            dry_run=False,
+            user=self.user,
+            expected_intents=_import_intents(preview),
+        )
+
+        written = next(row for row in result.rows if row.object_type == "device")
+        self.assertNotIn("identity_state_changed", written.extra_data, written.to_dict())
+        self.assertEqual(written.action, previewed.action, written.to_dict())
