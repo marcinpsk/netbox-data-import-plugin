@@ -2,90 +2,90 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/changelog/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/configuration/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/contributing/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/installation/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/adr/0001-target-neutral-import-plans/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/adr/0002-source-trace-identity/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/adr/0003-adapter-owned-profile-configuration/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/agents/domain/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/agents/issue-tracker/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/agents/licensing/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/agents/triage-labels/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/research/netbox-cable-profile/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/research/openai-compatible-provider-contract/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/research/vault-provider-credentials/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/spec/target-neutral-import-architecture/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/superpowers/plans/2026-05-03-per-row-sync/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/superpowers/plans/2026-05-04-device-unlink-serial-warning/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/superpowers/plans/2026-05-06-multi-column-merge-preview-fixes/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/superpowers/specs/2026-05-03-per-row-sync-design/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/superpowers/specs/2026-05-03-unlink-serial-design/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
     <url>
          <loc>https://marcinpsk.github.io/netbox-data-import-plugin/superpowers/specs/2026-05-06-multi-column-merge-preview-fixes/</loc>
-         <lastmod>2026-08-27</lastmod>
+         <lastmod>2026-08-28</lastmod>
     </url>
 </urlset>
