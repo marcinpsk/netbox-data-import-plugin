@@ -1,0 +1,218 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
+
+/* Load the first-party browser asset in jsdom and drive the split modal the way the preview
+ * page does: open it from a row button, then send each part of the cell to a Target Field. */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const source = readFileSync(
+  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/split_name_modal.js"),
+  "utf8",
+);
+
+const ORIGINAL_VALUE = "AT900 - host-900";
+const SPLIT_FIELD_VALUES = { "cn-2": { device_name: ORIGINAL_VALUE, asset_tag: "", serial: "SN900" } };
+
+let lookups;
+
+function render({ existingResolutions = {} } = {}) {
+  lookups = [];
+  window.EXISTING_RESOLUTIONS = existingResolutions;
+  document.body.innerHTML = `
+    <button id="trigger" data-ndi-modal="#splitNameModal" data-source-id="cn-2"
+            data-source-column="device_name" data-original-value="${ORIGINAL_VALUE}">Split</button>
+    <div class="modal" id="splitNameModal">
+      <form id="splitForm" data-check-device-url="/plugins/data-import/check-device/">
+        <input type="hidden" id="res_source_id" name="source_id">
+        <input type="hidden" id="res_source_column" name="source_column">
+        <input type="hidden" id="res_original_value" name="original_value">
+        <input type="hidden" id="res_resolved_fields" name="resolved_fields">
+        <div id="res_original_display"></div>
+        <input type="text" id="res_delimiter" value=" - ">
+        <div id="res_existing_notice" class="d-none"><code id="res_existing_display"></code></div>
+        <div class="row g-3" id="res_parts_row"></div>
+        <div id="res_conflict_alert" class="d-none"></div>
+        <div id="res_duplicate_alert" class="d-none"></div>
+        <div id="res_device_check" class="d-none"><small id="res_device_check_msg"></small></div>
+        <button type="submit">Save</button>
+      </form>
+    </div>
+    <script type="application/json" id="ndi-split-field-values">${JSON.stringify(SPLIT_FIELD_VALUES)}</script>
+  `;
+  /* The script binds once and looks every element up by id, so one evaluation serves every
+   * render in this file. */
+  window.eval(source);
+  if (!window.ndiTestSubmitBlocked) {
+    window.ndiTestSubmitBlocked = true;
+    // Registered after the script's own handler, so jsdom stops short of navigating away.
+    document.addEventListener("submit", (event) => event.preventDefault());
+  }
+  openModal();
+}
+
+function openModal() {
+  document
+    .getElementById("splitNameModal")
+    .dispatchEvent(
+      Object.assign(new Event("show.bs.modal", { bubbles: true }), {
+        relatedTarget: document.getElementById("trigger"),
+      }),
+    );
+}
+
+function partField(idx) {
+  return document.getElementById(`res_part_field_${idx}`);
+}
+
+function partValue(idx) {
+  return document.getElementById(`res_part_val_${idx}`);
+}
+
+function setField(idx, value) {
+  partField(idx).value = value;
+  partField(idx).dispatchEvent(new Event("change"));
+}
+
+function setValue(idx, value) {
+  partValue(idx).value = value;
+  partValue(idx).dispatchEvent(new Event("input"));
+}
+
+function saveButton() {
+  return document.querySelector('#splitNameModal button[type="submit"]');
+}
+
+function submitForm() {
+  document.getElementById("splitForm").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+}
+
+function resolvedFields() {
+  return JSON.parse(document.getElementById("res_resolved_fields").value || "null");
+}
+
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url) => {
+      lookups.push(url);
+      return Promise.resolve({ json: () => Promise.resolve({ exists: false, count: 0, url: "" }) });
+    }),
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("split modal parts", () => {
+  beforeEach(() => render());
+
+  it("cuts the cell on the delimiter, one part per field", () => {
+    expect([partValue(0).value, partValue(1).value]).toEqual(["AT900", "host-900"]);
+    expect([partField(0).value, partField(1).value]).toEqual(["asset_tag", "device_name"]);
+  });
+
+  it("re-cuts the cell when the delimiter changes", () => {
+    const delimiter = document.getElementById("res_delimiter");
+    delimiter.value = "-";
+    delimiter.dispatchEvent(new Event("input", { bubbles: true }));
+    expect([partValue(0).value, partValue(1).value, partValue(2).value]).toEqual(["AT900", "host", "900"]);
+  });
+
+  it("saves the field each part was sent to", () => {
+    submitForm();
+    expect(resolvedFields()).toEqual({ asset_tag: "AT900", device_name: "host-900" });
+  });
+});
+
+describe("the device that a part would name", () => {
+  beforeEach(() => render());
+
+  it("looks up the part the operator sent to the device name, not the second one", () => {
+    lookups.length = 0;
+    setField(0, "device_name");
+    setField(1, "asset_tag");
+    expect(lookups.at(-1)).toContain("AT900");
+    expect(lookups.filter((url) => url.includes("host-900"))).toHaveLength(0);
+  });
+
+  it("looks up the second part while that is the one naming the device", () => {
+    expect(lookups.some((url) => url.includes("host-900"))).toBe(true);
+  });
+
+  it("follows the value as it is edited", () => {
+    lookups.length = 0;
+    setValue(1, "host-901");
+    expect(lookups.some((url) => url.includes("host-901"))).toBe(true);
+  });
+
+  it("says nothing when no part names the device", () => {
+    setField(1, "serial");
+    expect(document.getElementById("res_device_check").classList.contains("d-none")).toBe(true);
+  });
+});
+
+describe("two parts claiming one field", () => {
+  beforeEach(() => render());
+
+  it("refuses the save instead of dropping a part", () => {
+    setField(0, "device_name");
+    expect(saveButton().disabled).toBe(true);
+    expect(document.getElementById("res_duplicate_alert").classList.contains("d-none")).toBe(false);
+  });
+
+  it("marks both offending selects", () => {
+    setField(0, "device_name");
+    expect(partField(0).classList.contains("is-invalid")).toBe(true);
+    expect(partField(1).classList.contains("is-invalid")).toBe(true);
+  });
+
+  it("writes no resolution while the clash stands", () => {
+    setField(0, "device_name");
+    submitForm();
+    expect(resolvedFields()).toBeNull();
+  });
+
+  it("clears the refusal once one part moves to another field", () => {
+    setField(0, "device_name");
+    setField(0, "asset_tag");
+    expect(saveButton().disabled).toBe(false);
+    expect(document.getElementById("res_duplicate_alert").classList.contains("d-none")).toBe(true);
+    expect(partField(1).classList.contains("is-invalid")).toBe(false);
+  });
+
+  it("leaves two ignored parts alone", () => {
+    setField(0, "");
+    setField(1, "");
+    expect(saveButton().disabled).toBe(false);
+  });
+});
+
+describe("a part that overwrites a value the file already carries", () => {
+  beforeEach(() => render());
+
+  it("blocks the save until the override is acknowledged", () => {
+    setField(0, "serial");
+    expect(saveButton().disabled).toBe(true);
+    document.getElementById("res_force_0").checked = true;
+    document.getElementById("res_force_0").dispatchEvent(new Event("change"));
+    expect(saveButton().disabled).toBe(false);
+  });
+});
+
+describe("a row that already has a saved resolution", () => {
+  it("pre-fills the parts from the resolution", () => {
+    render({
+      existingResolutions: {
+        "cn-2": {
+          device_name: { original_value: ORIGINAL_VALUE, resolved_fields: { serial: "SN900", device_name: "host-900" } },
+        },
+      },
+    });
+    expect([partField(0).value, partField(1).value]).toEqual(["serial", "device_name"]);
+    expect([partValue(0).value, partValue(1).value]).toEqual(["SN900", "host-900"]);
+    expect(document.getElementById("res_existing_notice").classList.contains("d-none")).toBe(false);
+  });
+});
