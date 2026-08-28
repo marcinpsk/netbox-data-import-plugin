@@ -582,3 +582,29 @@ class PlanLookupAndIdentityTest(SimpleTestCase):
     def test_a_change_is_hashable_by_its_serialized_form(self):
         """Changes go into sets during merging, so equal content has to hash equal."""
         self.assertEqual(hash(_change()), hash(_change()))
+
+
+class CatalogAndDiagnosticLookupTest(SimpleTestCase):
+    """Small lookups the plan and catalog expose, which nothing else exercised."""
+
+    def test_a_diagnostic_is_hashable_by_its_serialized_form(self):
+        """Diagnostics are deduplicated while units merge, so equal content hashes equal."""
+        first = Diagnostic(code="rack.ignored", severity=Severity.INFO, identities=("unit:1",))
+        second = Diagnostic(code="rack.ignored", severity=Severity.INFO, identities=("unit:1",))
+
+        self.assertEqual(hash(first), hash(second))
+
+    def test_a_key_family_names_the_modules_that_consume_it(self):
+        """A profile derives its Target Fields through this, never from a local list."""
+        from netbox_data_import.catalog import CATALOG
+
+        family = CATALOG.family("extra_json:owner")
+
+        self.assertIsNotNone(family)
+        self.assertIn("device", family.target_modules)
+
+    def test_an_unknown_target_module_key_reads_as_absent(self):
+        """The catalog answers None rather than raising, so callers can probe it."""
+        from netbox_data_import.catalog import target_module
+
+        self.assertIsNone(target_module("no-such-module"))
