@@ -29,6 +29,7 @@ from .contact_resolution import ContactResolutionRequired, PrimaryContactResolve
 from .device_field_review import DeviceFieldReviewer
 from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
 from .models import DeviceImportSource, ImportProfile
+from .netbox_reader import NetBoxReader
 from .object_permissions import (
     ObjectPermissionDenied as _ObjectPermissionDenied,
     enforce_saved_object_permission as _enforce_saved_object_permission,
@@ -173,6 +174,16 @@ class ImportContext:
     rack_map: dict = field(default_factory=dict)
     pending_device_roles: set = field(default_factory=set)
     user: object | None = None
+
+    @property
+    def reader(self) -> NetBoxReader:
+        """Return the permission-scoped accessor every planning read goes through."""
+        cached = self.__dict__.get("_reader")
+        if cached is None:
+            cached = NetBoxReader.for_optional_actor(self.user)
+            self.__dict__["_reader"] = cached
+        return cached
+
     # Tracks ``(rack_name, position, face) -> (row_number, device_name)`` for
     # rows that claim a rack position in the current file, so within-file
     # rack-position duplicates are flagged before they would cause an
@@ -952,7 +963,7 @@ def _pass1_device_review(row, ctx, crm, Device):
         (_str_val(row.get("asset_tag")) or "")[:50],
         Device,
         tenant=ctx.tenant,
-        device_queryset=_device_queryset_for_user(Device, ctx.user, "view") if ctx.user is not None else None,
+        device_queryset=ctx.reader.devices(),
         review_device_ids=review_device_ids,
     )
     if matched_device is None:
@@ -1811,19 +1822,10 @@ def _bind_device_source(profile, source_id, device, asset_tag=""):
         raise _DeviceBindingConflict("The source-to-device binding changed during import") from exc
 
 
-def _device_queryset_for_user(Device, user, action):
-    """Return devices allowed by NetBox object permissions."""
-    if user is None:
-        return Device.objects.all()
-    return Device.objects.restrict(user, action)
-
-
 def _reserve_device_names(rows, ctx, class_role_map, Device):
     """Reserve case-insensitive source and NetBox names before suggestions."""
     existing_names = (
-        _device_queryset_for_user(Device, ctx.user, "view")
-        .filter(site=ctx.site, **_tenant_filter(ctx.tenant))
-        .values_list("name", flat=True)
+        ctx.reader.devices().filter(site=ctx.site, **_tenant_filter(ctx.tenant)).values_list("name", flat=True)
     )
     ctx.reserved_device_names.update(_identity_text(name) for name in existing_names)
     for row in rows:
@@ -1838,7 +1840,7 @@ def _reserve_device_names(rows, ctx, class_role_map, Device):
 def _effective_duplicate_identity_values(rows, ctx, class_role_map, ambiguous_names, Device):
     """Return one review-aware identity write plan per source row."""
     values = {}
-    device_queryset = _device_queryset_for_user(Device, ctx.user, "view") if ctx.user is not None else None
+    device_queryset = ctx.reader.devices()
     for row in rows:
         crm = class_role_map.get(_str_val(row.get("device_class")))
         if not _is_writing_device_row(row, crm, ctx.ignored_source_ids):
@@ -2509,7 +2511,7 @@ def _preview_device_row(  # noqa: C901
         Device,
         ambiguous_names,
         tenant=ctx.tenant,
-        device_queryset=_device_queryset_for_user(Device, ctx.user, "view") if ctx.user is not None else None,
+        device_queryset=ctx.reader.devices(),
         review_device_ids=(
             ctx.field_reviewer.review_device_ids(source_id) if ctx.field_reviewer is not None else frozenset()
         ),
@@ -3055,7 +3057,7 @@ def _write_device_row(  # noqa: C901
         Device,
         ambiguous_names,
         tenant=ctx.tenant,
-        device_queryset=_device_queryset_for_user(Device, ctx.user, "view") if ctx.user is not None else None,
+        device_queryset=ctx.reader.devices(),
         source_match=locked_source_match,
         source_match_locked=bool(source_id),
         review_device_ids=(
@@ -3348,10 +3350,7 @@ def _write_device_row(  # noqa: C901
                 extra_data={"identity_conflict": "device_already_bound", "netbox_device_id": device.pk},
             )
         if actual_action == "update":
-            if (
-                ctx.user is not None
-                and not _device_queryset_for_user(Device, ctx.user, "change").filter(pk=device.pk).exists()
-            ):
+            if ctx.user is not None and not ctx.reader.devices("change").filter(pk=device.pk).exists():
                 return _perm_denied_row("dcim.change_device", row, device_name, "device")
             device.device_type = device_type
             device.role = device_role
@@ -3723,7 +3722,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 Device,
                 ambiguous_names,
                 tenant=ctx.tenant,
-                device_queryset=(_device_queryset_for_user(Device, ctx.user, "view") if ctx.user is not None else None),
+                device_queryset=(ctx.reader.devices()),
                 review_device_ids=(
                     ctx.field_reviewer.review_device_ids(source_id) if ctx.field_reviewer is not None else frozenset()
                 ),
@@ -3745,7 +3744,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                 continue
             if strong_device is None:
                 existing = (
-                    _device_queryset_for_user(Device, ctx.user, "view")
+                    ctx.reader.devices()
                     .filter(
                         site=ctx.site,
                         name__iexact=device_name,
@@ -4092,7 +4091,7 @@ def _active_ignored_device_type_rows(
         return frozenset()
     from dcim.models import Device
 
-    device_queryset = _device_queryset_for_user(Device, user, "view") if user is not None else None
+    device_queryset = NetBoxReader.for_optional_actor(user).devices()
     ignored_rows = set()
     for row in rows:
         source_id = _str_val(row.get("source_id"))
