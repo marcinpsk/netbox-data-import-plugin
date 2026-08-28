@@ -2,6 +2,36 @@
 
 <!-- version list -->
 
+## v1.9.0 (2026-08-28)
+
+### Bug Fixes
+
+- Apply the findings from the adversarial review
+  ([`c1d26f3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c1d26f3605c4d3ece6a26813451ce365e03f484f))
+
+- Check the split part that names the device, not the second one
+  ([`77f0c14`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/77f0c141449771ff5d8eb82217b7cb68f4823625))
+
+- Keep the writer and the preview reading one set of zero-U fields
+  ([`2b47397`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2b47397500c21310584a17212e7619d5aa1f2de9))
+
+- Name the field behind a row's conflict count
+  ([`61021bf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/61021bf8cc6bd7578961b82f09992b0250dfdbd8))
+
+- Stop offering a rack position a zero-U device type cannot hold
+  ([`4747192`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4747192a42e284ebe9b26303f68e9cd21b70fb98))
+
+### Features
+
+- Compare every row a preview conflict names
+  ([`6ce6445`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6ce6445cd9ec7796a63eb659787c4a54bcff6247))
+
+### Testing
+
+- Drive the split modal through real Bootstrap
+  ([`0d33fd7`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0d33fd74d88031a0baf0955ba3027fedf5f152df))
+
+
 ## v1.8.0 (2026-08-28)
 
 ### Bug Fixes
