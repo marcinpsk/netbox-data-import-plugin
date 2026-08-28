@@ -17,6 +17,7 @@ from netbox_data_import.catalog import CATALOG
 from netbox_data_import.tests.test_views import BaseViewTestCase, PreviewSessionMixin
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "templates" / "netbox_data_import"
+STATIC_JS_DIR = Path(__file__).resolve().parents[1] / "static" / "netbox_data_import" / "js"
 HEAD_BLOCK = re.compile(r"{%\s*block head\s*%}(.*?){%\s*endblock\s*%}", re.DOTALL)
 
 
@@ -156,6 +157,40 @@ class DetailRowIdsAreUniqueTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertTrue(rows, "the preview must render source rows")
         self.assertTrue(all('role="button"' not in attrs for attrs in rows), rows[:2])
         self.assertTrue(all("tabindex=" not in attrs for attrs in rows), rows[:2])
+
+
+class SplitModalMarkupMatchesItsScriptTest(PreviewSessionMixin, BaseViewTestCase):
+    """The split modal's script reaches every element by id, so a renamed id fails in silence."""
+
+    def _script_source(self):
+        """Return the shipped split-modal asset."""
+        return (STATIC_JS_DIR / "split_name_modal.js").read_text()
+
+    def test_the_preview_loads_the_split_modal_script(self):
+        """The rendered modal needs the script that controls it."""
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertContains(response, 'src="/static/netbox_data_import/js/split_name_modal.js')
+
+    def test_every_id_the_script_reads_is_rendered(self):
+        """A literal id in the script and none in the page is the drift this catches."""
+        source = self._script_source()
+        # A built id is concatenated, so the closing bracket keeps those out of this set.
+        wanted = set(re.findall(r"getElementById\('([^']+)'\)", source))
+        wanted.update(re.findall(r"readJson\('([^']+)'\)", source))
+        self.assertTrue(wanted, "the script must look elements up by id")
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        html = response.content.decode()
+        missing = sorted(name for name in wanted if f'id="{name}"' not in html)
+        self.assertEqual(missing, [])
+
+    def test_the_check_device_url_reaches_the_script_through_the_form(self):
+        """The script is a static file, so it cannot resolve a Django URL itself."""
+        self.assertIn("dataset.checkDeviceUrl", self._script_source())
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertContains(response, "data-check-device-url=")
 
 
 class PluginScriptsAreVersionedTest(PreviewSessionMixin, BaseViewTestCase):

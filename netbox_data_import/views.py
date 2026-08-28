@@ -3,6 +3,7 @@
 import difflib
 import logging
 import time
+from dataclasses import replace
 from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
@@ -880,6 +881,91 @@ class ImportSetupView(PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
+_DEVICE_CONFLICT_ROW_LIST_KEYS = (
+    "duplicate_serial_rows",
+    "duplicate_asset_tag_rows",
+)
+
+
+def _other_conflict_row_identities(row, source_object_types_by_number):
+    """Return the row number and object type named by one preview error."""
+    identities = [
+        (row_number, source_object_types_by_number.get(row_number, row.object_type))
+        for row_number in row.extra_data.get("duplicate_source_id_rows", ())
+    ]
+    for key in _DEVICE_CONFLICT_ROW_LIST_KEYS:
+        identities.extend((row_number, row.object_type) for row_number in row.extra_data.get(key, ()))
+    conflict_row_number = row.extra_data.get("conflict_row_number")
+    if conflict_row_number is not None:
+        identities.append((conflict_row_number, row.object_type))
+    return tuple(dict.fromkeys(identity for identity in identities if identity != (row.row_number, row.object_type)))
+
+
+def _conflict_comparison_row(row, source_rows_by_number, *, is_current):
+    """Return the source facts that the conflict comparison shows for one result row."""
+    source_row = source_rows_by_number.get(row.row_number, {})
+    extra_data = row.extra_data
+    serial = extra_data.get("source_serial", source_row.get("serial", ""))
+    asset_tag = extra_data.get("asset_tag", source_row.get("asset_tag", ""))
+    rack_name = row.rack_name or source_row.get("rack_name", "")
+    if not rack_name and row.object_type == "rack":
+        rack_name = row.name
+    return {
+        "row_number": row.row_number,
+        "name": row.name,
+        "source_id": row.source_id,
+        "serial": serial,
+        "asset_tag": asset_tag,
+        "rack_name": rack_name,
+        "u_position": extra_data.get("u_position", source_row.get("u_position")),
+        "face": extra_data.get("face", source_row.get("face", "")),
+        "action": row.action,
+        "detail": row.detail,
+        "is_current": is_current,
+    }
+
+
+def _preview_rows_with_conflict_comparisons(result, source_rows, profile):
+    """Copy preview rows and attach comparisons for each within-import row conflict."""
+    result_rows_by_identity = {(row.row_number, row.object_type): row for row in result.rows}
+    source_rows_by_number = {row.get("_row_number"): row for row in source_rows}
+    object_types_by_class = {
+        mapping.source_class: "rack" if mapping.creates_rack else "device"
+        for mapping in profile.class_role_mappings.all()
+    }
+    source_object_types_by_number = {}
+    for source_row in source_rows:
+        source_class = engine._str_val(source_row.get("device_class"))
+        if source_class in object_types_by_class:
+            source_object_types_by_number[source_row.get("_row_number")] = object_types_by_class[source_class]
+    conflict_rows_by_row = {}
+    for row in result.rows:
+        other_rows = [
+            result_rows_by_identity.get(identity)
+            for identity in _other_conflict_row_identities(row, source_object_types_by_number)
+        ]
+        other_rows = [other_row for other_row in other_rows if other_row is not None]
+        if not other_rows:
+            continue
+        conflict_rows_by_row[(row.row_number, row.object_type)] = [
+            _conflict_comparison_row(row, source_rows_by_number, is_current=True),
+            *(_conflict_comparison_row(other_row, source_rows_by_number, is_current=False) for other_row in other_rows),
+        ]
+
+    preview_rows = []
+    for row in result.rows:
+        preview_rows.append(
+            replace(
+                row,
+                extra_data={
+                    **row.extra_data,
+                    "conflict_rows": conflict_rows_by_row.get((row.row_number, row.object_type), []),
+                },
+            )
+        )
+    return preview_rows
+
+
 class ImportPreviewView(PermissionRequiredMixin, View):
     """Step 2: show dry-run results, let user confirm or go back."""
 
@@ -924,12 +1010,12 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         site, location, tenant = target["site"], target["location"], target["tenant"]
 
         stored_result = request.session.get("import_result")
+        # Derived for both branches, never stored: storing it would bake the resolution in.
+        rows = engine.derive_effective_rows(rows, profile)
         if use_materialized_result and isinstance(stored_result, dict):
             result = engine.ImportResult.from_session_dict(stored_result)
         else:
             context_obj = {"site": site, "location": location, "tenant": tenant}
-            # Derived, never stored: writing it back would bake the resolution in and block a later edit.
-            rows = engine.derive_effective_rows(rows, profile)
             result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
             record_recalculated_preview(request.session, result)
 
@@ -1024,6 +1110,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             for r in result.rows
             if r.object_type == "device" and r.source_id
         }
+        preview_rows = _preview_rows_with_conflict_comparisons(result, rows, profile)
 
         non_card_error_rows = [
             r
@@ -1036,6 +1123,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             "netbox_data_import/import_preview.html",
             {
                 "result": result,
+                "preview_rows": preview_rows,
                 "filename": ctx.get("filename", ""),
                 "profile_id": ctx.get("profile_id"),
                 "profile": profile,
