@@ -1777,6 +1777,17 @@ def _preview_device_action(request):
     return row, device
 
 
+def _offered_difference(row, target_field) -> bool:
+    """Return whether the preview offered this field for review.
+
+    A field the import does not write is reported too, and an operator ignores it to stop
+    the preview reporting it. Only a synced field has to be a writable difference.
+    """
+    return target_field in row.extra_data.get("field_diff", {}) or target_field in row.extra_data.get(
+        "field_informational", {}
+    )
+
+
 def _preview_field_intent(request, target_field):
     """Return one authoritative field value after checking its NetBox baseline."""
     action = _preview_device_action(request)
@@ -1870,7 +1881,7 @@ class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
                 "The selected field difference is no longer current. Recalculate the preview and try again.",
             )
         profile, _result, row, target_field = review
-        if target_field not in row.extra_data.get("field_diff", {}):
+        if not _offered_difference(row, target_field):
             return _preview_action_error(
                 request,
                 next_url,

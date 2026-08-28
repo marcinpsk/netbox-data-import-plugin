@@ -69,8 +69,8 @@ class ZeroUPlacementIsNotADifferenceTest(ZeroUPlacementMixin, BaseViewTestCase):
     def test_the_position_is_reported_as_not_written(self):
         """Offering it as a difference invites a sync that NetBox rejects."""
         _profile, _site, _rows, _result, row = self._run()
-        self.assertIn("u_position", row.extra_data.get("field_diff", {}))
         self.assertIn("u_position", row.extra_data.get("field_informational", {}))
+        self.assertNotIn("u_position", row.extra_data.get("field_diff", {}))
 
     def test_the_face_is_reported_as_not_written(self):
         """Same rule as the position: a zero-U type takes neither."""
@@ -86,8 +86,8 @@ class ZeroUPlacementIsNotADifferenceTest(ZeroUPlacementMixin, BaseViewTestCase):
     def test_a_row_left_with_only_placement_has_no_difference(self):
         """`writes_nothing` reads the same set, so a phantom difference keeps a no-op row an update."""
         _profile, _site, _rows, _result, row = self._run(serial="SN-NETBOX")
-        diff = row.extra_data.get("field_diff", {})
-        self.assertEqual(sorted(set(diff) - set(row.extra_data.get("field_informational", {}))), [])
+        self.assertEqual(row.extra_data.get("field_diff", {}), {})
+        self.assertIn("u_position", row.extra_data.get("field_informational", {}))
 
     def test_the_row_says_the_device_type_takes_no_position(self):
         """The placement button is inert for a reason the operator cannot otherwise see."""
@@ -126,19 +126,19 @@ class ZeroUPlacementRendersAsNotWrittenTest(ZeroUPlacementMixin, BaseViewTestCas
         )
         return chunk[chunk.index('<tr id="diff-') :]
 
-    def _field_cell(self, detail, field_name):
-        """Return the diff table row for one field."""
-        match = re.search(rf'<tr id="diff-field-\d+-{field_name}">(.*?)</tr>', detail, re.DOTALL)
+    def _field_cell(self, detail, field_name, prefix="diff"):
+        """Return the detail table row for one field."""
+        match = re.search(rf'<tr id="{prefix}-field-\d+-{field_name}">(.*?)</tr>', detail, re.DOTALL)
         self.assertIsNotNone(match, f"the detail row must list {field_name}")
         return match.group(1)
 
     def test_the_position_row_is_marked_not_written(self):
         """Without the mark the diff reads as something the import will apply."""
-        self.assertIn("(not written)", self._field_cell(self._detail_row(), "u_position"))
+        self.assertIn("(not written)", self._field_cell(self._detail_row(), "u_position", prefix="informational"))
 
     def test_the_position_row_offers_no_sync_button(self):
         """The quick action would set a position the device type cannot hold."""
-        self.assertNotIn("ndi-sync-btn", self._field_cell(self._detail_row(), "u_position"))
+        self.assertNotIn("ndi-sync-btn", self._field_cell(self._detail_row(), "u_position", prefix="informational"))
 
     def test_a_written_field_keeps_its_sync_button(self):
         """The guard must not disarm the fields the quick action does apply."""
@@ -258,3 +258,47 @@ class ZeroUTypeChangeOnAPlacedDeviceTest(BaseViewTestCase):
         """Same rule as the position, and the row supplies both."""
         row = self._run()
         self.assertIn("face", row.extra_data.get("field_informational", {}))
+
+
+class ANoOpRowDoesNotClaimFieldsDifferTest(ZeroUPlacementMixin, BaseViewTestCase):
+    """A badge that counts a field the import never writes reports a change that never happens."""
+
+    def _rendered_preview(self, **run_kwargs):
+        """Render the preview a browser shows for one run."""
+        from netbox_data_import.views import _serialize_rows
+
+        profile, site, rows, result, row = self._run(**run_kwargs)
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "zero_u.xlsx",
+        }
+        session.save()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        return row, response.content.decode()
+
+    def test_a_placement_only_row_reports_no_writable_difference(self):
+        """The row writes nothing, so counting its dropped placement as a difference is a lie."""
+        _row, html = self._rendered_preview(serial="SN-NETBOX")
+        self.assertNotIn("field(s) differ", html)
+
+    def test_a_placement_only_row_still_opens_its_detail(self):
+        """Dropping the badge must not leave the row without a control that opens the panel."""
+        _row, html = self._rendered_preview(serial="SN-NETBOX")
+        self.assertIn("field(s) not written", html)
+
+    def test_a_placement_only_row_still_lists_the_dropped_fields(self):
+        """The operator has to see which values the import discards."""
+        _row, html = self._rendered_preview(serial="SN-NETBOX")
+        self.assertRegex(html, r'<tr id="informational-field-\d+-u_position">')
+
+    def test_a_row_that_writes_a_field_still_counts_it(self):
+        """The count has to keep every difference the import really applies."""
+        _row, html = self._rendered_preview()
+        self.assertIn("field(s) differ", html)
+        self.assertRegex(html, r'<tr id="diff-field-\d+-serial">')

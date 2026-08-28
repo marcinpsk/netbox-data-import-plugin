@@ -1037,7 +1037,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
             {"netbox": "1", "file": "2"},
         )
         self.assertTrue(device_row.extra_data["field_non_writable"]["u_height"])
-        self.assertIn("device_name", device_row.extra_data["field_diff"])
+        self.assertIn("device_name", device_row.extra_data["field_informational"])
         self.assertContains(preview_response, "1 field(s) ignored")
         self.assertContains(preview_response, "(not written)")
 
@@ -1169,7 +1169,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         _response, device_row = self._preview_device_row()
         self.assertEqual(device_row.action, "update", device_row.to_dict())
         self.assertIn("device_type", device_row.extra_data["field_diff"])
-        self.assertEqual(device_row.extra_data["field_diff"]["u_position"], {"netbox": "5", "file": "7"})
+        self.assertEqual(device_row.extra_data["field_informational"]["u_position"], {"netbox": "5", "file": "7"})
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),
@@ -1230,7 +1230,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.rows[0]["u_height"] = 1
         self._save_rows(self.rows)
         _response, device_row = self._preview_device_row()
-        self.assertEqual(device_row.extra_data["field_diff"]["u_height"], {"netbox": "0", "file": "1"})
+        self.assertEqual(device_row.extra_data["field_informational"]["u_height"], {"netbox": "0", "file": "1"})
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:ignore_field_difference"),
@@ -1246,7 +1246,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         self.rows[0]["u_height"] = 2
         self._save_rows(self.rows)
         _response, device_row = self._preview_device_row()
-        self.assertEqual(device_row.extra_data["field_diff"]["u_height"], {"netbox": "0", "file": "2"})
+        self.assertEqual(device_row.extra_data["field_informational"]["u_height"], {"netbox": "0", "file": "2"})
 
     def test_field_review_hint_follows_a_case_insensitive_name_match(self):
         """A field review keeps a name-matched device after its source name changes."""
@@ -1283,7 +1283,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
 
         self.assertEqual(device_row.action, "update", device_row.to_dict())
         self.assertEqual(device_row.extra_data["netbox_device_id"], self.device.pk)
-        self.assertIn("device_name", device_row.extra_data["field_diff"])
+        self.assertIn("device_name", device_row.extra_data["field_informational"])
         self.assertIn("u_position", device_row.extra_data["field_ignored"])
 
         response = self.client.post(
@@ -1300,7 +1300,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         _response, device_row = self._preview_device_row()
         self.assertEqual(device_row.action, "update", device_row.to_dict())
         self.assertEqual(device_row.extra_data["netbox_device_id"], self.device.pk)
-        self.assertIn("device_name", device_row.extra_data["field_diff"])
+        self.assertIn("device_name", device_row.extra_data["field_informational"])
         self.assertIn("u_position", device_row.extra_data["field_diff"])
 
     def test_ignored_missing_device_type_keeps_the_current_relation(self):
@@ -1627,7 +1627,7 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         _response, preview_row = self._preview_device_row()
         self.assertEqual(preview_row.action, "update", preview_row.to_dict())
         self.assertNotIn("u_position", preview_row.extra_data.get("field_ignored", {}))
-        self.assertIn("u_position", preview_row.extra_data["field_diff"])
+        self.assertIn("u_position", preview_row.extra_data["field_informational"])
 
         result = run_import(self.rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
 

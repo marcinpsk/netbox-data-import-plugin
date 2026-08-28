@@ -1934,7 +1934,7 @@ def _result_position(value):
 _NOT_PROVIDED = object()
 
 
-def _compute_field_diff(  # noqa: C901
+def _compute_field_differences(  # noqa: C901
     matched_device,
     device_name,
     serial,
@@ -1979,10 +1979,9 @@ def _compute_field_diff(  # noqa: C901
     if location is not _NOT_PROVIDED:
         proposal["location"] = location
     proposal.update(ip_fields or {})
-    return DeviceFieldReviewer.field_diff(
+    return DeviceFieldReviewer.field_differences(
         matched_device,
         proposal,
-        include_informational=True,
         display_overrides=display_overrides,
     )
 
@@ -2738,7 +2737,7 @@ def _preview_device_row(  # noqa: C901
     field_snapshots: dict | None = None
     if matched_device is not None and action != "skip":
         if review is None:
-            field_diff = _compute_field_diff(
+            field_diff, field_informational = _compute_field_differences(
                 matched_device,
                 device_name,
                 serial,
@@ -2756,7 +2755,7 @@ def _preview_device_row(  # noqa: C901
                 ip_fields=ip_fields,
             )
         else:
-            field_diff = {**review.differing, **review.informational}
+            field_diff = review.differing
             field_ignored = review.ignored
             field_informational = review.informational
             field_non_writable = {

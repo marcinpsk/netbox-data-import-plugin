@@ -10,7 +10,7 @@ from netbox_data_import.engine import (
     ImportResult,
     _assign_ip_to_device,
     _clear_resolved_conflicts,
-    _compute_field_diff,
+    _compute_field_differences,
     _ensure_device_role,
     _ensure_device_type,
     _ensure_manufacturer,
@@ -329,7 +329,7 @@ class EnsureDeviceRolePermDeniedNonDryRunTest(TestCase):
 
 
 class ComputeFieldDiffFaceAirflowTest(TestCase):
-    """Tests for _compute_field_diff — lines 766, 768, 778-780."""
+    """Tests for _compute_field_differences — lines 766, 768, 778-780."""
 
     def setUp(self):
         from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
@@ -342,7 +342,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
         self.role = DeviceRole.objects.create(name="DiffFaceRole2", slug="diff-face-role2", color="000000")
 
     def test_face_included_in_diff_when_different(self):
-        """_compute_field_diff includes face in diff when it differs — line 766."""
+        """_compute_field_differences includes face in diff when it differs — line 766."""
         from dcim.choices import DeviceFaceChoices
         from dcim.models import Device
 
@@ -353,7 +353,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             role=self.role,
             face=DeviceFaceChoices.FACE_FRONT,
         )
-        diff = _compute_field_diff(
+        diff, informational = _compute_field_differences(
             matched_device=device,
             device_name="face-diff-device2",
             serial="",
@@ -368,7 +368,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
         self.assertEqual(diff["face"]["file"], str(DeviceFaceChoices.FACE_REAR))
 
     def test_airflow_included_in_diff_when_different(self):
-        """_compute_field_diff includes airflow in diff when it differs — line 768."""
+        """_compute_field_differences includes airflow in diff when it differs — line 768."""
         from dcim.choices import DeviceAirflowChoices
         from dcim.models import Device
 
@@ -379,7 +379,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             role=self.role,
             airflow=DeviceAirflowChoices.AIRFLOW_FRONT_TO_REAR,
         )
-        diff = _compute_field_diff(
+        diff, informational = _compute_field_differences(
             matched_device=device,
             device_name="airflow-diff-device2",
             serial="",
@@ -394,7 +394,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
         self.assertNotEqual(diff["airflow"]["file"], diff["airflow"]["netbox"])
 
     def test_u_height_float_comparison_detects_diff(self):
-        """_compute_field_diff detects u_height difference via float comparison — line 778."""
+        """_compute_field_differences detects u_height difference via float comparison — line 778."""
         from dcim.models import Device
 
         device = Device.objects.create(
@@ -403,7 +403,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             device_type=self.dt,
             role=self.role,
         )
-        diff = _compute_field_diff(
+        diff, informational = _compute_field_differences(
             matched_device=device,
             device_name="uheight-diff-device2",
             serial="",
@@ -414,12 +414,12 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             u_height=2,
             u_position=None,
         )
-        self.assertIn("u_height", diff)
-        self.assertEqual(diff["u_height"]["netbox"], "1")
-        self.assertEqual(diff["u_height"]["file"], "2")
+        self.assertIn("u_height", informational)
+        self.assertEqual(informational["u_height"]["netbox"], "1")
+        self.assertEqual(informational["u_height"]["file"], "2")
 
     def test_u_height_none_silences_typeerror(self):
-        """_compute_field_diff silences TypeError when u_height is None — line 780."""
+        """_compute_field_differences silences TypeError when u_height is None — line 780."""
         from dcim.models import Device
 
         device = Device.objects.create(
@@ -428,7 +428,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             device_type=self.dt,
             role=self.role,
         )
-        diff = _compute_field_diff(
+        diff, informational = _compute_field_differences(
             matched_device=device,
             device_name="uheight-none-device2",
             serial="",
@@ -439,7 +439,7 @@ class ComputeFieldDiffFaceAirflowTest(TestCase):
             u_height=None,
             u_position=None,
         )
-        self.assertNotIn("u_height", diff)
+        self.assertNotIn("u_height", informational)
 
 
 class PreviewDeviceRowUHeightInvalidTest(TestCase):
