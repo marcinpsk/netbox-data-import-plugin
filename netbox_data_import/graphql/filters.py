@@ -17,17 +17,18 @@ except ModuleNotFoundError as exc:  # pragma: no cover
         raise
     ImportProfileFilter = None
 else:  # pragma: no cover
+    # The lookup class moved between strawberry-django releases, so it resolves at import time.
     StrFilterLookup = getattr(strawberry_django, "StrFilterLookup", None)
     if StrFilterLookup is None:
         StrFilterLookup = strawberry_django.FilterLookup
 
     @strawberry_django.filter_type(ImportProfile, lookups=True)
-    class ImportProfileFilter(NetBoxModelFilter):
+    class ImportProfileFilter(NetBoxModelFilter):  # type: ignore[no-redef]
         """Filter profiles by their imported configuration fields."""
 
-        name: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        description: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        source_adapter: StrFilterLookup[str] | None = strawberry_django.filter_field()
+        name: StrFilterLookup[str] | None = strawberry_django.filter_field()  # type: ignore[valid-type]
+        description: StrFilterLookup[str] | None = strawberry_django.filter_field()  # type: ignore[valid-type]
+        source_adapter: StrFilterLookup[str] | None = strawberry_django.filter_field()  # type: ignore[valid-type]
 
 
 __all__ = ("ImportProfileFilter",)

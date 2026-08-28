@@ -131,7 +131,7 @@ class PrimaryContactResolver:
 
     @staticmethod
     def _candidate_source_columns(profile) -> dict[str, frozenset[str]]:
-        grouped = {}
+        grouped: dict[str, set[str]] = {}
         for mapping in profile.column_mappings.filter(target_field__startswith="candidate:"):
             target = mapping.target_field.removeprefix("candidate:")
             grouped.setdefault(target, set()).add(mapping.source_column)
@@ -208,7 +208,7 @@ class PrimaryContactResolver:
         candidate_values = cls._candidate_values(row, source_columns, extra_columns)
         try:
             selection = cls._selection(row, profile, candidate_values, legacy_primary_contact)
-            plan = cls._plan(obj, profile, selection, user)
+            plan = None if selection is None else cls._plan(obj, profile, selection, user)
         except ContactResolutionRequired as exc:
             exc.suggestion = cls.suggest(candidate_values, profile, user)
             raise
@@ -309,9 +309,7 @@ class PrimaryContactResolver:
         return primary_assignment, assignment, "unchanged"
 
     @classmethod
-    def _plan(cls, obj, profile, selection: ContactSelection | None, user=None, lock=False) -> dict | None:
-        if selection is None:
-            return None
+    def _plan(cls, obj, profile, selection: ContactSelection, user=None, lock=False) -> dict:
         role_name = profile.adapter_settings.primary_contact_role
         if not role_name:
             raise ValidationError({"primary_contact": "Select a primary contact role on the import profile."})

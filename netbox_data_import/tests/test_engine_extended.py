@@ -75,7 +75,7 @@ class _MockUserViewOnly:
     is_active = True
     is_superuser = False
     is_authenticated = True
-    _object_perm_cache = {"dcim.view_device": [{}]}
+    _object_perm_cache: dict[str, list[dict]] = {"dcim.view_device": [{}]}
 
     def has_perm(self, perm, obj=None):
         return perm == "dcim.view_device"

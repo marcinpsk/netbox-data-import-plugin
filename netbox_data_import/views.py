@@ -2119,7 +2119,7 @@ class _AjaxPermissionView(ConditionalLoginRequiredMixin, View):
     fire first for API callers.
     """
 
-    permission_required = None
+    permission_required: str | tuple[str, ...] | None = None
     permission_denied_response_format = "json"
 
     def dispatch(self, request, *args, **kwargs):

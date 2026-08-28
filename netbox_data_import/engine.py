@@ -17,7 +17,7 @@ import re
 from copy import copy
 from functools import partial
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 from io import BytesIO
 
 from django.core.exceptions import ValidationError
@@ -54,6 +54,10 @@ _CandidateResolutionRequired = ContactResolutionRequired
 # ---------------------------------------------------------------------------
 
 
+RowAction = Literal["create", "update", "skip", "error", "ignore"]
+RowObjectType = Literal["rack", "device", "manufacturer", "device_type", ""]
+
+
 @dataclass
 class RowResult:
     """Holds the result of processing a single source row."""
@@ -61,8 +65,8 @@ class RowResult:
     row_number: int
     source_id: str
     name: str
-    action: Literal["create", "update", "skip", "error", "ignore"]
-    object_type: Literal["rack", "device", "manufacturer", "device_type", ""]
+    action: RowAction
+    object_type: RowObjectType
     detail: str
     netbox_url: str = ""
     rack_name: str = ""
@@ -436,11 +440,11 @@ def _merge_row_values(
     raw_row,
     raw_headers: dict[str, int],
     grouped_col_map: dict[str, list[str]],
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Build a parsed row dict using multi-source merge semantics."""
-    row_dict: dict[str, object] = {"_row_number": row_num}
+    row_dict: dict[str, Any] = {"_row_number": row_num}
     for target_field, source_cols in grouped_col_map.items():
-        values: dict[str, object] = {}
+        values: dict[str, Any] = {}
         for source_col in source_cols:
             idx = raw_headers.get(source_col)
             if idx is None:
@@ -467,7 +471,7 @@ def _merge_row_values(
     return row_dict
 
 
-def _clear_resolved_conflicts(row_dict: dict[str, object], resolved_fields: dict) -> None:
+def _clear_resolved_conflicts(row_dict: dict[str, Any], resolved_fields: dict) -> None:
     """Remove conflicts for fields overridden by saved resolutions."""
     for resolved_field in resolved_fields:
         row_dict.get("_conflicts", {}).pop(resolved_field, None)
@@ -767,7 +771,7 @@ def _get_translation_maps():
     return side, airflow, _STATUS_MAP
 
 
-def _perm_denied_row(perm: str, row: dict, name: str, object_type: str) -> RowResult:
+def _perm_denied_row(perm: str, row: dict, name: str, object_type: RowObjectType) -> RowResult:
     """Return a permission-denied RowResult for a write operation the user may not perform."""
     return RowResult(
         row_number=row["_row_number"],
@@ -2635,7 +2639,7 @@ def _preview_device_row(  # noqa: C901
                 },
             )
         ctx.claimed_device_ids[matched_device.pk] = (row.get("_row_number"), source_id)
-        action = "update" if ctx.profile.adapter_settings.update_existing else "skip"
+        action: RowAction = "update" if ctx.profile.adapter_settings.update_existing else "skip"
         if relation_error is not None:
             action = "error"
             detail = relation_error
@@ -3378,12 +3382,13 @@ def _write_device_row(  # noqa: C901
                         assigned = _assign_ip_to_device(device, ip_field, ip_str, ctx.user)
                         if not assigned:
                             ip_json[ip_field] = ip_str
-                    PrimaryContactResolver.apply(device, ctx.profile, contact_review, ctx.user)
+                    # Set in the sibling `actual_action == "update"` block; layer 4 merges the two.
+                    PrimaryContactResolver.apply(device, ctx.profile, contact_review, ctx.user)  # type: ignore[arg-type]
                     _store_source_id(
                         device,
                         ctx.profile,
                         source_id,
-                        contact_review.extra_columns,
+                        contact_review.extra_columns,  # type: ignore[union-attr]
                         ip_json or None,
                     )
                     _enforce_saved_object_permission(device, ctx.user, "change")
@@ -4216,20 +4221,20 @@ def run_import(
 
     Raises ValidationError when the profile names an adapter this release does not register.
     """
-    from .models import IgnoredDevice, validate_registered_adapter
+    from .models import ClassRoleMapping, IgnoredDevice, validate_registered_adapter
 
     # Every adapter setting is read from deep inside the passes, so reject the profile up front.
     validate_registered_adapter(profile)
 
-    class_role_map: dict[str, object] = {
+    class_role_map: dict[str, ClassRoleMapping] = {
         crm.source_class: crm for crm in profile.class_role_mappings.select_related("rack_type").all()
     }
     ignored_source_ids = frozenset(
         _str_val(source_id)
         for source_id in IgnoredDevice.objects.filter(profile=profile).values_list("source_id", flat=True)
     )
-    source_id_rows = {}
-    rack_name_counts = {}
+    source_id_rows: dict[str, list[int]] = {}
+    rack_name_counts: dict[str, int] = {}
     for row in rows:
         source_id = _str_val(row.get("source_id"))
         crm = class_role_map.get(_str_val(row.get("device_class")))
@@ -4305,7 +4310,7 @@ def run_import(
 
 def _build_candidate_source_columns(profile: ImportProfile) -> dict[str, frozenset[str]]:
     """Return configured source columns grouped by candidate target."""
-    grouped = {}
+    grouped: dict[str, set[str]] = {}
     for mapping in profile.column_mappings.all():
         if mapping.target_field.startswith(CANDIDATE_TARGET_PREFIX):
             target = mapping.target_field.removeprefix(CANDIDATE_TARGET_PREFIX)

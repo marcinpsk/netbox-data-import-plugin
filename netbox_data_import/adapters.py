@@ -58,7 +58,7 @@ class SourceAdapter:
         raise NotImplementedError
 
     @classmethod
-    def interpret(cls, source_document, adapter_config, **kwargs) -> SourceBatch:
+    def interpret(cls, source_document, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
         """Return the Source Batch one source document carries under *adapter_config*."""
         raise NotImplementedError
 

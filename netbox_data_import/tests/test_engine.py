@@ -161,6 +161,7 @@ class MultiColumnMergeTest(TestCase):
 
         wb = openpyxl.Workbook()
         ws = wb.active
+        assert ws is not None
         ws.title = "Data"
         ws.append(["Id", "Rack", "Name", "Class", "Make", "Model", "Serial Number", "Service Tag"])
         ws.append(["100", "Rack-01", "Dev-01", "Server", "Cisco", "C9300", serial_number, service_tag])
@@ -892,6 +893,7 @@ class ParseFileEdgeCasesTest(TestCase):
         # Build an xlsx with one data row and one empty row
         wb = openpyxl.Workbook()
         ws = wb.active
+        assert ws is not None
         ws.title = "Data"
         ws.append(
             [
@@ -930,6 +932,7 @@ class ParseFileEdgeCasesTest(TestCase):
 
         wb = openpyxl.Workbook()
         ws = wb.active
+        assert ws is not None
         ws.title = "Data"
         ws.append(["Id", "Name", "Class"])
         ws.append(["SRC001", "dev-01", "Server"])

@@ -10,6 +10,8 @@ the ORM, and free of a database in its tests.
 
 from __future__ import annotations
 
+from typing import Any
+
 import re
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -65,11 +67,11 @@ def _cell(raw_row, index) -> object:
     return raw_row[index] if index is not None and index < len(raw_row) else None
 
 
-def _merge_row_values(row_number: int, raw_row, headers: dict[str, int], column_map) -> dict[str, object]:
+def _merge_row_values(row_number: int, raw_row, headers: dict[str, int], column_map) -> dict[str, Any]:
     """Build one row dict, recording a conflict when two source columns disagree."""
-    row: dict[str, object] = {"_row_number": row_number}
+    row: dict[str, Any] = {"_row_number": row_number}
     for target_field, source_columns in column_map.items():
-        values: dict[str, object] = {}
+        values: dict[str, Any] = {}
         for source_column in source_columns:
             value = _cell(raw_row, headers.get(source_column))
             if isinstance(value, str):
