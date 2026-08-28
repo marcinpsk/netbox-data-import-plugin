@@ -18,6 +18,7 @@
 
   /* The values this row already carries, so a part can say whether it overwrites one. */
   var fileValues = {};
+  var deviceCheckRequest = 0;
 
   function readJson(id) {
     var node = document.getElementById(id);
@@ -162,6 +163,7 @@
   }
 
   function checkDevice(name) {
+    var request = ++deviceCheckRequest;
     var div = document.getElementById('res_device_check');
     var msg = document.getElementById('res_device_check_msg');
     if (!div || !msg) return;
@@ -173,6 +175,7 @@
     fetch(url + '?name=' + encodeURIComponent(name))
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        if (request !== deviceCheckRequest) return;
         div.classList.remove('d-none');
         msg.textContent = '';
         var icon = document.createElement('i');
@@ -201,7 +204,9 @@
           msg.appendChild(document.createTextNode(' not yet in NetBox — will be created on import.'));
         }
       })
-      .catch(function () { div.classList.add('d-none'); });
+      .catch(function () {
+        if (request === deviceCheckRequest) div.classList.add('d-none');
+      });
   }
 
   function addPart(container, idx, value, defaultField) {

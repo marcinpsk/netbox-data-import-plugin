@@ -166,6 +166,12 @@ class SplitModalMarkupMatchesItsScriptTest(PreviewSessionMixin, BaseViewTestCase
         """Return the shipped split-modal asset."""
         return (STATIC_JS_DIR / "split_name_modal.js").read_text()
 
+    def test_the_preview_loads_the_split_modal_script(self):
+        """The rendered modal needs the script that controls it."""
+        self._setup_session()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertContains(response, 'src="/static/netbox_data_import/js/split_name_modal.js')
+
     def test_every_id_the_script_reads_is_rendered(self):
         """A literal id in the script and none in the page is the drift this catches."""
         source = self._script_source()

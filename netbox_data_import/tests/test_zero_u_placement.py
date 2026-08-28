@@ -213,3 +213,48 @@ class OnlyAnInformationalFieldLosesItsSyncButtonTest(ZeroUPlacementMixin, BaseVi
         row, cell = self._serial_cell(u_height=1)
         self.assertNotIn("field_informational", row.extra_data)
         self.assertIn("ndi-sync-btn", cell)
+
+
+class ZeroUTypeChangeOnAPlacedDeviceTest(BaseViewTestCase):
+    """A row that moves a placed device to a zero-U type still writes neither position nor face."""
+
+    def _run(self):
+        """Preview a source row that retypes a racked 1U device as zero-U at another position."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        from netbox_data_import.engine import parse_file, run_import
+
+        site = Site.objects.create(name="ZeroUMoveSite", slug="zero-u-move-site")
+        profile = _make_profile("ZeroUMoveProfile")
+        eaton = Manufacturer.objects.create(name="Eaton", slug="eaton")
+        DeviceType.objects.create(manufacturer=eaton, model="EMAB33", slug="eaton-emab33", u_height=0)
+        legacy = Manufacturer.objects.create(name="Legacy", slug="legacy")
+        stored_type = DeviceType.objects.create(
+            manufacturer=legacy, model="RackServer", slug="legacy-rackserver", u_height=1
+        )
+        role = DeviceRole.objects.create(name="Server", slug="server")
+        rack = Rack.objects.create(name="Rack-ZU", site=site, u_height=42)
+        Device.objects.create(
+            name="ZU-PDU-A",
+            site=site,
+            rack=rack,
+            position=5,
+            face="front",
+            device_type=stored_type,
+            role=role,
+            serial="SN-NETBOX",
+            status="active",
+        )
+        rows = parse_file(_workbook(serial="SN-NETBOX", position="7", side="Rear"), profile)
+        result = run_import(rows, profile, {"site": site}, dry_run=True)
+        return next(row for row in result.rows if row.object_type == "device")
+
+    def test_the_position_the_row_carries_is_not_a_writable_difference(self):
+        """The stored position does not make the source position reachable."""
+        row = self._run()
+        self.assertIn("u_position", row.extra_data.get("field_informational", {}))
+
+    def test_the_face_the_row_carries_is_not_a_writable_difference(self):
+        """Same rule as the position, and the row supplies both."""
+        row = self._run()
+        self.assertIn("face", row.extra_data.get("field_informational", {}))

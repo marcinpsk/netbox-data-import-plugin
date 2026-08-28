@@ -2131,15 +2131,15 @@ def _zero_u_overrides(device_type, position, face, ignored_fields=()):
 ZERO_U_DROPPED_FIELDS = ("u_position", "face")
 
 
-def _zero_u_review(review, device, zero_u):
+def _zero_u_review(review, zero_u):
     """Return *review* with the fields a zero-U type drops moved out of the differences.
 
-    `_zero_u_overrides` clears the position and the face, so neither reaches NetBox. Reporting
-    them as differences offers a sync NetBox refuses and keeps a row that writes nothing off the
-    no-op count. A device that still holds either value is left alone, because clearing it is a
-    write this cannot describe.
+    `_zero_u_overrides` clears the position and the face, so the source value of neither reaches
+    NetBox. Reporting them as differences offers a per-field sync that writes a value the import
+    then discards. Whether NetBox's own stored position is cleared is a separate write, and
+    `_matched_device_writes_nothing` decides that from the device.
     """
-    if review is None or not zero_u or device.position is not None or device.face:
+    if review is None or not zero_u:
         return review
     moved = {name: review.differing[name] for name in ZERO_U_DROPPED_FIELDS if name in review.differing}
     if not moved:
@@ -2597,7 +2597,7 @@ def _preview_device_row(  # noqa: C901
             device_face,
             review.ignored if review is not None else (),
         )
-        review = _zero_u_review(review, matched_device, is_zero_u)
+        review = _zero_u_review(review, is_zero_u)
         zero_u_conflict = _zero_u_review_conflict(
             device_type,
             position,
@@ -3194,7 +3194,7 @@ def _write_device_row(  # noqa: C901
             review.ignored if review is not None else (),
         )
         # The intent guard compares this action to the previewed one, so both drop the same fields.
-        review = _zero_u_review(review, device, device_type is not None and device_type.u_height == 0)
+        review = _zero_u_review(review, device_type is not None and device_type.u_height == 0)
         zero_u_conflict = _zero_u_review_conflict(
             device_type,
             position,

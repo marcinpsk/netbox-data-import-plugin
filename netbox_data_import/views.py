@@ -1010,12 +1010,12 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         site, location, tenant = target["site"], target["location"], target["tenant"]
 
         stored_result = request.session.get("import_result")
+        # Derived for both branches, never stored: storing it would bake the resolution in.
+        rows = engine.derive_effective_rows(rows, profile)
         if use_materialized_result and isinstance(stored_result, dict):
             result = engine.ImportResult.from_session_dict(stored_result)
         else:
             context_obj = {"site": site, "location": location, "tenant": tenant}
-            # Derived, never stored: writing it back would bake the resolution in and block a later edit.
-            rows = engine.derive_effective_rows(rows, profile)
             result = engine.run_import(rows, profile, context_obj, dry_run=True, user=request.user)
             record_recalculated_preview(request.session, result)
 

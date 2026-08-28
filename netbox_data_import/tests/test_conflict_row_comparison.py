@@ -279,6 +279,73 @@ class ConflictRowComparisonTest(BaseViewTestCase):
         self.assertEqual(response.status_code, 200)
         return response
 
+    def _resolution_workbook(self):
+        """Return two rows whose serials differ until a saved resolution makes them collide."""
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "Data"
+        sheet.append(["Id", "Rack", "Name", "Class", "Make", "Model", "UHeight", "UPosition", "Serial Number"])
+        sheet.append(
+            ["res-a", "Rack-Compare", "res-device-a", "Server", "Example Vendor", "Example Model", 1, 1, "SERIAL-A"]
+        )
+        sheet.append(
+            ["res-b", "Rack-Compare", "res-device-b", "Server", "Example Vendor", "Example Model", 1, 2, "SERIAL-B"]
+        )
+        workbook = io.BytesIO()
+        book.save(workbook)
+        workbook.seek(0)
+        return workbook
+
+    def _materialized_preview(self):
+        """Render the preview from the stored result, the way the setup step reaches it once."""
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        from netbox_data_import.engine import derive_effective_rows, parse_file, run_import
+        from netbox_data_import.models import SourceResolution
+        from netbox_data_import.preview_row_actions import PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY
+        from netbox_data_import.views import _serialize_rows
+
+        site = Site.objects.create(name="Resolution Site", slug="resolution-site")
+        Rack.objects.create(name="Rack-Compare", site=site, u_height=42)
+        DeviceRole.objects.create(name="Server", slug="server")
+        manufacturer = Manufacturer.objects.create(name="Example Vendor", slug="example-vendor")
+        DeviceType.objects.create(
+            manufacturer=manufacturer, model="Example Model", slug="example-vendor-example-model", u_height=1
+        )
+        profile = _make_profile("Resolution comparison")
+        SourceResolution.objects.create(
+            profile=profile,
+            source_id="res-a",
+            source_column="serial",
+            original_value="SERIAL-A",
+            resolved_fields={"serial": "SERIAL-B"},
+        )
+        rows = parse_file(self._resolution_workbook(), profile)
+        result = run_import(derive_effective_rows(rows, profile), profile, {"site": site}, dry_run=True)
+
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "resolutions.xlsx",
+        }
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        session.save()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertEqual(response.status_code, 200)
+        return response
+
+    def test_the_comparison_shows_the_value_that_caused_the_conflict(self):
+        """The stored result is built from resolved rows, so the table cannot read the raw ones."""
+        response = self._materialized_preview()
+        line = self._comparison_line(self._detail_for(response, "res-device-a"), "res-device-a")
+        self.assertIn("SERIAL-B", line)
+        self.assertNotIn("SERIAL-A", line)
+
     def _detail_for(self, response, name):
         """Return one named device row's detail markup."""
         rows = list(response.context["result"].rows)

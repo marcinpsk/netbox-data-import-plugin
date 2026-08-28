@@ -92,6 +92,26 @@ function resolvedFields() {
   return JSON.parse(document.getElementById("res_resolved_fields").value || "null");
 }
 
+function deferDeviceLookups() {
+  const pending = [];
+  vi.mocked(fetch).mockImplementation(
+    (url) =>
+      new Promise((resolveLookup) => {
+        lookups.push(url);
+        pending.push({ url, resolveLookup });
+      }),
+  );
+  return pending;
+}
+
+function respondTo(lookup, data) {
+  lookup.resolveLookup({ json: () => Promise.resolve(data) });
+}
+
+async function settleDeviceCheck() {
+  await new Promise((resolveCheck) => setTimeout(resolveCheck, 0));
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     "fetch",
@@ -147,9 +167,53 @@ describe("the device that a part would name", () => {
     setValue(1, "host-901");
     expect(lookups.some((url) => url.includes("host-901"))).toBe(true);
   });
+});
 
-  it("says nothing when no part names the device", () => {
+describe("device checks that finish out of order", () => {
+  it("keeps the newer result when the older lookup finishes last", async () => {
+    const pending = deferDeviceLookups();
+    render();
+    setField(1, "asset_tag");
+    setField(0, "device_name");
+
+    expect(pending.map(({ url }) => url)).toEqual([
+      "/plugins/data-import/check-device/?name=host-900",
+      "/plugins/data-import/check-device/?name=AT900",
+    ]);
+    respondTo(pending[1], { exists: false, count: 0, url: "" });
+    await vi.waitFor(() => expect(document.getElementById("res_device_check_msg").textContent).toContain("AT900"));
+
+    respondTo(pending[0], { exists: true, count: 1, url: "/dcim/devices/900/" });
+    await settleDeviceCheck();
+
+    const message = document.getElementById("res_device_check_msg").textContent;
+    expect(message).toContain("AT900");
+    expect(message).toContain("not yet in NetBox");
+  });
+
+  it("waits for the newer result when the older lookup finishes first", async () => {
+    const pending = deferDeviceLookups();
+    render();
+    setField(1, "asset_tag");
+    setField(0, "device_name");
+
+    respondTo(pending[0], { exists: true, count: 1, url: "/dcim/devices/900/" });
+    await settleDeviceCheck();
+    expect(document.getElementById("res_device_check").classList.contains("d-none")).toBe(true);
+
+    respondTo(pending[1], { exists: false, count: 0, url: "" });
+    await vi.waitFor(() => expect(document.getElementById("res_device_check_msg").textContent).toContain("AT900"));
+    expect(document.getElementById("res_device_check_msg").textContent).toContain("not yet in NetBox");
+  });
+
+  it("stays hidden when no part names the device", async () => {
+    const pending = deferDeviceLookups();
+    render();
     setField(1, "serial");
+
+    respondTo(pending[0], { exists: true, count: 1, url: "/dcim/devices/900/" });
+    await settleDeviceCheck();
+
     expect(document.getElementById("res_device_check").classList.contains("d-none")).toBe(true);
   });
 });
