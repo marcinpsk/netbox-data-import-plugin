@@ -400,7 +400,8 @@ class _DeviceBatch:
         status = _translate(row.get("status"), self.status_map) or "active"
 
         if position is None:
-            return _Placement(position=None, face=face, airflow=airflow, status=status)
+            # NetBox refuses a rack face on a device in no rack, so the plan never asks for one.
+            return _Placement(position=None, face=face if rack is not None else "", airflow=airflow, status=status)
         if rack is None:
             return _Placement(refused=("device.rack_required", {"u_position": position}))
         if not face:
@@ -557,6 +558,48 @@ class DeviceModule:
             disposition=Disposition.ACTIONABLE,
             changes=(self._change(identity, "update", payload, match.device),),
         )
+
+    def apply(self, planned_change: PlannedChange, execution_context) -> Any:
+        """Apply one device change, having locked its row and rechecked its preconditions."""
+        from dcim.models import Device
+
+        from .object_permissions import enforce_saved_object_permission
+
+        payload = planned_change.payload
+        device_id = planned_change.preconditions.get("device_id")
+        if device_id is None:
+            device = Device()
+            action = "add"
+        else:
+            # `of=("self",)` because NetBox's default Device queryset outer-joins, which cannot be locked.
+            device = Device.objects.filter(pk=device_id).select_for_update(of=("self",)).first()
+            if device is None:
+                raise PreconditionFailed(f"Device {device_id} is gone, so '{payload['name']}' cannot be updated.")
+            if device.device_type_id != planned_change.preconditions.get("device_type_id"):
+                raise PreconditionFailed(f"Device '{device.name}' changed type since the plan was made.")
+            action = "change"
+
+        device.name = payload["name"]
+        device.device_type_id = payload["device_type_id"]
+        device.role_id = payload["role_id"]
+        device.site_id = payload["site_id"]
+        device.location_id = payload["location_id"]
+        device.rack_id = payload["rack_id"]
+        device.position = payload["u_position"]
+        device.face = payload["face"]
+        device.status = payload["status"]
+        if payload["tenant_id"] is not None:
+            device.tenant_id = payload["tenant_id"]
+        if payload["airflow"]:
+            device.airflow = payload["airflow"]
+        for field in ("serial", "asset_tag"):
+            if payload[field]:
+                setattr(device, field, payload[field])
+        device.full_clean()
+        device.save()
+        # An ObjectPermission's constraints are only evaluated against the saved row.
+        enforce_saved_object_permission(device, execution_context.actor, action)
+        return device
 
     @staticmethod
     def _payload(row, name, dependencies, placement, batch) -> dict:

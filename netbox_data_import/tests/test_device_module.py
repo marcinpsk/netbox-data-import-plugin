@@ -15,7 +15,7 @@ from netbox_data_import.catalog import OutputKind
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, IgnoredDevice, ImportProfile
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.plan import Disposition
-from netbox_data_import.target_modules import DeviceModule
+from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed
 
 
 class DeviceModulePlanTestBase(TestCase):
@@ -334,6 +334,13 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.face_required")
 
+    def test_a_face_with_no_rack_is_dropped(self):
+        """NetBox refuses a rack face on a device that is in no rack, so the plan cannot ask for one."""
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="", face="Front"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual(units[0].changes[0].payload["face"], "")
+
     def test_a_position_a_stored_device_already_fills_is_invalid(self):
         """The write would fail on the rack's own constraint, so planning says so first."""
         self._device("stored", rack=self.rack, position=5, face="front")
@@ -407,3 +414,99 @@ class DeviceModuleZeroUTest(DeviceModulePlanTestBase):
         )
 
         self.assertEqual([unit.disposition for unit in units], [Disposition.ACTIONABLE] * 2)
+
+
+class DeviceModuleApplyTest(DeviceModulePlanTestBase):
+    """Applying one Planned Change writes the device the plan described, or refuses to."""
+
+    def setUp(self):
+        super().setUp()
+        from netbox_data_import.tests.helpers import user_with_object_permission
+        from dcim.models import Device
+
+        self.actor = user_with_object_permission("device-module-writer", [(Device, ("add", "change", "view"), {})])
+        self.context = ExecutionContext(actor=self.actor, reader=self.reader)
+
+    def _only_change(self, *rows):
+        """Return the single change the given rows plan."""
+        units = self._plan(*rows)
+        self.assertEqual(len(units), 1, [unit.diagnostics for unit in units])
+        self.assertEqual(len(units[0].changes), 1, units[0].disposition)
+        return units[0].changes[0]
+
+    def test_a_create_change_writes_the_device_the_plan_described(self):
+        change = self._only_change(
+            self._row(2, "D-1", "srv-01", serial="SN-1", asset_tag="AT-1", u_position="5", face="Front")
+        )
+
+        device = DeviceModule().apply(change, self.context)
+
+        device.refresh_from_db()
+        self.assertEqual(device.name, "srv-01")
+        self.assertEqual(device.serial, "SN-1")
+        self.assertEqual(device.asset_tag, "AT-1")
+        self.assertEqual(device.rack_id, self.rack.pk)
+        self.assertEqual(device.position, 5)
+        self.assertEqual(device.face, "front")
+        self.assertEqual(device.device_type_id, self.device_type.pk)
+        self.assertEqual(device.role_id, self.role.pk)
+
+    def test_an_update_change_reconciles_the_stored_device(self):
+        stored = self._device("srv-01", rack=self.rack, serial="OLD")
+
+        change = self._only_change(self._row(2, "D-1", "srv-01", serial="NEW"))
+        DeviceModule().apply(change, self.context)
+
+        stored.refresh_from_db()
+        self.assertEqual(stored.serial, "NEW")
+
+    def test_a_vanished_device_is_refused_rather_than_recreated(self):
+        """The plan named a device to update, and creating a new one instead is not that."""
+        from dcim.models import Device
+
+        stored = self._device("srv-01", rack=self.rack, serial="OLD")
+        change = self._only_change(self._row(2, "D-1", "srv-01", serial="NEW"))
+        Device.objects.filter(pk=stored.pk).delete()
+
+        with self.assertRaises(PreconditionFailed):
+            DeviceModule().apply(change, self.context)
+
+    def test_a_device_type_that_moved_since_the_plan_is_refused(self):
+        """The type decides the height, so the placement the plan checked no longer holds."""
+        from dcim.models import Device, DeviceType
+
+        stored = self._device("srv-01", rack=self.rack, serial="OLD")
+        change = self._only_change(self._row(2, "D-1", "srv-01", serial="NEW"))
+        other = DeviceType.objects.create(manufacturer=self.manufacturer, model="R760", slug="dell-r760", u_height=1)
+        Device.objects.filter(pk=stored.pk).update(device_type=other)
+
+        with self.assertRaises(PreconditionFailed):
+            DeviceModule().apply(change, self.context)
+
+    def test_an_actor_without_the_add_permission_is_refused(self):
+        """An ObjectPermission constraint is only decided against the saved row."""
+        from dcim.models import Device
+
+        from netbox_data_import.object_permissions import ObjectPermissionDenied
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        blocked = user_with_object_permission(
+            "device-module-blocked", [(Device, ("add", "view"), {"name": "only-this-name"})]
+        )
+        change = self._only_change(self._row(2, "D-1", "srv-01"))
+
+        with self.assertRaises(ObjectPermissionDenied):
+            DeviceModule().apply(change, ExecutionContext(actor=blocked, reader=self.reader))
+
+    def test_a_zero_u_device_is_written_without_a_position(self):
+        """NetBox refuses a position on a zero-U type, so the plan never carries one."""
+        from dcim.models import DeviceType
+
+        DeviceType.objects.create(manufacturer=self.manufacturer, model="PDU", slug="dell-pdu", u_height=0)
+
+        change = self._only_change(self._row(2, "D-1", "pdu-01", model="PDU", u_position="5", face="Front"))
+        device = DeviceModule().apply(change, self.context)
+
+        device.refresh_from_db()
+        self.assertIsNone(device.position)
+        self.assertEqual(device.face, "")
