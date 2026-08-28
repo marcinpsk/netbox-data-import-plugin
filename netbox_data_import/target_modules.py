@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from .catalog import OutputKind
 from .device_identity import DeviceTypeIdentityResolver
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
-from .values import normalize_for_compare
+from .values import normalize_for_compare, translation_maps
 
 DEFAULT_RACK_HEIGHT = 42
 
@@ -76,6 +76,29 @@ def _repeated(values) -> frozenset[str]:
             repeated.add(value)
         seen.add(value)
     return frozenset(repeated)
+
+
+def _coerce_position(value):
+    """Return the rack position the row asks for, or None when it names none."""
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number == int(number) else number
+
+
+def _translate(value, table) -> str:
+    """Return the NetBox value a source word names, or the word itself when it is already one."""
+    text = _text(value).lower()
+    if not text:
+        return ""
+    mapped = table.get(text)
+    if mapped is not None:
+        return mapped
+    return text if text in set(table.values()) else ""
 
 
 def _coerce_height(value) -> int:
@@ -236,6 +259,16 @@ class RackModule:
         )
 
 
+def _occupied_units(position, height):
+    """Return the half-unit slots a device of *height* fills from *position*."""
+    from decimal import Decimal
+
+    start = Decimal(str(position))
+    step = Decimal("0.5")
+    count = int(Decimal(str(height)) / step)
+    return [start + step * index for index in range(count)]
+
+
 def _refused(identity, code, display) -> SynchronizationUnit:
     """Return an invalid unit carrying the error that refused it."""
     return SynchronizationUnit(
@@ -262,6 +295,17 @@ class _Dependencies:
     role: Any = None
     rack: Any = None
     missing: tuple[str, dict] | None = None
+
+
+@dataclass(frozen=True)
+class _Placement:
+    """Where a device row puts the device, or the reason it cannot go there."""
+
+    position: Any = None
+    face: str = ""
+    airflow: str = ""
+    status: str = "active"
+    refused: tuple[str, dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -292,6 +336,9 @@ class _DeviceBatch:
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
         self._duplicate_names = _repeated(_identity_text(row.get("device_name")) for row in rows)
         self._racks = self._racks_by_name(netbox_reader)
+        self.side_map, self.airflow_map, self.status_map = translation_maps()
+        # Row order decides who keeps a slot two rows claim, so the first row planned wins it.
+        self._claimed: dict[tuple[int, str | None, Any], int] = {}
 
     @staticmethod
     def _rows_by_value(rows, field, fold) -> dict[str, list[int]]:
@@ -343,6 +390,43 @@ class _DeviceBatch:
         if rack_name and rack is None:
             return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
         return _Dependencies(device_type=device_type, role=role, rack=rack)
+
+    def placement(self, row, device_type, rack) -> _Placement:
+        """Return where this row puts the device, or the first reason it cannot go there."""
+        zero_u = device_type.u_height == 0
+        position = None if zero_u else _coerce_position(row.get("u_position"))
+        face = "" if zero_u else _translate(row.get("face"), self.side_map)
+        airflow = _translate(row.get("airflow"), self.airflow_map)
+        status = _translate(row.get("status"), self.status_map) or "active"
+
+        if position is None:
+            return _Placement(position=None, face=face, airflow=airflow, status=status)
+        if rack is None:
+            return _Placement(refused=("device.rack_required", {"u_position": position}))
+        if not face:
+            return _Placement(refused=("device.face_required", {"u_position": position}))
+        return _Placement(position=position, face=face, airflow=airflow, status=status)
+
+    def claim(self, row, rack, placement, device_type, matched) -> tuple[str, dict] | None:
+        """Take the units this row occupies, or name what already holds them."""
+        if rack is None or placement.position is None or device_type.u_height == 0:
+            return None
+        rack_face = None if device_type.is_full_depth else placement.face
+        for unit in _occupied_units(placement.position, device_type.u_height):
+            key = (rack.pk, rack_face, unit)
+            claimed_by = self._claimed.get(key)
+            if claimed_by is not None:
+                return "device.rack_position_claimed", {"u_position": placement.position, "claimed_by_row": claimed_by}
+            self._claimed[key] = row.get("_row_number")
+
+        available = rack.get_available_units(
+            u_height=device_type.u_height,
+            rack_face=rack_face,
+            exclude=[matched.pk] if matched is not None else [],
+        )
+        if placement.position not in available:
+            return "device.rack_position_occupied", {"u_position": placement.position, "rack_name": rack.name}
+        return None
 
     def match(self, row, name) -> _Match:
         """Return the stored device this row reconciles, strongest identifier first."""
@@ -450,7 +534,16 @@ class DeviceModule:
         if match.ambiguous is not None:
             return _refused(identity, match.ambiguous, {**display, "value": match.value})
 
-        payload = self._payload(row, name, dependencies, batch)
+        placement = batch.placement(row, dependencies.device_type, dependencies.rack)
+        if placement.refused is not None:
+            code, placement_display = placement.refused
+            return _refused(identity, code, {**display, **placement_display})
+        taken = batch.claim(row, dependencies.rack, placement, dependencies.device_type, match.device)
+        if taken is not None:
+            code, taken_display = taken
+            return _refused(identity, code, {**display, **taken_display})
+
+        payload = self._payload(row, name, dependencies, placement, batch)
         if match.device is None:
             return SynchronizationUnit(
                 identity=identity,
@@ -466,12 +559,16 @@ class DeviceModule:
         )
 
     @staticmethod
-    def _payload(row, name, dependencies, batch) -> dict:
+    def _payload(row, name, dependencies, placement, batch) -> dict:
         """Return the device state this row asks for, resolved to what a write needs."""
         return {
             "name": name,
             "serial": _text(row.get("serial")),
             "asset_tag": _text(row.get("asset_tag")),
+            "u_position": placement.position,
+            "face": placement.face,
+            "airflow": placement.airflow,
+            "status": placement.status,
             "device_type_id": dependencies.device_type.pk,
             "role_id": dependencies.role.pk,
             "rack_id": dependencies.rack.pk if dependencies.rack is not None else None,
@@ -489,6 +586,13 @@ class DeviceModule:
             return True
         if payload["rack_id"] is not None and device.rack_id != payload["rack_id"]:
             return True
+        if normalize_for_compare(device.position) != normalize_for_compare(payload["u_position"]):
+            return True
+        if _text(device.status) != payload["status"]:
+            return True
+        for field, stored in (("face", device.face), ("airflow", device.airflow)):
+            if payload[field] and _text(stored) != payload[field]:
+                return True
         for field in ("serial", "asset_tag"):
             if payload[field] and _text(getattr(device, field)) != payload[field]:
                 return True

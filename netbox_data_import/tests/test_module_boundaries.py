@@ -25,7 +25,6 @@ PERMITTED = {
         "_coerce_position",
         "_device_placement_differs",
         "_effective_device_name",
-        "_get_translation_maps",
         "_has_below_rack_position",
         "_identity_text",
         "_normalize_for_compare",

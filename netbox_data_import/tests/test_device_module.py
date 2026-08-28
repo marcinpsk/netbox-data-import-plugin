@@ -298,3 +298,112 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         units = DeviceModule().plan(self._batch(self._row(2, "D-1", "srv-01")), self.profile, None, reader)
 
         self.assertEqual(units[0].changes[0].operation, "create")
+
+
+class DeviceModulePlacementTest(DeviceModulePlanTestBase):
+    """Where a device sits is part of what the row writes, and the rack has to have room."""
+
+    def test_the_placement_the_row_names_reaches_the_change(self):
+        units = self._plan(self._row(2, "D-1", "srv-01", u_position="5", face="Front", airflow="Front to Back"))
+
+        payload = units[0].changes[0].payload
+        self.assertEqual(payload["u_position"], 5)
+        self.assertEqual(payload["face"], "front")
+        self.assertEqual(payload["airflow"], "front-to-rear")
+
+    def test_a_source_word_the_importer_already_reads_is_translated(self):
+        """`Back` and `Rear` are one NetBox face, and the module reads the same table as the engine."""
+        units = self._plan(self._row(2, "D-1", "srv-01", u_position="5", face="Back"))
+
+        self.assertEqual(units[0].changes[0].payload["face"], "rear")
+
+    def test_a_status_the_source_spells_its_own_way_is_translated(self):
+        units = self._plan(self._row(2, "D-1", "srv-01", status="Live"))
+
+        self.assertEqual(units[0].changes[0].payload["status"], "active")
+
+    def test_a_position_with_no_rack_is_invalid(self):
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="", u_position="5", face="Front"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.rack_required")
+
+    def test_a_position_with_no_face_is_invalid(self):
+        units = self._plan(self._row(2, "D-1", "srv-01", u_position="5"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.face_required")
+
+    def test_a_position_a_stored_device_already_fills_is_invalid(self):
+        """The write would fail on the rack's own constraint, so planning says so first."""
+        self._device("stored", rack=self.rack, position=5, face="front")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", u_position="5", face="Front"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.rack_position_occupied")
+
+    def test_two_rows_claiming_one_slot_name_each_other(self):
+        """The second row is refused, and the operator needs to know which row took the slot."""
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", u_position="5", face="Front"),
+            self._row(7, "D-2", "srv-02", u_position="5", face="Front"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual(units[1].disposition, Disposition.INVALID)
+        self.assertEqual(units[1].diagnostics[0].code, "device.rack_position_claimed")
+        self.assertEqual(units[1].diagnostics[0].display["claimed_by_row"], 2)
+
+    def test_a_device_keeping_its_own_slot_is_not_refused(self):
+        """A matched device already occupies the position, and staying put is not a conflict."""
+        self._device("srv-01", rack=self.rack, position=5, face="front")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", u_position="5", face="Front"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP)
+
+    def test_a_taller_device_that_does_not_fit_is_invalid(self):
+        """A 2U device at the top of the rack has nowhere to put its second unit."""
+        from dcim.models import DeviceType
+
+        DeviceType.objects.create(manufacturer=self.manufacturer, model="R760", slug="dell-r760", u_height=2)
+
+        units = self._plan(self._row(2, "D-1", "srv-01", model="R760", u_position="42", face="Front"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.rack_position_occupied")
+
+
+class DeviceModuleZeroUTest(DeviceModulePlanTestBase):
+    """A zero-U device type holds no rack position and no face, whatever the row says."""
+
+    def setUp(self):
+        super().setUp()
+        from dcim.models import DeviceType
+
+        DeviceType.objects.create(manufacturer=self.manufacturer, model="PDU", slug="dell-pdu", u_height=0)
+
+    def _pdu_row(self, **extra):
+        return self._row(2, "D-1", "pdu-01", model="PDU", **extra)
+
+    def test_the_position_the_row_carries_is_dropped(self):
+        units = self._plan(self._pdu_row(u_position="5", face="Front"))
+
+        self.assertIsNone(units[0].changes[0].payload["u_position"])
+        self.assertEqual(units[0].changes[0].payload["face"], "")
+
+    def test_a_position_with_no_face_is_not_refused(self):
+        """The face rule guards a real rack position, and a zero-U type has none to guard."""
+        units = self._plan(self._pdu_row(u_position="5"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+
+    def test_two_zero_u_rows_do_not_claim_one_slot(self):
+        """Neither row occupies a unit, so neither can take the other's."""
+        units = self._plan(
+            self._row(2, "D-1", "pdu-01", model="PDU", u_position="5", face="Front"),
+            self._row(7, "D-2", "pdu-02", model="PDU", u_position="5", face="Front"),
+        )
+
+        self.assertEqual([unit.disposition for unit in units], [Disposition.ACTIONABLE] * 2)

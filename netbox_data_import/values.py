@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Value comparison shared by source interpretation and target planning.
+"""Value comparison and translation shared by source interpretation and target planning.
 
 Two source columns agreeing, and a source value matching what NetBox already holds, are the same
-question asked twice. Keeping one implementation is what stops the two answers drifting.
+question asked twice. Keeping one implementation is what stops the two answers drifting. The same
+holds for what a source word means: `Back` and `Rear` are one NetBox face, wherever they are read.
 """
 
 from __future__ import annotations
@@ -35,4 +36,38 @@ def comparison_key(target_field: str, value) -> str:
     return "" if value is None else str(value).strip()
 
 
-__all__ = ("NUMERIC_TARGET_FIELDS", "comparison_key", "normalize_for_compare")
+STATUS_MAP: dict[str, str] = {
+    "live": "active",
+    "production": "active",
+    "planned": "planned",
+    "staged": "staged",
+    "failed": "failed",
+    "offline": "offline",
+    "decommissioning": "decommissioning",
+}
+
+
+def translation_maps():
+    """Return (side, airflow, status) source-word tables, with the choice values imported lazily."""
+    from dcim.choices import DeviceAirflowChoices, DeviceFaceChoices
+
+    side = {
+        "front": DeviceFaceChoices.FACE_FRONT,
+        "back": DeviceFaceChoices.FACE_REAR,
+        "rear": DeviceFaceChoices.FACE_REAR,
+    }
+    airflow = {
+        "front to back": DeviceAirflowChoices.AIRFLOW_FRONT_TO_REAR,
+        "back to front": DeviceAirflowChoices.AIRFLOW_REAR_TO_FRONT,
+        "passive": DeviceAirflowChoices.AIRFLOW_PASSIVE,
+    }
+    return side, airflow, STATUS_MAP
+
+
+__all__ = (
+    "NUMERIC_TARGET_FIELDS",
+    "STATUS_MAP",
+    "comparison_key",
+    "normalize_for_compare",
+    "translation_maps",
+)

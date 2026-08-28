@@ -32,7 +32,7 @@ from .forms import (
     ImportSetupForm,
 )
 from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
-from .values import normalize_for_compare
+from .values import normalize_for_compare, translation_maps
 from . import __version__ as _plugin_version
 from .models import (
     locked_profile_policy,
@@ -2207,7 +2207,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         from django.http import JsonResponse
 
         from dcim.models import Device
-        from .engine import _STATUS_MAP
+        from .values import STATUS_MAP
 
         field = request.POST.get("field", "")
 
@@ -2231,7 +2231,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         try:
             # Nothing wraps this request, and a receiver on the model can require a transaction.
             with transaction.atomic():
-                display = self._apply_field(device, field, value, _STATUS_MAP, request.user)
+                display = self._apply_field(device, field, value, STATUS_MAP, request.user)
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
@@ -2336,7 +2336,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
     @staticmethod
     def _apply_airflow(device, value):
         """Write the airflow the source row states, in the wording the importer already reads."""
-        _side, airflow_map, _status = engine._get_translation_maps()
+        _side, airflow_map, _status = translation_maps()
         text = str(value).strip().lower()
         mapped = airflow_map.get(text)
         # The stored value is also accepted, so a row already carrying one syncs as it stands.
@@ -4091,7 +4091,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
 
             if device is not None and match_method == "name":
                 position = engine._coerce_position(row.get("u_position"))
-                side_map, _, _ = engine._get_translation_maps()
+                side_map, _, _ = translation_maps()
                 face = side_map.get(engine._str_val(row.get("face")).lower())
                 if engine._device_placement_differs(
                     device,

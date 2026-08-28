@@ -28,7 +28,7 @@ from .device_identity import DeviceTypeIdentityResolver
 from .adapters import SourceUnreadable
 from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
 from .flat_workbook import FlatWorkbookConfig, TransformRule, promote_extra_json_fields
-from .values import comparison_key, normalize_for_compare
+from .values import comparison_key, normalize_for_compare, translation_maps
 from .models import DeviceImportSource, ImportProfile
 from .netbox_reader import NetBoxReader
 from .object_permissions import (
@@ -554,35 +554,8 @@ def _resolve_device_type_slugs(
 # Main import runner — pass helpers
 # ---------------------------------------------------------------------------
 
+
 # Value-translation maps (shared across passes)
-_STATUS_MAP = {
-    "live": "active",
-    "production": "active",
-    "planned": "planned",
-    "staged": "staged",
-    "failed": "failed",
-    "offline": "offline",
-    "decommissioning": "decommissioning",
-}
-
-
-def _get_translation_maps():
-    """Return (SIDE_MAP, AIRFLOW_MAP, STATUS_MAP) with lazy-imported choice values."""
-    from dcim.choices import DeviceAirflowChoices, DeviceFaceChoices
-
-    side = {
-        "front": DeviceFaceChoices.FACE_FRONT,
-        "back": DeviceFaceChoices.FACE_REAR,
-        "rear": DeviceFaceChoices.FACE_REAR,
-    }
-    airflow = {
-        "front to back": DeviceAirflowChoices.AIRFLOW_FRONT_TO_REAR,
-        "back to front": DeviceAirflowChoices.AIRFLOW_REAR_TO_FRONT,
-        "passive": DeviceAirflowChoices.AIRFLOW_PASSIVE,
-    }
-    return side, airflow, _STATUS_MAP
-
-
 def _perm_denied_row(perm: str, row: dict, name: str, object_type: RowObjectType) -> RowResult:
     """Return a permission-denied RowResult for a write operation the user may not perform."""
     return RowResult(
@@ -3345,7 +3318,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
     """
     from dcim.models import Device, DeviceRole, DeviceType, Rack
 
-    side_map, airflow_map, status_map = _get_translation_maps()
+    side_map, airflow_map, status_map = translation_maps()
 
     # Identify device names that appear in multiple rows. When the same name occurs
     # in 2+ rows the name-based device lookup would incorrectly match all of them
