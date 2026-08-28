@@ -3,9 +3,8 @@
 """The Device Target Module turns device source rows into Synchronization Units.
 
 Every branch the current device pass reports as a row action maps onto exactly one disposition from
-section 4.2, so these tests are the mapping written down. This layer covers identity, the duplicate
-checks, matching against NetBox, the operator's saved field review, and the disposition each of
-those earns. Contacts and IP assignment arrive with the next layer.
+section 4.2, so these tests are the mapping written down. They cover identity, duplicate checks,
+matching against NetBox, field review, contacts, IP assignment, and each resulting disposition.
 """
 
 from django.test import TestCase
@@ -21,7 +20,7 @@ from netbox_data_import.models import (
     ImportProfile,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
-from netbox_data_import.plan import Disposition
+from netbox_data_import.plan import Disposition, Severity
 from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed
 
 
@@ -531,6 +530,222 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         device.refresh_from_db()
         self.assertIsNone(device.position)
         self.assertEqual(device.face, "")
+
+
+class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
+    """Device plans and writes carry the same parsed address fields."""
+
+    def setUp(self):
+        """Give device and address writes their real object permissions."""
+        super().setUp()
+        from dcim.models import Device
+        from ipam.models import IPAddress
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        self.actor = user_with_object_permission(
+            "device-module-ip-writer",
+            [
+                (Device, ("add", "change", "view"), {}),
+                (IPAddress, ("add", "change", "view"), {}),
+            ],
+        )
+        self.context = ExecutionContext(actor=self.actor, reader=self.reader, profile=self.profile)
+
+    def _interface_template(self):
+        """Declare the management interface that a new device instantiates."""
+        from dcim.models import InterfaceTemplate
+
+        return InterfaceTemplate.objects.create(
+            device_type=self.device_type,
+            name="mgmt0",
+            type="1000base-t",
+            mgmt_only=True,
+        )
+
+    def _assigned_address(self, device, address):
+        """Put one address on the device interface and select it as primary IPv4."""
+        from ipam.models import IPAddress
+
+        assigned = IPAddress.objects.create(
+            address=address,
+            assigned_object=device.interfaces.get(name="mgmt0"),
+        )
+        device.primary_ip4 = assigned
+        device.save(update_fields=["primary_ip4"])
+        return assigned
+
+    def _only_change(self, row):
+        """Return the one change a row plans."""
+        units = self._plan(row)
+        self.assertEqual(len(units), 1, [unit.diagnostics for unit in units])
+        self.assertEqual(len(units[0].changes), 1, units[0].disposition)
+        return units[0].changes[0]
+
+    def _ignore_primary_ip4(self, device, file_address, stored_address):
+        """Record the exact primary IPv4 difference the operator ignored."""
+        IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id="D-1",
+            netbox_device_id=device.pk,
+            target_field="primary_ip4",
+            file_snapshot={"canonical": file_address, "display": file_address},
+            netbox_snapshot={"canonical": stored_address, "display": stored_address},
+        )
+
+    def test_a_create_carries_and_assigns_the_rows_address(self):
+        """A created device gets its parsed address after its interface exists."""
+        self._interface_template()
+
+        change = self._only_change(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.10"))
+        self.assertEqual(dict(change.payload["ip_fields"]), {"primary_ip4": "198.18.0.10/32"})
+        device = DeviceModule().apply(change, self.context)
+
+        device.refresh_from_db()
+        self.assertEqual(str(device.primary_ip4.address), "198.18.0.10/32")
+        self.assertEqual(device.primary_ip4.assigned_object.device_id, device.pk)
+        self.assertEqual(device.primary_ip4.assigned_object.name, "mgmt0")
+
+    def test_a_matched_device_that_already_holds_the_address_is_a_no_op(self):
+        """The plan has no work when the current field points at that device's address."""
+        self._interface_template()
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        self._assigned_address(device, "198.18.0.11/32")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.11"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+        self.assertEqual(units[0].changes, ())
+
+        # Another address on the same setup is work, so the no-op rests on the address.
+        moved = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.13"))
+
+        self.assertEqual(moved[0].disposition, Disposition.ACTIONABLE, moved[0].diagnostics)
+        self.assertEqual(dict(moved[0].changes[0].payload["ip_fields"]), {"primary_ip4": "198.18.0.13/32"})
+
+    def test_a_matched_device_that_lacks_the_address_is_actionable(self):
+        """An address absent from the matched device is update work."""
+        self._interface_template()
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.12"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+        self.assertEqual(units[0].changes[0].operation, "update")
+        self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
+
+    def test_an_ignored_address_is_absent_from_the_change_and_is_not_written(self):
+        """One reviewed payload decides both the disposition and the address write."""
+        self._interface_template()
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        stored = self._assigned_address(device, "198.18.0.19/32")
+        self._ignore_primary_ip4(device, "198.18.0.20/32", "198.18.0.19/32")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.20"))
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+        change = self._only_change(self._row(2, "D-1", "srv-01", serial="NEW", primary_ip4="198.18.0.20"))
+        self.assertNotIn("primary_ip4", change.payload["ip_fields"])
+        DeviceModule().apply(change, self.context)
+
+        device.refresh_from_db()
+        self.assertEqual(device.serial, "NEW")
+        self.assertEqual(device.primary_ip4_id, stored.pk)
+
+    def test_an_unplaceable_address_is_stored_as_unassigned(self):
+        """A device still writes when its type declares no interface for the address."""
+        change = self._only_change(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.21"))
+
+        device = DeviceModule().apply(change, self.context)
+
+        device.refresh_from_db()
+        self.assertIsNone(device.primary_ip4)
+        self.assertEqual(
+            DeviceImportSource.objects.get(device=device).unassigned_ips,
+            {"primary_ip4": "198.18.0.21/32"},
+        )
+
+    def test_an_unparseable_address_warns_without_changing_the_disposition(self):
+        """A bad optional address does not refuse an otherwise actionable create."""
+        self._interface_template()
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="not-an-address"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual(len(units[0].diagnostics), 1)
+        diagnostic = units[0].diagnostics[0]
+        self.assertEqual(diagnostic.code, "device.unparseable_ip")
+        self.assertEqual(diagnostic.severity, Severity.WARNING)
+        self.assertEqual(
+            dict(diagnostic.display),
+            {
+                "device_name": "srv-01",
+                "source_id": "D-1",
+                "field": "primary_ip4",
+                "value": "not-an-address",
+            },
+        )
+        change = units[0].changes[0]
+        self.assertEqual(dict(change.payload["ip_fields"]), {})
+        device = DeviceModule().apply(change, self.context)
+        device.refresh_from_db()
+        self.assertIsNone(device.primary_ip4)
+
+    def test_an_address_held_by_another_device_is_stored_as_unassigned(self):
+        """The write records an address conflict instead of taking the other device's row."""
+        self._interface_template()
+        other = self._device("srv-other", rack=self.rack)
+        assigned = self._assigned_address(other, "198.18.0.22/32")
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        change = self._only_change(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.22"))
+
+        DeviceModule().apply(change, self.context)
+
+        device.refresh_from_db()
+        assigned.refresh_from_db()
+        self.assertIsNone(device.primary_ip4)
+        self.assertEqual(assigned.assigned_object.device_id, other.pk)
+        self.assertEqual(
+            DeviceImportSource.objects.get(device=device).unassigned_ips,
+            {"primary_ip4": "198.18.0.22/32"},
+        )
+
+    def test_an_address_that_moves_the_device_out_of_scope_is_refused(self):
+        """The permission check reads the state the whole row leaves, addresses included."""
+        from dcim.models import Device
+        from ipam.models import IPAddress
+
+        from netbox_data_import.object_permissions import ObjectPermissionDenied
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        self._interface_template()
+        scoped = user_with_object_permission(
+            "device-module-ip-scoped",
+            [
+                (Device, ("add", "change", "view"), {"primary_ip4__isnull": True}),
+                (IPAddress, ("add", "change", "view"), {}),
+            ],
+        )
+        change = self._only_change(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.24"))
+
+        with self.assertRaises(ObjectPermissionDenied):
+            DeviceModule().apply(change, ExecutionContext(actor=scoped, reader=self.reader, profile=self.profile))
+
+    def test_a_stored_unassigned_address_is_cleared_after_it_places(self):
+        """A later import clears stale provenance when the address can now land."""
+        self._interface_template()
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        stored = DeviceImportSource.objects.get(device=device)
+        stored.unassigned_ips = {"primary_ip4": "198.18.0.23/32"}
+        stored.save(update_fields=["unassigned_ips"])
+        change = self._only_change(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.23"))
+
+        DeviceModule().apply(change, self.context)
+
+        device.refresh_from_db()
+        stored.refresh_from_db()
+        self.assertEqual(str(device.primary_ip4.address), "198.18.0.23/32")
+        self.assertEqual(stored.unassigned_ips, {})
 
 
 class DeviceModuleFieldReviewTest(DeviceModulePlanTestBase):

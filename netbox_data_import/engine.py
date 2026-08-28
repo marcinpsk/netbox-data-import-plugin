@@ -28,6 +28,7 @@ from .device_identity import DeviceTypeIdentityResolver
 from .adapters import SourceUnreadable
 from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
 from .flat_workbook import FlatWorkbookConfig, TransformRule, promote_extra_json_fields
+from .ip_assignment import already_assigned, parse_address
 from .values import comparison_key, normalize_for_compare, translation_maps
 from .models import DeviceImportSource, ImportProfile
 from .netbox_reader import NetBoxReader
@@ -504,42 +505,6 @@ def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
     return result
 
 
-# Bounded at both ends: a word cannot leave a shorter valid address, and 45 covers the longest one.
-_IP_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f:.]{1,45}(?:/\d{1,3})?(?![0-9A-Za-z])")
-
-
-def _normalized_ip(token: str) -> str | None:
-    """Return *token* as 'address/prefix', or None when it is not one address."""
-    import ipaddress
-
-    try:
-        if "/" in token:
-            return str(ipaddress.ip_interface(token))
-        addr = ipaddress.ip_address(token)
-    except ValueError:
-        return None
-    return f"{addr}/32" if addr.version == 4 else f"{addr}/128"
-
-
-def _parse_ip_with_prefix(raw_value: str) -> str | None:
-    """Return the one address a source value names, as 'address/prefix', or None.
-
-    Sources export an address inside a label or with a separator appended, so the whole value is
-    tried first and the addresses spelled inside it only after that.
-    """
-    raw = str(raw_value).strip()
-    if not raw:
-        return None
-    whole = _normalized_ip(raw)
-    if whole is not None:
-        return whole
-    for token in _IP_TOKEN.findall(raw):
-        found = _normalized_ip(token)
-        if found is not None:
-            return found
-    return None
-
-
 def _resolve_device_type_slugs(
     make: str,
     model: str,
@@ -1006,36 +971,6 @@ def _set_rack_import_fields(rack, u_height, serial, rack_type, ctx):
 _RACK_IMPORT_FIELDS = ("u_height", "serial", "rack_type_id", "location_id", "tenant_id")
 
 
-def _ip_already_assigned(device, ip_field, ip_str) -> bool:
-    """Return whether the device already carries exactly this address on *ip_field*.
-
-    The writer only assigns after finding an interface of this device that already carries the
-    address, and it resolves the IPAddress by that interface's VRF. Anything else it would either
-    create or record as unassigned, so only that exact state counts as settled.
-    """
-    import ipaddress
-
-    from ipam.models import IPAddress
-
-    current = getattr(device, ip_field, None)
-    if current is None:
-        return False
-    try:
-        if ipaddress.ip_interface(str(current.address)) != ipaddress.ip_interface(str(ip_str)):
-            return False
-    except ValueError:
-        return False
-    same_address = list(IPAddress.objects.filter(address=str(current.address)).values_list("pk", flat=True)[:2])
-    if same_address != [current.pk]:
-        return False
-    interface = current.assigned_object
-    return (
-        interface is not None
-        and getattr(interface, "device_id", None) == device.pk
-        and getattr(interface, "vrf_id", None) == current.vrf_id
-    )
-
-
 def _writable_ip_fields(ip_fields, review) -> dict:
     """Return the address fields the writer may store.
 
@@ -1091,7 +1026,7 @@ def _matched_device_writes_nothing(
     if plan is not None and not (plan["contact_action"] == "reuse" and plan["assignment_action"] == "unchanged"):
         return False
     writable_ips = _writable_ip_fields(ip_fields, review)
-    if any(not _ip_already_assigned(device, ip_field, ip_str) for ip_field, ip_str in writable_ips.items()):
+    if any(not already_assigned(device, ip_field, ip_str) for ip_field, ip_str in writable_ips.items()):
         return False
     custom_field = profile.adapter_settings.custom_field_name
     if custom_field and source_id and device.custom_field_data.get(custom_field) != source_id:
@@ -3462,7 +3397,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
         for ip_field in ("primary_ip4", "primary_ip6", "oob_ip"):
             raw = str(row.get(ip_field, "")).strip()
             if raw:
-                parsed = _parse_ip_with_prefix(raw)
+                parsed = parse_address(raw)
                 if parsed:
                     ip_fields[ip_field] = parsed
                 else:

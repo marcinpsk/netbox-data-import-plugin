@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from django.core.exceptions import ValidationError
 
+from . import ip_assignment
 from .catalog import OutputKind
 from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
@@ -346,6 +347,9 @@ def _reviewed_payload(payload, review, device) -> dict:
     if review is None or not review.ignored:
         return payload
     effective = dict(payload)
+    effective["ip_fields"] = {
+        name: value for name, value in (payload.get("ip_fields") or {}).items() if name not in review.ignored
+    }
     for target_field in review.ignored:
         mapped = _REVIEWED_PAYLOAD_FIELDS.get(target_field)
         if mapped is None:
@@ -353,6 +357,28 @@ def _reviewed_payload(payload, review, device) -> dict:
         key, stored = mapped
         effective[key] = stored(device)
     return effective
+
+
+def _assign_ips(device, ip_fields, actor) -> dict:
+    """Assign each placeable address and return the fields that remain unassigned."""
+    unassigned = {}
+    changed = set()
+    for field, address in ip_fields.items():
+        try:
+            target = ip_assignment.resolve(device, field, address)
+        except ip_assignment.IPAssignmentError:
+            unassigned[field] = address
+            continue
+        if target.already_held:
+            if getattr(device, f"{field}_id", None) != target.held.pk:
+                setattr(device, field, target.held)
+                changed.add(field)
+            continue
+        setattr(device, field, ip_assignment.apply(target, actor))
+        changed.add(field)
+    if changed:
+        device.save(update_fields=sorted(changed))
+    return unassigned
 
 
 def _apply_contact(device, contact, execution_context) -> None:
@@ -421,7 +447,7 @@ def _bind_source(profile, source_id, device, asset_tag) -> None:
     existing.save(update_fields=["device_name", "source_asset_tag"])
 
 
-def _store_provenance(device, payload, execution_context) -> None:
+def _store_provenance(device, payload, unassigned, execution_context) -> None:
     """Record which source row wrote this device, so a later import reconciles it instead of copying it."""
     from .models import DeviceImportSource
 
@@ -440,6 +466,7 @@ def _store_provenance(device, payload, execution_context) -> None:
             "profile": profile,
             "source_id": source_id,
             "extra_columns": payload.get("extra_columns") or {},
+            "unassigned_ips": unassigned,
         },
     )
 
@@ -640,6 +667,7 @@ class _DeviceBatch:
         """Return the operator's saved review for one matched device, in the reviewer's terms."""
         device_type = dependencies.device_type
         manufacturer = device_type.manufacturer
+        ip_fields = payload.get("ip_fields") or {}
         proposal = {
             "device_name": payload["name"],
             "serial": payload["serial"],
@@ -654,6 +682,7 @@ class _DeviceBatch:
             "role": _text(dependencies.role.slug),
             "tenant": self.reader.tenant,
             "location": self.reader.location,
+            **{name: ip_fields.get(name, "") for name in ip_assignment.IP_FIELD_FAMILY},
         }
         return self._reviewer.review(_text(row.get("source_id")), device, proposal)
 
@@ -762,17 +791,20 @@ class DeviceModule:
             )
         except ValidationError as exc:
             return _refused(identity, "device.contact_invalid", {**display, "error": "; ".join(exc.messages)})
+        ip_fields, ip_diagnostics = self._ip_fields(row, identity, display)
         payload = {
             **payload,
             "contact": _contact_payload(contact),
             "source_id": source_id,
             "extra_columns": contact.extra_columns,
+            "ip_fields": ip_fields,
         }
         if match.device is None:
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.ACTIONABLE,
                 changes=(self._change(identity, "create", payload, None),),
+                diagnostics=ip_diagnostics,
             )
         review = batch.review(row, match.device, dependencies, placement, payload)
         payload = _reviewed_payload(payload, review, match.device)
@@ -781,11 +813,16 @@ class DeviceModule:
             and _contact_writes_nothing(contact)
             and _provenance_is_current(match.device, payload, batch.profile)
         ):
-            return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP)
+            return SynchronizationUnit(
+                identity=identity,
+                disposition=Disposition.NO_OP,
+                diagnostics=ip_diagnostics,
+            )
         return SynchronizationUnit(
             identity=identity,
             disposition=Disposition.ACTIONABLE,
             changes=(self._change(identity, "update", payload, match.device),),
+            diagnostics=ip_diagnostics,
         )
 
     def apply(self, planned_change: PlannedChange, execution_context) -> Any:
@@ -827,11 +864,35 @@ class DeviceModule:
                 setattr(device, field, payload[field])
         device.full_clean()
         device.save()
-        # An ObjectPermission's constraints are only evaluated against the saved row.
-        enforce_saved_object_permission(device, execution_context.actor, action)
+        unassigned = _assign_ips(device, payload.get("ip_fields") or {}, execution_context.actor)
         _apply_contact(device, payload.get("contact"), execution_context)
-        _store_provenance(device, payload, execution_context)
+        _store_provenance(device, payload, unassigned, execution_context)
+        # Constraints are only evaluated against the saved row, so this reads the state the row leaves.
+        enforce_saved_object_permission(device, execution_context.actor, action)
         return device
+
+    @staticmethod
+    def _ip_fields(row, identity, display) -> tuple[dict, tuple[Diagnostic, ...]]:
+        """Return parsed address fields and warnings for non-empty values that do not parse."""
+        fields = {}
+        diagnostics = []
+        for name in ip_assignment.IP_FIELD_FAMILY:
+            raw = _text(row.get(name))
+            if not raw:
+                continue
+            address = ip_assignment.parse_address(raw)
+            if address is not None:
+                fields[name] = address
+                continue
+            diagnostics.append(
+                Diagnostic(
+                    code="device.unparseable_ip",
+                    severity=Severity.WARNING,
+                    identities=(identity,),
+                    display={**display, "field": name, "value": raw},
+                )
+            )
+        return fields, tuple(diagnostics)
 
     @staticmethod
     def _payload(row, name, dependencies, placement, batch) -> dict:
@@ -873,6 +934,11 @@ class DeviceModule:
         for field in ("serial", "asset_tag"):
             if payload[field] and _text(getattr(device, field)) != payload[field]:
                 return True
+        if any(
+            not ip_assignment.already_assigned(device, field, address)
+            for field, address in (payload.get("ip_fields") or {}).items()
+        ):
+            return True
         return False
 
     @staticmethod

@@ -13,11 +13,11 @@ from netbox_data_import.engine import (
     ParseError,
     RowResult,
     _ensure_device_type,
-    _ip_already_assigned,
     _preview_device_row,
     parse_file,
     run_import,
 )
+from netbox_data_import.ip_assignment import already_assigned, parse_address
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile
 from netbox_data_import.values import normalize_for_compare
 
@@ -727,39 +727,35 @@ class PreviewDeviceRowTest(TestCase):
         self.assertNotIn("_ip", result_row.extra_data)
 
 
-class ParseIPWithPrefixTest(TestCase):
-    """Tests for _parse_ip_with_prefix helper function."""
+class ParseAddressTest(TestCase):
+    """Tests for the shared address parser."""
 
-    def test_parse_ip_with_prefix_adds_cidr(self):
-        """_parse_ip_with_prefix adds /32 or /128 prefix if absent."""
-        from netbox_data_import.engine import _parse_ip_with_prefix
-
+    def test_parse_address_adds_cidr(self):
+        """The parser adds a host prefix when the source omits one."""
         # IPv4 without prefix
-        self.assertEqual(_parse_ip_with_prefix("192.168.1.1"), "192.168.1.1/32")
+        self.assertEqual(parse_address("192.168.1.1"), "192.168.1.1/32")
 
         # IPv4 with prefix
-        self.assertEqual(_parse_ip_with_prefix("192.168.1.1/24"), "192.168.1.1/24")
+        self.assertEqual(parse_address("192.168.1.1/24"), "192.168.1.1/24")
 
         # IPv6 without prefix
-        self.assertEqual(_parse_ip_with_prefix("::1"), "::1/128")
+        self.assertEqual(parse_address("::1"), "::1/128")
 
         # Invalid IP
-        self.assertIsNone(_parse_ip_with_prefix("not-an-ip"))
+        self.assertIsNone(parse_address("not-an-ip"))
 
         # Empty string
-        self.assertIsNone(_parse_ip_with_prefix(""))
+        self.assertIsNone(parse_address(""))
 
         # IPv4 with prefix preserved
-        self.assertEqual(_parse_ip_with_prefix("192.168.1.1/24"), "192.168.1.1/24")
+        self.assertEqual(parse_address("192.168.1.1/24"), "192.168.1.1/24")
 
 
 class IPBuriedInSourceTextTest(TestCase):
     """Source systems export an address inside a label, and the row still names one address."""
 
     def _parse(self, raw):
-        from netbox_data_import.engine import _parse_ip_with_prefix
-
-        return _parse_ip_with_prefix(raw)
+        return parse_address(raw)
 
     def test_a_trailing_suffix_the_octets_do_not_own_is_dropped(self):
         """`192.0.2.99_5` is one address and a separator the exporter left behind."""
@@ -1683,7 +1679,7 @@ class DuplicateSerialReportTest(TestCase):
         self.assertNotEqual(by_source["DUP-SRC-B"].action, "error", by_source["DUP-SRC-B"].detail)
 
 
-class IpAlreadyAssignedTest(TestCase):
+class AlreadyAssignedTest(TestCase):
     """The writer resolves an address to one IPAddress, so only a unique address is settled."""
 
     def setUp(self):
@@ -1704,7 +1700,7 @@ class IpAlreadyAssignedTest(TestCase):
 
     def test_the_address_the_device_carries_is_settled(self):
         """One address, one IPAddress: the writer can only resolve to what the device already has."""
-        self.assertTrue(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
+        self.assertTrue(already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
 
     def test_a_second_row_holding_the_same_address_is_not_settled(self):
         """The writer filters by address and VRF, so it could resolve to the other object."""
@@ -1712,11 +1708,11 @@ class IpAlreadyAssignedTest(TestCase):
 
         IPAddress.objects.create(address="10.0.0.5/24")
 
-        self.assertFalse(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
+        self.assertFalse(already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
 
     def test_a_different_address_is_not_settled(self):
         """A row naming another address is a real write."""
-        self.assertFalse(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.6/24"))
+        self.assertFalse(already_assigned(self.device, "primary_ip4", "10.0.0.6/24"))
 
     def test_an_address_no_interface_carries_is_not_settled(self):
         """Without an interface the writer cannot assign, so it records the address as unassigned."""
@@ -1724,7 +1720,7 @@ class IpAlreadyAssignedTest(TestCase):
         self.address.save()
         self.device.refresh_from_db()
 
-        self.assertFalse(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
+        self.assertFalse(already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
 
     def test_an_interface_in_another_vrf_is_not_settled(self):
         """The writer resolves the address by the interface's VRF, which would miss this object."""
@@ -1734,4 +1730,4 @@ class IpAlreadyAssignedTest(TestCase):
         self.interface.save()
         self.device.refresh_from_db()
 
-        self.assertFalse(_ip_already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
+        self.assertFalse(already_assigned(self.device, "primary_ip4", "10.0.0.5/24"))
