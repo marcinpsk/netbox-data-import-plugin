@@ -15,6 +15,7 @@ from netbox_data_import.catalog import OutputKind
 from netbox_data_import.models import (
     ClassRoleMapping,
     DeviceExistingMatch,
+    DeviceImportSource,
     IgnoredDevice,
     IgnoredFieldDifference,
     ImportProfile,
@@ -69,6 +70,20 @@ class DeviceModulePlanTestBase(TestCase):
 
     def _plan(self, *rows):
         return DeviceModule().plan(self._batch(*rows), self.profile, None, self.reader)
+
+    def _with_provenance(self, device, source_id="D-1", asset_tag="", extra_columns=None):
+        """Record the provenance a previous import of this row would have left behind."""
+        DeviceImportSource.objects.create(
+            device=device, profile=self.profile, source_id=source_id, extra_columns=extra_columns or {}
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id=source_id,
+            netbox_device_id=device.pk,
+            device_name=device.name,
+            source_asset_tag=asset_tag,
+        )
+        return device
 
     def _device(self, name, **fields):
         """Create a NetBox device that a row can match."""
@@ -224,7 +239,7 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
 
     def test_a_matching_device_is_a_no_op(self):
         """NetBox already holds what the row asks for, so nothing should execute."""
-        self._device("srv-01", rack=self.rack)
+        self._with_provenance(self._device("srv-01", rack=self.rack))
 
         units = self._plan(self._row(2, "D-1", "srv-01"))
 
@@ -370,7 +385,7 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
 
     def test_a_device_keeping_its_own_slot_is_not_refused(self):
         """A matched device already occupies the position, and staying put is not a conflict."""
-        self._device("srv-01", rack=self.rack, position=5, face="front")
+        self._with_provenance(self._device("srv-01", rack=self.rack, position=5, face="front"))
 
         units = self._plan(self._row(2, "D-1", "srv-01", u_position="5", face="Front"))
 
@@ -534,7 +549,7 @@ class DeviceModuleFieldReviewTest(DeviceModulePlanTestBase):
 
     def test_a_row_whose_only_difference_is_ignored_is_a_no_op(self):
         """Planning a change the review already settled would execute a write the operator refused."""
-        device = self._device("srv-01", rack=self.rack, serial="OLD")
+        device = self._with_provenance(self._device("srv-01", rack=self.rack, serial="OLD"))
         self._ignore(device, "serial", "NEW", "OLD")
 
         units = self._plan(self._row(2, "D-1", "srv-01", serial="NEW"))
@@ -633,7 +648,7 @@ class DeviceModuleContactTest(DeviceModulePlanTestBase):
 
     def test_a_contact_the_device_already_holds_is_not_a_change(self):
         """Re-importing a settled contact must not make an otherwise identical row actionable."""
-        device = self._device("srv-01", rack=self.rack)
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
         self._assign(device, "owner@example.invalid")
 
         units = self._plan(self._row(2, "D-1", "srv-01", primary_contact="owner@example.invalid"))
@@ -670,7 +685,7 @@ class DeviceModuleContactTest(DeviceModulePlanTestBase):
 
     def test_a_row_with_no_contact_values_plans_no_contact(self):
         """A profile with a contact role must not invent a contact for a row that names none."""
-        self._device("srv-01", rack=self.rack)
+        self._with_provenance(self._device("srv-01", rack=self.rack))
 
         units = self._plan(self._row(2, "D-1", "srv-01"))
 
@@ -697,7 +712,7 @@ class DeviceModuleDoesNotRenameTest(DeviceModulePlanTestBase):
 
     def test_a_name_the_row_spells_differently_is_not_work_on_its_own(self):
         """The row reconciles a device it matched by serial, and every other field agrees."""
-        self._device("stored-name", rack=self.rack, serial="SN-1")
+        self._with_provenance(self._device("stored-name", rack=self.rack, serial="SN-1"))
 
         units = self._plan(self._row(2, "D-1", "srv-01", serial="SN-1"))
 
@@ -721,3 +736,109 @@ class DeviceModuleDoesNotRenameTest(DeviceModulePlanTestBase):
         device = DeviceModule().apply(units[0].changes[0], self.context)
 
         self.assertEqual(device.name, "srv-01")
+
+
+class DeviceModuleProvenanceTest(DeviceModulePlanTestBase):
+    """A device the import wrote carries its source, and that is how the next run finds it again.
+
+    The stored source ID is the identifier that survives a renamed device, a changed serial and a
+    re-cut asset tag, so it is the one most rows reconcile on.
+    """
+
+    def setUp(self):
+        """Give this test an actor allowed to write the devices it plans."""
+        super().setUp()
+        from dcim.models import Device
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        self.actor = user_with_object_permission("device-module-provenance", [(Device, ("add", "change", "view"), {})])
+        self.context = ExecutionContext(actor=self.actor, reader=self.reader, profile=self.profile)
+
+    def test_a_stored_source_id_matches_the_device_it_was_written_on(self):
+        """Neither the name nor the serial agrees, so only the stored source can find this device."""
+        device = self._device("stored-name", rack=self.rack)
+        DeviceImportSource.objects.create(device=device, profile=self.profile, source_id="D-1")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", status="Offline"))
+
+        self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
+
+    def test_one_source_id_stored_on_two_devices_refuses_the_row(self):
+        """Two devices claim this row, and picking one silently would write to the wrong device."""
+        for name in ("first", "second"):
+            DeviceImportSource.objects.create(
+                device=self._device(name, rack=self.rack), profile=self.profile, source_id="D-1"
+            )
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID, units[0].diagnostics)
+        self.assertEqual(units[0].diagnostics[0].code, "device.ambiguous_stored_source_id")
+
+    def test_a_saved_field_review_matches_the_device_it_was_saved_against(self):
+        """The operator reviewed a field on this device, which names the device this row reconciles."""
+        device = self._device("stored-name", rack=self.rack)
+        IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id="D-1",
+            netbox_device_id=device.pk,
+            target_field="serial",
+            file_snapshot={"canonical": "NEW", "display": "NEW"},
+            netbox_snapshot={"canonical": "OLD", "display": "OLD"},
+        )
+
+        units = self._plan(self._row(2, "D-1", "srv-01", status="Offline"))
+
+        self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
+
+    def test_applying_a_create_stores_the_source_the_row_carried(self):
+        """Without the record the next import cannot find the device this one just made."""
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        device = DeviceModule().apply(units[0].changes[0], self.context)
+
+        stored = DeviceImportSource.objects.get(device=device)
+        self.assertEqual(stored.source_id, "D-1")
+        self.assertEqual(stored.profile, self.profile)
+
+    def test_applying_a_create_binds_the_source_to_the_device(self):
+        """The binding is what makes the match explicit rather than inferred on the next run."""
+        units = self._plan(self._row(2, "D-1", "srv-01", asset_tag="AT-1"))
+
+        device = DeviceModule().apply(units[0].changes[0], self.context)
+
+        binding = DeviceExistingMatch.objects.get(profile=self.profile, source_id="D-1")
+        self.assertEqual(binding.netbox_device_id, device.pk)
+        self.assertEqual(binding.device_name, device.name)
+        self.assertEqual(binding.source_asset_tag, "AT-1")
+
+
+class DeviceModuleProvenanceIsWorkTest(DeviceModulePlanTestBase):
+    """A device that holds every field but no provenance still has its source to record."""
+
+    def test_a_matched_device_with_no_stored_provenance_is_work(self):
+        """The next import finds this device only if this one records what wrote it."""
+        self._device("srv-01", rack=self.rack)
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+
+    def test_a_device_whose_provenance_is_current_is_a_no_op(self):
+        """Everything the row writes is already written, provenance included."""
+        self._with_provenance(self._device("srv-01", rack=self.rack))
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+    def test_a_stale_binding_name_is_work(self):
+        """The binding records the device name, so a renamed device leaves it to be refreshed."""
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        DeviceExistingMatch.objects.filter(profile=self.profile, source_id="D-1").update(device_name="old-name")
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+        self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)

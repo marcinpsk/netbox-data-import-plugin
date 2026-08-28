@@ -373,6 +373,77 @@ def _apply_contact(device, contact, execution_context) -> None:
     )
 
 
+def _provenance_is_current(device, payload, profile) -> bool:
+    """Return whether the stored provenance already records what this row would write.
+
+    A device that holds every field but no record is still work: the record is what lets the next
+    import reconcile this device instead of creating a second one beside it.
+    """
+    from .models import DeviceImportSource
+
+    source_id = payload.get("source_id") or ""
+    if (
+        source_id
+        and not profile.device_matches.filter(
+            source_id=source_id,
+            netbox_device_id=device.pk,
+            device_name=device.name,
+            source_asset_tag=payload.get("asset_tag") or "",
+        ).exists()
+    ):
+        return False
+    stored = DeviceImportSource.objects.filter(device_id=device.pk).first()
+    return stored is not None and (
+        stored.profile_id == profile.pk
+        and stored.source_id == source_id
+        and stored.extra_columns == (payload.get("extra_columns") or {})
+        and not stored.unassigned_ips
+    )
+
+
+def _bind_source(profile, source_id, device, asset_tag) -> None:
+    """Bind this source row to this device, refusing a binding that already names another."""
+    existing = profile.device_matches.select_for_update().filter(source_id=source_id).first()
+    if existing is None:
+        profile.device_matches.create(
+            source_id=source_id,
+            netbox_device_id=device.pk,
+            device_name=device.name,
+            source_asset_tag=asset_tag,
+        )
+        return
+    if existing.netbox_device_id != device.pk:
+        raise PreconditionFailed(
+            f"Source ID '{source_id}' is bound to device #{existing.netbox_device_id}, not '{device.name}'."
+        )
+    existing.device_name = device.name
+    existing.source_asset_tag = asset_tag
+    existing.save(update_fields=["device_name", "source_asset_tag"])
+
+
+def _store_provenance(device, payload, execution_context) -> None:
+    """Record which source row wrote this device, so a later import reconciles it instead of copying it."""
+    from .models import DeviceImportSource
+
+    profile = execution_context.profile
+    source_id = payload.get("source_id") or ""
+    asset_tag = payload.get("asset_tag") or ""
+    if source_id:
+        _bind_source(profile, source_id, device, asset_tag)
+        custom_field = profile.adapter_settings.custom_field_name
+        if custom_field:
+            device.custom_field_data[custom_field] = source_id
+            device.save(update_fields=["custom_field_data"])
+    DeviceImportSource.objects.update_or_create(
+        device=device,
+        defaults={
+            "profile": profile,
+            "source_id": source_id,
+            "extra_columns": payload.get("extra_columns") or {},
+        },
+    )
+
+
 def _contact_payload(review) -> dict | None:
     """Return the reviewed contact selection in the form the plan carries and the write replays."""
     if review is None or review.selection is None:
@@ -404,6 +475,7 @@ class _DeviceBatch:
         self._identity = DeviceTypeIdentityResolver.for_profile(profile)
         self._reviewer = DeviceFieldReviewer.for_profile(profile)
         self._candidate_columns = PrimaryContactResolver.candidate_source_columns(profile)
+        self._stored_by_source = self._stored_sources(rows, profile, netbox_reader)
         self._roles = {mapping.source_class: _text(mapping.role_slug) for mapping in profile.class_role_mappings.all()}
         self._clashes = {field: self._rows_by_value(rows, field, fold) for field, _code, fold in self._CLASH_FIELDS}
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
@@ -422,6 +494,23 @@ class _DeviceBatch:
             if value:
                 found.setdefault(value, []).append(row.get("_row_number"))
         return {value: numbers for value, numbers in found.items() if len(numbers) > 1}
+
+    @staticmethod
+    def _stored_sources(rows, profile, netbox_reader) -> dict[str, list]:
+        """Return the devices an earlier import of this profile wrote, by the source ID it stored."""
+        source_ids = {_text(row.get("source_id")) for row in rows}
+        source_ids.discard("")
+        if not source_ids:
+            return {}
+        devices = (
+            netbox_reader.devices()
+            .filter(data_import_source__profile=profile, data_import_source__source_id__in=source_ids)
+            .select_related("data_import_source")
+        )
+        stored: dict[str, list] = {}
+        for device in devices:
+            stored.setdefault(_text(device.data_import_source.source_id), []).append(device)
+        return stored
 
     @staticmethod
     def _racks_by_name(netbox_reader) -> dict[str, Any]:
@@ -512,6 +601,20 @@ class _DeviceBatch:
             bound = devices.filter(pk=bound_id).first()
             if bound is not None:
                 return _Match(device=bound)
+
+        stored = self._stored_by_source.get(source_id, ()) if source_id else ()
+        if len(stored) > 1:
+            return _Match(ambiguous="device.ambiguous_stored_source_id", value=source_id)
+        if stored:
+            return _Match(device=stored[0])
+
+        reviewed_ids = self._reviewer.review_device_ids(source_id) if source_id else frozenset()
+        if len(reviewed_ids) > 1:
+            return _Match(ambiguous="device.ambiguous_field_review", value=source_id)
+        if reviewed_ids:
+            reviewed = devices.filter(pk=next(iter(reviewed_ids))).first()
+            if reviewed is not None:
+                return _Match(device=reviewed)
 
         for field, lookup, code in (
             ("serial", "serial", "device.ambiguous_serial"),
@@ -659,7 +762,12 @@ class DeviceModule:
             )
         except ValidationError as exc:
             return _refused(identity, "device.contact_invalid", {**display, "error": "; ".join(exc.messages)})
-        payload = {**payload, "contact": _contact_payload(contact)}
+        payload = {
+            **payload,
+            "contact": _contact_payload(contact),
+            "source_id": source_id,
+            "extra_columns": contact.extra_columns,
+        }
         if match.device is None:
             return SynchronizationUnit(
                 identity=identity,
@@ -668,7 +776,11 @@ class DeviceModule:
             )
         review = batch.review(row, match.device, dependencies, placement, payload)
         payload = _reviewed_payload(payload, review, match.device)
-        if not self._differs(match.device, payload) and _contact_writes_nothing(contact):
+        if (
+            not self._differs(match.device, payload)
+            and _contact_writes_nothing(contact)
+            and _provenance_is_current(match.device, payload, batch.profile)
+        ):
             return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP)
         return SynchronizationUnit(
             identity=identity,
@@ -718,6 +830,7 @@ class DeviceModule:
         # An ObjectPermission's constraints are only evaluated against the saved row.
         enforce_saved_object_permission(device, execution_context.actor, action)
         _apply_contact(device, payload.get("contact"), execution_context)
+        _store_provenance(device, payload, execution_context)
         return device
 
     @staticmethod
