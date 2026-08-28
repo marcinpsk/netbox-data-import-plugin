@@ -32,6 +32,7 @@ from .forms import (
     ImportSetupForm,
 )
 from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
+from .values import normalize_for_compare
 from . import __version__ as _plugin_version
 from .models import (
     locked_profile_policy,
@@ -1810,7 +1811,7 @@ def _placement_matches_preview(device, row) -> bool:
         return False
     return (
         device.rack_id == state.get("rack_id")
-        and engine._normalize_for_compare(device.position) == state.get("position", "")
+        and normalize_for_compare(device.position) == state.get("position", "")
         and (device.face or "") == state.get("face", "")
     )
 

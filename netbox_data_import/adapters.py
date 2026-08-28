@@ -13,11 +13,36 @@ the NetBox boundary.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from .catalog import OutputKind, has_implemented_module
 
 
 class UnknownSourceAdapter(Exception):
     """A profile names a Source Adapter key this release does not register."""
+
+
+class SourceUnreadable(Exception):
+    """The source document, or the configuration naming its shape, cannot produce rows."""
+
+
+@dataclass(frozen=True)
+class SourceDiagnostic:
+    """One thing the adapter could not interpret, reported without failing the batch."""
+
+    code: str
+    message: str
+    row_number: int | None = None
+
+
+@dataclass(frozen=True)
+class SourceBatch:
+    """The typed source items and source diagnostics from one file (section 1)."""
+
+    output_kinds: frozenset[str]
+    rows: tuple[dict, ...] = ()
+    diagnostics: tuple[SourceDiagnostic, ...] = ()
+    unused_columns: dict[str, dict] = field(default_factory=dict)
 
 
 class SourceAdapter:
@@ -30,6 +55,11 @@ class SourceAdapter:
     @classmethod
     def config_form_class(cls):
         """Return the Django form that validates this adapter's ``adapter_config``."""
+        raise NotImplementedError
+
+    @classmethod
+    def interpret(cls, source_document, adapter_config, **kwargs) -> SourceBatch:
+        """Return the Source Batch one source document carries under *adapter_config*."""
         raise NotImplementedError
 
 
@@ -46,6 +76,14 @@ class FlatWorkbookAdapter(SourceAdapter):
         from .adapter_forms import FlatWorkbookConfigForm
 
         return FlatWorkbookConfigForm
+
+    @classmethod
+    def interpret(cls, source_document, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
+        """Interpret workbook bytes under a `FlatWorkbookConfig`."""
+        from . import flat_workbook
+
+        rows, unused = flat_workbook.interpret(source_document, adapter_config, collect_unused=collect_unused)
+        return SourceBatch(output_kinds=cls.output_kinds, rows=tuple(rows), unused_columns=unused)
 
 
 class TraceWorkbookAdapter(SourceAdapter):
@@ -96,6 +134,9 @@ __all__ = (
     "DEFAULT_ADAPTER_KEY",
     "FlatWorkbookAdapter",
     "SourceAdapter",
+    "SourceBatch",
+    "SourceDiagnostic",
+    "SourceUnreadable",
     "TraceWorkbookAdapter",
     "UnknownSourceAdapter",
     "adapter_choices",

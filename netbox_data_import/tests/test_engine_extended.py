@@ -13,7 +13,6 @@ from netbox_data_import.engine import (
     ImportContext,
     ImportResult,
     RowResult,
-    _apply_transform_rules,
     _coerce_position,
     _ensure_device_role,
     _ensure_device_type,
@@ -29,6 +28,7 @@ from netbox_data_import.engine import (
     parse_file,
     run_import,
 )
+from netbox_data_import.flat_workbook import _apply_transform_rules
 from netbox_data_import.models import (
     ClassRoleMapping,
     ColumnMapping,
@@ -774,9 +774,9 @@ class ApplyTransformRulesTest(TestCase):
         _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
         self.assertEqual(row_dict["device_name"], "unchanged")
 
-    def test_invalid_regex_raises_parse_error(self):
-        """_apply_transform_rules with a malformed regex pattern raises ParseError."""
-        from netbox_data_import.engine import ParseError
+    def test_invalid_regex_is_refused_by_the_adapter(self):
+        """A pattern that does not compile is a source error, raised where the regex runs."""
+        from netbox_data_import.adapters import SourceUnreadable
 
         rule = ColumnTransformRule.objects.create(
             profile=self.profile,
@@ -788,8 +788,34 @@ class ApplyTransformRulesTest(TestCase):
         row_dict = {}
         raw_headers = {"ColF": 0}
         raw_row = ("some value",)
-        with self.assertRaises(ParseError):
+        with self.assertRaises(SourceUnreadable):
             _apply_transform_rules(row_dict, raw_row, raw_headers, [rule])
+
+    def test_parse_file_reports_an_invalid_regex_as_a_parse_error(self):
+        """The engine translates the adapter's error, so every parse_file caller still sees one type."""
+        from io import BytesIO
+
+        import openpyxl
+
+        from netbox_data_import.engine import ParseError, parse_file
+
+        ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="ColF",
+            pattern="(",
+            group_1_target="device_name",
+            group_2_target="",
+        )
+        book = openpyxl.Workbook()
+        book.active.title = "Data"
+        book.active.append(["ColF"])
+        book.active.append(["some value"])
+        buffer = BytesIO()
+        book.save(buffer)
+        buffer.seek(0)
+
+        with self.assertRaises(ParseError):
+            parse_file(buffer, self.profile)
 
 
 # ---------------------------------------------------------------------------

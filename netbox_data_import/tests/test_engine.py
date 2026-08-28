@@ -14,12 +14,12 @@ from netbox_data_import.engine import (
     RowResult,
     _ensure_device_type,
     _ip_already_assigned,
-    _normalize_for_compare,
     _preview_device_row,
     parse_file,
     run_import,
 )
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile
+from netbox_data_import.values import normalize_for_compare
 
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
@@ -1284,36 +1284,36 @@ class NormalizeForCompareTest(TestCase):
     """Tests for _normalize_for_compare helper."""
 
     def test_integer_string_unchanged(self):
-        self.assertEqual(_normalize_for_compare("35"), "35")
+        self.assertEqual(normalize_for_compare("35"), "35")
 
     def test_float_whole_number_normalized(self):
         """35.0 → '35'"""
-        self.assertEqual(_normalize_for_compare("35.0"), "35")
+        self.assertEqual(normalize_for_compare("35.0"), "35")
 
     def test_float_whole_number_direct(self):
         """float(35.0) → '35'"""
-        self.assertEqual(_normalize_for_compare(35.0), "35")
+        self.assertEqual(normalize_for_compare(35.0), "35")
 
     def test_float_with_fraction_unchanged(self):
         """1.5 stays '1.5'"""
-        self.assertEqual(_normalize_for_compare(1.5), "1.5")
+        self.assertEqual(normalize_for_compare(1.5), "1.5")
 
     def test_none_returns_empty(self):
-        self.assertEqual(_normalize_for_compare(None), "")
+        self.assertEqual(normalize_for_compare(None), "")
 
     def test_non_numeric_string_unchanged(self):
-        self.assertEqual(_normalize_for_compare("ABC-123"), "ABC-123")
+        self.assertEqual(normalize_for_compare("ABC-123"), "ABC-123")
 
     def test_zero(self):
-        self.assertEqual(_normalize_for_compare(0), "0")
+        self.assertEqual(normalize_for_compare(0), "0")
 
     def test_zero_float(self):
-        self.assertEqual(_normalize_for_compare(0.0), "0")
+        self.assertEqual(normalize_for_compare(0.0), "0")
 
     def test_infinity_string_returns_stripped_value(self):
         for value in ("inf", "Infinity", "-inf"):
             with self.subTest(value=value):
-                self.assertEqual(_normalize_for_compare(value), value.strip())
+                self.assertEqual(normalize_for_compare(value), value.strip())
 
 
 class ExistingRackPreviewActionTest(TestCase):

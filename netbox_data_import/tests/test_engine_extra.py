@@ -6,7 +6,8 @@ import os
 
 from django.test import TestCase
 
-from netbox_data_import.engine import _collect_unmapped_values, _promote_extra_json_fields, _store_source_id, parse_file
+from netbox_data_import.engine import _store_source_id, parse_file
+from netbox_data_import.flat_workbook import _collect_unmapped_values, promote_extra_json_fields
 from netbox_data_import.models import ColumnMapping, DeviceImportSource, ImportProfile, stored_import_source
 from netbox_data_import.tests.helpers import make_dcim_objects
 
@@ -188,40 +189,40 @@ class StoreSourceIdExtraTest(TestCase):
 
 
 class PromoteExtraJsonFieldsTest(TestCase):
-    """Unit tests for _promote_extra_json_fields."""
+    """Unit tests for promote_extra_json_fields."""
 
     def test_moves_non_empty_value_to_extra_columns(self):
         """extra_json:<key> with a value is moved into _extra_columns."""
         row = {"device_name": "host", "extra_json:jira_id": "JIRA-123"}
-        _promote_extra_json_fields(row)
+        promote_extra_json_fields(row)
         self.assertNotIn("extra_json:jira_id", row)
         self.assertEqual(row["_extra_columns"]["jira_id"], "JIRA-123")
 
     def test_multiple_extra_json_fields(self):
         """Multiple extra_json: keys are all promoted."""
         row = {"extra_json:jira_id": "JIRA-1", "extra_json:ticket": "T-99"}
-        _promote_extra_json_fields(row)
+        promote_extra_json_fields(row)
         self.assertEqual(row["_extra_columns"]["jira_id"], "JIRA-1")
         self.assertEqual(row["_extra_columns"]["ticket"], "T-99")
 
     def test_none_value_not_added_to_extra_columns(self):
         """extra_json: key with None value is removed but not written to _extra_columns."""
         row = {"device_name": "host", "extra_json:jira_id": None}
-        _promote_extra_json_fields(row)
+        promote_extra_json_fields(row)
         self.assertNotIn("extra_json:jira_id", row)
         self.assertNotIn("_extra_columns", row)
 
     def test_empty_string_value_not_added_to_extra_columns(self):
         """extra_json: key with empty-string value is removed but not written to _extra_columns."""
         row = {"device_name": "host", "extra_json:jira_id": ""}
-        _promote_extra_json_fields(row)
+        promote_extra_json_fields(row)
         self.assertNotIn("extra_json:jira_id", row)
         self.assertNotIn("_extra_columns", row)
 
     def test_non_extra_json_keys_untouched(self):
         """Keys not starting with extra_json: are not affected."""
         row = {"device_name": "host", "serial": "ABC123"}
-        _promote_extra_json_fields(row)
+        promote_extra_json_fields(row)
         self.assertEqual(row["device_name"], "host")
         self.assertEqual(row["serial"], "ABC123")
 
