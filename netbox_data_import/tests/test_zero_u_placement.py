@@ -33,8 +33,8 @@ def _workbook(*, serial, position="1", side="Rear"):
 class ZeroUPlacementMixin:
     """Preview a zero-U device that NetBox already holds without a position or a face."""
 
-    def _run(self, *, serial="SN-FILE"):
-        """Return the previewed device row for a zero-U PDU."""
+    def _run(self, *, serial="SN-FILE", u_height=0):
+        """Return the previewed device row for a PDU of the given device-type height."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 
         from netbox_data_import.engine import parse_file, run_import
@@ -43,7 +43,7 @@ class ZeroUPlacementMixin:
         profile = _make_profile("ZeroUProfile")
         manufacturer = Manufacturer.objects.create(name="Eaton", slug="eaton")
         device_type = DeviceType.objects.create(
-            manufacturer=manufacturer, model="EMAB33", slug="eaton-emab33", u_height=0
+            manufacturer=manufacturer, model="EMAB33", slug="eaton-emab33", u_height=u_height
         )
         role = DeviceRole.objects.create(name="Server", slug="server")
         rack = Rack.objects.create(name="Rack-ZU", site=site, u_height=42)
@@ -143,3 +143,73 @@ class ZeroUPlacementRendersAsNotWrittenTest(ZeroUPlacementMixin, BaseViewTestCas
     def test_a_written_field_keeps_its_sync_button(self):
         """The guard must not disarm the fields the quick action does apply."""
         self.assertIn("ndi-sync-btn", self._field_cell(self._detail_row(), "serial"))
+
+
+class ZeroUImportAgreesWithItsPreviewTest(ZeroUPlacementMixin, BaseViewTestCase):
+    """The execute guard compares the writer's action to the previewed one, so both must agree."""
+
+    def _imported_row(self, *, serial="SN-NETBOX"):
+        """Import the workbook once, then return its preview and its second import."""
+        from netbox_data_import.engine import parse_file, run_import
+        from netbox_data_import.views import _import_intents
+
+        profile, site, _rows, _result, _row = self._run(serial=serial)
+        run_import(parse_file(_workbook(serial=serial), profile), profile, {"site": site}, dry_run=False)
+
+        rows = parse_file(_workbook(serial=serial), profile)
+        preview = run_import(rows, profile, {"site": site}, dry_run=True)
+        written = run_import(
+            parse_file(_workbook(serial=serial), profile),
+            profile,
+            {"site": site},
+            dry_run=False,
+            expected_intents=_import_intents(preview),
+        )
+        return (
+            next(r for r in preview.rows if r.object_type == "device"),
+            next(r for r in written.rows if r.object_type == "device"),
+        )
+
+    def test_an_imported_zero_u_row_previews_as_a_no_op(self):
+        """The position and the face it carries were never written, so nothing is left to write."""
+        preview_row, _written_row = self._imported_row()
+        self.assertEqual(preview_row.action, "skip", preview_row.detail)
+        self.assertTrue(preview_row.extra_data.get("writes_nothing"))
+
+    def test_the_writer_reaches_the_same_action_as_the_preview(self):
+        """A writer that still counts the dropped fields fails the row on the intent guard."""
+        _preview_row, written_row = self._imported_row()
+        self.assertNotEqual(written_row.action, "error", written_row.detail)
+        self.assertEqual(written_row.action, "skip", written_row.detail)
+
+
+class OnlyAnInformationalFieldLosesItsSyncButtonTest(ZeroUPlacementMixin, BaseViewTestCase):
+    """The guard reads one dict, and a row that has none of those fields must keep its buttons."""
+
+    def _serial_cell(self, **run_kwargs):
+        """Return the serial line of the rendered diff table for one run."""
+        from netbox_data_import.views import _serialize_rows
+
+        profile, site, rows, result, row = self._run(**run_kwargs)
+        session = self.client.session
+        session["import_result"] = result.to_session_dict()
+        session["import_rows"] = _serialize_rows(rows)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": "zero_u.xlsx",
+        }
+        session.save()
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        html = response.content.decode()
+        match = re.search(r'<tr id="diff-field-\d+-serial">(.*?)</tr>', html, re.DOTALL)
+        self.assertIsNotNone(match, "the preview must list the serial difference")
+        return row, match.group(1)
+
+    def test_a_row_with_no_informational_field_keeps_its_sync_button(self):
+        """A full-height type leaves the dict out of the row, which must not disarm the action."""
+        row, cell = self._serial_cell(u_height=1)
+        self.assertNotIn("field_informational", row.extra_data)
+        self.assertIn("ndi-sync-btn", cell)

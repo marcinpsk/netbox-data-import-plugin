@@ -3177,6 +3177,8 @@ def _write_device_row(  # noqa: C901
             face,
             review.ignored if review is not None else (),
         )
+        # The intent guard compares this action to the previewed one, so both drop the same fields.
+        review = _zero_u_review(review, device, device_type is not None and device_type.u_height == 0)
         zero_u_conflict = _zero_u_review_conflict(
             device_type,
             position,
