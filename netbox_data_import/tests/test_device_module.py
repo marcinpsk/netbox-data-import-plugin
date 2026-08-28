@@ -244,7 +244,7 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         """The serial is a stronger identifier than the name, so it decides first."""
         device = self._device("stored-name", rack=self.rack, serial="SN-1")
 
-        units = self._plan(self._row(2, "D-1", "srv-01", serial="SN-1"))
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="SN-1", status="Offline"))
 
         self.assertEqual(units[0].changes[0].operation, "update")
         self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
@@ -252,7 +252,7 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
     def test_an_asset_tag_matches_a_device_the_name_does_not(self):
         device = self._device("stored-name", rack=self.rack, asset_tag="AT-1")
 
-        units = self._plan(self._row(2, "D-1", "srv-01", asset_tag="AT-1"))
+        units = self._plan(self._row(2, "D-1", "srv-01", asset_tag="AT-1", status="Offline"))
 
         self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
 
@@ -262,7 +262,7 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         bound = self._device("bound-device", rack=self.rack)
         DeviceExistingMatch.objects.create(profile=self.profile, source_id="D-1", netbox_device_id=bound.pk)
 
-        units = self._plan(self._row(2, "D-1", "srv-01"))
+        units = self._plan(self._row(2, "D-1", "srv-01", status="Offline"))
 
         self.assertEqual(units[0].changes[0].preconditions["device_id"], bound.pk)
 
@@ -675,3 +675,49 @@ class DeviceModuleContactTest(DeviceModulePlanTestBase):
         units = self._plan(self._row(2, "D-1", "srv-01"))
 
         self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+
+class DeviceModuleDoesNotRenameTest(DeviceModulePlanTestBase):
+    """An import reconciles a device it matched; it does not rename it.
+
+    The name is how a row finds a device, so writing it back would let a source spelling silently
+    retitle a NetBox device an operator named deliberately. Renaming is an explicit action, not a
+    side effect of an import.
+    """
+
+    def setUp(self):
+        """Give this test an actor allowed to write the device it plans."""
+        super().setUp()
+        from dcim.models import Device
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        self.actor = user_with_object_permission("device-module-rename", [(Device, ("add", "change", "view"), {})])
+        self.context = ExecutionContext(actor=self.actor, reader=self.reader, profile=self.profile)
+
+    def test_a_name_the_row_spells_differently_is_not_work_on_its_own(self):
+        """The row reconciles a device it matched by serial, and every other field agrees."""
+        self._device("stored-name", rack=self.rack, serial="SN-1")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="SN-1"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+    def test_applying_a_change_leaves_the_stored_name_alone(self):
+        """A row that carries real work must still not rename the device while it does it."""
+        device = self._device("stored-name", rack=self.rack, serial="SN-1", asset_tag="AT-OLD")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="SN-1", asset_tag="AT-NEW"))
+        DeviceModule().apply(units[0].changes[0], self.context)
+
+        device.refresh_from_db()
+        self.assertEqual(device.asset_tag, "AT-NEW")
+        self.assertEqual(device.name, "stored-name")
+
+    def test_a_created_device_still_takes_the_name_its_row_carries(self):
+        """Nothing exists to protect on a create, so the row names the device it makes."""
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        device = DeviceModule().apply(units[0].changes[0], self.context)
+
+        self.assertEqual(device.name, "srv-01")

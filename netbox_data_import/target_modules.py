@@ -323,7 +323,6 @@ class _Match:
 
 
 _REVIEWED_PAYLOAD_FIELDS: dict[str, tuple[str, Any]] = {
-    "device_name": ("name", lambda device: device.name),
     "serial": ("serial", lambda device: _text(device.serial)),
     "asset_tag": ("asset_tag", lambda device: _text(device.asset_tag)),
     "u_position": ("u_position", lambda device: device.position),
@@ -697,7 +696,8 @@ class DeviceModule:
                 raise PreconditionFailed(f"Device '{device.name}' changed type since the plan was made.")
             action = "change"
 
-        device.name = payload["name"]
+        if action == "add":
+            device.name = payload["name"]
         device.device_type_id = payload["device_type_id"]
         device.role_id = payload["role_id"]
         device.site_id = payload["site_id"]
@@ -741,9 +741,11 @@ class DeviceModule:
 
     @staticmethod
     def _differs(device, payload) -> bool:
-        """Return whether the stored device already holds what the row asks for."""
-        if _identity_text(device.name) != _identity_text(payload["name"]):
-            return True
+        """Return whether the stored device already holds what the row asks for.
+
+        The name is absent on purpose. It is how a row finds a device, and an import reconciles
+        the device it matched rather than retitling it.
+        """
         if device.device_type_id != payload["device_type_id"] or device.role_id != payload["role_id"]:
             return True
         if payload["rack_id"] is not None and device.rack_id != payload["rack_id"]:
