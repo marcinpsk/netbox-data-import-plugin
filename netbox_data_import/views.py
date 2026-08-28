@@ -2359,8 +2359,9 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
         if target.already_held:
             # The device carries it already, so only the field moves. No IPAM row is written.
-            if getattr(device, f"{field}_id", None) != target.existing.pk:
-                setattr(device, field, target.existing)
+            held = target.held
+            if getattr(device, f"{field}_id", None) != held.pk:
+                setattr(device, field, held)
                 device.save(update_fields=[field])
             return target.summary
 

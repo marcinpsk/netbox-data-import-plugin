@@ -35,6 +35,13 @@ class IPTarget:
         return getattr(self.interface, "name", "") or ""
 
     @property
+    def held(self):
+        """Return the stored row the device already carries, which only a held target has."""
+        if not self.already_held or self.existing is None:
+            raise IPAssignmentError(f"{self.address} is not already on this device, so it has no stored row.")
+        return self.existing
+
+    @property
     def summary(self) -> str:
         """Return what the sync reports once it has written."""
         if not self.interface_name:

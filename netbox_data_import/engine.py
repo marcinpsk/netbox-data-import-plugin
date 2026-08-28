@@ -3528,8 +3528,9 @@ def _assign_ip_to_device(device, ip_field: str, ip_str: str, user=None):
     except ip_assignment.IPAssignmentError:
         return False
     if target.already_held:
-        if getattr(device, f"{ip_field}_id", None) != target.existing.pk:
-            setattr(device, ip_field, target.existing)
+        held = target.held
+        if getattr(device, f"{ip_field}_id", None) != held.pk:
+            setattr(device, ip_field, held)
             device.save(update_fields=[ip_field])
         return True
     setattr(device, ip_field, ip_assignment.apply(target, user))
