@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v1.10.0 (2026-08-28)
+
+### Bug Fixes
+
+- Count only the differences the import applies
+  ([`453772c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/453772c11e70872f303f121865f0dc76431a5185))
+
+- Decide an ignored address once for the preview and the writer
+  ([`9be0391`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9be0391ea7c9121bc17e0227d3d324b3bcdf9893))
+
+### Features
+
+- Settle a serial collision from the conflict comparison
+  ([`65c7e66`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/65c7e66958b5e71954a35592c6d6ea54ed5af77b))
+
+### Testing
+
+- Unpack only the map each field-difference test reads
+  ([`fdecf5e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/fdecf5e6a35e94d7a7a7eeb08dfcb985d278d3de))
+
+
 ## v1.9.0 (2026-08-28)
 
 ### Bug Fixes
