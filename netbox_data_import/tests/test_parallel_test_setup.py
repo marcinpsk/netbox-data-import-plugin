@@ -158,8 +158,7 @@ def test_a_gateway_specification_above_the_ceiling_is_rejected():
             sys.executable,
             "-m",
             "pytest",
-            # The addopts carry `-n auto`, and xdist rewrites the gateway list from a worker
-            # count, so reaching this path at all means dropping them.
+            # xdist rewrites the gateway list from a worker count, so this path drops the addopts.
             "-o",
             "addopts=",
             "--tx",
@@ -253,8 +252,7 @@ def test_collecting_without_running_is_left_alone():
         timeout=120,
     )
 
-    # `--ignore` leaves nothing to collect, so pytest exits 5. Status 4 would mean the ceiling
-    # refused a run that starts no worker at all.
+    # Nothing to collect means exit 5; exit 4 would mean the ceiling refused a no-worker run.
     assert result.returncode == 5, f"exit {result.returncode}\n{(result.stdout + result.stderr)[-3000:]}"
 
 
@@ -286,8 +284,7 @@ def test_a_gateway_specification_without_distribution_is_left_alone():
         timeout=120,
     )
 
-    # `--ignore` leaves nothing to collect, so pytest exits 5. Status 4 would mean the ceiling
-    # refused a run that starts no worker at all.
+    # Nothing to collect means exit 5; exit 4 would mean the ceiling refused a no-worker run.
     assert result.returncode == 5, f"exit {result.returncode}\n{(result.stdout + result.stderr)[-3000:]}"
 
 
