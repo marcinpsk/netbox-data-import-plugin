@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .catalog import OutputKind
+from .device_identity import DeviceTypeIdentityResolver
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
 from .values import normalize_for_compare
 
@@ -59,6 +60,24 @@ def _identity_text(value) -> str:
     return _text(value).casefold()
 
 
+def _ignored_source_ids(profile) -> frozenset[str]:
+    """Return the source identities the operator has chosen to skip."""
+    return frozenset(_text(value) for value in profile.ignored_devices.values_list("source_id", flat=True))
+
+
+def _repeated(values) -> frozenset[str]:
+    """Return the non-empty values that appear more than once in one batch."""
+    seen: set[str] = set()
+    repeated: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        if value in seen:
+            repeated.add(value)
+        seen.add(value)
+    return frozenset(repeated)
+
+
 def _coerce_height(value) -> int:
     """Return the rack height the row asks for, never below one unit."""
     try:
@@ -78,9 +97,9 @@ class RackModule:
         rows = self._rack_rows(source_batch, profile)
         if not rows:
             return []
-        ignored = self._ignored_source_ids(profile)
-        duplicate_names = self._repeated(_identity_text(row.get("rack_name")) or "" for row in rows)
-        duplicate_source_ids = self._repeated(_text(row.get("source_id")) for row in rows)
+        ignored = _ignored_source_ids(profile)
+        duplicate_names = _repeated(_identity_text(row.get("rack_name")) or "" for row in rows)
+        duplicate_source_ids = _repeated(_text(row.get("source_id")) for row in rows)
         existing = self._existing_by_name(netbox_reader)
         return [
             self._unit(row, netbox_reader, ignored, duplicate_names, duplicate_source_ids, existing) for row in rows
@@ -94,24 +113,6 @@ class RackModule:
             if mapping.creates_rack and not mapping.ignore
         }
         return [row for row in source_batch.rows if _text(row.get("device_class")) in creates_rack]
-
-    @staticmethod
-    def _ignored_source_ids(profile) -> frozenset[str]:
-        """Return the source identities the operator has chosen to skip."""
-        return frozenset(_text(value) for value in profile.ignored_devices.values_list("source_id", flat=True))
-
-    @staticmethod
-    def _repeated(values) -> frozenset[str]:
-        """Return the non-empty values that appear more than once in one batch."""
-        seen: set[str] = set()
-        repeated: set[str] = set()
-        for value in values:
-            if not value:
-                continue
-            if value in seen:
-                repeated.add(value)
-            seen.add(value)
-        return frozenset(repeated)
 
     @staticmethod
     def _existing_by_name(netbox_reader) -> dict[str, Any]:
@@ -138,7 +139,7 @@ class RackModule:
         source_id = _text(row.get("source_id"))
 
         if not name:
-            return self._refused(identity, "rack.missing_name", {"source_id": source_id})
+            return _refused(identity, "rack.missing_name", {"source_id": source_id})
         if source_id and source_id in ignored:
             return SynchronizationUnit(
                 identity=identity,
@@ -153,9 +154,9 @@ class RackModule:
                 ),
             )
         if _identity_text(name) in duplicate_names:
-            return self._refused(identity, "rack.duplicate_name", {"rack_name": name, "source_id": source_id})
+            return _refused(identity, "rack.duplicate_name", {"rack_name": name, "source_id": source_id})
         if source_id and source_id in duplicate_source_ids:
-            return self._refused(identity, "rack.duplicate_source_id", {"rack_name": name, "source_id": source_id})
+            return _refused(identity, "rack.duplicate_source_id", {"rack_name": name, "source_id": source_id})
 
         height = _coerce_height(row.get("u_height"))
         serial = _text(row.get("serial"))
@@ -234,18 +235,284 @@ class RackModule:
             preconditions=preconditions,
         )
 
+
+def _refused(identity, code, display) -> SynchronizationUnit:
+    """Return an invalid unit carrying the error that refused it."""
+    return SynchronizationUnit(
+        identity=identity,
+        disposition=Disposition.INVALID,
+        diagnostics=(Diagnostic(code=code, severity=Severity.ERROR, identities=(identity,), display=display),),
+    )
+
+
+def _blocked(identity, code, display) -> SynchronizationUnit:
+    """Return a unit waiting on a dependency this module does not create."""
+    return SynchronizationUnit(
+        identity=identity,
+        disposition=Disposition.BLOCKED,
+        diagnostics=(Diagnostic(code=code, severity=Severity.ERROR, identities=(identity,), display=display),),
+    )
+
+
+@dataclass(frozen=True)
+class _Dependencies:
+    """What a device row needs to already exist, or the first thing that does not."""
+
+    device_type: Any = None
+    role: Any = None
+    rack: Any = None
+    missing: tuple[str, dict] | None = None
+
+
+@dataclass(frozen=True)
+class _Match:
+    """The stored device a row reconciles, or the reason no automatic answer is safe."""
+
+    device: Any = None
+    ambiguous: str | None = None
+    value: str = ""
+
+
+class _DeviceBatch:
+    """The batch-wide state every device row is planned against, loaded once."""
+
+    _CLASH_FIELDS = (
+        ("source_id", "device.duplicate_source_id", False),
+        ("serial", "device.duplicate_serial", False),
+        ("asset_tag", "device.duplicate_asset_tag", True),
+    )
+
+    def __init__(self, rows, profile, netbox_reader):
+        self.profile = profile
+        self.reader = netbox_reader
+        self.ignored = _ignored_source_ids(profile)
+        self._identity = DeviceTypeIdentityResolver.for_profile(profile)
+        self._roles = {mapping.source_class: _text(mapping.role_slug) for mapping in profile.class_role_mappings.all()}
+        self._clashes = {field: self._rows_by_value(rows, field, fold) for field, _code, fold in self._CLASH_FIELDS}
+        self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
+        self._duplicate_names = _repeated(_identity_text(row.get("device_name")) for row in rows)
+        self._racks = self._racks_by_name(netbox_reader)
+
     @staticmethod
-    def _refused(identity, code, display) -> SynchronizationUnit:
-        """Return an invalid unit carrying the error that refused it."""
+    def _rows_by_value(rows, field, fold) -> dict[str, list[int]]:
+        """Return the source row numbers each non-empty value of *field* appears on."""
+        found: dict[str, list[int]] = {}
+        for row in rows:
+            value = _identity_text(row.get(field)) if fold else _text(row.get(field))
+            if value:
+                found.setdefault(value, []).append(row.get("_row_number"))
+        return {value: numbers for value, numbers in found.items() if len(numbers) > 1}
+
+    @staticmethod
+    def _racks_by_name(netbox_reader) -> dict[str, Any]:
+        """Return the racks the actor may view at the import site, keyed by comparison name."""
+        if netbox_reader.site is None:
+            return {}
+        racks = netbox_reader.racks().filter(site=netbox_reader.site)
+        if netbox_reader.location is not None:
+            racks = racks.filter(location=netbox_reader.location)
+        return {_identity_text(rack.name): rack for rack in racks}
+
+    def clash(self, row) -> tuple[str, str, list[int]] | None:
+        """Return the first identity another row in this batch also claims."""
+        for field, code, fold in self._CLASH_FIELDS:
+            value = _identity_text(row.get(field)) if fold else _text(row.get(field))
+            numbers = self._clashes[field].get(value) if value else None
+            if numbers:
+                return code, value, numbers
+        return None
+
+    def dependencies(self, row) -> _Dependencies:
+        """Return the Device Type, Role and Rack the row needs, or the first one missing."""
+        from dcim.models import DeviceRole, DeviceType
+
+        make = " ".join((_text(row.get("make")) or "Unknown").split())
+        model = " ".join((_text(row.get("model")) or "Unknown").split())
+        mfg_slug, dt_slug, _explicit = self._identity.resolve(make, model)
+        device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
+        if device_type is None:
+            return _Dependencies(missing=("device.device_type_missing", {"mfg_slug": mfg_slug, "dt_slug": dt_slug}))
+
+        role_slug = self._roles.get(_text(row.get("device_class")), "")
+        role = DeviceRole.objects.filter(slug=role_slug).first() if role_slug else None
+        if role is None:
+            return _Dependencies(missing=("device.role_missing", {"role_slug": role_slug}))
+
+        rack_name = _text(row.get("rack_name"))
+        rack = self._racks.get(_identity_text(rack_name)) if rack_name else None
+        if rack_name and rack is None:
+            return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
+        return _Dependencies(device_type=device_type, role=role, rack=rack)
+
+    def match(self, row, name) -> _Match:
+        """Return the stored device this row reconciles, strongest identifier first."""
+        devices = self.reader.devices()
+        source_id = _text(row.get("source_id"))
+
+        bound_id = self._bindings.get(source_id) if source_id else None
+        if bound_id is not None:
+            bound = devices.filter(pk=bound_id).first()
+            if bound is not None:
+                return _Match(device=bound)
+
+        for field, lookup, code in (
+            ("serial", "serial", "device.ambiguous_serial"),
+            ("asset_tag", "asset_tag__iexact", "device.ambiguous_asset_tag"),
+        ):
+            value = _text(row.get(field))
+            if not value:
+                continue
+            found = list(devices.filter(**{lookup: value})[:2])
+            if len(found) > 1:
+                return _Match(ambiguous=code, value=value)
+            if found:
+                return _Match(device=found[0])
+
+        if _identity_text(name) in self._duplicate_names or self.reader.site is None:
+            return _Match()
+        by_name = list(devices.filter(name__iexact=name, site=self.reader.site)[:2])
+        if len(by_name) > 1:
+            return _Match(ambiguous="device.ambiguous_name", value=name)
+        return _Match(device=by_name[0] if by_name else None)
+
+
+class DeviceModule:
+    """Plans the Devices a flat source batch describes.
+
+    Section 4.4 makes a Device Type, a Device Role and a Rack dependencies of a device, not part of
+    it, so a device row that names one NetBox does not hold is blocked rather than invalid. Creating
+    them is another unit's work.
+    """
+
+    key = "device"
+    consumes = frozenset({OutputKind.DEVICE_SOURCE_ROW})
+
+    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
+        """Return one Synchronization Unit per device row, with the disposition its state earns."""
+        rows = self._device_rows(source_batch, profile)
+        if not rows:
+            return []
+        batch = _DeviceBatch(rows, profile, netbox_reader)
+        return [self._unit(row, batch) for row in rows]
+
+    @staticmethod
+    def _device_rows(source_batch, profile) -> list[dict]:
+        """Return the batch rows whose class the profile maps to a device."""
+        device_classes = {
+            mapping.source_class: mapping
+            for mapping in profile.class_role_mappings.all()
+            if not mapping.creates_rack and not mapping.ignore
+        }
+        return [row for row in source_batch.rows if _text(row.get("device_class")) in device_classes]
+
+    @staticmethod
+    def unit_identity(row) -> str:
+        """Return the identity that survives replanning, which is never the row number."""
+        source_id = _text(row.get("source_id"))
+        if source_id:
+            return f"device:source:{source_id}"
+        return f"device:name:{_identity_text(row.get('device_name'))}"
+
+    def _unit(self, row, batch) -> SynchronizationUnit:
+        """Return the one unit this row produces."""
+        identity = self.unit_identity(row)
+        name = _text(row.get("device_name"))
+        source_id = _text(row.get("source_id"))
+        display = {"device_name": name, "source_id": source_id}
+
+        if not name:
+            return _refused(identity, "device.missing_name", display)
+        if source_id and source_id in batch.ignored:
+            return SynchronizationUnit(
+                identity=identity,
+                disposition=Disposition.EXCLUDED,
+                diagnostics=(
+                    Diagnostic(
+                        code="device.ignored",
+                        severity=Severity.INFO,
+                        identities=(identity,),
+                        display=display,
+                    ),
+                ),
+            )
+
+        clash = batch.clash(row)
+        if clash is not None:
+            code, value, numbers = clash
+            return _refused(identity, code, {**display, "value": value, "rows": numbers})
+
+        dependencies = batch.dependencies(row)
+        if dependencies.missing is not None:
+            code, missing_display = dependencies.missing
+            return _blocked(identity, code, {**display, **missing_display})
+
+        match = batch.match(row, name)
+        if match.ambiguous is not None:
+            return _refused(identity, match.ambiguous, {**display, "value": match.value})
+
+        payload = self._payload(row, name, dependencies, batch)
+        if match.device is None:
+            return SynchronizationUnit(
+                identity=identity,
+                disposition=Disposition.ACTIONABLE,
+                changes=(self._change(identity, "create", payload, None),),
+            )
+        if not self._differs(match.device, payload):
+            return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP)
         return SynchronizationUnit(
             identity=identity,
-            disposition=Disposition.INVALID,
-            diagnostics=(Diagnostic(code=code, severity=Severity.ERROR, identities=(identity,), display=display),),
+            disposition=Disposition.ACTIONABLE,
+            changes=(self._change(identity, "update", payload, match.device),),
+        )
+
+    @staticmethod
+    def _payload(row, name, dependencies, batch) -> dict:
+        """Return the device state this row asks for, resolved to what a write needs."""
+        return {
+            "name": name,
+            "serial": _text(row.get("serial")),
+            "asset_tag": _text(row.get("asset_tag")),
+            "device_type_id": dependencies.device_type.pk,
+            "role_id": dependencies.role.pk,
+            "rack_id": dependencies.rack.pk if dependencies.rack is not None else None,
+            "site_id": batch.reader.site.pk if batch.reader.site is not None else None,
+            "location_id": batch.reader.location.pk if batch.reader.location is not None else None,
+            "tenant_id": batch.reader.tenant.pk if batch.reader.tenant is not None else None,
+        }
+
+    @staticmethod
+    def _differs(device, payload) -> bool:
+        """Return whether the stored device already holds what the row asks for."""
+        if _identity_text(device.name) != _identity_text(payload["name"]):
+            return True
+        if device.device_type_id != payload["device_type_id"] or device.role_id != payload["role_id"]:
+            return True
+        if payload["rack_id"] is not None and device.rack_id != payload["rack_id"]:
+            return True
+        for field in ("serial", "asset_tag"):
+            if payload[field] and _text(getattr(device, field)) != payload[field]:
+                return True
+        return False
+
+    @staticmethod
+    def _change(identity, operation, payload, device) -> PlannedChange:
+        """Return the one write this unit performs, with the target state it assumed."""
+        if device is None:
+            preconditions: dict = {"device_id": None}
+        else:
+            preconditions = {"device_id": device.pk, "device_type_id": device.device_type_id}
+        return PlannedChange(
+            identity=f"{identity}:{operation}",
+            target_module=DeviceModule.key,
+            operation=operation,
+            payload=payload,
+            preconditions=preconditions,
         )
 
 
 __all__ = (
     "DEFAULT_RACK_HEIGHT",
+    "DeviceModule",
     "ExecutionContext",
     "PreconditionFailed",
     "RackModule",
