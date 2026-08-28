@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .catalog import OutputKind
+from .device_field_review import DeviceFieldReviewer
 from .device_identity import DeviceTypeIdentityResolver
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
 from .values import normalize_for_compare, translation_maps
@@ -317,6 +318,40 @@ class _Match:
     value: str = ""
 
 
+_REVIEWED_PAYLOAD_FIELDS: dict[str, tuple[str, Any]] = {
+    "device_name": ("name", lambda device: device.name),
+    "serial": ("serial", lambda device: _text(device.serial)),
+    "asset_tag": ("asset_tag", lambda device: _text(device.asset_tag)),
+    "u_position": ("u_position", lambda device: device.position),
+    "face": ("face", lambda device: _text(device.face)),
+    "airflow": ("airflow", lambda device: _text(device.airflow)),
+    "status": ("status", lambda device: _text(device.status)),
+    "device_type": ("device_type_id", lambda device: device.device_type_id),
+    "role": ("role_id", lambda device: device.role_id),
+    "rack_name": ("rack_id", lambda device: device.rack_id),
+    "tenant": ("tenant_id", lambda device: device.tenant_id),
+    "location": ("location_id", lambda device: device.location_id),
+}
+
+
+def _reviewed_payload(payload, review, device) -> dict:
+    """Return the payload with every ignored field back at the value NetBox holds.
+
+    The disposition and the write both read this one result, so a row whose only difference the
+    operator ignored plans as a no-op and can never be written as an update.
+    """
+    if review is None or not review.ignored:
+        return payload
+    effective = dict(payload)
+    for target_field in review.ignored:
+        mapped = _REVIEWED_PAYLOAD_FIELDS.get(target_field)
+        if mapped is None:
+            continue
+        key, stored = mapped
+        effective[key] = stored(device)
+    return effective
+
+
 class _DeviceBatch:
     """The batch-wide state every device row is planned against, loaded once."""
 
@@ -331,6 +366,7 @@ class _DeviceBatch:
         self.reader = netbox_reader
         self.ignored = _ignored_source_ids(profile)
         self._identity = DeviceTypeIdentityResolver.for_profile(profile)
+        self._reviewer = DeviceFieldReviewer.for_profile(profile)
         self._roles = {mapping.source_class: _text(mapping.role_slug) for mapping in profile.class_role_mappings.all()}
         self._clashes = {field: self._rows_by_value(rows, field, fold) for field, _code, fold in self._CLASH_FIELDS}
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
@@ -460,6 +496,27 @@ class _DeviceBatch:
             return _Match(ambiguous="device.ambiguous_name", value=name)
         return _Match(device=by_name[0] if by_name else None)
 
+    def review(self, row, device, dependencies, placement, payload):
+        """Return the operator's saved review for one matched device, in the reviewer's terms."""
+        device_type = dependencies.device_type
+        manufacturer = device_type.manufacturer
+        proposal = {
+            "device_name": payload["name"],
+            "serial": payload["serial"],
+            "asset_tag": payload["asset_tag"],
+            "u_position": placement.position,
+            "face": placement.face,
+            "airflow": placement.airflow,
+            "status": placement.status,
+            "rack_name": _text(row.get("rack_name")),
+            "_rack_location_id": self.reader.location.pk if self.reader.location is not None else None,
+            "device_type": (manufacturer.slug, device_type.slug, manufacturer.name, device_type.model),
+            "role": _text(dependencies.role.slug),
+            "tenant": self.reader.tenant,
+            "location": self.reader.location,
+        }
+        return self._reviewer.review(_text(row.get("source_id")), device, proposal)
+
 
 class DeviceModule:
     """Plans the Devices a flat source batch describes.
@@ -551,6 +608,8 @@ class DeviceModule:
                 disposition=Disposition.ACTIONABLE,
                 changes=(self._change(identity, "create", payload, None),),
             )
+        review = batch.review(row, match.device, dependencies, placement, payload)
+        payload = _reviewed_payload(payload, review, match.device)
         if not self._differs(match.device, payload):
             return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP)
         return SynchronizationUnit(

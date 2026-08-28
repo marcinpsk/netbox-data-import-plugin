@@ -4,15 +4,21 @@
 
 Every branch the current device pass reports as a row action maps onto exactly one disposition from
 section 4.2, so these tests are the mapping written down. This layer covers identity, the duplicate
-checks, matching against NetBox, and the disposition each of those earns. Field review, contacts
-and IP assignment arrive with the next layer.
+checks, matching against NetBox, the operator's saved field review, and the disposition each of
+those earns. Contacts and IP assignment arrive with the next layer.
 """
 
 from django.test import TestCase
 
 from netbox_data_import.adapters import SourceBatch
 from netbox_data_import.catalog import OutputKind
-from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, IgnoredDevice, ImportProfile
+from netbox_data_import.models import (
+    ClassRoleMapping,
+    DeviceExistingMatch,
+    IgnoredDevice,
+    IgnoredFieldDifference,
+    ImportProfile,
+)
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.plan import Disposition
 from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed
@@ -510,3 +516,58 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         device.refresh_from_db()
         self.assertIsNone(device.position)
         self.assertEqual(device.face, "")
+
+
+class DeviceModuleFieldReviewTest(DeviceModulePlanTestBase):
+    """An ignored difference means leave the field alone, so neither the plan nor the write carries it."""
+
+    def _ignore(self, device, target_field, file_value, netbox_value, source_id="D-1"):
+        """Record the exact review an operator saves from the preview."""
+        IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id=source_id,
+            netbox_device_id=device.pk,
+            target_field=target_field,
+            file_snapshot={"canonical": file_value, "display": file_value},
+            netbox_snapshot={"canonical": netbox_value, "display": netbox_value},
+        )
+
+    def test_a_row_whose_only_difference_is_ignored_is_a_no_op(self):
+        """Planning a change the review already settled would execute a write the operator refused."""
+        device = self._device("srv-01", rack=self.rack, serial="OLD")
+        self._ignore(device, "serial", "NEW", "OLD")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="NEW"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+        self.assertEqual(units[0].changes, ())
+
+    def test_an_ignored_field_keeps_the_stored_value_in_the_payload(self):
+        """The guard has to stop the ignored field only, not every field the row carries."""
+        self._ignore(self._device("srv-01", rack=self.rack, serial="OLD", asset_tag="AT-OLD"), "serial", "NEW", "OLD")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="NEW", asset_tag="AT-NEW"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        payload = units[0].changes[0].payload
+        self.assertEqual(payload["asset_tag"], "AT-NEW")
+        self.assertEqual(payload["serial"], "OLD")
+
+    def test_a_review_saved_against_another_device_does_not_apply(self):
+        """A review names one device, so it cannot settle a difference on a different one."""
+        self._device("srv-01", rack=self.rack, serial="OLD")
+        self._ignore(self._device("other-device", rack=self.rack), "serial", "NEW", "OLD")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="NEW"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual(units[0].changes[0].payload["serial"], "NEW")
+
+    def test_a_review_whose_values_moved_on_does_not_apply(self):
+        """The review pins one exact pair, so a new file value is a new difference."""
+        self._ignore(self._device("srv-01", rack=self.rack, serial="OLD"), "serial", "NEW", "OLD")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="NEWER"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual(units[0].changes[0].payload["serial"], "NEWER")
