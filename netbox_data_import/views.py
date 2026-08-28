@@ -921,6 +921,9 @@ def _conflict_comparison_row(row, source_rows_by_number, *, is_current):
         "face": extra_data.get("face", source_row.get("face", "")),
         "action": row.action,
         "detail": row.detail,
+        # The comparison offers the same action the row column does, so it carries the same facts.
+        "identity_conflict": extra_data.get("identity_conflict", ""),
+        "duplicate_serial": extra_data.get("duplicate_serial", ""),
         "is_current": is_current,
     }
 

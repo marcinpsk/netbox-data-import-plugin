@@ -867,6 +867,7 @@
                             <th>Asset tag</th>
                             <th>Rack / position</th>
                             <th>Action / detail</th>
+                            <th>Resolve</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -888,6 +889,31 @@
                             <td>
                               <span class="badge ndi-badge-{{ conflict_row.action }}">{{ conflict_row.action|title }}</span>
                               <span class="small text-muted">{{ conflict_row.detail }}</span>
+                            </td>
+                            <td class="text-nowrap">
+                              {% if conflict_row.identity_conflict == 'duplicate_serial' and conflict_row.source_id and profile_id %}
+                              {# The operator picks which of the colliding rows gives the serial up. #}
+                              <form method="post" action="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
+                                    hx-post="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
+                                    hx-target="#page-content"
+                                    hx-select="#page-content"
+                                    hx-swap="outerHTML show:top"
+                                    hx-disabled-elt="find button"
+                                    class="d-inline ndi-conflict-comparison-action">
+                                {% csrf_token %}
+                                <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                                <input type="hidden" name="source_id" value="{{ conflict_row.source_id }}">
+                                <input type="hidden" name="row_number" value="{{ conflict_row.row_number }}">
+                                <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                                <input type="hidden" name="next" value="{{ preview_url }}">
+                                <button type="submit" class="btn btn-xs btn-outline-warning"
+                                        title="Import row {{ conflict_row.row_number }} without serial '{{ conflict_row.duplicate_serial }}', leaving it to the other row.">
+                                  <i class="mdi mdi-barcode-off"></i> Ignore serial
+                                </button>
+                              </form>
+                              {% else %}
+                              <span class="text-muted small">—</span>
+                              {% endif %}
                             </td>
                           </tr>
                           {% endfor %}
