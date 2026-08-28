@@ -338,6 +338,23 @@ class IgnoredFieldDifferencePreviewTest(TestCase):
         stored = DeviceImportSource.objects.get(device=created)
         self.assertEqual(stored.unassigned_ips, {"primary_ip4": "192.0.2.61/32"})
 
+    def test_a_full_import_moves_the_field_when_the_device_already_holds_the_address(self):
+        """The address is already on an interface, so only the device field moves. No IPAM row is written."""
+        from ipam.models import IPAddress
+
+        self._give_the_device_an_address("192.0.2.70/24")
+        self.device.primary_ip4 = None
+        self.device.save(update_fields=["primary_ip4"])
+        before = IPAddress.objects.count()
+        rows = self._row_with_an_ip("192.0.2.70")
+        self._save_rows(rows)
+
+        run_import(rows, self.profile, {"site": self.site}, dry_run=False, user=self.user)
+
+        self.device.refresh_from_db()
+        self.assertEqual(str(self.device.primary_ip4.address), "192.0.2.70/24")
+        self.assertEqual(IPAddress.objects.count(), before)
+
     def test_a_full_import_keeps_an_address_it_has_nowhere_to_put(self):
         """The device type declares no interfaces. The device still imports and the value survives.
 

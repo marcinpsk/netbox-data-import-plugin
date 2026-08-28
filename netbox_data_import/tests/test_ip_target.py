@@ -30,3 +30,18 @@ class HeldRowTest(SimpleTestCase):
 
         with self.assertRaises(IPAssignmentError):
             target.held
+
+
+class UnplaceableTargetTest(SimpleTestCase):
+    """A target with nowhere to go still has to describe itself to the operator."""
+
+    def _target(self):
+        return IPTarget(address="192.0.2.10/24", interface=None, existing=None, already_held=False)
+
+    def test_the_summary_is_just_the_address(self):
+        """There is no interface to name, so the sync reports the address alone."""
+        self.assertEqual(self._target().summary, "192.0.2.10/24")
+
+    def test_the_preview_shows_no_placement(self):
+        """The row already prints the address, so an empty hint adds nothing beside it."""
+        self.assertEqual(self._target().placement, "")
