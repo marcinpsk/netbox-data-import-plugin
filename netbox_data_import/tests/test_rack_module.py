@@ -238,3 +238,106 @@ class RackModuleApplyTest(TestCase):
 
         with self.assertRaises(ObjectPermissionDenied):
             RackModule().apply(change, context)
+
+
+class RackModuleEdgeTest(TestCase):
+    """The narrower paths through rack planning and writing."""
+
+    def setUp(self):
+        """A site, a location inside it, and a rack-creating profile."""
+        from dcim.models import Location, Site
+
+        self.site = Site.objects.create(name="Rack Edge Site", slug="rack-edge-site")
+        self.location = Location.objects.create(name="Rack Edge Room", slug="rack-edge-room", site=self.site)
+        self.profile = ImportProfile.objects.create(
+            name="Rack Edge Profile", adapter_config={"sheet_name": "Data", "update_existing": True}
+        )
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="Cabinet", creates_rack=True)
+
+    def _batch(self, *rows):
+        return SourceBatch(output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}), rows=tuple(rows))
+
+    def _row(self, source_id, rack_name, **extra):
+        row = {
+            "_row_number": 2,
+            "source_id": source_id,
+            "device_class": "Cabinet",
+            "rack_name": rack_name,
+            "u_height": 42,
+            "serial": "",
+        }
+        row.update(extra)
+        return row
+
+    def test_a_row_with_no_source_id_is_identified_by_its_name(self):
+        """Not every source carries an identity column, so the name is the fallback key."""
+        reader = NetBoxReader.unrestricted().for_target(site=self.site)
+
+        units = RackModule().plan(self._batch(self._row("", "edge-cab-01")), self.profile, None, reader)
+
+        self.assertEqual(units[0].identity, "rack:name:edge-cab-01")
+
+    def test_an_unreadable_height_falls_back_to_the_default(self):
+        """A rack height that is not a number must not fail the whole batch."""
+        reader = NetBoxReader.unrestricted().for_target(site=self.site)
+
+        units = RackModule().plan(
+            self._batch(self._row("E-1", "edge-cab-02", u_height="tall")), self.profile, None, reader
+        )
+
+        self.assertEqual(units[0].changes[0].payload["u_height"], 42)
+
+    def test_a_reader_with_no_target_matches_nothing(self):
+        """Without a site there is no target state to compare against, so every row is a create."""
+        from dcim.models import Rack
+
+        Rack.objects.create(name="edge-cab-03", site=self.site, u_height=42)
+        units = RackModule().plan(
+            self._batch(self._row("E-3", "edge-cab-03")), self.profile, None, NetBoxReader.unrestricted()
+        )
+
+        self.assertEqual(units[0].changes[0].operation, "create")
+
+    def test_a_location_bound_reader_only_matches_racks_in_that_location(self):
+        """The operator chose a location, so a rack elsewhere in the site is not this rack."""
+        from dcim.models import Rack
+
+        Rack.objects.create(name="edge-cab-04", site=self.site, u_height=42)
+        reader = NetBoxReader.unrestricted().for_target(site=self.site, location=self.location)
+
+        units = RackModule().plan(self._batch(self._row("E-4", "edge-cab-04")), self.profile, None, reader)
+
+        self.assertEqual(units[0].changes[0].operation, "create")
+        self.assertEqual(units[0].changes[0].payload["location_id"], self.location.pk)
+
+    def test_a_created_rack_carries_the_serial_and_tenant_the_plan_named(self):
+        """Both are optional in the payload, and both have to reach the written row."""
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Rack Edge Tenant", slug="rack-edge-tenant")
+        actor = get_user_model().objects.create_superuser(
+            username="rack-edge-actor", email="rack-edge@example.invalid", password="testpass"
+        )
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site, tenant=tenant)
+        units = RackModule().plan(
+            self._batch(self._row("E-5", "edge-cab-05", serial="EDGE-SERIAL")), self.profile, None, reader
+        )
+
+        rack = RackModule().apply(units[0].changes[0], ExecutionContext(actor=actor, reader=reader))
+
+        self.assertEqual(rack.serial, "EDGE-SERIAL")
+        self.assertEqual(rack.tenant, tenant)
+
+    def test_a_serial_difference_alone_makes_the_unit_actionable(self):
+        """Height is not the only field the row reconciles."""
+        from dcim.models import Rack
+
+        Rack.objects.create(name="edge-cab-06", site=self.site, u_height=42, serial="OLD")
+        reader = NetBoxReader.unrestricted().for_target(site=self.site)
+
+        units = RackModule().plan(
+            self._batch(self._row("E-6", "edge-cab-06", serial="NEW")), self.profile, None, reader
+        )
+
+        self.assertEqual(units[0].changes[0].operation, "update")
+        self.assertEqual(units[0].changes[0].payload["serial"], "NEW")

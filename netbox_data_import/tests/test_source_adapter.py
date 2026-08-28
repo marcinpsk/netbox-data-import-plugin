@@ -142,3 +142,49 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
             FlatWorkbookAdapter.interpret(content, config)
 
         self.assertIn("Combined", str(caught.exception))
+
+    def test_a_candidate_column_is_kept_for_review_rather_than_written(self):
+        """A candidate target offers review choices, so its values stay grouped by source column."""
+        content = _workbook("Data", ("Owner", "Backup"), ("ada", "grace"))
+        config = FlatWorkbookConfig(sheet_name="Data", column_map={"candidate:contact": ("Owner", "Backup")})
+
+        batch = FlatWorkbookAdapter.interpret(content, config)
+
+        self.assertEqual(batch.rows[0]["_candidate_values"]["contact"], {"Owner": "ada", "Backup": "grace"})
+
+    def test_the_unmapped_tally_counts_rows_and_keeps_a_few_samples(self):
+        """The setup step reports what the profile does not map, so the operator can map it."""
+        content = _workbook("Data", ("Id", "Notes"), ("SRC-1", "first"), ("SRC-2", "second"))
+        config = FlatWorkbookConfig(sheet_name="Data", column_map={"source_id": ("Id",)})
+
+        batch = FlatWorkbookAdapter.interpret(content, config, collect_unused=True)
+
+        self.assertEqual(batch.unused_columns["Notes"]["count"], 2)
+        self.assertEqual(batch.unused_columns["Notes"]["samples"], ["first", "second"])
+
+    def test_an_extra_json_mapping_becomes_a_captured_column(self):
+        """`extra_json:<name>` is a declared passthrough, not a Target Field the writer knows."""
+        content = _workbook("Data", ("Owner",), ("ada",))
+        config = FlatWorkbookConfig(sheet_name="Data", column_map={"extra_json:owner": ("Owner",)})
+
+        batch = FlatWorkbookAdapter.interpret(content, config)
+
+        self.assertEqual(batch.rows[0]["_extra_columns"], {"owner": "ada"})
+
+
+class SourceAdapterContractTest(SimpleTestCase):
+    """The base declares the seam; a subclass that forgets it must fail loudly."""
+
+    def test_the_base_refuses_to_interpret(self):
+        """`interpret` is the contract, so the base cannot silently return nothing."""
+        from netbox_data_import.adapters import SourceAdapter
+
+        with self.assertRaises(NotImplementedError):
+            SourceAdapter.interpret(b"", None)
+
+    def test_the_base_refuses_to_name_a_configuration_form(self):
+        """Every adapter validates its own `adapter_config` at the boundary."""
+        from netbox_data_import.adapters import SourceAdapter
+
+        with self.assertRaises(NotImplementedError):
+            SourceAdapter.config_form_class()

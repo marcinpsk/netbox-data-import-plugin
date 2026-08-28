@@ -550,3 +550,35 @@ class SelectiveMergeTest(SimpleTestCase):
         unit = _unit(identity="unit:2", changes=(_change(identity="device:5", dependencies=("device_type:1",)),))
         ordered = merge_changes((unit,), reconciled=("device_type:1",))
         self.assertNotIn("device_type:1", [change.identity for change in ordered])
+
+
+class PlanLookupAndIdentityTest(SimpleTestCase):
+    """The narrower refusals a plan makes when it is built or queried wrongly."""
+
+    def test_a_change_without_an_identity_is_refused(self):
+        """Section 4.3 needs a stable identity, so an empty one cannot enter a plan."""
+        with self.assertRaises(PlanInvalid):
+            PlannedChange(identity="", target_module="device", operation="create", payload={})
+
+    def test_a_unit_without_an_identity_is_refused(self):
+        """A unit is what selective synchronization names, so it needs a key."""
+        with self.assertRaises(PlanInvalid):
+            SynchronizationUnit(identity="", disposition=Disposition.ACTIONABLE)
+
+    def test_a_unit_holding_the_wrong_kind_of_member_is_refused(self):
+        """A plan carries typed members only, never whatever the caller happened to pass."""
+        with self.assertRaises(PlanInvalid):
+            SynchronizationUnit(identity="unit:1", disposition=Disposition.ACTIONABLE, changes=("not-a-change",))
+
+    def test_an_unknown_unit_reads_as_absent(self):
+        """`unit()` answers None so a caller can ask without handling an exception."""
+        self.assertIsNone(_plan().unit("unit:absent"))
+
+    def test_fingerprinting_an_unknown_unit_is_refused(self):
+        """Fingerprinting names a specific unit, so a missing one is a programming error."""
+        with self.assertRaises(PlanInvalid):
+            _plan().unit_fingerprint("unit:absent")
+
+    def test_a_change_is_hashable_by_its_serialized_form(self):
+        """Changes go into sets during merging, so equal content has to hash equal."""
+        self.assertEqual(hash(_change()), hash(_change()))

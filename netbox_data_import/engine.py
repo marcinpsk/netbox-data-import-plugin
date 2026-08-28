@@ -18,16 +18,17 @@ from copy import copy
 from functools import partial
 from dataclasses import dataclass, field
 from typing import Any, Literal
-from io import BytesIO
 
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
 from django.utils.text import slugify
-import openpyxl
 
 from .contact_resolution import ContactResolutionRequired, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
+from .adapters import SourceUnreadable
 from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
+from .flat_workbook import FlatWorkbookConfig, TransformRule, promote_extra_json_fields
+from .values import comparison_key, normalize_for_compare
 from .models import DeviceImportSource, ImportProfile
 from .netbox_reader import NetBoxReader
 from .object_permissions import (
@@ -310,80 +311,6 @@ def _effective_device_name(row) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_header_index_map(ws) -> dict[str, int]:
-    """Build a header-name → column-index map from the first worksheet row.
-
-    First occurrence wins when duplicate headers exist.
-    """
-    raw_headers: dict[str, int] = {}
-    for idx, cell in enumerate(ws[1]):
-        if cell.value is not None:
-            header = str(cell.value).strip()
-            if header not in raw_headers:
-                raw_headers[header] = idx
-    return raw_headers
-
-
-def _apply_transform_rules(row_dict: dict, raw_row, raw_headers: dict, transform_rules) -> None:
-    """Apply column transform rules in-place to *row_dict*."""
-    for rule in transform_rules:
-        idx = raw_headers.get(rule.source_column)
-        if idx is None:
-            continue
-        raw_value = raw_row[idx] if idx < len(raw_row) else None
-        if raw_value is None:
-            continue
-        raw_str = str(raw_value).strip()
-        try:
-            m = re.fullmatch(rule.pattern, raw_str)
-        except re.error as exc:
-            raise ParseError(
-                f"Invalid regex pattern '{rule.pattern}' in transform rule for column "
-                f"'{rule.source_column}' (value: {raw_str!r}): {exc}"
-            ) from exc
-        if m and rule.group_1_target and len(m.groups()) >= 1:
-            row_dict[rule.group_1_target] = m.group(1)
-        if m and rule.group_2_target and len(m.groups()) >= 2:
-            row_dict[rule.group_2_target] = m.group(2)
-
-
-def _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra):
-    """Return extra dict for a single row and update unused_stats in-place."""
-    extra: dict[str, str] = {}
-    for col in unmapped_cols:
-        idx = raw_headers[col]
-        raw_val = row[idx] if idx < len(row) else None
-        str_val = _str_val(raw_val)
-        if not str_val:
-            continue
-        extra[col] = str_val
-        if return_stats:
-            entry = unused_stats.setdefault(col, {"count": 0, "samples": []})
-            entry["count"] += 1
-            if len(entry["samples"]) < 5:
-                entry["samples"].append(str_val)
-    return extra
-
-
-def _promote_extra_json_fields(row_dict: dict) -> None:
-    """Move any extra_json:<key> entries from row_dict into row_dict["_extra_columns"]."""
-    for k in [k for k in list(row_dict) if isinstance(k, str) and k.startswith("extra_json:")]:
-        json_key = k[len("extra_json:") :]
-        val = row_dict.pop(k)
-        if val not in (None, ""):
-            row_dict.setdefault("_extra_columns", {})[json_key] = val
-
-
-_NUMERIC_TARGET_FIELDS: frozenset[str] = frozenset({"u_position", "u_height"})
-
-
-def _cmp_for_field(field: str, val) -> str:
-    """Return the comparison key for *val* appropriate to *field* type."""
-    if field in _NUMERIC_TARGET_FIELDS:
-        return _normalize_for_compare(val)
-    return "" if val is None else str(val).strip()
-
-
 def _build_grouped_col_map(profile: ImportProfile) -> dict[str, list[str]]:
     """Return a target-field keyed map of all mapped source columns."""
     grouped: dict[str, list[str]] = {}
@@ -435,42 +362,6 @@ def _apply_one_resolution(row_dict: dict, res, source_to_targets: dict[str, list
             row_dict[target_field] = None
 
 
-def _merge_row_values(
-    row_num: int,
-    raw_row,
-    raw_headers: dict[str, int],
-    grouped_col_map: dict[str, list[str]],
-) -> dict[str, Any]:
-    """Build a parsed row dict using multi-source merge semantics."""
-    row_dict: dict[str, Any] = {"_row_number": row_num}
-    for target_field, source_cols in grouped_col_map.items():
-        values: dict[str, Any] = {}
-        for source_col in source_cols:
-            idx = raw_headers.get(source_col)
-            if idx is None:
-                continue
-            value = raw_row[idx] if idx < len(raw_row) else None
-            if isinstance(value, str):
-                value = value.strip()
-            if value is not None and str(value).strip():
-                values[source_col] = value
-
-        if not values:
-            continue
-        if target_field.startswith(CANDIDATE_TARGET_PREFIX):
-            candidate_target = target_field.removeprefix(CANDIDATE_TARGET_PREFIX)
-            row_dict.setdefault("_candidate_values", {})[candidate_target] = {
-                source_column: str(value) for source_column, value in values.items()
-            }
-            continue
-        if len({_cmp_for_field(target_field, v) for v in values.values()}) == 1:
-            row_dict[target_field] = next(iter(values.values()))
-        else:
-            row_dict[target_field] = None
-            row_dict.setdefault("_conflicts", {})[target_field] = {k: str(v) for k, v in values.items()}
-    return row_dict
-
-
 def _clear_resolved_conflicts(row_dict: dict[str, Any], resolved_fields: dict) -> None:
     """Remove conflicts for fields overridden by saved resolutions."""
     for resolved_field in resolved_fields:
@@ -516,15 +407,15 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
             existing_nonempty = existing is not None and str(existing).strip() != ""
 
             if not existing_nonempty:
-                unique = {_cmp_for_field(target_field, v) for v in unmapped.values()}
+                unique = {comparison_key(target_field, v) for v in unmapped.values()}
                 if len(unique) == 1:
                     row[target_field] = next(iter(unmapped.values()))
                 else:
                     row[target_field] = None
                     row.setdefault("_conflicts", {})[target_field] = {k: str(v) for k, v in unmapped.items()}
             else:
-                cmp_existing = _cmp_for_field(target_field, existing)
-                cmp_unmapped = {_cmp_for_field(target_field, v) for v in unmapped.values()}
+                cmp_existing = comparison_key(target_field, existing)
+                cmp_unmapped = {comparison_key(target_field, v) for v in unmapped.values()}
                 if len({cmp_existing} | cmp_unmapped) > 1:
                     all_candidates = {target_field: str(existing), **{k: str(v) for k, v in unmapped.items()}}
                     row[target_field] = None
@@ -532,13 +423,34 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
 
         if not extra_columns:
             row.pop("_extra_columns", None)
-        _promote_extra_json_fields(row)
+        promote_extra_json_fields(row)
 
     return rows
 
 
+def flat_workbook_config(profile: ImportProfile) -> FlatWorkbookConfig:
+    """Read the profile's source-format policy into the frozen config the adapter takes.
+
+    Section 2.2 keeps the adapter off the ORM, so the engine does this read and passes data.
+    """
+    return FlatWorkbookConfig(
+        sheet_name=profile.adapter_settings.sheet_name,
+        column_map={field: tuple(columns) for field, columns in _build_grouped_col_map(profile).items()},
+        transform_rules=tuple(
+            TransformRule(
+                source_column=rule.source_column,
+                pattern=rule.pattern,
+                group_1_target=rule.group_1_target or "",
+                group_2_target=rule.group_2_target or "",
+            )
+            for rule in profile.column_transform_rules.all()
+        ),
+        capture_extra_data=profile.adapter_settings.capture_extra_data,
+    )
+
+
 def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
-    """Read the Excel file and return a list of row-dicts keyed by target_field name.
+    """Read the source file and return a list of row-dicts keyed by target_field name.
 
     When return_stats=True, returns a tuple (rows, unused_stats) where unused_stats
     is a dict mapping unmapped source column names to {"count": int, "samples": list[str]}.
@@ -547,56 +459,17 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     """
     if not has_implemented_module(profile.output_kinds):
         raise ParseError(f"This release has no Target Module for the '{profile.source_adapter}' source adapter.")
+    adapter = profile.adapter
+    if adapter is None:
+        raise ParseError(f"Unknown source adapter '{profile.source_adapter}'.")
 
     try:
-        content = file_obj.read()
-        wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
-    except Exception as exc:
-        raise ParseError(f"Cannot open Excel file: {exc}") from exc
+        batch = adapter.interpret(file_obj.read(), flat_workbook_config(profile), collect_unused=return_stats)
+    except SourceUnreadable as exc:
+        raise ParseError(str(exc)) from exc
 
-    if profile.adapter_settings.sheet_name not in wb.sheetnames:
-        available = ", ".join(wb.sheetnames)
-        raise ParseError(f"Sheet '{profile.adapter_settings.sheet_name}' not found. Available sheets: {available}")
-
-    ws = wb[profile.adapter_settings.sheet_name]
-    raw_headers = _build_header_index_map(ws)
-
-    # Build grouped source-column map from profile
-    col_map = _build_grouped_col_map(profile)
-
-    # Unmapped columns: present in the sheet but not in any mapping
-    all_mapped_sources = {src for srcs in col_map.values() for src in srcs}
-    unmapped_cols = [col for col in raw_headers if col not in all_mapped_sources]
-
-    # Pre-fetch transform rules for efficiency
-    transform_rules = list(profile.column_transform_rules.all())
-
-    unused_stats: dict[str, dict] = {}
-    capture_extra = profile.adapter_settings.capture_extra_data
-
-    rows = []
-    for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        # Skip fully empty rows
-        if all(v is None for v in row):
-            continue
-
-        row_dict = _merge_row_values(row_num, row, raw_headers, col_map)
-
-        # Promote explicit extra_json: mappings into _extra_columns
-        _promote_extra_json_fields(row_dict)
-
-        _apply_transform_rules(row_dict, row, raw_headers, transform_rules)
-
-        if return_stats or capture_extra:
-            extra = _collect_unmapped_values(row, raw_headers, unmapped_cols, unused_stats, return_stats, capture_extra)
-            if capture_extra and extra:
-                row_dict.setdefault("_extra_columns", {}).update(extra)
-
-        rows.append(row_dict)
-
-    if return_stats:
-        return rows, unused_stats
-    return rows
+    rows = list(batch.rows)
+    return (rows, batch.unused_columns) if return_stats else rows
 
 
 def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
@@ -1095,7 +968,7 @@ def placement_sync_is_noop(device, rack_name, position, face) -> bool:
     device_rack_name = device.rack.name if device.rack_id else ""
     if _identity_text(device_rack_name) != _identity_text(rack_name):
         return False
-    if position is not None and _normalize_for_compare(device.position) != _normalize_for_compare(position):
+    if position is not None and normalize_for_compare(device.position) != normalize_for_compare(position):
         return False
     if face and (device.face or "") != face:
         return False
@@ -1110,7 +983,7 @@ def _device_placement_differs(device, source_location_id, rack_name, position, f
         device.location_id != source_location_id
         or (device.rack_id is not None and device_rack_location_id != source_location_id)
         or _identity_text(device_rack_name) != _identity_text(rack_name)
-        or _normalize_for_compare(device.position) != _normalize_for_compare(position)
+        or normalize_for_compare(device.position) != normalize_for_compare(position)
         or (face is not None and (device.face or None) != face)
     )
 
@@ -1168,7 +1041,7 @@ def _device_identity_state(device):
         "location_id": device.location_id,
         "tenant_id": device.tenant_id,
         "rack_id": device.rack_id,
-        "position": _normalize_for_compare(device.position),
+        "position": normalize_for_compare(device.position),
         "face": device.face or "",
         "device_type_id": device.device_type_id,
         "role_id": device.role_id,
@@ -1892,7 +1765,7 @@ def _suggest_unique_device_name(row, ctx):
     """Build and reserve one deterministic, case-insensitive device name."""
     name = _effective_device_name(row)
     rack_name = _str_val(row.get("rack_name")) or "NO-RACK"
-    position = _normalize_for_compare(row.get("u_position")) or "NO-U"
+    position = normalize_for_compare(row.get("u_position")) or "NO-U"
     base = f"{name}-{rack_name}-U{position}" if position != "NO-U" else f"{name}-{rack_name}"
     candidate = base[:64]
     if _identity_text(candidate) in ctx.reserved_device_names:
@@ -1907,24 +1780,6 @@ def _suggest_unique_device_name(row, ctx):
         counter += 1
     ctx.reserved_device_names.add(_identity_text(unique_candidate))
     return unique_candidate
-
-
-def _normalize_for_compare(val) -> str:
-    """Normalize a value for field-diff comparison.
-
-    Whole-number floats (e.g. 35.0, "35.0") are normalized to their integer
-    string form ("35") to avoid false diffs caused by type differences between
-    the source file and what NetBox returns.
-    """
-    if val is None:
-        return ""
-    try:
-        f = float(val)
-        if f == int(f):
-            return str(int(f))
-        return str(f)
-    except (TypeError, ValueError, OverflowError):
-        return str(val).strip()
 
 
 def _result_position(value):
@@ -2236,7 +2091,7 @@ def _check_rack_position_conflict(
             ]
         for claimed_key in claimed_keys:
             prev_row, prev_name = ctx.claimed_positions[claimed_key]
-            slot_label = _normalize_for_compare(slot)
+            slot_label = normalize_for_compare(slot)
             if prev_row is not None:
                 other = f"row {prev_row}"
                 if prev_name:
@@ -2383,13 +2238,13 @@ def _name_placement_conflict_row(
             "suggested_name": _suggest_unique_device_name(row, ctx),
             "source_rack_name": source_rack,
             "source_location": source_location,
-            "source_position": _normalize_for_compare(position),
+            "source_position": normalize_for_compare(position),
             "source_face": face or "",
             "netbox_device_id": matched_device.pk,
             "netbox_device_name": matched_device.name,
             "netbox_rack_name": netbox_rack,
             "netbox_location": netbox_location,
-            "netbox_position": _normalize_for_compare(matched_device.position),
+            "netbox_position": normalize_for_compare(matched_device.position),
             "netbox_face": matched_device.face or "",
             "source_serial": serial or "",
             "asset_tag": asset_tag or "",
@@ -2944,7 +2799,7 @@ def _preview_device_row(  # noqa: C901
             **(
                 {
                     "netbox_rack_name": matched_device.rack.name if matched_device.rack_id else "",
-                    "netbox_position": _normalize_for_compare(matched_device.position),
+                    "netbox_position": normalize_for_compare(matched_device.position),
                     "netbox_face": matched_device.face or "",
                     # Only set when a placement sync has nothing to write, so an older preview
                     # that predates this key keeps offering the action.
@@ -3779,7 +3634,7 @@ def _pass3_process_devices(rows, ctx, class_role_map):  # noqa: C901
                             "netbox_device_id": existing.pk,
                             "netbox_device_name": existing.name,
                             "netbox_rack_name": netbox_rack,
-                            "netbox_position": _normalize_for_compare(existing.position),
+                            "netbox_position": normalize_for_compare(existing.position),
                             "netbox_face": existing.face or "",
                             "netbox_url": existing.get_absolute_url(),
                         }
