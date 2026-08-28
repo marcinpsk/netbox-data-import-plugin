@@ -21,10 +21,10 @@ from typing import Any, Literal
 
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
-from django.utils.text import slugify
 
 from .contact_resolution import ContactResolutionRequired, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
+from .device_identity import DeviceTypeIdentityResolver
 from .adapters import SourceUnreadable
 from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
 from .flat_workbook import FlatWorkbookConfig, TransformRule, promote_extra_json_fields
@@ -220,7 +220,7 @@ class ImportContext:
     candidate_source_columns: dict[str, frozenset[str]] = field(default_factory=dict)
     progress_callback: Callable[[int, int], None] | None = None
     field_reviewer: DeviceFieldReviewer | None = None
-    device_type_identity: _DeviceTypeIdentityResolver | None = None
+    device_type_identity: DeviceTypeIdentityResolver | None = None
     effective_duplicate_identity: dict[int, dict[str, str | None]] = field(default_factory=dict)
 
 
@@ -540,75 +540,14 @@ def _parse_ip_with_prefix(raw_value: str) -> str | None:
     return None
 
 
-def _normalize_mapping_text(value: str) -> str:
-    r"""Normalize whitespace and decode JavaScript-style \uXXXX escapes."""
-    value = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), value)
-    return " ".join(value.split())
-
-
-class _DeviceTypeIdentityResolver:
-    """Resolve all profile Device Type identities from two batch-loaded indexes."""
-
-    def __init__(self, device_type_mappings, manufacturer_mappings):
-        self.device_type_mappings = tuple(device_type_mappings)
-        self.manufacturer_mappings = tuple(manufacturer_mappings)
-        self._device_types_exact = {}
-        self._device_types_by_make = {}
-        for mapping in self.device_type_mappings:
-            self._device_types_exact.setdefault((mapping.source_make, mapping.source_model), mapping)
-            self._device_types_by_make.setdefault(mapping.source_make.lower(), []).append(mapping)
-        self._manufacturers_exact = {}
-        for mapping in self.manufacturer_mappings:
-            self._manufacturers_exact.setdefault(mapping.source_make, mapping)
-        self.mapped_source_makes = frozenset(self._manufacturers_exact)
-
-    @classmethod
-    def for_profile(cls, profile):
-        """Load both mapping tables once for one import run."""
-        return cls(
-            profile.device_type_mappings.all(),
-            profile.manufacturer_mappings.all(),
-        )
-
-    def resolve(self, make: str, model: str) -> tuple[str, str, bool]:
-        """Return manufacturer slug, Device Type slug, and explicit status."""
-        mapping = self._device_types_exact.get((make, model))
-        if mapping is None:
-            mapping = next(
-                (
-                    candidate
-                    for candidate in self._device_types_by_make.get(make.lower(), ())
-                    if _normalize_mapping_text(candidate.source_model) == model
-                ),
-                None,
-            )
-        if mapping is not None:
-            return mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug, True
-
-        manufacturer_mapping = self._manufacturers_exact.get(make)
-        if manufacturer_mapping is None:
-            manufacturer_mapping = next(
-                (
-                    candidate
-                    for candidate in self.manufacturer_mappings
-                    if _normalize_mapping_text(candidate.source_make) == make
-                ),
-                None,
-            )
-        manufacturer_slug = (
-            manufacturer_mapping.netbox_manufacturer_slug if manufacturer_mapping is not None else slugify(make)[:50]
-        )
-        return manufacturer_slug, slugify(f"{make}-{model}")[:50], False
-
-
 def _resolve_device_type_slugs(
     make: str,
     model: str,
     profile: ImportProfile,
-    resolver: _DeviceTypeIdentityResolver | None = None,
+    resolver: DeviceTypeIdentityResolver | None = None,
 ) -> tuple[str, str, bool]:
     """Resolve one Device Type identity through a shared batch index."""
-    return (resolver or _DeviceTypeIdentityResolver.for_profile(profile)).resolve(make, model)
+    return (resolver or DeviceTypeIdentityResolver.for_profile(profile)).resolve(make, model)
 
 
 # ---------------------------------------------------------------------------
@@ -4008,7 +3947,7 @@ def _derived_slug_conflicts(
     """Return per-row errors for different source identities that derive one slug."""
     manufacturer_groups = {}
     device_type_groups = {}
-    device_type_identity = device_type_identity or _DeviceTypeIdentityResolver.for_profile(profile)
+    device_type_identity = device_type_identity or DeviceTypeIdentityResolver.for_profile(profile)
     mapped_source_makes = device_type_identity.mapped_source_makes
     for row in rows:
         crm = class_role_map.get(_str_val(row.get("device_class")))
@@ -4126,7 +4065,7 @@ def run_import(
         candidate_source_columns=_build_candidate_source_columns(profile),
         progress_callback=progress_callback,
         field_reviewer=DeviceFieldReviewer.for_profile(profile),
-        device_type_identity=_DeviceTypeIdentityResolver.for_profile(profile),
+        device_type_identity=DeviceTypeIdentityResolver.for_profile(profile),
     )
     ctx.slug_conflicts_by_row = _derived_slug_conflicts(
         rows,
