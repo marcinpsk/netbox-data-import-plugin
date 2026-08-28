@@ -157,7 +157,7 @@ class RackModuleApplyTest(TestCase):
             username="rack-apply-actor", email="rack-apply@example.invalid", password="testpass"
         )
         self.reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
-        self.context = ExecutionContext(actor=self.actor, reader=self.reader)
+        self.context = ExecutionContext(actor=self.actor, reader=self.reader, profile=self.profile)
 
     def _only_change(self, *rows):
         batch = SourceBatch(output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}), rows=tuple(rows))
@@ -234,7 +234,9 @@ class RackModuleApplyTest(TestCase):
         Rack.objects.create(name="apply-cab-05", site=self.site, u_height=20)
         change = self._only_change(self._row("RACK-5", "apply-cab-05"))
         viewer = user_with_object_permission("rack-apply-viewer", [(Rack, ["view"], None)])
-        context = ExecutionContext(actor=viewer, reader=NetBoxReader.for_actor(viewer).for_target(site=self.site))
+        context = ExecutionContext(
+            actor=viewer, reader=NetBoxReader.for_actor(viewer).for_target(site=self.site), profile=self.profile
+        )
 
         with self.assertRaises(ObjectPermissionDenied):
             RackModule().apply(change, context)
@@ -323,7 +325,9 @@ class RackModuleEdgeTest(TestCase):
             self._batch(self._row("E-5", "edge-cab-05", serial="EDGE-SERIAL")), self.profile, None, reader
         )
 
-        rack = RackModule().apply(units[0].changes[0], ExecutionContext(actor=actor, reader=reader))
+        rack = RackModule().apply(
+            units[0].changes[0], ExecutionContext(actor=actor, reader=reader, profile=self.profile)
+        )
 
         self.assertEqual(rack.serial, "EDGE-SERIAL")
         self.assertEqual(rack.tenant, tenant)

@@ -130,7 +130,8 @@ class PrimaryContactResolver:
     """Hide Contact resolution, lookup, assignment, and JSON migration behind one interface."""
 
     @staticmethod
-    def _candidate_source_columns(profile) -> dict[str, frozenset[str]]:
+    def candidate_source_columns(profile) -> dict[str, frozenset[str]]:
+        """Return the source columns each candidate target collects, grouped by target."""
         grouped: dict[str, set[str]] = {}
         for mapping in profile.column_mappings.filter(target_field__startswith="candidate:"):
             target = mapping.target_field.removeprefix("candidate:")
@@ -204,7 +205,7 @@ class PrimaryContactResolver:
 
         legacy_primary_contact = _text(row.get("primary_contact")) or _text(extra_columns.get("primary_contact"))
         extra_columns.pop("primary_contact", None)
-        source_columns = candidate_source_columns or cls._candidate_source_columns(profile)
+        source_columns = candidate_source_columns or cls.candidate_source_columns(profile)
         candidate_values = cls._candidate_values(row, source_columns, extra_columns)
         try:
             selection = cls._selection(row, profile, candidate_values, legacy_primary_contact)

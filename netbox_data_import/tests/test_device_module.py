@@ -431,7 +431,7 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         from dcim.models import Device
 
         self.actor = user_with_object_permission("device-module-writer", [(Device, ("add", "change", "view"), {})])
-        self.context = ExecutionContext(actor=self.actor, reader=self.reader)
+        self.context = ExecutionContext(actor=self.actor, reader=self.reader, profile=self.profile)
 
     def _only_change(self, *rows):
         """Return the single change the given rows plan."""
@@ -502,7 +502,7 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         change = self._only_change(self._row(2, "D-1", "srv-01"))
 
         with self.assertRaises(ObjectPermissionDenied):
-            DeviceModule().apply(change, ExecutionContext(actor=blocked, reader=self.reader))
+            DeviceModule().apply(change, ExecutionContext(actor=blocked, reader=self.reader, profile=self.profile))
 
     def test_a_zero_u_device_is_written_without_a_position(self):
         """NetBox refuses a position on a zero-U type, so the plan never carries one."""
@@ -571,3 +571,107 @@ class DeviceModuleFieldReviewTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
         self.assertEqual(units[0].changes[0].payload["serial"], "NEWER")
+
+
+class DeviceModuleContactTest(DeviceModulePlanTestBase):
+    """A device row carries a primary contact, and the plan decides it before anything is written."""
+
+    def setUp(self):
+        """Give the profile the contact role that makes contact resolution active."""
+        super().setUp()
+        from tenancy.models import ContactRole
+
+        self.contact_role = ContactRole.objects.create(name="Primary Contact", slug="primary-contact")
+        self.profile.adapter_config = {
+            **self.profile.adapter_config,
+            "primary_contact_role": self.contact_role.name,
+            "primary_contact_lookup_field": "email",
+        }
+        self.profile.save(update_fields=["adapter_config"])
+        self.actor = self._contact_writer()
+        self.context = ExecutionContext(actor=self.actor, reader=self.reader, profile=self.profile)
+
+    @staticmethod
+    def _contact_writer():
+        """Return an actor allowed to write the device and the contact it is assigned."""
+        from dcim.models import Device
+        from tenancy.models import Contact, ContactAssignment
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        return user_with_object_permission(
+            "device-module-contact-writer",
+            [
+                (Device, ("add", "change", "view"), {}),
+                (Contact, ("add", "view"), {}),
+                (ContactAssignment, ("add", "change", "view"), {}),
+            ],
+        )
+
+    def test_applying_a_create_assigns_the_contact_the_plan_carried(self):
+        """A plan that names a contact but never assigns it has written half the row."""
+        from django.contrib.contenttypes.models import ContentType
+        from tenancy.models import ContactAssignment
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_contact="owner@example.invalid"))
+
+        device = DeviceModule().apply(units[0].changes[0], self.context)
+
+        assignment = ContactAssignment.objects.get(
+            object_type=ContentType.objects.get_for_model(device),
+            object_id=device.pk,
+            role=self.contact_role,
+        )
+        self.assertEqual(assignment.contact.email, "owner@example.invalid")
+
+    def _assign(self, device, email):
+        """Let the real resolver establish the state a later plan has to call unchanged."""
+        from netbox_data_import.contact_resolution import PrimaryContactResolver
+
+        review = PrimaryContactResolver.review(device, {"primary_contact": email}, self.profile, None)
+        PrimaryContactResolver.apply(device, self.profile, review, None)
+
+    def test_a_contact_the_device_already_holds_is_not_a_change(self):
+        """Re-importing a settled contact must not make an otherwise identical row actionable."""
+        device = self._device("srv-01", rack=self.rack)
+        self._assign(device, "owner@example.invalid")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_contact="owner@example.invalid"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+    def test_a_contact_the_device_does_not_hold_makes_the_row_actionable(self):
+        """The row writes an assignment NetBox does not have, so it is work the plan must carry."""
+        self._device("srv-01", rack=self.rack)
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_contact="owner@example.invalid"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        contact = units[0].changes[0].payload["contact"]
+        self.assertEqual(contact["values"]["email"], "owner@example.invalid")
+
+    def test_a_create_carries_the_contact_its_row_names(self):
+        """A created device has no contact until the plan says which one it gets."""
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_contact="owner@example.invalid"))
+
+        self.assertEqual(units[0].changes[0].operation, "create")
+        self.assertEqual(units[0].changes[0].payload["contact"]["values"]["email"], "owner@example.invalid")
+
+    def test_a_row_that_needs_a_contact_decision_is_refused(self):
+        """Guessing which candidate column supplies a Contact field is the operator's call."""
+        row = self._row(2, "D-1", "srv-01")
+        row["_candidate_values"] = {"contact": {"Owner": "OBO"}}
+
+        units = self._plan(row)
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID, units[0].diagnostics)
+        self.assertEqual(units[0].diagnostics[0].code, "device.contact_resolution_required")
+        self.assertEqual(units[0].diagnostics[0].display["candidate_values"], {"Owner": "OBO"})
+
+    def test_a_row_with_no_contact_values_plans_no_contact(self):
+        """A profile with a contact role must not invent a contact for a row that names none."""
+        self._device("srv-01", rack=self.rack)
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)

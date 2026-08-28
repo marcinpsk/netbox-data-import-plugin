@@ -15,7 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from django.core.exceptions import ValidationError
+
 from .catalog import OutputKind
+from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
 from .device_identity import DeviceTypeIdentityResolver
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
@@ -34,6 +37,7 @@ class ExecutionContext:
 
     actor: Any
     reader: Any
+    profile: Any
 
 
 class TargetModuleRuntime(Protocol):
@@ -352,6 +356,39 @@ def _reviewed_payload(payload, review, device) -> dict:
     return effective
 
 
+def _apply_contact(device, contact, execution_context) -> None:
+    """Assign the reviewed primary contact to a device the write has already saved."""
+    if contact is None:
+        return
+    PrimaryContactResolver.apply(
+        device,
+        execution_context.profile,
+        ContactReview(
+            selection=ContactSelection(values=dict(contact["values"]), contact_id=contact["contact_id"]),
+            extra_columns={},
+            plan=None,
+            candidate_values={},
+            suggestion=None,
+        ),
+        execution_context.actor,
+    )
+
+
+def _contact_payload(review) -> dict | None:
+    """Return the reviewed contact selection in the form the plan carries and the write replays."""
+    if review is None or review.selection is None:
+        return None
+    return {"values": dict(review.selection.values), "contact_id": review.selection.contact_id}
+
+
+def _contact_writes_nothing(review) -> bool:
+    """Return whether the reviewed contact leaves the stored assignment as it stands."""
+    plan = None if review is None else review.plan
+    if plan is None:
+        return True
+    return plan["contact_action"] == "reuse" and plan["assignment_action"] == "unchanged"
+
+
 class _DeviceBatch:
     """The batch-wide state every device row is planned against, loaded once."""
 
@@ -367,6 +404,7 @@ class _DeviceBatch:
         self.ignored = _ignored_source_ids(profile)
         self._identity = DeviceTypeIdentityResolver.for_profile(profile)
         self._reviewer = DeviceFieldReviewer.for_profile(profile)
+        self._candidate_columns = PrimaryContactResolver.candidate_source_columns(profile)
         self._roles = {mapping.source_class: _text(mapping.role_slug) for mapping in profile.class_role_mappings.all()}
         self._clashes = {field: self._rows_by_value(rows, field, fold) for field, _code, fold in self._CLASH_FIELDS}
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
@@ -517,6 +555,16 @@ class _DeviceBatch:
         }
         return self._reviewer.review(_text(row.get("source_id")), device, proposal)
 
+    def contact_review(self, row, device):
+        """Return the reviewed primary contact for one row, before anything is written."""
+        return PrimaryContactResolver.review(
+            device,
+            row,
+            self.profile,
+            self.reader.actor,
+            candidate_source_columns=self._candidate_columns,
+        )
+
 
 class DeviceModule:
     """Plans the Devices a flat source batch describes.
@@ -602,6 +650,17 @@ class DeviceModule:
             return _refused(identity, code, {**display, **taken_display})
 
         payload = self._payload(row, name, dependencies, placement, batch)
+        try:
+            contact = batch.contact_review(row, match.device)
+        except ContactResolutionRequired as exc:
+            return _refused(
+                identity,
+                "device.contact_resolution_required",
+                {**display, "candidate_values": exc.candidate_values},
+            )
+        except ValidationError as exc:
+            return _refused(identity, "device.contact_invalid", {**display, "error": "; ".join(exc.messages)})
+        payload = {**payload, "contact": _contact_payload(contact)}
         if match.device is None:
             return SynchronizationUnit(
                 identity=identity,
@@ -610,7 +669,7 @@ class DeviceModule:
             )
         review = batch.review(row, match.device, dependencies, placement, payload)
         payload = _reviewed_payload(payload, review, match.device)
-        if not self._differs(match.device, payload):
+        if not self._differs(match.device, payload) and _contact_writes_nothing(contact):
             return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP)
         return SynchronizationUnit(
             identity=identity,
@@ -658,6 +717,7 @@ class DeviceModule:
         device.save()
         # An ObjectPermission's constraints are only evaluated against the saved row.
         enforce_saved_object_permission(device, execution_context.actor, action)
+        _apply_contact(device, payload.get("contact"), execution_context)
         return device
 
     @staticmethod
