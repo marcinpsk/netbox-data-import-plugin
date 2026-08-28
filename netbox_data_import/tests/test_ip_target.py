@@ -45,3 +45,19 @@ class UnplaceableTargetTest(SimpleTestCase):
     def test_the_preview_shows_no_placement(self):
         """The row already prints the address, so an empty hint adds nothing beside it."""
         self.assertEqual(self._target().placement, "")
+
+
+class ReviewNormalizationTest(SimpleTestCase):
+    """The preview compares IP values, and a source cell need not hold an address."""
+
+    def test_a_value_that_is_not_an_address_compares_as_its_own_text(self):
+        """A malformed cell still has to reach the diff, or the row loses the difference."""
+        from netbox_data_import.device_field_review import _ip_normalize
+
+        self.assertEqual(_ip_normalize("not-an-address"), "not-an-address")
+
+    def test_an_address_compares_in_its_canonical_form(self):
+        """`192.0.2.1/24` and its stored form have to compare equal."""
+        from netbox_data_import.device_field_review import _ip_normalize
+
+        self.assertEqual(_ip_normalize("192.0.2.1/24"), "192.0.2.1/24")
