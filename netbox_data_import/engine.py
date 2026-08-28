@@ -2112,6 +2112,29 @@ def _zero_u_overrides(device_type, position, face, ignored_fields=()):
     return position, face
 
 
+ZERO_U_DROPPED_FIELDS = ("u_position", "face")
+
+
+def _zero_u_review(review, device, zero_u):
+    """Return *review* with the fields a zero-U type drops moved out of the differences.
+
+    `_zero_u_overrides` clears the position and the face, so neither reaches NetBox. Reporting
+    them as differences offers a sync NetBox refuses and keeps a row that writes nothing off the
+    no-op count. A device that still holds either value is left alone, because clearing it is a
+    write this cannot describe.
+    """
+    if review is None or not zero_u or device.position is not None or device.face:
+        return review
+    moved = {name: review.differing[name] for name in ZERO_U_DROPPED_FIELDS if name in review.differing}
+    if not moved:
+        return review
+    return replace(
+        review,
+        differing={name: values for name, values in review.differing.items() if name not in moved},
+        informational={**review.informational, **moved},
+    )
+
+
 def _zero_u_review_conflict(device_type, position, face, ignored_fields=()):
     """Return reviewed fields that cannot coexist with a zero-U type."""
     if device_type is None or device_type.u_height != 0:
@@ -2558,6 +2581,7 @@ def _preview_device_row(  # noqa: C901
             device_face,
             review.ignored if review is not None else (),
         )
+        review = _zero_u_review(review, matched_device, is_zero_u)
         zero_u_conflict = _zero_u_review_conflict(
             device_type,
             position,
@@ -2867,6 +2891,7 @@ def _preview_device_row(  # noqa: C901
             "dt_exists": dt_exists,
             "extra_columns": row.get("_extra_columns", {}),
             "conflicts": row.get("_conflicts", {}),
+            **({"zero_u": True} if is_zero_u else {}),
             **({"writes_nothing": True} if writes_nothing else {}),
             **rack_error_extra,
             **placement_error_extra,

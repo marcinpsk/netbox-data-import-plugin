@@ -863,7 +863,11 @@
                             class="btn btn-xs {% if row.extra_data.placement_sync_writes_nothing %}btn-outline-secondary{% else %}btn-outline-success ndi-sync-placement-btn{% endif %}"
                             {% if row.extra_data.placement_sync_writes_nothing %}
                               disabled
+                              {% if row.extra_data.zero_u %}
+                              title="This device type is zero-U, so it takes no rack position and no face. The rack is the only placement value, and NetBox already holds it."
+                              {% else %}
                               title="This row sets no placement value NetBox does not already hold. A full import can still clear a position this row leaves empty."
+                              {% endif %}
                             {% else %}
                               data-action-url="{% url 'plugins:netbox_data_import:sync_placement' %}"
                               data-row-id="{{ row.row_number }}"
@@ -900,7 +904,7 @@
                           {% if vals.ip_target %}<div class="text-muted small">{{ vals.ip_target }}</div>{% endif %}
                         </td>
                         <td>
-                          {% if field_name in syncable_fields %}
+                          {% if field_name in syncable_fields and field_name not in row.extra_data.field_informational %}
                           <button type="button" class="btn btn-xs btn-outline-primary ndi-sync-btn"
                                   data-action-url="{% url 'plugins:netbox_data_import:sync_device_field' %}"
                                   data-field="{{ field_name }}"
