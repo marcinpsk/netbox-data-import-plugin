@@ -1057,3 +1057,69 @@ class DeviceModuleProvenanceIsWorkTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
         self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
+
+
+class DeviceModuleTargetStateIsWorkTest(DeviceModulePlanTestBase):
+    """The write assigns the import target and the source-ID custom field, so both are work."""
+
+    def test_a_device_outside_the_target_location_is_work(self):
+        """The write moves a matched device to the location the import targets."""
+        from dcim.models import Location
+
+        location = Location.objects.create(name="Hall A", slug="hall-a", site=self.site)
+        self.reader = NetBoxReader.unrestricted().for_target(site=self.site, location=location)
+        device = self._with_provenance(self._device("srv-01"))
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name=""))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+        self.assertEqual(units[0].changes[0].payload["location_id"], location.pk)
+        self.assertIsNone(device.location_id)
+
+    def test_a_device_the_target_location_already_holds_is_a_no_op(self):
+        """A device already at the target location leaves the field alone."""
+        from dcim.models import Location
+
+        location = Location.objects.create(name="Hall B", slug="hall-b", site=self.site)
+        self.reader = NetBoxReader.unrestricted().for_target(site=self.site, location=location)
+        self._with_provenance(self._device("srv-01", location=location))
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name=""))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+    def test_a_device_outside_the_target_tenant_is_work(self):
+        """The write assigns the tenant the import targets."""
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Tenant One", slug="tenant-one")
+        self.reader = NetBoxReader.unrestricted().for_target(site=self.site, tenant=tenant)
+        self._with_provenance(self._device("srv-01", rack=self.rack))
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+        self.assertEqual(units[0].changes[0].payload["tenant_id"], tenant.pk)
+
+    def test_a_device_whose_source_id_custom_field_is_unset_is_work(self):
+        """The profile's custom field carries the source ID, so an empty one is left to write."""
+        self.profile.adapter_config = {**self.profile.adapter_config, "custom_field_name": "cf_source_id"}
+        self.profile.save(update_fields=["adapter_config"])
+        self._with_provenance(self._device("srv-01", rack=self.rack))
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+
+    def test_a_device_whose_source_id_custom_field_is_current_is_a_no_op(self):
+        """A custom field that already holds the source ID is not work on its own."""
+        self.profile.adapter_config = {**self.profile.adapter_config, "custom_field_name": "cf_source_id"}
+        self.profile.save(update_fields=["adapter_config"])
+        device = self._device("srv-01", rack=self.rack)
+        device.custom_field_data["cf_source_id"] = "D-1"
+        device.save(update_fields=["custom_field_data"])
+        self._with_provenance(device)
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)

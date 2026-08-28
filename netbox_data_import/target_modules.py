@@ -418,6 +418,9 @@ def _provenance_is_current(device, payload, profile) -> bool:
         ).exists()
     ):
         return False
+    custom_field = profile.adapter_settings.custom_field_name
+    if custom_field and source_id and device.custom_field_data.get(custom_field) != source_id:
+        return False
     stored = DeviceImportSource.objects.filter(device_id=device.pk).first()
     return stored is not None and (
         stored.profile_id == profile.pk
@@ -923,6 +926,11 @@ class DeviceModule:
         if device.device_type_id != payload["device_type_id"] or device.role_id != payload["role_id"]:
             return True
         if payload["rack_id"] is not None and device.rack_id != payload["rack_id"]:
+            return True
+        # The write assigns the target's location always and its tenant only when there is one.
+        if device.location_id != payload["location_id"]:
+            return True
+        if payload["tenant_id"] is not None and device.tenant_id != payload["tenant_id"]:
             return True
         if normalize_for_compare(device.position) != normalize_for_compare(payload["u_position"]):
             return True
