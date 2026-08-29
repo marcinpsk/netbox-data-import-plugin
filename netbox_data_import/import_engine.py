@@ -9,11 +9,16 @@ workbook, no column and no NetBox object type.
 
 from __future__ import annotations
 
+from django.core.exceptions import ValidationError
+from django.db import DatabaseError
+
 from . import adapters, catalog, target_modules
-from .models import SourceDocument
-from .netbox_reader import NetBoxReader
-from .plan import Diagnostic, ImportPlan, Severity, executable_units, merge_changes
+from .models import FailureReason, ImportExecution, SourceDocument, locked_profile_policy
+from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
+from .object_permissions import ObjectPermissionDenied
+from .plan import Diagnostic, Disposition, ImportPlan, PlanInvalid, Severity, executable_units, merge_changes
 from .source_resolution import derive_effective_rows
+from .target_modules import ExecutionContext, PreconditionFailed
 
 
 _RESOLUTION_SECTION = "source_resolutions"
@@ -29,6 +34,26 @@ def _resolution_section():
 
 class StaleSourceDocument(Exception):
     """The referenced stored source no longer exists, so the operator has to upload it again."""
+
+
+class StalePlan(Exception):
+    """A selected unit no longer has the decision inputs the operator accepted."""
+
+
+class SelectionError(Exception):
+    """The requested Synchronization Unit selection is not executable as stated."""
+
+
+class _ExecutionFailed(Exception):
+    """Carry one apply failure out of the transaction, with what rolled back behind it."""
+
+    def __init__(self, *, cause, reason, failed_change, rolled_back, not_attempted):
+        super().__init__(str(cause))
+        self.cause = cause
+        self.reason = reason
+        self.failed_change = failed_change
+        self.rolled_back = list(rolled_back)
+        self.not_attempted = list(not_attempted)
 
 
 class ImportEngine:
@@ -69,9 +94,151 @@ class ImportEngine:
             diagnostics=tuple(cls._source_diagnostic(item) for item in source_batch.diagnostics),
             source_fingerprint=document.content_fingerprint,
             profile_fingerprint=profile.planning_fingerprint,
-            actor=actor.username,
+            actor=str(actor.pk),
             planning_context=planning_context,
         )
+
+    @classmethod
+    def execute(
+        cls,
+        profile,
+        source_document,
+        accepted_plan,
+        selection,
+        idempotency_key,
+        actor,
+    ) -> ImportExecution:
+        """Apply selected units from one accepted serialized plan and return their audit row."""
+        accepted = ImportPlan.from_dict(accepted_plan)
+        selected_identities = tuple(selection)
+        if not selected_identities:
+            raise SelectionError("An execution needs at least one Synchronization Unit.")
+        execution, created = ImportExecution.reserve(
+            profile=profile,
+            source_document=source_document,
+            actor=actor,
+            idempotency_key=idempotency_key,
+            plan_schema_version=accepted.schema_version,
+            accepted_plan_fingerprint=accepted.fingerprint,
+            selected_units=list(selected_identities),
+        )
+        if not created:
+            return execution
+
+        try:
+            # One lock over the replan, the comparison and the writes: policy cannot move between them.
+            with locked_profile_policy(profile.pk):
+                cls._write_selection(execution, profile, source_document, accepted, selected_identities, actor)
+        except _ExecutionFailed as failure:
+            cls._mark_failed(
+                execution,
+                reason=failure.reason,
+                failed_change=failure.failed_change,
+                rolled_back=failure.rolled_back,
+                not_attempted=failure.not_attempted,
+            )
+            raise failure.cause
+        except Exception as exc:
+            # Every other failure after the reservation, so the row can never stay pending.
+            cls._mark_failed(
+                execution,
+                reason=cls._failure_reason(exc),
+                not_attempted=cls._selected_change_identities(accepted, selected_identities),
+            )
+            raise
+        return execution
+
+    @classmethod
+    def _write_selection(cls, execution, profile, source_document, accepted, selected_identities, actor) -> None:
+        """Compare the selection against a fresh plan and apply it, inside the caller's transaction."""
+        current = cls.plan(profile, source_document, actor, accepted.planning_context)
+        units = cls._selected_units(accepted, current, selected_identities)
+        try:
+            changes = merge_changes(units)
+        except PlanInvalid as exc:
+            raise SelectionError(str(exc)) from exc
+        context = ExecutionContext(
+            actor=actor,
+            reader=NetBoxReader.for_actor(actor).for_planning_context(accepted.planning_context),
+            profile=profile,
+        )
+        completed: list[str] = []
+        for index, change in enumerate(changes):
+            runtime = target_modules.runtime_for(change.target_module)
+            if runtime is None:
+                raise LookupError(f"No Target Module runtime is registered for '{change.target_module}'.")
+            try:
+                runtime.apply(change, context)
+            except (PreconditionFailed, ObjectPermissionDenied, ValidationError, DatabaseError) as exc:
+                raise _ExecutionFailed(
+                    cause=exc,
+                    reason=cls._failure_reason(exc),
+                    failed_change=change.identity,
+                    rolled_back=completed,
+                    not_attempted=[later.identity for later in changes[index + 1 :]],
+                ) from exc
+            completed.append(change.identity)
+        execution.mark_succeeded(applied_changes={"changes": completed, "deleted": []})
+
+    @staticmethod
+    def _failure_reason(exc) -> str:
+        """Return the typed audit reason for one failure a Target Module can raise."""
+        if isinstance(exc, StalePlan):
+            return FailureReason.STALE_PLAN
+        if isinstance(exc, SelectionError):
+            return FailureReason.SELECTION
+        if isinstance(exc, (StaleSourceDocument, PlanningTargetUnavailable)):
+            return FailureReason.PLANNING
+        if isinstance(exc, PreconditionFailed):
+            return FailureReason.PRECONDITION
+        if isinstance(exc, ObjectPermissionDenied):
+            return FailureReason.PERMISSION
+        if isinstance(exc, ValidationError):
+            return FailureReason.VALIDATION
+        if isinstance(exc, DatabaseError):
+            return FailureReason.DATABASE
+        return FailureReason.PLANNING
+
+    @staticmethod
+    def _selected_units(accepted, current, selected_identities):
+        """Return the current actionable units whose accepted fingerprints still match."""
+        if len(set(selected_identities)) != len(selected_identities):
+            raise SelectionError("A Synchronization Unit can be selected only once.")
+        selected = []
+        for identity in selected_identities:
+            accepted_unit = accepted.unit(identity)
+            current_unit = current.unit(identity)
+            if accepted_unit is None or current_unit is None:
+                raise SelectionError(f"The current Import Plan does not carry selected unit '{identity}'.")
+            if accepted_unit.disposition != Disposition.ACTIONABLE:
+                raise SelectionError(f"Synchronization Unit '{identity}' was not actionable when selected.")
+            if current_unit.disposition != Disposition.ACTIONABLE:
+                raise StalePlan(f"Synchronization Unit '{identity}' is no longer actionable.")
+            if accepted.unit_fingerprint(identity) != current.unit_fingerprint(identity):
+                raise StalePlan(f"Synchronization Unit '{identity}' changed after the plan was accepted.")
+            selected.append(current_unit)
+        return tuple(selected)
+
+    @staticmethod
+    def _selected_change_identities(plan, selected_identities) -> list[str]:
+        """Return unique Planned Change identities carried by the selected units."""
+        identities = []
+        for unit_identity in selected_identities:
+            unit = plan.unit(unit_identity)
+            if unit is None:
+                continue
+            for change in unit.changes:
+                if change.identity not in identities:
+                    identities.append(change.identity)
+        return identities
+
+    @staticmethod
+    def _mark_failed(execution, **detail) -> None:
+        """Finish a failed row unless a concurrent finisher already chose its outcome."""
+        try:
+            execution.mark_failed(**detail)
+        except ValueError:
+            pass
 
     @staticmethod
     def _stored_source(profile, source_document) -> SourceDocument:
@@ -98,4 +265,4 @@ class ImportEngine:
         return Diagnostic(code=diagnostic.code, severity=Severity.WARNING, display=display)
 
 
-__all__ = ("ImportEngine", "StaleSourceDocument")
+__all__ = ("ImportEngine", "SelectionError", "StalePlan", "StaleSourceDocument")

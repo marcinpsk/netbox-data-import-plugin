@@ -63,8 +63,8 @@ class _DiagnosticFlatWorkbookAdapter(FlatWorkbookAdapter):
         )
 
 
-class ImportEnginePlanTest(TestCase):
-    """Planning uses one stored source and produces one deterministic target-neutral plan."""
+class ImportEngineTestDataMixin:
+    """Create the stored workbook, profile policy, target state, and actor for coordinator tests."""
 
     def setUp(self):
         """Create the profile policy and target state used by each plan."""
@@ -133,6 +133,10 @@ class ImportEnginePlanTest(TestCase):
             planning_context or self.planning_context,
         )
 
+
+class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
+    """Planning uses one stored source and produces one deterministic target-neutral plan."""
+
     def test_one_batch_fans_out_in_catalog_order(self):
         """One interpreted batch supplies units from both implemented modules."""
         plan = self._plan()
@@ -141,7 +145,7 @@ class ImportEnginePlanTest(TestCase):
             [unit.identity for unit in plan.units],
             ["device:source:D-1", "rack:source:R-1"],
         )
-        self.assertEqual(plan.actor, self.actor.username)
+        self.assertEqual(plan.actor, str(self.actor.pk))
         self.assertEqual(plan.planning_context, self.planning_context)
         # A blocked device row would also carry these identities, so prove the row really planned.
         self.assertEqual(plan.unit("device:source:D-1").changes[0].operation, "create")
@@ -413,7 +417,7 @@ class ImportEnginePlanTest(TestCase):
 
         self.assertEqual(unrestricted.changes[0].operation, "update")
         self.assertEqual(scoped.changes[0].operation, "create")
-        self.assertEqual(scoped_plan.actor, actor.username)
+        self.assertEqual(scoped_plan.actor, str(actor.pk))
 
     def test_an_adapter_diagnostic_becomes_a_plan_diagnostic(self):
         """The coordinator keeps a source warning outside every unit."""

@@ -556,6 +556,13 @@ class FailureReason:
     """Typed failure reasons an Import Execution records."""
 
     ABANDONED = "abandoned"
+    DATABASE = "database"
+    PERMISSION = "permission"
+    PRECONDITION = "precondition"
+    PLANNING = "planning"
+    SELECTION = "selection"
+    STALE_PLAN = "stale_plan"
+    VALIDATION = "validation"
 
 
 class ImportExecution(models.Model):
