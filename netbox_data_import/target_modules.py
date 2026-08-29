@@ -27,6 +27,7 @@ from .catalog import OutputKind
 from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
 from .device_identity import DeviceTypeIdentityResolver
+from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
 from .values import effective_device_name, identity_text, normalize_for_compare, source_position, translation_maps
@@ -176,11 +177,7 @@ def rack_duplicate_keys(rows) -> tuple[frozenset[str], frozenset[str]]:
 
 
 def rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) -> tuple[str, dict] | None:
-    """Return why this rack row plans no rack, or None when it plans one.
-
-    The Rack module turns this into a unit and the Device module asks it which racks a batch
-    creates. Deciding it twice would let a device row depend on a rack change that never exists.
-    """
+    """Share one rack rejection result so both modules agree which rack changes exist."""
     name = rack_row_name(row)
     source_id = _text(row.get("source_id"))
     if not name:
@@ -192,6 +189,19 @@ def rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) -> t
     if source_id and source_id in duplicate_source_ids:
         return "rack.duplicate_source_id", {"rack_name": name, "source_id": source_id}
     return None
+
+
+def _racks_by_comparison_name(netbox_reader) -> dict[str, list[Any]]:
+    """Return visible racks at the exact import target, grouped by comparison name."""
+    if netbox_reader.site is None:
+        return {}
+    location_filter = (
+        {"location": netbox_reader.location} if netbox_reader.location is not None else {"location__isnull": True}
+    )
+    grouped: dict[str, list[Any]] = {}
+    for rack in netbox_reader.racks().filter(site=netbox_reader.site, **location_filter):
+        grouped.setdefault(identity_text(rack.name), []).append(rack)
+    return grouped
 
 
 class RackModule:
@@ -207,7 +217,7 @@ class RackModule:
             return []
         ignored = _ignored_source_ids(profile)
         duplicate_names, duplicate_source_ids = rack_duplicate_keys(rows)
-        existing = self._existing_by_name(netbox_reader)
+        existing = _racks_by_comparison_name(netbox_reader)
         mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         return [
             self._unit(
@@ -232,19 +242,6 @@ class RackModule:
             if mapping.creates_rack and not mapping.ignore
         }
         return [row for row in source_batch.rows if _text(row.get("device_class")) in creates_rack]
-
-    @staticmethod
-    def _existing_by_name(netbox_reader) -> dict[str, list[Any]]:
-        """Return visible racks at the exact import target, grouped by comparison name."""
-        if netbox_reader.site is None:
-            return {}
-        location_filter = (
-            {"location": netbox_reader.location} if netbox_reader.location is not None else {"location__isnull": True}
-        )
-        existing: dict[str, list[Any]] = {}
-        for rack in netbox_reader.racks().filter(site=netbox_reader.site, **location_filter):
-            existing.setdefault(identity_text(rack.name), []).append(rack)
-        return existing
 
     @staticmethod
     def unit_identity(row) -> str:
@@ -543,6 +540,14 @@ class _Placement:
 
 
 @dataclass(frozen=True)
+class _PlacementClaim:
+    """The rack units one settled device row can reserve."""
+
+    keys: tuple[tuple[int | str, str | None, Any], ...] = ()
+    refused: tuple[str, dict] | None = None
+
+
+@dataclass(frozen=True)
 class _Match:
     """The stored device a row reconciles, or the reason no automatic answer is safe."""
 
@@ -778,7 +783,7 @@ class _DeviceBatch:
             "serial": self._rows_by_effective("serial", fold=False),
             "asset_tag": self._rows_by_effective("asset_tag", fold=True),
         }
-        self._racks = self._racks_by_name(netbox_reader)
+        self._racks = _racks_by_comparison_name(netbox_reader)
         self._planned_racks = self._planned_racks_by_name(source_batch, profile)
         self.side_map, self.airflow_map, self.status_map = translation_maps()
         # Row order decides who keeps a slot two rows claim, so the first row planned wins it.
@@ -923,19 +928,6 @@ class _DeviceBatch:
             if value:
                 found.setdefault(value, []).append(row_number)
         return {value: numbers for value, numbers in found.items() if len(numbers) > 1}
-
-    @staticmethod
-    def _racks_by_name(netbox_reader) -> dict[str, Any]:
-        """Return visible racks at the exact import target, grouped by comparison name."""
-        if netbox_reader.site is None:
-            return {}
-        location_filter = (
-            {"location": netbox_reader.location} if netbox_reader.location is not None else {"location__isnull": True}
-        )
-        grouped: dict[str, list[Any]] = {}
-        for rack in netbox_reader.racks().filter(site=netbox_reader.site, **location_filter):
-            grouped.setdefault(identity_text(rack.name), []).append(rack)
-        return grouped
 
     def _planned_racks_by_name(self, source_batch, profile) -> dict[str, str]:
         """Return valid rack creates in this batch, keyed by comparison name."""
@@ -1104,29 +1096,41 @@ class _DeviceBatch:
             return _Placement(refused=("device.face_required", {"u_position": position}))
         return _Placement(position=position, face=face, airflow=airflow, status=status)
 
-    def claim(self, row, rack, rack_identity, placement, device_type, matched) -> tuple[str, dict] | None:
-        """Take the units this row occupies, or name what already holds them."""
+    def prepare_claim(self, rack, rack_identity, placement, device_type, matched) -> _PlacementClaim:
+        """Return the available units this row can claim without reserving them yet."""
         rack_key = rack.pk if rack is not None else rack_identity
         if rack_key is None or placement.position is None or device_type.u_height == 0:
-            return None
+            return _PlacementClaim()
         rack_face = None if device_type.is_full_depth else placement.face
-        for unit in _occupied_units(placement.position, device_type.u_height):
-            key = (rack_key, rack_face, unit)
+        keys = tuple((rack_key, rack_face, unit) for unit in _occupied_units(placement.position, device_type.u_height))
+        for key in keys:
             claimed_by = self._claimed.get(key)
             if claimed_by is not None:
-                return "device.rack_position_claimed", {"u_position": placement.position, "claimed_by_row": claimed_by}
-            self._claimed[key] = row.get("_row_number")
+                return _PlacementClaim(
+                    refused=(
+                        "device.rack_position_claimed",
+                        {"u_position": placement.position, "claimed_by_row": claimed_by},
+                    )
+                )
 
-        if rack is None:
-            return None
-        available = rack.get_available_units(
-            u_height=device_type.u_height,
-            rack_face=rack_face,
-            exclude=[matched.pk] if matched is not None else [],
-        )
-        if placement.position not in available:
-            return "device.rack_position_occupied", {"u_position": placement.position, "rack_name": rack.name}
-        return None
+        if rack is not None:
+            available = rack.get_available_units(
+                u_height=device_type.u_height,
+                rack_face=rack_face,
+                exclude=[matched.pk] if matched is not None else [],
+            )
+            if placement.position not in available:
+                return _PlacementClaim(
+                    refused=(
+                        "device.rack_position_occupied",
+                        {"u_position": placement.position, "rack_name": rack.name},
+                    )
+                )
+        return _PlacementClaim(keys=keys)
+
+    def commit_claim(self, row, claim: _PlacementClaim) -> None:
+        """Reserve a checked placement after its row has settled."""
+        self._claimed.update({key: row.get("_row_number") for key in claim.keys})
 
     def match(self, row, name) -> _Match:
         """Return the stored device this row reconciles, strongest identifier first."""
@@ -1285,6 +1289,8 @@ class DeviceModule:
         rows = self._device_rows(source_batch, profile)
         if not rows:
             return []
+        if netbox_reader.site is None:
+            raise PlanningTargetUnavailable("Device planning needs an import target site.")
         batch = _DeviceBatch(source_batch, rows, profile, netbox_reader)
         return [self._unit(row, batch) for row in rows]
 
@@ -1523,22 +1529,22 @@ class DeviceModule:
             "ip_fields": ip_fields,
         }
         if match.device is None:
-            taken = batch.claim(
-                row,
+            claim = batch.prepare_claim(
                 dependencies.rack,
                 dependencies.rack_identity,
                 placement,
                 dependencies.device_type,
                 None,
             )
-            if taken is not None:
-                code, taken_display = taken
+            if claim.refused is not None:
+                code, taken_display = claim.refused
                 return _refused(identity, code, {**display, **taken_display})
             actor = batch.reader.actor
             if actor is not None and not actor.has_perm("dcim.add_device"):
                 return _refused(identity, "device.add_permission", display)
             if validation := self._validation_error(None, payload):
                 return _refused(identity, "device.validation_failed", {**display, "message": validation})
+            batch.commit_claim(row, claim)
             device_change = self._change(
                 identity,
                 "create",
@@ -1603,16 +1609,15 @@ class DeviceModule:
             airflow=payload["airflow"],
             status=payload["status"],
         )
-        taken = batch.claim(
-            row,
+        claim = batch.prepare_claim(
             effective_rack,
             effective_rack_identity,
             effective_placement,
             effective_type,
             match.device,
         )
-        if taken is not None:
-            code, taken_display = taken
+        if claim.refused is not None:
+            code, taken_display = claim.refused
             return _refused(identity, code, {**display, **taken_display})
         if not self._placement_differs(match.device, payload):
             display = {
@@ -1627,6 +1632,7 @@ class DeviceModule:
             and _contact_writes_nothing(contact)
             and _provenance_is_current(match.device, payload, batch.profile)
         ):
+            batch.commit_claim(row, claim)
             display = {
                 **display,
                 "extra_data": {
@@ -1646,6 +1652,7 @@ class DeviceModule:
             return _refused(identity, "device.change_permission", display)
         if validation := self._validation_error(match.device, payload):
             return _refused(identity, "device.validation_failed", {**display, "message": validation})
+        batch.commit_claim(row, claim)
         device_change = self._change(
             identity,
             "update",

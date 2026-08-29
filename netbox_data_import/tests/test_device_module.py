@@ -19,7 +19,7 @@ from netbox_data_import.models import (
     IgnoredFieldDifference,
     ImportProfile,
 )
-from netbox_data_import.netbox_reader import NetBoxReader
+from netbox_data_import.netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from netbox_data_import.plan import Disposition, Severity
 from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed
 
@@ -120,6 +120,18 @@ class DeviceModuleSelectionTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].disposition, Disposition.EXCLUDED)
         self.assertEqual(units[0].diagnostics[0].code, "device.class_ignored")
+
+    def test_planning_requires_a_reader_bound_to_an_import_site(self):
+        """A direct caller gets the target error instead of an attribute error after a strong match."""
+        self._device("stored-device", serial="SITE-BOUND-SERIAL")
+
+        with self.assertRaises(PlanningTargetUnavailable):
+            DeviceModule().plan(
+                self._batch(self._row(2, "D-1", "source-name", rack_name="", serial="SITE-BOUND-SERIAL")),
+                self.profile,
+                None,
+                NetBoxReader.unrestricted(),
+            )
 
 
 class DeviceModuleIdentityTest(DeviceModulePlanTestBase):
@@ -538,6 +550,19 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         self.assertEqual(units[1].disposition, Disposition.INVALID)
         self.assertEqual(units[1].diagnostics[0].code, "device.rack_position_claimed")
         self.assertEqual(units[1].diagnostics[0].display["claimed_by_row"], 2)
+
+    def test_a_rejected_row_does_not_claim_a_slot_from_a_later_valid_row(self):
+        """Only a row that can settle as executable or a no-op reserves its placement."""
+        self._device("stored-name")
+
+        units = self._plan(
+            self._row(2, "D-1", "stored-name", u_position="5", face="Front"),
+            self._row(3, "D-2", "new-device", u_position="5", face="Front"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.name_placement_conflict")
+        self.assertEqual(units[1].disposition, Disposition.ACTIONABLE, units[1].diagnostics)
 
     def test_two_rows_still_cannot_claim_one_slot_in_a_batch_created_rack(self):
         """The batch claim works before the new rack has an ORM identity."""

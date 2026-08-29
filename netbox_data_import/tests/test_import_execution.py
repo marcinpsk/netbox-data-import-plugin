@@ -4,6 +4,7 @@
 
 from django.test import TransactionTestCase
 
+from netbox_data_import.adapters import SourceUnreadable
 from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
 from netbox_data_import.netbox_reader import PlanningTargetUnavailable
 from netbox_data_import.models import ExecutionOutcome, IgnoredDevice, ImportExecution, SourceDocument
@@ -21,12 +22,14 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         from dcim.models import Device, Rack, Site
 
         grants = {
-            Site: ("view",),
-            Rack: ("view", "add", "change"),
-            Device: ("view", "add", "change"),
+            Site: (("view",), {}),
+            Rack: (("view", "add", "change"), {}),
+            Device: (("view", "add", "change"), {}),
         }
-        grants.update(overrides or {})
-        return [(model, actions, {}) for model, actions in grants.items()]
+        for model, constraints in (overrides or {}).items():
+            actions = grants.get(model, (("view",), {}))[0]
+            grants[model] = (actions, constraints)
+        return [(model, actions, constraints) for model, (actions, constraints) in grants.items()]
 
     def test_one_selected_create_writes_the_device_and_succeeds(self):
         """One accepted create writes its Device and names its Planned Change in the audit."""
@@ -56,6 +59,31 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         self.assertEqual(execution.plan_schema_version, accepted.schema_version)
         self.assertEqual(execution.accepted_plan_fingerprint, accepted.fingerprint)
         self.assertEqual(execution.selected_units, [unit.identity])
+
+    def test_execution_permission_overrides_constrain_the_saved_device(self):
+        """Execution grants use the same model-to-constraint override contract as planning grants."""
+        from dcim.models import Device
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        actor = user_with_object_permission(
+            "constrained-execution-operator",
+            self._planning_grants({Device: {"name": "server-a"}}),
+        )
+        accepted = ImportEngine.plan(self.profile, self.document, actor, self.planning_context)
+        unit = accepted.unit("device:source:D-1")
+
+        execution = ImportEngine.execute(
+            self.profile,
+            self.document,
+            accepted.to_dict(),
+            [unit.identity],
+            "constrained-device-create",
+            actor,
+        )
+
+        self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED)
+        self.assertTrue(Device.objects.filter(name="server-a", site=self.site).exists())
 
     def test_rack_and_device_creates_share_dependency_order(self):
         """One selection creates a Rack before the Device that depends on it."""
@@ -260,22 +288,73 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
         from netbox_data_import.models import ImportProfile
 
+        def policy_lock_is_held():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_locks
+                        WHERE pid = pg_backend_pid()
+                          AND relation = to_regclass(%s)
+                          AND mode = 'RowShareLock'
+                          AND granted
+                    )
+                    """,
+                    [ImportProfile._meta.db_table],
+                )
+                return cursor.fetchone()[0]
+
+        lock_observations = []
+
+        class LockObservedEngine(ImportEngine):
+            @classmethod
+            def plan(cls, *args, **kwargs):
+                lock_observations.append(("comparison", policy_lock_is_held()))
+                return super().plan(*args, **kwargs)
+
         accepted = self._plan()
         unit = accepted.unit("device:source:D-1")
-        ImportEngine.execute(
+        LockObservedEngine.execute(
             self.profile,
             self.document,
             accepted.to_dict(),
             [unit.identity],
             "policy-lock",
             self.actor,
+            progress_callback=lambda _processed, _total: lock_observations.append(("write", policy_lock_is_held())),
         )
 
-        # The lock is what supplies the one outer transaction, so it has to be released after it.
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT count(*) FROM pg_locks WHERE NOT granted")
-            self.assertEqual(cursor.fetchone()[0], 0)
+        self.assertTrue(lock_observations)
+        self.assertIn(("comparison", True), lock_observations)
+        self.assertIn(("write", True), lock_observations)
+        self.assertTrue(all(held for _stage, held in lock_observations))
+        self.assertFalse(policy_lock_is_held())
         self.assertTrue(ImportProfile.objects.filter(pk=self.profile.pk).exists())
+
+    def test_execution_reloads_policy_after_acquiring_its_lock(self):
+        """Replanning uses a policy write that committed after the caller loaded its profile."""
+        from dcim.models import Device
+
+        from netbox_data_import.models import ImportProfile
+
+        accepted = self._plan()
+        unit = accepted.unit("device:source:D-1")
+        ImportProfile.objects.filter(pk=self.profile.pk).update(
+            adapter_config={**self.profile.adapter_config, "sheet_name": "Missing"}
+        )
+
+        with self.assertRaises(SourceUnreadable):
+            ImportEngine.execute(
+                self.profile,
+                self.document,
+                accepted.to_dict(),
+                [unit.identity],
+                "fresh-locked-policy",
+                self.actor,
+            )
+
+        self.assertFalse(Device.objects.filter(name="server-a", site=self.site).exists())
 
     def test_an_empty_selection_is_refused_before_any_row_exists(self):
         """An execution names the units it applies, so an empty selection is a mistake."""

@@ -922,7 +922,11 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         row_number = self._syncable_row_number()
         self._retire_the_adapter()
         response = self.client.post(
-            reverse("plugins:netbox_data_import:sync_single_row"), {"row_number": str(row_number)}
+            reverse("plugins:netbox_data_import:sync_single_row"),
+            {
+                "row_number": str(row_number),
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
         )
         self.assertEqual(response.status_code, 400, response.content)
         self.assertIn("retired_adapter", response.json()["error"])

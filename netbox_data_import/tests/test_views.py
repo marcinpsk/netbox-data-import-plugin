@@ -2163,7 +2163,6 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         _store_workspace_rows(self.client, self.user, self.profile, self.site, rows)
 
     def test_post_automatch_by_serial(self):
-        """POST with a row matching by serial creates a DeviceExistingMatch."""
         from netbox_data_import.models import DeviceExistingMatch
 
         self._store_rows(
@@ -3097,7 +3096,6 @@ class AutoMatchNameScopeTest(BaseViewTestCase):
         self.profile = _make_profile("AmbNameProfile")
 
     def test_the_same_name_at_another_site_does_not_make_the_target_ambiguous(self):
-        """Only the same-site name participates in the auto-match command."""
         from netbox_data_import.models import DeviceExistingMatch
 
         _store_workspace_rows(
@@ -3167,7 +3165,6 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         self.profile = _make_profile("AmbATProfile")
 
     def test_ambiguous_asset_tag_creates_no_binding(self):
-        """Two matching Devices leave the source identity unresolved."""
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
         from netbox_data_import.models import DeviceExistingMatch
 

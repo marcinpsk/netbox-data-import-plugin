@@ -82,6 +82,30 @@ class ReviewWorkspacePresentationTest(TestCase):
         self.assertEqual(workspace.units[3].action, "ignore")
         self.assertEqual(workspace.units[4].detail, "device.example")
 
+    def test_target_refusals_have_operator_facing_details(self):
+        """Every target refusal without a custom message renders stable operator wording."""
+        cases = {
+            "device.add_permission": "Permission denied: dcim.add_device",
+            "device.change_permission": "Permission denied: dcim.change_device",
+            "device.already_bound": "Another source row is already linked to this device.",
+            "device.duplicate_name": "The device name appears more than once in this import.",
+            "device.name_placement_conflict": "The name matches a device at another placement.",
+            "device.rack_ambiguous": "Multiple racks have this name at the import target.",
+            "device.role_unconfigured": "No device role is configured for this source class.",
+            "device.zero_u_review_conflict": "A saved review keeps a rack position on a 0U device type.",
+            "rack.add_permission": "Permission denied: dcim.add_rack",
+            "rack.change_permission": "Permission denied: dcim.change_rack",
+        }
+
+        for code, message in cases.items():
+            with self.subTest(code=code):
+                unit = SynchronizationUnit(
+                    identity=f"{code}:refused",
+                    disposition=Disposition.INVALID,
+                    diagnostics=(Diagnostic(code=code, severity=Severity.ERROR),),
+                )
+                self.assertEqual(_workspace(unit).units[0].detail, message)
+
     def test_rack_groups_sort_devices_and_source_rows_are_deduplicated(self):
         """One source row can yield dependencies, but it appears once and devices sort by position."""
         shared = {"_row_number": 2, "source_id": "D-1", "device_name": "device-a", "rack_name": "rack-a"}

@@ -215,6 +215,22 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertTrue(body["error"])
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
+    def test_malformed_candidate_values_answer_json_not_an_internal_error(self):
+        """A serialized plan can be stale or corrupt, so its display data is untrusted input."""
+        session = self.client.session
+        device_unit = next(
+            unit for unit in session["import_plan"]["units"] if unit["display"].get("source_id") == "AJAX-001"
+        )
+        device_unit["display"]["extra_data"]["candidate_values"] = ["invalid"]
+        session.save()
+
+        response = self._post()
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response["Content-Type"].split(";")[0], JSON)
+        self.assertIs(json.loads(response.content)["ok"], False)
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
     def test_the_envelope_names_the_row(self):
         """The row action contract carries the row number, so the caller can address the row."""
         body = json.loads(self._post().content)

@@ -27,6 +27,8 @@ from netbox_data_import.models import (
     SourceDocument,
 )
 from netbox_data_import.plan import ImportPlan
+from netbox_data_import.preview_row_actions import retire_preview_revision
+from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 
@@ -92,6 +94,13 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
         )
+
+    def _sync_single_row(self, data=None):
+        """Post an inline execution with the active preview revision when one exists."""
+        payload = dict(data or {})
+        if revision := self.client.session.get("import_preview_revision"):
+            payload.setdefault("preview_revision", revision)
+        return self.client.post(reverse("plugins:netbox_data_import:sync_single_row"), payload)
 
     def _job(self, *, status="pending", data=None, user=True, queue_name="default"):
         """Create one native data-import Job owned by this actor by default."""
@@ -328,6 +337,53 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         results = self.client.get(reverse("plugins:netbox_data_import:import_results"))
         self.assertEqual(results.context["execution"], execution)
 
+    def test_results_accept_the_execution_view_permission(self):
+        """The audit result has its own permission boundary, independent of profile access."""
+        self._upload()
+        actor = user_with_object_permission(
+            "cutover-execution-viewer",
+            [(ImportExecution, ("view",), None)],
+        )
+        execution = ImportExecution.objects.create(
+            profile=self.profile,
+            source_document=SourceDocument.objects.get(profile=self.profile),
+            actor=actor,
+            outcome=ExecutionOutcome.FAILED,
+        )
+        client = Client()
+        client.force_login(actor)
+        session = client.session
+        session["import_execution_id"] = execution.pk
+        session.save()
+
+        response = client.get(reverse("plugins:netbox_data_import:import_results"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["execution"], execution)
+
+    def test_results_reject_the_profile_view_permission(self):
+        """Profile visibility alone must not expose an Import Execution audit record."""
+        self._upload()
+        actor = user_with_object_permission(
+            "cutover-profile-viewer",
+            [(ImportProfile, ("view",), None)],
+        )
+        execution = ImportExecution.objects.create(
+            profile=self.profile,
+            source_document=SourceDocument.objects.get(profile=self.profile),
+            actor=actor,
+            outcome=ExecutionOutcome.FAILED,
+        )
+        client = Client()
+        client.force_login(actor)
+        session = client.session
+        session["import_execution_id"] = execution.pk
+        session.save()
+
+        response = client.get(reverse("plugins:netbox_data_import:import_results"))
+
+        self.assertIn(response.status_code, (302, 403))
+
     def test_results_redirect_for_missing_or_foreign_execution(self):
         """A session cannot expose an absent audit row or another actor's result."""
         results_url = reverse("plugins:netbox_data_import:import_results")
@@ -452,32 +508,63 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
     def test_single_row_sync_rejects_invalid_session_and_row_inputs(self):
         """Inline execution requires a readable plan, profile, source, and create unit."""
-        sync_url = reverse("plugins:netbox_data_import:sync_single_row")
-        self.assertEqual(self.client.post(sync_url, {"row_number": 2}).status_code, 400)
+        self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
 
         self._upload()
-        self.assertEqual(self.client.post(sync_url, {}).status_code, 400)
-        self.assertEqual(self.client.post(sync_url, {"row_number": "invalid"}).status_code, 400)
-        self.assertEqual(self.client.post(sync_url, {"row_number": 999}).status_code, 400)
+        self.assertEqual(self._sync_single_row().status_code, 400)
+        self.assertEqual(self._sync_single_row({"row_number": "invalid"}).status_code, 400)
+        self.assertEqual(self._sync_single_row({"row_number": 999}).status_code, 400)
 
         session = self.client.session
         session["import_context"]["profile_id"] = 999999
         session.save()
-        self.assertEqual(self.client.post(sync_url, {"row_number": 2}).status_code, 400)
+        self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
 
         self._upload()
         session = self.client.session
         session["import_plan"]["schema_version"] = 999
         session.save()
-        self.assertEqual(self.client.post(sync_url, {"row_number": 2}).status_code, 409)
+        self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 409)
 
         self._upload()
         SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
-        self.assertEqual(self.client.post(sync_url, {"row_number": 2}).status_code, 400)
+        self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
+
+    def test_single_row_sync_rejects_a_queued_or_dirty_preview(self):
+        """Inline execution cannot use a plan after import starts or a review changes it."""
+        from dcim.models import Rack
+
+        for session_state in (
+            {"import_preview_pending": False},
+            {"import_preview_pending": True, "import_preview_dirty": True},
+        ):
+            with self.subTest(session_state=session_state):
+                self._upload()
+                session = self.client.session
+                session.update(session_state)
+                session.save()
+
+                response = self._sync_single_row({"row_number": 2})
+
+                self.assertEqual(response.status_code, 409)
+                self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
+
+        self._upload()
+        session = self.client.session
+        previous_revision = session["import_preview_revision"]
+        retire_preview_revision(session)
+        session.save()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_single_row"),
+            {"row_number": 2, "preview_revision": previous_revision},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
 
     def test_single_row_sync_classifies_expected_and_unexpected_engine_failures(self):
         """Inline execution exposes bounded errors from every coordinator failure class."""
-        sync_url = reverse("plugins:netbox_data_import:sync_single_row")
         for failure, status in (
             (PreconditionFailed("changed"), 409),
             (ValidationError("invalid"), 400),
@@ -486,16 +573,15 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             with self.subTest(failure=type(failure).__name__):
                 self._upload()
                 with patch("netbox_data_import.views.ImportEngine.execute", side_effect=failure):
-                    response = self.client.post(sync_url, {"row_number": 2})
+                    response = self._sync_single_row({"row_number": 2})
                 self.assertEqual(response.status_code, status)
 
     def test_single_row_sync_refuses_a_unit_that_is_no_longer_a_create(self):
         """After one inline create, the same row cannot be submitted as another create."""
-        sync_url = reverse("plugins:netbox_data_import:sync_single_row")
         self._upload()
 
-        first = self.client.post(sync_url, {"row_number": 2})
-        second = self.client.post(sync_url, {"row_number": 2})
+        first = self._sync_single_row({"row_number": 2})
+        second = self._sync_single_row({"row_number": 2})
 
         self.assertEqual(first.status_code, 200, first.content)
         self.assertEqual(second.status_code, 400)
@@ -508,6 +594,40 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
         response = self.client.get(preview_url)
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+
+    def test_preview_discards_malformed_candidate_values(self):
+        """The renderer must reject malformed display data instead of raising an internal error."""
+        preview_url = reverse("plugins:netbox_data_import:import_preview")
+        self._upload()
+        session = self.client.session
+        device_unit = next(
+            unit for unit in session["import_plan"]["units"] if unit["display"].get("object_type") == "device"
+        )
+        device_unit["display"].setdefault("extra_data", {})["candidate_values"] = ["invalid"]
+        session["import_preview_use_materialized_once"] = True
+        session.save()
+
+        response = self.client.get(preview_url)
+
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        self.assertNotIn("import_plan", self.client.session)
+
+    def test_preview_discards_malformed_contact_candidate_values(self):
+        """Contact suggestions require a source-column mapping, not any JSON value."""
+        preview_url = reverse("plugins:netbox_data_import:import_preview")
+        self._upload()
+        session = self.client.session
+        device_unit = next(
+            unit for unit in session["import_plan"]["units"] if unit["display"].get("object_type") == "device"
+        )
+        device_unit["display"].setdefault("extra_data", {})["candidate_values"] = {"contact": ["invalid"]}
+        session["import_preview_use_materialized_once"] = True
+        session.save()
+
+        response = self.client.get(preview_url)
+
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        self.assertNotIn("import_plan", self.client.session)
 
         self._upload()
         session = self.client.session

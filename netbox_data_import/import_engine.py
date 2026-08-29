@@ -144,6 +144,7 @@ class ImportEngine:
                 execution.link_job(job)
             # One lock over the replan, the comparison and the writes: policy cannot move between them.
             with locked_profile_policy(profile.pk):
+                profile.refresh_from_db()
                 cls._write_selection(
                     execution,
                     profile,

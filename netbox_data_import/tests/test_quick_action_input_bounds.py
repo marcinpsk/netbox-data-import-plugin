@@ -331,6 +331,7 @@ class QuickActionInputBoundsTest(TransactionTestCase):
         import io
 
         import openpyxl
+        from openpyxl.worksheet.worksheet import Worksheet
 
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument
@@ -340,6 +341,8 @@ class QuickActionInputBoundsTest(TransactionTestCase):
         headers = [key for key in rows[0] if not key.startswith("_")]
         workbook = openpyxl.Workbook()
         worksheet = workbook.active
+        if not isinstance(worksheet, Worksheet):
+            worksheet = workbook.create_sheet()
         worksheet.title = "Data"
         worksheet.append(headers)
         for row in rows:

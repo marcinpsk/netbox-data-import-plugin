@@ -134,6 +134,16 @@ def _parse_posted_profile_id(request):
         return None
 
 
+def _candidate_values(extra_data):
+    """Return candidate values after validating the serialized display shape."""
+    candidate_values = extra_data.get("candidate_values", {})
+    if not isinstance(candidate_values, Mapping) or any(
+        not isinstance(candidates, Mapping) for candidates in candidate_values.values()
+    ):
+        raise ValidationError("The active Import Plan has invalid candidate values.")
+    return candidate_values
+
+
 def _contact_candidate_context(request, profile_id, source_id):
     """Return Contact candidates and row state for one active preview row."""
     plan_data = request.session.get("import_plan") or {}
@@ -151,7 +161,7 @@ def _contact_candidate_context(request, profile_id, source_id):
     if str(context.get("profile_id")) != str(profile_id) or len(source_rows) != 1 or len(result_rows) != 1:
         raise ValidationError("The candidate resolution does not identify one active preview row.")
 
-    candidates = result_rows[0].extra_data.get("candidate_values", {}).get("contact", {})
+    candidates = _candidate_values(result_rows[0].extra_data).get("contact", {})
     if not isinstance(candidates, Mapping) or not candidates:
         raise ValidationError("The active preview row has no Contact candidate values.")
     return (
@@ -1111,11 +1121,16 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         }
         # The modal names a field for the operator; the catalog is where those names live.
         target_field_labels = {key: CATALOG.display(key) for key, _label in CATALOG.choices()}
-        candidate_values_by_row = {
-            str(r.row_number): r.extra_data.get("candidate_values", {})
-            for r in result.units
-            if r.extra_data.get("candidate_values")
-        }
+        candidate_values_by_row = {}
+        try:
+            for row in result.units:
+                candidate_values = _candidate_values(row.extra_data)
+                if candidate_values:
+                    candidate_values_by_row[str(row.row_number)] = candidate_values
+        except ValidationError as exc:
+            _discard_import_preview(request)
+            messages.error(request, "; ".join(exc.messages))
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
         contact_suggestions_by_row = {
             str(r.row_number): r.extra_data["contact_suggestion"]
             for r in result.units
@@ -1467,7 +1482,7 @@ class ImportProgressStatusView(PermissionRequiredMixin, View):
 class ImportResultsView(PermissionRequiredMixin, View):
     """Step 4: show the Import Execution audit outcome."""
 
-    permission_required = "netbox_data_import.view_importprofile"
+    permission_required = "netbox_data_import.view_importexecution"
 
     def get(self, request):
         """Render the results page for the most recent Import Execution."""
@@ -3986,6 +4001,13 @@ class SyncSingleRowView(_AjaxPermissionView):
         plan_data = request.session.get("import_plan")
         if not isinstance(ctx_data, dict) or not isinstance(plan_data, dict):
             return JsonResponse({"ok": False, "error": "No import in progress"}, status=400)
+        if stale_reason := _stale_preview_reason(request):
+            return JsonResponse({"ok": False, "error": stale_reason}, status=409)
+        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
+            return JsonResponse(
+                {"ok": False, "error": "Recalculate the preview before synchronizing a row."},
+                status=409,
+            )
 
         raw_row_number = request.POST.get("row_number")
         if raw_row_number is None:

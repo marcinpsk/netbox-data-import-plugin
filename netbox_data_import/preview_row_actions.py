@@ -38,6 +38,7 @@ def retire_preview_revision(session) -> str:
 def load_cached_preview(request):
     """Return the active Import Profile and materialized Review Workspace."""
     from .models import ImportProfile
+    from .plan import PlanError
     from .review_workspace import ReviewWorkspace
 
     context = request.session.get("import_context")
@@ -55,7 +56,11 @@ def load_cached_preview(request):
     profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
     if profile is None:
         return None
-    return profile, ReviewWorkspace.from_dict(plan_data)
+    try:
+        workspace = ReviewWorkspace.from_dict(plan_data)
+    except PlanError:
+        return None
+    return profile, workspace
 
 
 def mark_preview_dirty(session) -> None:

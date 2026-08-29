@@ -368,11 +368,7 @@ class ImportPlan:
         return fingerprint_of(self.fingerprint_data)
 
     def unit(self, identity: str) -> SynchronizationUnit | None:
-        """Return the unit stored under *identity*, or None.
-
-        The index is built once. Resolving every unit is what the Review Workspace and a selective
-        execution both do, and a scan for each of them is quadratic over a workbook-scale plan.
-        """
+        """Return one indexed unit without repeating a linear scan for each lookup."""
         index = self.__dict__.get("_unit_index")
         if index is None:
             index = {unit.identity: unit for unit in self.units}

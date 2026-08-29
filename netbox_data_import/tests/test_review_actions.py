@@ -191,6 +191,17 @@ class TargetNeutralFieldReviewTest(TestCase):
         )
         self.assertEqual(self._post("ignore_field_difference", "unknown").status_code, 409)
 
+    def test_ignore_rejects_a_cached_plan_that_cannot_be_deserialized(self):
+        """A stale cached schema follows the normal unavailable-preview response path."""
+        session = self.client.session
+        session["import_plan"]["schema_version"] = 999
+        session.save()
+
+        response = self._post("ignore_field_difference")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer current", response.json()["error"])
+
     def test_ignore_rejects_a_difference_removed_from_the_plan(self):
         """The action refuses a field that the accepted plan no longer offers."""
         session, unit = self._device_unit_data()
