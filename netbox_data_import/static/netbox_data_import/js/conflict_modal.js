@@ -2,7 +2,7 @@
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
 /* Several source columns can fill one Target Field. The modal shows what each column says and
- * saves the one the operator picks as a resolution, which re-runs the preview. */
+ * saves the one the operator picks as a resolution. */
 (function () {
   function readJson(id) {
     var node = document.getElementById(id);
@@ -78,7 +78,6 @@
     if (!btn) return;
 
     var form = document.getElementById('conflictForm');
-    // The save re-runs the whole preview, so the page stays put for seconds with nothing to show.
     if (form.dataset.ndiSubmitting === 'true') return;
     form.dataset.ndiSubmitting = 'true';
 
@@ -92,6 +91,23 @@
     document.getElementById('conf_source_column').value = '_merge_' + btn.dataset.fieldName;
     document.getElementById('conf_original_value').value = '';
     document.getElementById('conf_resolved_fields').value = JSON.stringify(resolved);
-    form.submit();
+    window.ndiPostPreviewAction(form.action, new FormData(form))
+      .then(function (payload) {
+        btn.textContent = 'Saved';
+        btn.title = payload.message;
+        document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
+          other.disabled = other.dataset.fieldName === btn.dataset.fieldName;
+        });
+        window.ndiMarkPreviewStale();
+        form.dataset.ndiSubmitting = 'false';
+      })
+      .catch(function (error) {
+        form.dataset.ndiSubmitting = 'false';
+        document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
+          other.disabled = false;
+        });
+        btn.textContent = 'Use this';
+        btn.title = error.message;
+      });
   });
 })();

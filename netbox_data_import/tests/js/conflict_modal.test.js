@@ -5,7 +5,7 @@
  * preview page does: open it from a row button, then pick one of the offered values. */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const source = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/conflict_modal.js"),
@@ -25,6 +25,10 @@ let submitted;
 
 function render() {
   submitted = 0;
+  window.ndiPostPreviewAction = vi.fn(() =>
+    Promise.resolve({ ok: true, preview_state: "recalculation_required", message: "Saved." }),
+  );
+  window.ndiMarkPreviewStale = vi.fn();
   document.body.innerHTML = `
     <button id="trigger" data-ndi-modal="#conflictModal" data-row-number="4" data-source-id="L1798">2 conflicts</button>
     <div class="modal" id="conflictModal">
@@ -66,13 +70,15 @@ describe("conflict modal", () => {
     expect(buttons()).toHaveLength(4);
   });
 
-  it("submits the value the operator picked", () => {
+  it("saves the value without navigating away from the preview", async () => {
     buttons()[1].click();
-    expect(submitted).toBe(1);
+    await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
+    expect(submitted).toBe(0);
     expect(document.getElementById("conf_source_column").value).toBe("_merge_device_name");
     expect(JSON.parse(document.getElementById("conf_resolved_fields").value)).toEqual({
       device_name: "L1798",
     });
+    expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
   });
 
   it("reports that the choice is being saved", () => {
@@ -90,13 +96,14 @@ describe("conflict modal", () => {
     expect(buttons().every((b) => b.disabled)).toBe(true);
   });
 
-  it("posts once however many times the operator clicks", () => {
+  it("posts once however many times the operator clicks", async () => {
     const picked = buttons()[1];
 
     picked.click();
     picked.click();
     buttons()[0].click();
 
-    expect(submitted).toBe(1);
+    await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
+    expect(submitted).toBe(0);
   });
 });

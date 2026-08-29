@@ -1576,7 +1576,7 @@ class _PermissionScopedWriteMixin:
             # The permission names an object the caller may not be allowed to know exists.
             logger.warning("%s: write refused outside the caller's object scope: %s", type(self).__name__, exc)
             error = "Permission denied: this action is outside your NetBox object permissions."
-            if getattr(self, "permission_denied_response_format", "redirect") == "json":
+            if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
                 return JsonResponse({"ok": False, "error": error}, status=403)
             messages.error(request, error)
             return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
@@ -1676,6 +1676,15 @@ def _preview_action_error(request, next_url, message, *, status=409):
         # on an unrelated page.
         return JsonResponse({"ok": False, "error": message}, status=status)
     messages.error(request, message)
+    return redirect(next_url)
+
+
+def _saved_preview_action_response(request, next_url, message):
+    """Report a saved preview decision without rebuilding its materialized plan."""
+    mark_preview_dirty(request.session)
+    if _wants_json(request):
+        return JsonResponse(pending_preview_payload(None, message))
+    messages.success(request, message)
     return redirect(next_url)
 
 
@@ -3313,35 +3322,38 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 
 
 class QuickCreateManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Immediately create a Manufacturer in NetBox from the preview page.
-
-    Redirects back to preview so the row changes from 'create' to a device action.
-    """
+    """Immediately create a Manufacturer in NetBox from the preview page."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Create the manufacturer in NetBox and redirect back to preview."""
+        """Create the manufacturer in NetBox and report the pending preview change."""
         from dcim.models import Manufacturer
 
+        next_url = reverse("plugins:netbox_data_import:import_preview")
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
-            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(
+                request,
+                next_url,
+                "A valid import profile is required. Reload the preview and try again.",
+                status=400,
+            )
         get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            return _preview_action_error(request, next_url, stale_reason, status=409)
         mfg_name = request.POST.get("mfg_name", "").strip()
         mfg_slug = request.POST.get("mfg_slug", "").strip()
         if not mfg_name or not mfg_slug:
-            messages.error(request, "Manufacturer name and slug are required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(request, next_url, "Manufacturer name and slug are required.", status=400)
         mfg = _get_or_init(Manufacturer, slug=mfg_slug)
         if mfg.pk is None:
             mfg.name = mfg_name
             try:
                 _validate_model_instance(mfg, f"manufacturer '{mfg_name}'")
             except ValueError as exc:
-                messages.error(request, str(exc))
-                return redirect(reverse("plugins:netbox_data_import:import_preview"))
+                return _preview_action_error(request, next_url, str(exc), status=400)
         result = save_permission_scoped_object(
             request.user,
             Manufacturer,
@@ -3352,40 +3364,47 @@ class QuickCreateManufacturerView(_PermissionScopedWriteMixin, PermissionRequire
         mfg = result.instance
         created = result.created
         if created:
-            messages.success(request, f"Manufacturer '{mfg.name}' created.")
+            saved_message = f"Manufacturer '{mfg.name}' created."
         else:
-            messages.info(request, f"Manufacturer '{mfg.name}' already existed.")
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            saved_message = f"Manufacturer '{mfg.name}' already existed."
+        return _saved_preview_action_response(request, next_url, saved_message)
 
 
 class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page.
-
-    Used when a source has inconsistent naming (e.g. 'Dell EMC' → 'dell').
-    Redirects back to preview which re-runs with the mapping applied.
-    """
+    """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the manufacturer mapping and redirect back to preview."""
+        """Save the manufacturer mapping and report the pending preview change."""
+        next_url = reverse("plugins:netbox_data_import:import_preview")
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
-            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(
+                request,
+                next_url,
+                "A valid import profile is required. Reload the preview and try again.",
+                status=400,
+            )
         profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            return _preview_action_error(request, next_url, stale_reason, status=409)
         source_make = " ".join(request.POST.get("source_make", "").split())
         netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
         if not source_make or not netbox_mfg_slug:
-            messages.error(request, "Source make and NetBox manufacturer slug are required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(
+                request,
+                next_url,
+                "Source make and NetBox manufacturer slug are required.",
+                status=400,
+            )
         mapping = _get_or_init(ManufacturerMapping, profile=profile, source_make=source_make)
         mapping.netbox_manufacturer_slug = netbox_mfg_slug
         try:
             _validate_model_instance(mapping, f"manufacturer mapping '{source_make}'")
         except ValueError as exc:
-            messages.error(request, str(exc))
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(request, next_url, str(exc), status=400)
         result = save_permission_scoped_object(
             request.user,
             ManufacturerMapping,
@@ -3393,29 +3412,39 @@ class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequir
             {"netbox_manufacturer_slug": netbox_mfg_slug},
         )
         verb = "Created" if result.created else "Updated"
-        messages.success(request, f"{verb} manufacturer mapping: '{source_make}' → {netbox_mfg_slug}")
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        return _saved_preview_action_response(
+            request,
+            next_url,
+            f"{verb} manufacturer mapping: '{source_make}' → {netbox_mfg_slug}",
+        )
 
 
 class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page.
 
     Optionally also creates the manufacturer and/or device type in NetBox right now.
-    Redirects back to preview which re-runs and shows the resolved rows.
     """
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the device type mapping (and optionally create objects) then redirect."""
+        """Save the device type mapping and report the pending preview change."""
         from dcim.models import DeviceType, Manufacturer
         from django.utils.text import slugify
 
+        next_url = reverse("plugins:netbox_data_import:import_preview")
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
-            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(
+                request,
+                next_url,
+                "A valid import profile is required. Reload the preview and try again.",
+                status=400,
+            )
         profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            return _preview_action_error(request, next_url, stale_reason, status=409)
         source_make = " ".join(request.POST.get("source_make", "").split())
         source_model = " ".join(request.POST.get("source_model", "").split())
         netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
@@ -3423,8 +3452,7 @@ class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequired
         action = request.POST.get("action", "map")  # "map" or "create_now"
 
         if not source_make or not source_model:
-            messages.error(request, "Source make and model are required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(request, next_url, "Source make and model are required.", status=400)
 
         if not netbox_mfg_slug:
             netbox_mfg_slug = slugify(source_make)
@@ -3487,40 +3515,41 @@ class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequired
                         on_existing="keep",
                     )
         except ValueError as exc:
-            messages.error(request, str(exc))
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(request, next_url, str(exc), status=400)
 
         if action == "create_now":
-            messages.success(
-                request, f"Mapping saved and device type '{source_make} / {source_model}' created in NetBox."
-            )
+            saved_message = f"Mapping saved and device type '{source_make} / {source_model}' created in NetBox."
         else:
             verb = "created" if created else "updated"
-            messages.success(
-                request,
-                f"DeviceType mapping {verb}: '{source_make} / {source_model}' → {netbox_mfg_slug}/{netbox_dt_slug}",
+            saved_message = (
+                f"DeviceType mapping {verb}: '{source_make} / {source_model}' → {netbox_mfg_slug}/{netbox_dt_slug}"
             )
 
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        return _saved_preview_action_response(request, next_url, saved_message)
 
 
 class QuickAddClassRoleMappingView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Quickly add a ClassRoleMapping (ignore / role) directly from an error row in preview.
-
-    Redirects back to preview; error rows for that class disappear on re-run.
-    """
+    """Quickly add a ClassRoleMapping (ignore / role) directly from an error row in preview."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the class→role mapping and redirect back to preview."""
+        """Save the class-to-role mapping and report the pending preview change."""
         from dcim.models import RackType
 
+        next_url = reverse("plugins:netbox_data_import:import_preview")
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
-            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(
+                request,
+                next_url,
+                "A valid import profile is required. Reload the preview and try again.",
+                status=400,
+            )
         profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            return _preview_action_error(request, next_url, stale_reason, status=409)
         source_class = request.POST.get("source_class", "").strip()
         mapping_action = request.POST.get("mapping_action", "ignore")  # "ignore", "role", or "rack"
         role_slug = request.POST.get("role_slug", "").strip()
@@ -3532,25 +3561,32 @@ class QuickAddClassRoleMappingView(_PermissionScopedWriteMixin, PermissionRequir
             try:
                 rack_type = RackType.objects.get(pk=int(rack_type_id))
             except (RackType.DoesNotExist, ValueError, TypeError):
-                messages.error(
-                    request, f"Invalid rack type selected for class '{source_class}'. Please choose a valid rack type."
+                return _preview_action_error(
+                    request,
+                    next_url,
+                    f"Invalid rack type selected for class '{source_class}'. Please choose a valid rack type.",
+                    status=400,
                 )
-                return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         if not source_class:
-            messages.error(request, "Source class is required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(request, next_url, "Source class is required.", status=400)
 
         _valid_actions = ("ignore", "role", "rack")
         if mapping_action not in _valid_actions:
-            messages.error(
-                request, f"Invalid mapping action '{mapping_action}'. Must be one of: {', '.join(_valid_actions)}."
+            return _preview_action_error(
+                request,
+                next_url,
+                f"Invalid mapping action '{mapping_action}'. Must be one of: {', '.join(_valid_actions)}.",
+                status=400,
             )
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
         if mapping_action == "role" and not role_slug:
-            messages.error(request, "A role slug is required when mapping action is 'role'.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(
+                request,
+                next_url,
+                "A role slug is required when mapping action is 'role'.",
+                status=400,
+            )
 
         values = {
             "ignore": mapping_action == "ignore",
@@ -3564,8 +3600,7 @@ class QuickAddClassRoleMappingView(_PermissionScopedWriteMixin, PermissionRequir
         try:
             _validate_model_instance(mapping, f"class role mapping '{source_class}'")
         except ValueError as exc:
-            messages.error(request, str(exc))
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(request, next_url, str(exc), status=400)
         result = save_permission_scoped_object(
             request.user,
             ClassRoleMapping,
@@ -3580,8 +3615,11 @@ class QuickAddClassRoleMappingView(_PermissionScopedWriteMixin, PermissionRequir
             action_label = f"creates rack{rt_suffix}"
         else:
             action_label = f"role '{role_slug}'"
-        messages.success(request, f"{verb} mapping: class '{source_class}' → {action_label}")
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        return _saved_preview_action_response(
+            request,
+            next_url,
+            f"{verb} mapping: class '{source_class}' → {action_label}",
+        )
 
 
 class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
@@ -3590,18 +3628,30 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
-        """Save the column mapping and redirect back to preview."""
+        """Save the column mapping and report the pending preview change."""
+        next_url = reverse("plugins:netbox_data_import:import_preview")
         profile_id = _parse_posted_profile_id(request)
         if profile_id is None:
-            messages.error(request, "A valid import profile is required. Reload the preview and try again.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(
+                request,
+                next_url,
+                "A valid import profile is required. Reload the preview and try again.",
+                status=400,
+            )
         profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            return _preview_action_error(request, next_url, stale_reason, status=409)
         source_column = request.POST.get("source_column", "").strip()
         target_field = request.POST.get("target_field", "").strip()
 
         if not source_column or not CATALOG.is_valid(target_field, output_kinds=profile.output_kinds):
-            messages.error(request, "Valid source column and target field are required.")
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(
+                request,
+                next_url,
+                "Valid source column and target field are required.",
+                status=400,
+            )
 
         # The catalog accepts any non-empty name after a family prefix, so it cannot bound length.
         # Validate before the displaced row is deleted: an invalid write must strand nothing.
@@ -3611,8 +3661,7 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
                 f"column mapping '{source_column}' -> {target_field}",
             )
         except ValueError as exc:
-            messages.error(request, str(exc))
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
+            return _preview_action_error(request, next_url, str(exc), status=400)
 
         if target_field.startswith(CANDIDATE_TARGET_PREFIX):
             result = save_permission_scoped_object(
@@ -3623,7 +3672,7 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
                 on_existing="keep",
             )
             verb = "Created" if result.created else "Kept"
-            messages.success(request, f"{verb} candidate mapping: '{source_column}' → {target_field}")
+            saved_message = f"{verb} candidate mapping: '{source_column}' → {target_field}"
         else:
             # A quick direct mapping replaces the source column that supplied the target before it.
             with transaction.atomic():
@@ -3640,15 +3689,14 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
                     on_existing="keep",
                 )
             if displaced_source:
-                messages.success(
-                    request,
-                    f"Reassigned: '{source_column}' → {target_field} (previously mapped from '{displaced_source}')",
+                saved_message = (
+                    f"Reassigned: '{source_column}' → {target_field} (previously mapped from '{displaced_source}')"
                 )
             else:
                 verb = "Created" if result.created else "Kept"
-                messages.success(request, f"{verb} mapping: '{source_column}' → {target_field}")
+                saved_message = f"{verb} mapping: '{source_column}' → {target_field}"
 
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        return _saved_preview_action_response(request, next_url, saved_message)
 
 
 class MatchExistingDeviceView(PermissionRequiredMixin, View):
@@ -3990,7 +4038,7 @@ class SyncSingleRowView(_AjaxPermissionView):
     """AJAX endpoint: execute a single row from the current import session.
 
     POST body: row_number=<int>
-    Returns JSON: {ok: true, detail, url} or {ok: false, error} / {ok: false, errors: [...]}
+    Returns the deferred preview-action JSON envelope.
     """
 
     permission_required = "netbox_data_import.change_importprofile"
@@ -4062,12 +4110,6 @@ class SyncSingleRowView(_AjaxPermissionView):
                 uuid.uuid4().hex,
                 request.user,
             )
-            current = ImportEngine.plan(
-                profile,
-                document,
-                request.user,
-                dict(accepted.planning_context),
-            )
         except (
             PlanError,
             PlanningTargetUnavailable,
@@ -4086,20 +4128,8 @@ class SyncSingleRowView(_AjaxPermissionView):
                 status=500,
             )
 
-        record_recalculated_preview(request.session, current)
-        current_workspace = ReviewWorkspace(current)
-        request.session["import_rows"] = current_workspace.source_rows
-        current_unit = next(
-            (unit for unit in current_workspace.units if unit.identity == preview_unit.identity),
-            None,
-        )
-        return JsonResponse(
-            {
-                "ok": True,
-                "detail": current_unit.detail if current_unit else "Synchronized.",
-                "url": current_unit.netbox_url if current_unit else "",
-            }
-        )
+        mark_preview_dirty(request.session)
+        return JsonResponse(pending_preview_payload(row_number, "Synchronized."))
 
 
 class UnlinkDeviceView(_AjaxPermissionView):

@@ -329,6 +329,23 @@
     if (!buildResolvedFields()) {
       event.preventDefault();
       updateSaveButton();
+      return;
     }
+    event.preventDefault();
+    var form = event.target;
+    var saveBtn = form.querySelector('button[type="submit"]');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    window.ndiPostPreviewAction(form.action, new FormData(form))
+      .then(function (payload) {
+        saveBtn.textContent = 'Saved';
+        saveBtn.title = payload.message;
+        window.ndiMarkPreviewStale();
+      })
+      .catch(function (error) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save resolution';
+        saveBtn.title = error.message;
+      });
   });
 })();
