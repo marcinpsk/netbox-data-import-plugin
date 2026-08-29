@@ -581,15 +581,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         """A selective execution returns immediately and leaves recalculation to the operator."""
         from dcim.models import Rack
 
-        sync_url = reverse("plugins:netbox_data_import:sync_single_row")
         self._upload()
         accepted_plan = self.client.session["import_plan"]
 
-        response = self.client.post(
-            sync_url,
-            {"row_number": 2},
-            HTTP_ACCEPT="application/json",
-        )
+        response = self._sync_single_row({"row_number": 2})
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json()["preview_state"], "recalculation_required")
@@ -597,8 +592,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertTrue(self.client.session["import_preview_dirty"])
         self.assertTrue(Rack.objects.filter(site=self.site, name="rack-a").exists())
 
-    def test_single_row_sync_refuses_a_unit_that_is_no_longer_a_create(self):
-        """After one inline create, the same row cannot be submitted as another create."""
+    def test_single_row_sync_refuses_a_second_sync_until_recalculation(self):
+        """The first inline create makes the materialized preview too stale for another sync."""
         self._upload()
 
         first = self._sync_single_row({"row_number": 2})
@@ -606,7 +601,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertEqual(first.status_code, 200, first.content)
         self.assertEqual(second.status_code, 409)
-        self.assertIn("no longer actionable", second.json()["error"])
+        self.assertIn("Recalculate the preview", second.json()["error"])
 
     def test_device_type_mapping_leaves_the_materialized_preview_stale(self):
         """A quick mapping saves without rebuilding the active preview."""

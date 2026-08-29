@@ -2323,6 +2323,8 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
 
   var currentRowNumber = null;
   var currentSyncButton = null;
+  var currentSyncRequest = null;
+  var pendingSyncRequests = new WeakMap();
 
   modal.addEventListener('show.bs.modal', function (e) {
     var btn = e.relatedTarget;
@@ -2439,20 +2441,41 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
     var errorDiv = document.getElementById('syncRowError');
     errorDiv.classList.add('d-none');
 
-    var body = new URLSearchParams({row_number: currentRowNumber});
+    var submittedRowNumber = currentRowNumber;
+    var submittedSyncButton = currentSyncButton;
+    var submittedSyncRequest = {};
+    currentSyncRequest = submittedSyncRequest;
+    pendingSyncRequests.set(submittedSyncButton, submittedSyncRequest);
+    submittedSyncButton.disabled = true;
+    var body = new URLSearchParams({row_number: submittedRowNumber});
     window.ndiPostPreviewAction('{% url "plugins:netbox_data_import:sync_single_row" %}', body)
     .then(function (data) {
-      currentSyncButton.disabled = true;
-      currentSyncButton.removeAttribute('data-ndi-modal');
-      currentSyncButton.title = data.message;
-      currentSyncButton.innerHTML = '<i class="mdi mdi-check"></i> Synced';
+      submittedSyncButton.disabled = true;
+      submittedSyncButton.removeAttribute('data-ndi-modal');
+      submittedSyncButton.title = data.message;
+      submittedSyncButton.innerHTML = '<i class="mdi mdi-check"></i> Synced';
+      if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
+        pendingSyncRequests.delete(submittedSyncButton);
+      }
       window.ndiMarkPreviewStale();
+      var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
+        && currentSyncButton === submittedSyncButton;
+      if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
+      if (!ownsCurrentModal) return;
       var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
       if (ModalClass) {
         ModalClass.getOrCreateInstance(modal).hide();
       }
     })
     .catch(function (error) {
+      if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
+        pendingSyncRequests.delete(submittedSyncButton);
+        submittedSyncButton.disabled = false;
+      }
+      var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
+        && currentSyncButton === submittedSyncButton;
+      if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
+      if (!ownsCurrentModal) return;
       confirmBtn.disabled = false;
       confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
       confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
