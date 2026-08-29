@@ -104,7 +104,7 @@
       if (resolutionState.activeToken !== requestToken) return null;
       resolutionState.activeToken = null;
       var currentForm = document.getElementById('conflictForm');
-      if (currentForm.dataset.ndiConflictRequestToken !== requestToken) return null;
+      if (!currentForm || currentForm.dataset.ndiConflictRequestToken !== requestToken) return null;
       currentForm.dataset.ndiSubmitting = 'false';
       delete currentForm.dataset.ndiConflictRequestToken;
       return currentForm;

@@ -68,12 +68,15 @@ class ContactResolutionSessionMixin:
         import io
 
         import openpyxl
+        from openpyxl.worksheet.worksheet import Worksheet
 
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.review_workspace import ReviewWorkspace
 
         workbook = openpyxl.Workbook()
         worksheet = workbook.active
+        if not isinstance(worksheet, Worksheet):
+            worksheet = workbook.create_sheet()
         worksheet.title = "Data"
         worksheet.append(["Id", "Name", "Class", "Make", "Model", "Contact", "Contact Number"])
         worksheet.append(

@@ -12,6 +12,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TransactionTestCase
 from django.urls import reverse
+from openpyxl.worksheet.worksheet import Worksheet
 
 from core.exceptions import JobFailed
 from core.models import Job
@@ -29,14 +30,16 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.plan import ImportPlan
 from netbox_data_import.preview_row_actions import retire_preview_revision
-from netbox_data_import.tests.helpers import user_with_object_permission
+from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 
 def _workbook() -> bytes:
     """Return one small flat workbook for the HTTP boundary."""
     book = openpyxl.Workbook()
-    sheet = book.active or book.create_sheet()
+    sheet = book.active
+    if not isinstance(sheet, Worksheet):
+        sheet = book.create_sheet()
     sheet.title = "Data"
     sheet.append(["Source ID", "Class", "Name", "Rack", "Make", "Model"])
     sheet.append(["R-1", "Cabinet", "", "rack-a", "", ""])
@@ -487,6 +490,42 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(retry_job.data["import_execution_id"], failed.pk)
         self.assertIn("already failed", retry_job.data["message"])
 
+    def test_job_runner_reports_a_profile_deleted_before_the_policy_lock(self):
+        """A profile removed after the worker reads it still becomes a recoverable Job failure."""
+        from django.db import connection
+
+        self._upload()
+        document = SourceDocument.objects.get(profile=self.profile)
+        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        selected = accepted.units[0].identity
+        job = self._job()
+        deleted = []
+
+        def delete_the_profile_when_the_lock_runs(execute, sql, params, many, context):
+            if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
+                deleted.append(True)
+
+                def delete_it():
+                    ImportProfile.objects.get(pk=self.profile.pk).delete()
+
+                with run_on_separate_connection(delete_it):
+                    pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(delete_the_profile_when_the_lock_runs):
+            with self.assertRaises(JobFailed):
+                ImportJobRunner(job).run(
+                    self.profile.pk,
+                    document.pk,
+                    accepted.to_dict(),
+                    [selected],
+                    "deleted-before-lock",
+                )
+
+        self.assertEqual(deleted, [True], "the policy lock was never reached")
+        job.refresh_from_db()
+        self.assertIn("profile", job.data["message"].lower())
+
     def test_progress_publication_is_throttled_and_tolerates_no_rq_context(self):
         """Large imports bound Redis writes, and synchronous calls have no RQ metadata."""
 
@@ -633,8 +672,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             ).exists()
         )
 
-    def test_preview_discards_a_missing_source_and_a_corrupt_materialized_plan(self):
-        """Session state cannot keep a preview whose stored input or plan schema is unreadable."""
+    def test_preview_discards_a_missing_source(self):
+        """Session state cannot keep a preview whose stored input is unavailable."""
         preview_url = reverse("plugins:netbox_data_import:import_preview")
         self._upload()
         SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
@@ -675,6 +714,9 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertNotIn("import_plan", self.client.session)
 
+    def test_preview_discards_a_materialized_plan_with_an_unknown_schema(self):
+        """Session state cannot keep a materialized plan with an unreadable schema."""
+        preview_url = reverse("plugins:netbox_data_import:import_preview")
         self._upload()
         session = self.client.session
         session["import_plan"]["schema_version"] = 999

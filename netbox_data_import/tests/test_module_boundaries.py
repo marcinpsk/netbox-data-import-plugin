@@ -41,6 +41,13 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
     def test_the_legacy_engine_is_deleted(self):
         self.assertFalse((PACKAGE / "engine.py").exists())
 
+    def test_the_architecture_guidance_names_the_public_coordinator(self):
+        guidance = PACKAGE.parent / "AGENTS.md"
+        architecture = guidance.read_text().partition("## Architecture")[2].partition("## Development environment")[0]
+
+        self.assertIn("`import_engine.py`", architecture)
+        self.assertNotIn("`engine.py`", architecture)
+
     def test_views_and_jobs_call_only_the_public_coordinator_methods(self):
         calls = {name: _import_engine_calls(PACKAGE / name) for name in CALLERS}
 

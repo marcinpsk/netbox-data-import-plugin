@@ -18,8 +18,10 @@ from netbox_data_import.ip_assignment import IPAssignmentError, IPTarget, alread
 from netbox_data_import.models import (
     ColumnMapping,
     DeviceImportSource,
+    ExecutionOutcome,
     FailureReason,
     IgnoredFieldDifference,
+    ImportExecution,
     ImportProfile,
     SourceDocument,
     SourceResolution,
@@ -270,8 +272,14 @@ class CoordinatorDefensiveContractTest(TestCase):
         with self.assertRaises(SelectionError):
             ImportEngine._selected_units(plan, plan, ["device:one", "device:one"])
 
-        execution = SimpleNamespace(mark_failed=lambda **_detail: (_ for _ in ()).throw(ValueError("finished")))
+        execution = ImportExecution.objects.create(
+            profile=ImportProfile.objects.create(name="Finished Audit Profile"),
+            outcome=ExecutionOutcome.PENDING,
+        )
+        execution.mark_succeeded(applied_changes={"changes": ["device:one:create"], "deleted": []})
         ImportEngine._mark_failed(execution, reason=FailureReason.PLANNING)
+        execution.refresh_from_db()
+        self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED)
 
     def test_an_unregistered_runtime_is_refused_before_any_write(self):
         """The coordinator cannot silently skip an executable change without a runtime."""
@@ -306,7 +314,6 @@ class CoordinatorDefensiveContractTest(TestCase):
         execution = SimpleNamespace(mark_succeeded=lambda **_detail: None)
         with (
             patch.object(ImportEngine, "plan", return_value=plan),
-            patch("netbox_data_import.import_engine.target_modules.runtime_for", return_value=None),
             self.assertRaises(LookupError),
         ):
             ImportEngine._write_selection(

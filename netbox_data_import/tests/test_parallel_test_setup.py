@@ -29,6 +29,30 @@ def _root_conftest():
     return module
 
 
+def _run_empty_pytest(*arguments, timeout=None):
+    """Run pytest without collecting this plugin's test suite."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
+    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *arguments,
+            "--no-cov",
+            "-p",
+            "no:cacheprovider",
+            "--ignore=netbox_data_import",
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        timeout=timeout,
+    )
+
+
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
     """Assign one PostgreSQL database and two Redis databases to a worker."""
     assert isolated_test_database_name("test_netbox_data_import", "gw3") == "test_netbox_data_import_gw3"
@@ -73,32 +97,7 @@ def test_a_bare_pytest_run_caps_the_auto_worker_pool():
     pytest loads `netbox_data_import/tests/conftest.py` only during collection, after the workers
     start, so a hook placed there would leave this run uncapped.
     """
-    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
-    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
-    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
-
-    result = subprocess.run(
-        # No path argument, so `-n auto` resolves against the root conftest alone. Collecting the
-        # plugin tests is not needed to start the workers, and skipping it keeps this run short.
-        # `no:cacheprovider` keeps this run off the .pytest_cache the outer run is using.
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-n",
-            "auto",
-            "--no-cov",
-            "-v",
-            "-p",
-            "no:cacheprovider",
-            "--ignore=netbox_data_import",
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=REPOSITORY_ROOT,
-        check=False,
-    )
+    result = _run_empty_pytest("-n", "auto", "-v")
 
     # `--ignore` leaves nothing to collect, so pytest exits 5. Any other status means the run broke
     # before the cap could apply, and the `created:` line alone would still pass the check below.
@@ -115,28 +114,7 @@ def test_an_explicit_worker_count_above_the_ceiling_is_rejected():
     Without a second check the run starts `gw8`, and that worker fails in the isolation helper during
     collection, after the databases of the other workers already exist.
     """
-    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
-    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
-    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-n",
-            str(MAX_PARALLEL_WORKERS + 1),
-            "--no-cov",
-            "-p",
-            "no:cacheprovider",
-            "--ignore=netbox_data_import",
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=REPOSITORY_ROOT,
-        check=False,
-    )
+    result = _run_empty_pytest("-n", str(MAX_PARALLEL_WORKERS + 1))
 
     # 4 is pytest's usage-error status. It must refuse the run instead of collecting and failing later.
     assert result.returncode == 4, f"exit {result.returncode}\n{(result.stdout + result.stderr)[-3000:]}"
@@ -145,34 +123,13 @@ def test_an_explicit_worker_count_above_the_ceiling_is_rejected():
 
 def test_a_gateway_specification_above_the_ceiling_is_rejected():
     """Reject an explicit gateway list before workers exceed the isolation limit."""
-    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
-    # The distinct name keeps this empty run separate from the outer test database.
-    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            # Clear addopts because xdist rewrites the gateway list from its worker count.
-            "-o",
-            "addopts=",
-            "--tx",
-            f"{MAX_PARALLEL_WORKERS + 1}*popen",
-            # Enable distribution because `--tx` alone starts no workers.
-            "--dist",
-            "load",
-            "--no-cov",
-            "-p",
-            "no:cacheprovider",
-            "--ignore=netbox_data_import",
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=REPOSITORY_ROOT,
-        check=False,
-        # The timeout bounds an unguarded run whose last worker cannot isolate itself.
+    result = _run_empty_pytest(
+        "-o",
+        "addopts=",
+        "--tx",
+        f"{MAX_PARALLEL_WORKERS + 1}*popen",
+        "--dist",
+        "load",
         timeout=120,
     )
 
@@ -183,32 +140,13 @@ def test_a_gateway_specification_above_the_ceiling_is_rejected():
 
 def test_a_signed_gateway_multiplier_is_counted_the_way_xdist_counts_it():
     """xdist parses the multiplier with `int()`, which takes a sign this repository must not miss."""
-    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
-    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
-    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-o",
-            "addopts=",
-            "--tx",
-            f"+{MAX_PARALLEL_WORKERS + 1}*popen",
-            "--dist",
-            "load",
-            "--no-cov",
-            "-p",
-            "no:cacheprovider",
-            "--ignore=netbox_data_import",
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=REPOSITORY_ROOT,
-        check=False,
-        # Unguarded, this run starts the workers and waits on the one that cannot isolate itself.
+    result = _run_empty_pytest(
+        "-o",
+        "addopts=",
+        "--tx",
+        f"+{MAX_PARALLEL_WORKERS + 1}*popen",
+        "--dist",
+        "load",
         timeout=120,
     )
 
@@ -219,32 +157,14 @@ def test_a_signed_gateway_multiplier_is_counted_the_way_xdist_counts_it():
 
 def test_collecting_without_running_is_left_alone():
     """xdist starts no worker for `--collect-only`, so the ceiling has nothing to refuse."""
-    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
-    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
-    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-o",
-            "addopts=",
-            "--collect-only",
-            "--tx",
-            f"{MAX_PARALLEL_WORKERS + 1}*popen",
-            "--dist",
-            "load",
-            "--no-cov",
-            "-p",
-            "no:cacheprovider",
-            "--ignore=netbox_data_import",
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=REPOSITORY_ROOT,
-        check=False,
+    result = _run_empty_pytest(
+        "-o",
+        "addopts=",
+        "--collect-only",
+        "--tx",
+        f"{MAX_PARALLEL_WORKERS + 1}*popen",
+        "--dist",
+        "load",
         timeout=120,
     )
 
@@ -254,29 +174,11 @@ def test_collecting_without_running_is_left_alone():
 
 def test_a_gateway_specification_without_distribution_is_left_alone():
     """`--tx` with distribution off starts no worker, so the ceiling has nothing to refuse."""
-    environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
-    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
-    environment["TEST_DB_NAME"] = "test_worker_pool_contract"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-o",
-            "addopts=",
-            "--tx",
-            f"{MAX_PARALLEL_WORKERS + 1}*popen",
-            "--no-cov",
-            "-p",
-            "no:cacheprovider",
-            "--ignore=netbox_data_import",
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=REPOSITORY_ROOT,
-        check=False,
+    result = _run_empty_pytest(
+        "-o",
+        "addopts=",
+        "--tx",
+        f"{MAX_PARALLEL_WORKERS + 1}*popen",
         timeout=120,
     )
 

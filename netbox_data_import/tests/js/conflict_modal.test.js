@@ -196,4 +196,20 @@ describe("conflict modal", () => {
     await vi.waitFor(() => expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce());
     expect(reopenedButtons.every((button) => !button.disabled)).toBe(true);
   });
+
+  it("releases a save after the preview removes its form", () => {
+    let completeRequest;
+    window.ndiPostPreviewAction.mockReturnValueOnce({
+      then(handler) {
+        completeRequest = handler;
+        return { catch: vi.fn() };
+      },
+    });
+
+    buttons()[1].click();
+    document.getElementById("conflictForm").remove();
+
+    expect(() => completeRequest({ message: "Saved." })).not.toThrow();
+    expect(window.ndiConflictResolutionState.activeToken).toBeNull();
+  });
 });

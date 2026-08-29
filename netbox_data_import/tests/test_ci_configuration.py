@@ -109,6 +109,14 @@ class ReleaseWorkflowTest(TestCase):
 class WorkflowAuditTest(TestCase):
     """Keep the GitHub Actions audit gating pull requests, not local commits alone."""
 
+    def test_the_lint_workflow_installs_the_locked_development_tools(self):
+        """The type checker and its stubs must come from the committed lock file."""
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "lint-format.yaml"
+        steps = yaml.safe_load(workflow.read_text())["jobs"]["format-and-lint"]["steps"]
+        install = next(step for step in steps if step.get("name") == "Install dependencies")
+
+        self.assertEqual(install["run"], "uv sync --locked --group dev")
+
     def test_the_lint_workflow_audits_the_workflows(self):
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "lint-format.yaml"
         steps = yaml.safe_load(workflow.read_text())["jobs"]["format-and-lint"]["steps"]

@@ -18,7 +18,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.object_permissions import ObjectPermissionDenied
 from netbox_data_import.preview_row_actions import record_recalculated_preview
-from netbox_data_import.tests.helpers import plan_source_rows
+from netbox_data_import.tests.helpers import plan_source_rows, user_with_object_permission
 
 
 class TargetNeutralFieldReviewTest(TestCase):
@@ -401,26 +401,33 @@ class TargetNeutralFieldReviewTest(TestCase):
     def test_unlink_checks_the_binding_and_each_dependent_review_permission(self):
         """Object-scoped denial preserves the whole source-to-device review state."""
         self._ignore_and_replan()
-        user_model = get_user_model()
-        original_has_perm = user_model.has_perm
-
-        def deny_binding(user, permission, obj=None):
-            if obj is not None and permission == "netbox_data_import.delete_deviceexistingmatch":
-                return False
-            return original_has_perm(user, permission, obj)
-
         endpoint = reverse("plugins:netbox_data_import:unlink_device")
         data = {"profile_id": self.profile.pk, "source_id": "REVIEW-ACTION-ROW"}
-        with patch.object(user_model, "has_perm", deny_binding):
-            self.assertEqual(self.client.post(endpoint, data).status_code, 302)
+        binding_denied = user_with_object_permission(
+            "review-action-binding-denied",
+            [
+                (ImportProfile, ("change",), None),
+                (DeviceExistingMatch, ("delete",), {"source_id": "OTHER-ROW"}),
+                (IgnoredFieldDifference, ("delete",), None),
+            ],
+        )
+        binding_client = Client()
+        binding_client.force_login(binding_denied)
+
+        self.assertEqual(binding_client.post(endpoint, data).status_code, 302)
         self.assertTrue(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
 
-        def deny_review(user, permission, obj=None):
-            if obj is not None and permission == "netbox_data_import.delete_ignoredfielddifference":
-                return False
-            return original_has_perm(user, permission, obj)
+        review_denied = user_with_object_permission(
+            "review-action-review-denied",
+            [
+                (ImportProfile, ("change",), None),
+                (DeviceExistingMatch, ("delete",), None),
+                (IgnoredFieldDifference, ("delete",), {"source_id": "OTHER-ROW"}),
+            ],
+        )
+        review_client = Client()
+        review_client.force_login(review_denied)
 
-        with patch.object(user_model, "has_perm", deny_review):
-            self.assertEqual(self.client.post(endpoint, data).status_code, 302)
+        self.assertEqual(review_client.post(endpoint, data).status_code, 302)
         self.assertTrue(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
         self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())

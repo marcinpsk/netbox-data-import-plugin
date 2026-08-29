@@ -10,6 +10,7 @@ from io import BytesIO
 
 import openpyxl
 from django.test import SimpleTestCase
+from openpyxl.worksheet.worksheet import Worksheet
 
 from netbox_data_import.adapters import FlatWorkbookAdapter, SourceBatch, SourceUnreadable
 from netbox_data_import.flat_workbook import FlatWorkbookConfig, TransformRule
@@ -19,6 +20,8 @@ def _workbook(sheet_name, header, *rows):
     """Build workbook bytes in memory so SimpleTestCase keeps database access disabled."""
     book = openpyxl.Workbook()
     sheet = book.active
+    if not isinstance(sheet, Worksheet):
+        sheet = book.create_sheet()
     sheet.title = sheet_name
     sheet.append(list(header))
     for row in rows:
@@ -170,6 +173,26 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
         batch = FlatWorkbookAdapter.interpret(content, config)
 
         self.assertEqual(batch.rows[0]["_extra_columns"], {"owner": "ada"})
+
+    def test_an_extra_json_transform_becomes_a_captured_column(self):
+        """A transformed passthrough follows the same row shape as a directly mapped one."""
+        content = _workbook("Data", ("Owner",), ("owner=ada",))
+        config = FlatWorkbookConfig(
+            sheet_name="Data",
+            column_map={},
+            transform_rules=(
+                TransformRule(
+                    source_column="Owner",
+                    pattern=r"owner=(.+)",
+                    group_1_target="extra_json:owner",
+                ),
+            ),
+        )
+
+        batch = FlatWorkbookAdapter.interpret(content, config)
+
+        self.assertEqual(batch.rows[0]["_extra_columns"], {"owner": "ada"})
+        self.assertNotIn("extra_json:owner", batch.rows[0])
 
 
 class SourceAdapterContractTest(SimpleTestCase):

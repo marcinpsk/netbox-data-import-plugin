@@ -117,16 +117,7 @@ def user_with_object_permission(username, grants):
 
 
 def make_dcim_objects(name_prefix=""):
-    """Create and return (site, manufacturer, device_type, role) with the given prefix.
-
-    Useful for test setUp methods that need basic DCIM infrastructure.
-    All objects receive ``name_prefix`` prepended so tests that run in the same
-    database transaction can use unique names.
-
-    Example::
-
-        site, mfg, dt, role = make_dcim_objects("Test")
-    """
+    """Create a Site, Manufacturer, Device Type, and Device Role with one prefix."""
     from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
 
     slug_prefix = name_prefix.lower()

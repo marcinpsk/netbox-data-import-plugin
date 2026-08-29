@@ -18,6 +18,7 @@ from netbox_data_import.models import (
     IgnoredDevice,
     IgnoredFieldDifference,
     ImportProfile,
+    ManufacturerMapping,
 )
 from netbox_data_import.netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from netbox_data_import.plan import Disposition, Severity
@@ -270,6 +271,28 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
 
         self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
         self.assertTrue(all(unit.diagnostics[0].code == "device.derived_slug_collision" for unit in units))
+
+    def test_normalized_manufacturer_mappings_make_a_shared_slug_explicit(self):
+        """Escaped source labels remain explicit when collision detection checks their normalized rows."""
+        ManufacturerMapping.objects.create(
+            profile=self.profile,
+            source_make=r"Acme\u0021",
+            netbox_manufacturer_slug="acme",
+        )
+        ManufacturerMapping.objects.create(
+            profile=self.profile,
+            source_make=r"Acme\u003f",
+            netbox_manufacturer_slug="acme",
+        )
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", make="Acme!", model="Widget One"),
+            self._row(3, "D-2", "srv-02", make="Acme?", model="Widget Two"),
+        )
+
+        self.assertFalse(
+            any(diagnostic.code == "device.derived_slug_collision" for unit in units for diagnostic in unit.diagnostics)
+        )
 
     def test_a_rack_the_row_names_but_netbox_does_not_have_is_blocked(self):
         """A device row cannot create the rack it is placed in."""

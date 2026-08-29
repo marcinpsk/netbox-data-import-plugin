@@ -90,6 +90,8 @@ class ImportJobRunner(JobRunner):
                 job=self.job,
                 progress_callback=publish_progress,
             )
+        except ImportProfile.DoesNotExist:
+            self._fail("The import profile is no longer available.")
         except (
             DatabaseError,
             ObjectPermissionDenied,

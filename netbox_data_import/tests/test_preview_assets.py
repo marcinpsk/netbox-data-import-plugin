@@ -372,13 +372,14 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
     def test_an_error_row_is_not_called_a_match(self):
         """An error row is never compared against NetBox, so the summary cannot claim a match."""
 
-        def blank_the_server_name(rows):
-            # The Cabinet row creates the rack, so only a device row can miss a device name.
-            target = next(row for row in rows if row.get("device_class") == "Server")
-            target["device_name"] = ""
-            target["asset_tag"] = ""
+        def blank_the_server_name(worksheet):
+            """Remove both Device identity values from the Server row."""
+            headings = {cell.value: cell.column for cell in worksheet[1]}
+            target = next(row for row in worksheet.iter_rows(min_row=2) if row[headings["Class"] - 1].value == "Server")
+            target[headings["Name"] - 1].value = None
+            target[headings["Asset Tag"] - 1].value = None
 
-        self._setup_session(mutate_rows=blank_the_server_name)
+        self._setup_session(mutate_workbook=blank_the_server_name)
         action, detail = self._detail_for(lambda row: row.action == "error")
         self.assertEqual(action, "error")
         self.assertNotIn(self.MATCH_MESSAGE, detail)
@@ -426,15 +427,16 @@ class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
         """Give two workbook rows one serial and render the preview."""
         row_numbers = []
 
-        def share_serial(rows):
+        def share_serial(worksheet):
             """Put one serial on the first two source Device rows."""
-            devices = [row for row in rows if row.get("serial")][:2]
+            headings = {cell.value: cell.column for cell in worksheet[1]}
+            devices = [row for row in worksheet.iter_rows(min_row=2) if row[headings["Serial Number"] - 1].value][:2]
             self.assertEqual(len(devices), 2, "the sample workbook must carry two device rows")
             for row in devices:
-                row["serial"] = "SHARED-PREVIEW-SERIAL"
-                row_numbers.append(row["_row_number"])
+                row[headings["Serial Number"] - 1].value = "SHARED-PREVIEW-SERIAL"
+                row_numbers.append(row[0].row)
 
-        self._setup_session(mutate_rows=share_serial)
+        self._setup_session(mutate_workbook=share_serial)
         html = self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
         return row_numbers, html
 

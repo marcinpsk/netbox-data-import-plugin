@@ -5,7 +5,6 @@
 import datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
@@ -297,17 +296,24 @@ class TargetModuleDatabaseEdgeTest(TestCase):
 
     def test_ip_assignment_updates_a_device_field_for_an_address_it_already_holds(self):
         """An already-held address moves the Device field without creating an IPAddress."""
-        held = SimpleNamespace(pk=17)
-        target = SimpleNamespace(already_held=True, held=held)
-        device = SimpleNamespace(primary_ip4_id=None, primary_ip4=None, saved=[])
-        device.save = lambda **kwargs: device.saved.append(kwargs["update_fields"])
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
 
-        with patch("netbox_data_import.target_modules.ip_assignment.resolve", return_value=target):
-            unassigned = _assign_ips(device, {"primary_ip4": "198.18.0.20/32"}, self.actor)
+        device = Device.objects.create(
+            name="target-edge-held-address",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        interface = Interface.objects.create(device=device, name="mgmt", type="1000base-t")
+        held = IPAddress.objects.create(address="198.18.0.20/32", assigned_object=interface)
+
+        unassigned = _assign_ips(device, {"primary_ip4": "198.18.0.20/32"}, self.actor)
 
         self.assertEqual(unassigned, {})
-        self.assertEqual(device.primary_ip4, held)
-        self.assertEqual(device.saved, [["primary_ip4"]])
+        device.refresh_from_db()
+        self.assertEqual(device.primary_ip4_id, held.pk)
+        self.assertEqual(IPAddress.objects.filter(address="198.18.0.20/32").count(), 1)
 
     def test_rack_create_refuses_a_late_duplicate(self):
         """A Rack created after planning invalidates the create precondition."""

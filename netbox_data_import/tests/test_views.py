@@ -497,18 +497,13 @@ class ImportSetupViewTest(BaseViewTestCase):
 class PreviewSessionMixin:
     """Build the preview session state without dragging another class's test methods along."""
 
-    def _setup_session(self, *, mutate_rows=None):
-        """Populate session with a valid import state.
-
-        `mutate_rows` edits the parsed rows so a caller can preview a state the workbook lacks.
-        """
+    def _setup_session(self, *, mutate_workbook=None):
+        """Populate session with a valid import state."""
         from dcim.models import Site
-        from netbox_data_import import adapter_config, adapters, catalog, target_modules
-        from netbox_data_import.adapters import SourceBatch
+        from openpyxl import load_workbook
+
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument
-        from netbox_data_import.netbox_reader import NetBoxReader
-        from netbox_data_import.plan import ImportPlan
         from netbox_data_import.preview_row_actions import (
             PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
             record_recalculated_preview,
@@ -519,6 +514,13 @@ class PreviewSessionMixin:
         profile = _make_profile("PreviewProfile")
         with open(FIXTURE_PATH, "rb") as f:
             content = f.read()
+        if mutate_workbook is not None:
+            workbook = load_workbook(BytesIO(content))
+            worksheet = workbook["Data"]
+            mutate_workbook(worksheet)
+            output = BytesIO()
+            workbook.save(output)
+            content = output.getvalue()
         document = SourceDocument.store(
             profile=profile,
             content=content,
@@ -526,38 +528,7 @@ class PreviewSessionMixin:
             uploaded_by=self.user,
         )
         planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
-        if mutate_rows is None:
-            plan = ImportEngine.plan(profile, document, self.user, planning_context)
-        else:
-            adapter = adapters.get_adapter(profile.source_adapter)
-            self.assertIsNotNone(adapter)
-            batch = adapter.interpret(
-                content,
-                adapter_config.interpreter_config_for(profile),
-                collect_unused=True,
-            )
-            rows = list(batch.rows)
-            mutate_rows(rows)
-            batch = SourceBatch(
-                output_kinds=batch.output_kinds,
-                rows=tuple(rows),
-                diagnostics=batch.diagnostics,
-                unused_columns=batch.unused_columns,
-            )
-            reader = NetBoxReader.for_actor(self.user).for_planning_context(planning_context)
-            units = []
-            for declaration in catalog.TARGET_MODULES:
-                if declaration.consumes & batch.output_kinds:
-                    units.extend(
-                        target_modules.runtime_for(declaration.key).plan(batch, profile, catalog.CATALOG, reader)
-                    )
-            plan = ImportPlan(
-                units=tuple(units),
-                source_fingerprint=document.content_fingerprint,
-                profile_fingerprint=profile.planning_fingerprint,
-                actor=str(self.user.pk),
-                planning_context=planning_context,
-            )
+        plan = ImportEngine.plan(profile, document, self.user, planning_context)
         workspace = ReviewWorkspace(plan)
 
         session = self.client.session
@@ -572,10 +543,7 @@ class PreviewSessionMixin:
             "source_document_id": document.pk,
         }
         session["import_preview_pending"] = True
-        if mutate_rows is not None:
-            session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
-        else:
-            session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
+        session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
         session.save()
         return profile
 

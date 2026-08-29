@@ -169,8 +169,8 @@ def interpret(content: bytes, config: FlatWorkbookConfig, *, collect_unused: boo
         if all(value is None for value in raw_row):
             continue
         row = _merge_row_values(row_number, raw_row, headers, config.column_map)
-        promote_extra_json_fields(row)
         _apply_transform_rules(row, raw_row, headers, config.transform_rules)
+        promote_extra_json_fields(row)
         if collect_unused or config.capture_extra_data:
             extra = _collect_unmapped_values(
                 raw_row, headers, unmapped_columns, unused_stats, collect_unused, config.capture_extra_data
