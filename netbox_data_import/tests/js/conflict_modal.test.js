@@ -137,12 +137,12 @@ describe("conflict modal", () => {
     expect(currentButtons.every((button) => button.textContent === "Use this")).toBe(true);
   });
 
-  it("does not apply an earlier failure to a newly submitted conflict", async () => {
-    const requests = [];
-    window.ndiPostPreviewAction.mockImplementation(
+  it("does not apply an earlier failure to a newly opened conflict", async () => {
+    let rejectRequest;
+    window.ndiPostPreviewAction.mockImplementationOnce(
       () =>
-        new Promise((resolvePending, rejectPending) => {
-          requests.push({ resolvePending, rejectPending });
+        new Promise((_resolvePending, rejectPending) => {
+          rejectRequest = rejectPending;
         }),
     );
 
@@ -157,14 +157,43 @@ describe("conflict modal", () => {
     const currentButtons = buttons();
     currentButtons[0].click();
 
-    expect(window.ndiPostPreviewAction).toHaveBeenCalledTimes(2);
-    requests[0].rejectPending(new Error("Earlier save failed."));
-    await Promise.resolve();
-
+    expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce();
     expect(currentButtons.every((button) => button.disabled)).toBe(true);
-    expect(currentButtons[0].textContent).toMatch(/saving/i);
+    rejectRequest(new Error("Earlier save failed."));
+    await vi.waitFor(() =>
+      expect(currentButtons.every((button) => !button.disabled)).toBe(true),
+    );
 
-    requests[1].resolvePending({ message: "Saved." });
+    expect(currentButtons.every((button) => button.textContent === "Use this")).toBe(true);
+    expect(currentButtons.every((button) => button.title === "")).toBe(true);
+  });
+
+  it("does not submit the same conflict twice while its save is pending", async () => {
+    let resolveRequest;
+    window.ndiPostPreviewAction.mockImplementationOnce(
+      () =>
+        new Promise((resolvePending) => {
+          resolveRequest = resolvePending;
+        }),
+    );
+
+    buttons()[1].click();
+    document
+      .getElementById("conflictModal")
+      .dispatchEvent(
+        Object.assign(new Event("show.bs.modal"), {
+          relatedTarget: document.getElementById("trigger"),
+        }),
+      );
+    const reopenedButtons = buttons();
+
+    reopenedButtons[0].click();
+
+    expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce();
+    expect(reopenedButtons.every((button) => button.disabled)).toBe(true);
+
+    resolveRequest({ message: "Saved." });
     await vi.waitFor(() => expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce());
+    expect(reopenedButtons.every((button) => !button.disabled)).toBe(true);
   });
 });
