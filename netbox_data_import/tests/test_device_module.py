@@ -11,6 +11,7 @@ from django.test import TestCase
 
 from netbox_data_import.adapters import SourceBatch
 from netbox_data_import.catalog import OutputKind
+from netbox_data_import.device_identity import DeviceTypeIdentityResolver
 from netbox_data_import.models import (
     ClassRoleMapping,
     DeviceExistingMatch,
@@ -317,6 +318,22 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
         units = self._plan(self._row(2, "D-1", "srv-01"))
 
         self.assertEqual(units[0].changes[-1].payload["device_type_id"], mapped_type.pk)
+
+    def test_device_type_resolver_normalizes_both_sides_of_make_lookup(self):
+        """The resolver owns whitespace normalization for direct callers too."""
+        DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="Dell  EMC",
+            source_model=r"R\u0036\u0036\u0030",
+            netbox_manufacturer_slug="mapped-make",
+            netbox_device_type_slug="mapped-type",
+        )
+        resolver = DeviceTypeIdentityResolver.for_profile(self.profile)
+
+        self.assertEqual(
+            resolver.resolve("Dell  EMC", "R660"),
+            ("mapped-make", "mapped-type", True),
+        )
 
     def test_a_rack_the_row_names_but_netbox_does_not_have_is_blocked(self):
         """A device row cannot create the rack it is placed in."""

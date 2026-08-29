@@ -51,13 +51,15 @@ class DeviceTypeIdentityResolver:
 
     def resolve(self, make: str, model: str) -> tuple[str, str, bool]:
         """Return manufacturer slug, Device Type slug, and explicit status."""
+        normalized_make = normalize_mapping_text(make)
+        normalized_model = normalize_mapping_text(model)
         mapping = self._device_types_exact.get((make, model))
         if mapping is None:
             mapping = next(
                 (
                     candidate
-                    for candidate in self._device_types_by_make.get(make.lower(), ())
-                    if normalize_mapping_text(candidate.source_model) == model
+                    for candidate in self._device_types_by_make.get(normalized_make.lower(), ())
+                    if normalize_mapping_text(candidate.source_model) == normalized_model
                 ),
                 None,
             )
@@ -70,14 +72,16 @@ class DeviceTypeIdentityResolver:
                 (
                     candidate
                     for candidate in self.manufacturer_mappings
-                    if normalize_mapping_text(candidate.source_make) == make
+                    if normalize_mapping_text(candidate.source_make) == normalized_make
                 ),
                 None,
             )
         manufacturer_slug = (
-            manufacturer_mapping.netbox_manufacturer_slug if manufacturer_mapping is not None else slugify(make)[:50]
+            manufacturer_mapping.netbox_manufacturer_slug
+            if manufacturer_mapping is not None
+            else slugify(normalized_make)[:50]
         )
-        return manufacturer_slug, slugify(f"{make}-{model}")[:50], False
+        return manufacturer_slug, slugify(f"{normalized_make}-{normalized_model}")[:50], False
 
 
 __all__ = ("DeviceTypeIdentityResolver", "normalize_mapping_text")
