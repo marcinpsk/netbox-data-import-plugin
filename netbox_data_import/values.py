@@ -47,15 +47,19 @@ def comparison_key(target_field: str, value) -> str:
     return "" if value is None else str(value).strip()
 
 
-STATUS_MAP: dict[str, str] = {
-    "live": "active",
-    "production": "active",
-    "planned": "planned",
-    "staged": "staged",
-    "failed": "failed",
-    "offline": "offline",
-    "decommissioning": "decommissioning",
-}
+def status_map() -> dict[str, str]:
+    """Return the source words that name a NetBox device status, taken from NetBox's own choices."""
+    from dcim.choices import DeviceStatusChoices
+
+    return {
+        "live": DeviceStatusChoices.STATUS_ACTIVE,
+        "production": DeviceStatusChoices.STATUS_ACTIVE,
+        "planned": DeviceStatusChoices.STATUS_PLANNED,
+        "staged": DeviceStatusChoices.STATUS_STAGED,
+        "failed": DeviceStatusChoices.STATUS_FAILED,
+        "offline": DeviceStatusChoices.STATUS_OFFLINE,
+        "decommissioning": DeviceStatusChoices.STATUS_DECOMMISSIONING,
+    }
 
 
 def translation_maps():
@@ -72,14 +76,14 @@ def translation_maps():
         "back to front": DeviceAirflowChoices.AIRFLOW_REAR_TO_FRONT,
         "passive": DeviceAirflowChoices.AIRFLOW_PASSIVE,
     }
-    return side, airflow, STATUS_MAP
+    return side, airflow, status_map()
 
 
 __all__ = (
     "NUMERIC_TARGET_FIELDS",
-    "STATUS_MAP",
     "comparison_key",
     "source_text",
+    "status_map",
     "normalize_for_compare",
     "translation_maps",
 )

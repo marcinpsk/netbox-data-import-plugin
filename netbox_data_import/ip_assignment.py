@@ -118,7 +118,8 @@ def already_assigned(device, field, address) -> bool:
     if current is None:
         return False
     try:
-        if ipaddress.ip_interface(str(current.address)) != ipaddress.ip_interface(str(address)):
+        # `held_by_device` matches on the host, so a stored mask that differs is still settled.
+        if _host(current.address) != _host(address):
             return False
     except ValueError:
         return False

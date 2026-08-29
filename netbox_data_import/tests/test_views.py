@@ -4070,6 +4070,16 @@ class SyncDeviceFieldViewTests(TestCase):
         self.device.refresh_from_db()
         self.assertEqual(self.device.status, "active")
 
+    def test_sync_status_translates_a_source_word(self):
+        """The view takes the same source-word table the import does, so an alias resolves."""
+        from dcim.choices import DeviceStatusChoices
+
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "status", "value": "live"})
+
+        self.assertTrue(response.json()["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.status, DeviceStatusChoices.STATUS_ACTIVE)
+
     def test_sync_u_height(self):
         """u_height is not in _ALLOWED_FIELDS → ok=False with 'not syncable' error."""
         response = self.client.post(self.url, {"device_id": self.device.pk, "field": "u_height", "value": "2"})

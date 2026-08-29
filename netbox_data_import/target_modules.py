@@ -115,17 +115,25 @@ def _coerce_height(value) -> int:
         return DEFAULT_RACK_HEIGHT
 
 
+def rack_row_name(row) -> str:
+    """Return the rack name one rack row carries."""
+    return _text(row.get("rack_name")) or _text(row.get("device_name"))
+
+
 def rack_unit_identity(row) -> str:
     """Return the stable Synchronization Unit identity for one rack row."""
     source_id = _text(row.get("source_id"))
     if source_id:
         return f"rack:source:{source_id}"
-    return f"rack:name:{_identity_text(row.get('rack_name'))}"
+    return f"rack:name:{_identity_text(rack_row_name(row))}"
 
 
-def rack_row_name(row) -> str:
-    """Return the rack name one rack row carries."""
-    return _text(row.get("rack_name")) or _text(row.get("device_name"))
+def rack_duplicate_keys(rows) -> tuple[frozenset[str], frozenset[str]]:
+    """Return the rack names and source IDs more than one row in this batch claims."""
+    return (
+        _repeated(_identity_text(rack_row_name(row)) for row in rows),
+        _repeated(_text(row.get("source_id")) for row in rows),
+    )
 
 
 def rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) -> tuple[str, dict] | None:
@@ -159,8 +167,7 @@ class RackModule:
         if not rows:
             return []
         ignored = _ignored_source_ids(profile)
-        duplicate_names = _repeated(_identity_text(row.get("rack_name")) or "" for row in rows)
-        duplicate_source_ids = _repeated(_text(row.get("source_id")) for row in rows)
+        duplicate_names, duplicate_source_ids = rack_duplicate_keys(rows)
         existing = self._existing_by_name(netbox_reader)
         return [
             self._unit(row, netbox_reader, ignored, duplicate_names, duplicate_source_ids, existing) for row in rows
@@ -219,7 +226,8 @@ class RackModule:
                 changes=(self._change(identity, "create", name, height, serial, netbox_reader, None),),
             )
 
-        if not self._differs(rack, height, serial):
+        tenant_id = netbox_reader.tenant.pk if netbox_reader.tenant is not None else None
+        if not self._differs(rack, height, serial, tenant_id):
             return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP)
         return SynchronizationUnit(
             identity=identity,
@@ -260,9 +268,12 @@ class RackModule:
         return rack
 
     @staticmethod
-    def _differs(rack, height: int, serial: str) -> bool:
+    def _differs(rack, height: int, serial: str, tenant_id=None) -> bool:
         """Return whether the stored rack already matches what the row asks for."""
         if normalize_for_compare(rack.u_height) != normalize_for_compare(height):
+            return True
+        # The write assigns the target tenant whenever the import names one.
+        if tenant_id is not None and rack.tenant_id != tenant_id:
             return True
         return bool(serial) and _text(rack.serial) != serial
 
@@ -582,8 +593,7 @@ class _DeviceBatch:
         """Return valid rack creates in this batch, keyed by comparison name."""
         rows = RackModule._rack_rows(source_batch, profile)
         ignored = _ignored_source_ids(profile)
-        duplicate_names = _repeated(_identity_text(row.get("rack_name")) or "" for row in rows)
-        duplicate_source_ids = _repeated(_text(row.get("source_id")) for row in rows)
+        duplicate_names, duplicate_source_ids = rack_duplicate_keys(rows)
         planned = {}
         for row in rows:
             if rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) is not None:
@@ -1064,6 +1074,7 @@ __all__ = (
     "PreconditionFailed",
     "RackModule",
     "TargetModuleRuntime",
+    "rack_duplicate_keys",
     "rack_row_name",
     "rack_row_rejection",
     "rack_unit_identity",

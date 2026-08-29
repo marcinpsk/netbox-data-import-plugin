@@ -156,7 +156,7 @@ class Diagnostic:
 
     def __post_init__(self):
         """Validate the code namespace and the severity vocabulary."""
-        if not _DIAGNOSTIC_CODE.match(self.code or ""):
+        if not _DIAGNOSTIC_CODE.match(_plan_text(self.code, "Diagnostic code")):
             raise PlanInvalid(f"Diagnostic code '{self.code}' must use the '<domain>.<condition>' form.")
         if self.severity not in Severity.ALL:
             raise PlanInvalid(f"Unknown diagnostic severity '{self.severity}'.")
@@ -368,11 +368,16 @@ class ImportPlan:
         return fingerprint_of(self.fingerprint_data)
 
     def unit(self, identity: str) -> SynchronizationUnit | None:
-        """Return the unit stored under *identity*, or None."""
-        for unit in self.units:
-            if unit.identity == identity:
-                return unit
-        return None
+        """Return the unit stored under *identity*, or None.
+
+        The index is built once. Resolving every unit is what the Review Workspace and a selective
+        execution both do, and a scan for each of them is quadratic over a workbook-scale plan.
+        """
+        index = self.__dict__.get("_unit_index")
+        if index is None:
+            index = {unit.identity: unit for unit in self.units}
+            object.__setattr__(self, "_unit_index", index)
+        return index.get(identity)
 
     def unit_fingerprint(self, identity: str) -> str:
         """Return one unit's decision inputs plus the context shared by every unit."""

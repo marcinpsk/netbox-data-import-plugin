@@ -32,7 +32,7 @@ from .forms import (
     ImportSetupForm,
 )
 from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
-from .values import normalize_for_compare, translation_maps
+from .values import normalize_for_compare, status_map, translation_maps
 from . import __version__ as _plugin_version
 from .models import (
     locked_profile_policy,
@@ -2208,7 +2208,6 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         from django.http import JsonResponse
 
         from dcim.models import Device
-        from .values import STATUS_MAP
 
         field = request.POST.get("field", "")
 
@@ -2232,7 +2231,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         try:
             # Nothing wraps this request, and a receiver on the model can require a transaction.
             with transaction.atomic():
-                display = self._apply_field(device, field, value, STATUS_MAP, request.user)
+                display = self._apply_field(device, field, value, status_map(), request.user)
         except ValueError as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:

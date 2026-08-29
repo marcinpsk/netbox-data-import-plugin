@@ -814,7 +814,7 @@ class ApplyTransformRulesTest(TestCase):
         book.save(buffer)
         buffer.seek(0)
 
-        with self.assertRaises(ParseError):
+        with self.assertRaisesRegex(ParseError, "Invalid regex pattern"):
             parse_file(buffer, self.profile)
 
 

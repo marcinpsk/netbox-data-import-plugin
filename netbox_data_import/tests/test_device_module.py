@@ -1175,6 +1175,7 @@ class DeviceModuleTargetStateIsWorkTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
         self.assertEqual(units[0].changes[0].payload["location_id"], location.pk)
+        device.refresh_from_db()
         self.assertIsNone(device.location_id)
 
     def test_a_device_the_target_location_already_holds_is_a_no_op(self):

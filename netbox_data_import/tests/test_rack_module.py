@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""The Rack Target Module turns rack source rows into Synchronization Units.
-
-Every branch the current rack pass reports as a row action maps onto exactly one disposition from
-section 4.2, so these tests are the mapping written down.
-"""
+"""Verify that every rack row action maps to one section 4.2 disposition."""
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -17,8 +13,8 @@ from netbox_data_import.plan import Disposition
 from netbox_data_import.target_modules import ExecutionContext, PreconditionFailed, RackModule
 
 
-class RackModulePlanTest(TestCase):
-    """One rack row in, one Synchronization Unit out, with the disposition its state earns."""
+class RackModulePlanTestBase(TestCase):
+    """Provide the target state and source-row helpers for rack planning tests."""
 
     def setUp(self):
         """A site, a rack-creating class, and a profile that maps to it."""
@@ -50,6 +46,10 @@ class RackModulePlanTest(TestCase):
 
     def _plan(self, *rows):
         return RackModule().plan(self._batch(*rows), self.profile, None, self.reader)
+
+
+class RackModulePlanTest(RackModulePlanTestBase):
+    """One rack row in, one Synchronization Unit out, with the disposition its state earns."""
 
     def test_a_new_rack_is_actionable_and_carries_one_change(self):
         """The row names a rack the site does not have, so the unit has work to do."""
@@ -345,3 +345,39 @@ class RackModuleEdgeTest(TestCase):
 
         self.assertEqual(units[0].changes[0].operation, "update")
         self.assertEqual(units[0].changes[0].payload["serial"], "NEW")
+
+
+class RackModuleReviewFindingTest(RackModulePlanTestBase):
+    """Two defects a review found: the duplicate-name key, and the tenant the write assigns."""
+
+    def test_two_rows_naming_one_rack_through_device_name_are_both_refused(self):
+        """The duplicate check reads the same name the unit takes, so the fallback counts too."""
+        units = self._plan(
+            {"_row_number": 2, "source_id": "", "device_class": "Cabinet", "device_name": "fallback-rack"},
+            {"_row_number": 3, "source_id": "", "device_class": "Cabinet", "device_name": "fallback-rack"},
+        )
+
+        self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
+        self.assertEqual(units[0].diagnostics[0].code, "rack.duplicate_name")
+
+    def test_a_rack_in_another_tenant_is_work(self):
+        """The write assigns the target tenant, so a rack outside it is not a no-op."""
+        from dcim.models import Rack
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Rack Tenant", slug="rack-tenant")
+        Rack.objects.create(name="tenant-rack", site=self.site, u_height=42)
+        self.reader = NetBoxReader.unrestricted().for_target(site=self.site, tenant=tenant)
+
+        units = self._plan(
+            {
+                "_row_number": 2,
+                "source_id": "R-T",
+                "device_class": "Cabinet",
+                "rack_name": "tenant-rack",
+                "u_height": 42,
+            }
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+        self.assertEqual(units[0].changes[0].payload["tenant_id"], tenant.pk)
