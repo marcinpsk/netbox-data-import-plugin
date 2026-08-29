@@ -7,6 +7,7 @@ from django.test import TransactionTestCase
 from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
 from netbox_data_import.netbox_reader import PlanningTargetUnavailable
 from netbox_data_import.models import ExecutionOutcome, IgnoredDevice, ImportExecution, SourceDocument
+from netbox_data_import.plan import Disposition
 from netbox_data_import.target_modules import PreconditionFailed
 from netbox_data_import.tests.test_import_engine import ImportEngineTestDataMixin, _workbook
 
@@ -95,6 +96,11 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
             device_type=self.device_type,
             role=self.role,
         )
+        self.profile.device_matches.create(
+            source_id="D-1",
+            netbox_device_id=stored.pk,
+            device_name=stored.name,
+        )
         document = SourceDocument.store(
             profile=self.profile,
             content=_workbook(
@@ -124,6 +130,7 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         rack_unit = accepted.unit("rack:source:R-NEW")
         device_unit = accepted.unit("device:source:D-1")
         later_unit = accepted.unit("device:source:D-2")
+        self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE)
 
         def delete_matched_device(sender, instance, created, **kwargs):
             if created and instance.name == "new-rack":

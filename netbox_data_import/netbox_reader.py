@@ -91,11 +91,7 @@ class NetBoxReader:
 
     @classmethod
     def for_optional_actor(cls, actor) -> NetBoxReader:
-        """Return a scoped reader, or an unrestricted one when the caller has no actor.
-
-        `run_import` still accepts no actor, so this names that boundary in one place instead of
-        repeating the decision at each read.
-        """
+        """Return a scoped reader, or an unrestricted one for an explicit system caller."""
         return cls.unrestricted() if actor is None else cls.for_actor(actor)
 
     @property

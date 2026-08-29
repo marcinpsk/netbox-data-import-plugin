@@ -2,22 +2,15 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The session keeps pristine parsed rows, so a replayed resolution can express a removal."""
 
-import uuid
-
 from threading import Event
 
 from django.contrib.auth import get_user_model
-from django.db.models.signals import post_save
 from django.db.utils import OperationalError
 from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
+from netbox_data_import.models import ColumnMapping, ImportProfile, SourceResolution
 from netbox_data_import.tests.helpers import run_on_separate_connection
-from netbox_data_import.views import _serialize_rows
-
-SOURCE_ID = "PRISTINE-1"
-PRISTINE_NAME = "TAG-1 - server-a"
 
 
 def _build_profile(name):
@@ -37,157 +30,8 @@ def _seen(responses):
     return f"responses={[(r.status_code, r.content[:200]) for r in responses]}"
 
 
-def _pristine_rows():
-    """Return the rows exactly as the parser produced them, with no resolution applied."""
-    return [
-        {
-            "_row_number": 2,
-            "source_id": SOURCE_ID,
-            "device_name": PRISTINE_NAME,
-            "asset_tag": "",
-            "device_class": "Server",
-            "make": "PristineMfg",
-            "model": "PristineModel",
-        }
-    ]
-
-
-class PristinePreviewRowMixin:
-    """Shared setup that drives the real preview view over a seeded session."""
-
-    def build_world(self):
-        """Create the user, site, role mapping, profile, and seed the preview session."""
-        from dcim.models import DeviceRole, Site
-
-        self.user = get_user_model().objects.create_superuser("pristine-user", "p@example.invalid", "testpass")
-        self.client = Client()
-        self.client.force_login(self.user)
-        self.site = Site.objects.create(name="Pristine Site", slug="pristine-site")
-        self.role = DeviceRole.objects.create(name="Pristine Role", slug="pristine-role")
-        self.profile = _build_profile("Pristine Profile")
-        ClassRoleMapping.objects.create(profile=self.profile, source_class="Server", role_slug=self.role.slug)
-
-        session = self.client.session
-        session["import_rows"] = _serialize_rows(_pristine_rows())
-        session["import_context"] = {
-            "profile_id": self.profile.pk,
-            "site_id": self.site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "pristine.xlsx",
-        }
-        session["import_preview_pending"] = True
-        session.save()
-
-    def open_preview(self):
-        """Render the preview the way the browser does."""
-        return self.client.get(reverse("plugins:netbox_data_import:import_preview"))
-
-    def save_split(self, resolved_fields):
-        """Create or replace the saved split resolution for the one source row."""
-        resolution, _ = SourceResolution.objects.update_or_create(
-            profile=self.profile,
-            source_id=SOURCE_ID,
-            source_column="device_name",
-            defaults={"original_value": PRISTINE_NAME, "resolved_fields": resolved_fields},
-        )
-        return resolution
-
-    def run_the_worker(self):
-        """Execute the queued import through the real job runner."""
-        from core.models import Job
-
-        from netbox_data_import.jobs import ImportJobRunner
-
-        session = self.client.session
-        job = Job.objects.create(
-            name="Data Import",
-            user=self.user,
-            status="pending",
-            job_id=uuid.uuid4(),
-            queue_name="default",
-            data={"job_type": ImportJobRunner.job_type},
-        )
-        ImportJobRunner(job).run(session["import_rows"], session["import_context"], session["import_result"])
-        return job
-
-
-class DroppedResolutionFieldTest(PristinePreviewRowMixin, TestCase):
-    """Editing a resolution to drop a target field must clear that field."""
-
-    def setUp(self):
-        """Build the world and take the first preview."""
-        self.build_world()
-        self.open_preview()
-
-    def test_the_session_keeps_the_pristine_parsed_row(self):
-        """A replayed resolution must never be written back into import_rows."""
-        self.save_split({"asset_tag": "TAG-1", "device_name": "server-a"})
-        self.open_preview()
-
-        [stored] = self.client.session["import_rows"]
-        self.assertEqual(stored["device_name"], PRISTINE_NAME)
-        self.assertEqual(stored["asset_tag"], "")
-
-    def test_dropping_the_tag_from_a_resolution_stops_importing_it(self):
-        """The operator re-splits and ignores the tag, so the imported device carries no asset tag."""
-        from dcim.models import Device
-
-        self.save_split({"asset_tag": "TAG-1", "device_name": "server-a"})
-        self.open_preview()
-
-        # The operator reopens the split modal and this time ignores the tag.
-        self.save_split({"device_name": "server-a"})
-        self.open_preview()
-
-        self.run_the_worker()
-        device = Device.objects.get(name="server-a")
-        self.assertEqual(device.asset_tag or "", "")
-
-
-class ResolutionCommittedAfterValidationTest(PristinePreviewRowMixin, TransactionTestCase):
-    """A resolution that commits after the worker's validation read must not reach execution."""
-
-    def setUp(self):
-        """Build the world, save a first decision, and take the preview the operator approves."""
-        self.build_world()
-        self.open_preview()
-        self.save_split({"asset_tag": "TAG-1", "device_name": "server-a"})
-        self.open_preview()
-
-    def test_a_save_committed_after_the_validation_read_is_refused(self):
-        """Read-committed does not wait for the open save, so the worker must re-read before it writes."""
-        from core.exceptions import JobFailed
-        from core.models import Job
-
-        from dcim.models import Device
-
-        def supersede_the_decision(sender, instance, **kwargs):
-            """Commit an edited resolution once the worker reaches its validating phase."""
-            if (instance.data or {}).get("phase") != "validating":
-                return
-            post_save.disconnect(supersede_the_decision, sender=Job)
-
-            def write_it():
-                SourceResolution.objects.filter(
-                    profile_id=self.profile.pk, source_id=SOURCE_ID, source_column="device_name"
-                ).update(resolved_fields={"device_name": "server-a-renamed"})
-
-            with run_on_separate_connection(write_it):
-                pass
-
-        post_save.connect(supersede_the_decision, sender=Job, weak=False)
-        self.addCleanup(post_save.disconnect, supersede_the_decision, sender=Job)
-
-        with self.assertRaises(JobFailed):
-            self.run_the_worker()
-
-        self.assertFalse(Device.objects.filter(name="server-a").exists())
-        self.assertFalse(Device.objects.filter(name="server-a-renamed").exists())
-
-
-class UploadStoresPristineRowsTest(TestCase):
-    """The real upload path must store pristine rows, not the parser's resolved output."""
+class UploadStoresPristineSourceTest(TestCase):
+    """The real upload path keeps the source bytes independent from saved resolutions."""
 
     def setUp(self):
         """Authenticate and create a profile that already carries a saved resolution."""
@@ -210,16 +54,19 @@ class UploadStoresPristineRowsTest(TestCase):
         }.items():
             ColumnMapping.objects.create(profile=self.profile, source_column=source_column, target_field=target_field)
 
-    def test_a_resolution_saved_before_upload_is_not_baked_into_the_session(self):
-        """`parse_file` used to apply resolutions, which made every uploaded row effective."""
+    def test_a_resolution_saved_before_upload_is_not_baked_into_the_source(self):
+        """Replanning can change effective rows without modifying the stored upload."""
         import os
 
-        from netbox_data_import.engine import parse_file
+        from netbox_data_import.adapters import FlatWorkbookAdapter
+        from netbox_data_import.adapter_config import interpreter_config_for
         from netbox_data_import.models import SourceResolution
 
         fixture = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
         with open(fixture, "rb") as handle:
-            first_source_id = str(parse_file(handle, self.profile)[0].get("source_id", ""))
+            original = handle.read()
+        batch = FlatWorkbookAdapter.interpret(original, interpreter_config_for(self.profile))
+        first_source_id = str(batch.rows[0].get("source_id", ""))
         self.assertTrue(first_source_id)
 
         SourceResolution.objects.create(
@@ -236,9 +83,10 @@ class UploadStoresPristineRowsTest(TestCase):
                 {"profile": self.profile.pk, "site": self.site.pk, "excel_file": handle},
             )
 
-        stored = self.client.session.get("import_rows") or []
-        self.assertTrue(stored)
-        self.assertEqual([r for r in stored if r.get("device_name") == "baked-by-parse-file"], [])
+        from netbox_data_import.models import SourceDocument
+
+        stored = SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"])
+        self.assertEqual(bytes(stored.content), original)
 
 
 class PolicyWriteSerializationTest(TransactionTestCase):
@@ -378,46 +226,6 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         self.assertEqual(response.status_code, 200, response.content)
         resolution.refresh_from_db()
         self.assertEqual(resolution.resolved_fields, {"device_name": "second-decision"})
-
-
-class ProfileVanishedBeforeTheJobLockTest(PristinePreviewRowMixin, TransactionTestCase):
-    """A profile deleted before the worker's policy lock is a job failure, not a traceback."""
-
-    def setUp(self):
-        """Build the world and take the preview the operator approves."""
-        self.build_world()
-        self.open_preview()
-
-    def test_the_job_reports_the_missing_profile(self):
-        """Every other missing dependency ends in _fail, so this one owes the same report."""
-        from core.exceptions import JobFailed
-        from core.models import Job
-
-        from dcim.models import Device
-        from django.db import connection
-
-        deleted = []
-
-        def delete_the_profile_when_the_lock_runs(execute, sql, params, many, context):
-            # Stand in for a profile deleted between the worker's read and its policy lock.
-            if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
-                deleted.append(True)
-
-                def delete_it():
-                    ImportProfile.objects.get(pk=self.profile.pk).delete()
-
-                with run_on_separate_connection(delete_it):
-                    pass
-            return execute(sql, params, many, context)
-
-        with connection.execute_wrapper(delete_the_profile_when_the_lock_runs):
-            with self.assertRaises(JobFailed):
-                self.run_the_worker()
-
-        self.assertEqual(deleted, [True], "the locking statement never ran")
-        job = Job.objects.get(name="Data Import")
-        self.assertEqual(job.data["message"], "The import profile is no longer available.")
-        self.assertFalse(Device.objects.filter(name="server-a").exists())
 
 
 class ProfileVanishedBeforeTheCreateLockTest(TransactionTestCase):

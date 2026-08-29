@@ -77,7 +77,7 @@ class NetBoxReaderScopeTest(TestCase):
         self.assertEqual(reader.racks().count(), 2)
 
     def test_the_optional_boundary_scopes_an_actor_and_passes_none_through(self):
-        """`run_import` still takes no actor, so that decision is named once rather than repeated."""
+        """An explicit system caller remains the only unrestricted optional boundary."""
         self.assertEqual(NetBoxReader.for_optional_actor(self.actor).devices().count(), 1)
         self.assertEqual(NetBoxReader.for_optional_actor(None).devices().count(), 2)
         self.assertIs(NetBoxReader.for_optional_actor(self.actor).actor, self.actor)

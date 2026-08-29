@@ -9,6 +9,9 @@ holds for what a source word means: `Back` and `Rear` are one NetBox face, where
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
+import math
+
 NUMERIC_TARGET_FIELDS: frozenset[str] = frozenset({"u_position", "u_height"})
 
 # A spreadsheet exports an empty cell as one of these words, and no caller wants the literal text.
@@ -21,6 +24,38 @@ def source_text(value) -> str:
         return ""
     text = str(value).strip()
     return "" if text.lower() in _NONE_LIKE else text
+
+
+def identity_text(value) -> str:
+    """Return the case-insensitive comparison form of a source identity."""
+    return " ".join(source_text(value).split()).casefold()
+
+
+def source_position(value, default=None):
+    """Return a finite rack position without losing half-unit precision."""
+    text = source_text(value)
+    if not text:
+        return default
+    try:
+        position = Decimal(text)
+    except (InvalidOperation, TypeError, ValueError):
+        return default
+    if not position.is_finite() or not math.isfinite(float(position)):
+        return default
+    if position == position.to_integral_value():
+        return int(position)
+    return float(position)
+
+
+def effective_device_name(row) -> str:
+    """Return the imported device name, including the asset-tag fallback."""
+    return source_text(row.get("device_name")) or source_text(row.get("asset_tag"))[:50]
+
+
+def has_below_rack_position(row) -> bool:
+    """Return whether a source row explicitly names a position below rack unit one."""
+    position = source_position(row.get("u_position"))
+    return position is not None and position < 1
 
 
 def normalize_for_compare(value) -> str:
@@ -82,7 +117,11 @@ def translation_maps():
 __all__ = (
     "NUMERIC_TARGET_FIELDS",
     "comparison_key",
+    "effective_device_name",
+    "has_below_rack_position",
+    "identity_text",
     "source_text",
+    "source_position",
     "status_map",
     "normalize_for_compare",
     "translation_maps",

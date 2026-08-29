@@ -106,18 +106,37 @@ class DeviceModuleSelectionTest(DeviceModulePlanTestBase):
         """A class that creates a rack belongs to the Rack module, not this one."""
         self.assertEqual(self._plan(self._row(2, "R-1", "dm-rack", device_class="Cabinet")), [])
 
-    def test_an_unmapped_class_produces_no_unit(self):
-        """A class the profile says nothing about is not this module's row to plan."""
-        self.assertEqual(self._plan(self._row(2, "D-1", "srv-01", device_class="Unmapped")), [])
+    def test_an_unmapped_class_is_invalid(self):
+        """The preview must show a source row whose class has no target policy."""
+        units = self._plan(self._row(2, "D-1", "srv-01", device_class="Unmapped"))
 
-    def test_a_class_the_profile_ignores_produces_no_unit(self):
-        """`ignore` is a policy answer for the whole class, so no unit is owed."""
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.class_unmapped")
+
+    def test_a_class_the_profile_ignores_is_excluded(self):
+        """The explicit class policy stays visible as an excluded unit."""
         ClassRoleMapping.objects.create(profile=self.profile, source_class="Spare", creates_rack=False, ignore=True)
-        self.assertEqual(self._plan(self._row(2, "D-1", "srv-01", device_class="Spare")), [])
+        units = self._plan(self._row(2, "D-1", "srv-01", device_class="Spare"))
+
+        self.assertEqual(units[0].disposition, Disposition.EXCLUDED)
+        self.assertEqual(units[0].diagnostics[0].code, "device.class_ignored")
 
 
 class DeviceModuleIdentityTest(DeviceModulePlanTestBase):
     """A unit needs an identity that survives replanning, and a name to write."""
+
+    def test_an_empty_device_name_falls_back_to_the_asset_tag(self):
+        """The legacy import names an otherwise valid device from its asset tag."""
+        units = self._plan(self._row(2, "D-1", "", asset_tag="AT-FALLBACK"))
+
+        self.assertEqual(units[0].changes[-1].payload["name"], "AT-FALLBACK")
+
+    def test_a_position_below_one_is_a_no_op(self):
+        """Under-rack and blanking-panel rows remain visible but never write a Device."""
+        units = self._plan(self._row(2, "D-1", "srv-01", u_position="0"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP)
+        self.assertEqual(units[0].diagnostics[0].code, "device.below_rack")
 
     def test_a_row_with_no_device_name_is_invalid(self):
         """A device without a name is not something this can create or match."""
@@ -176,14 +195,14 @@ class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):
         self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
         self.assertEqual(units[0].diagnostics[0].code, "device.duplicate_asset_tag")
 
-    def test_a_duplicate_name_does_not_refuse_the_row(self):
-        """Two rows can name one device legitimately, so the name only stops auto-matching."""
+    def test_a_duplicate_name_refuses_both_unmatched_rows(self):
+        """Two creates with one target name cannot both succeed, so neither is executable."""
         self._device("srv-01")
 
         units = self._plan(self._row(2, "D-1", "srv-01"), self._row(3, "D-2", "srv-01"))
 
-        self.assertEqual([unit.disposition for unit in units], [Disposition.ACTIONABLE] * 2)
-        self.assertEqual([unit.changes[0].operation for unit in units], ["create"] * 2)
+        self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
+        self.assertTrue(all(unit.diagnostics[0].code == "device.duplicate_name" for unit in units))
 
     def test_the_diagnostic_names_every_row_the_conflict_involves(self):
         """The operator picks which row gives the value up, so both row numbers have to be there."""
@@ -197,26 +216,48 @@ class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):
 
 
 class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
-    """A device needs a type and a role, and neither is this module's to create."""
+    """The module plans the relation objects the legacy device pass created."""
 
-    def test_a_device_type_netbox_does_not_have_is_blocked(self):
-        """`blocked` is the disposition for an unmet dependency, not `invalid`."""
+    def test_a_missing_device_type_is_an_executable_dependency(self):
+        """The default profile creates the Manufacturer and Device Type before the Device."""
         units = self._plan(self._row(2, "D-1", "srv-01", make="Acme", model="Widget"))
 
-        self.assertEqual(units[0].disposition, Disposition.BLOCKED)
-        self.assertEqual(units[0].diagnostics[0].code, "device.device_type_missing")
-        self.assertEqual(units[0].diagnostics[0].display["dt_slug"], "acme-widget")
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+        self.assertEqual(
+            [change.operation for change in units[0].changes],
+            ["create_manufacturer", "create_device_type", "create"],
+        )
 
-    def test_a_role_netbox_does_not_have_is_blocked(self):
-        """The class maps to a role slug, and the role behind it still has to exist."""
+    def test_a_missing_role_is_an_executable_dependency(self):
+        """The class mapping supplies enough information to create its Device Role."""
         ClassRoleMapping.objects.create(
             profile=self.profile, source_class="Switch", creates_rack=False, role_slug="network-switch"
         )
 
         units = self._plan(self._row(2, "D-1", "sw-01", device_class="Switch"))
 
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+        self.assertEqual([change.operation for change in units[0].changes], ["create_role", "create"])
+
+    def test_disabled_device_type_creation_leaves_the_unit_blocked(self):
+        """The explicit profile policy can require the operator to create or map the type."""
+        self.profile.adapter_config = {**self.profile.adapter_config, "create_missing_device_types": False}
+        self.profile.save(update_fields=["adapter_config"])
+
+        units = self._plan(self._row(2, "D-1", "srv-01", make="Acme", model="Widget"))
+
         self.assertEqual(units[0].disposition, Disposition.BLOCKED)
-        self.assertEqual(units[0].diagnostics[0].code, "device.role_missing")
+        self.assertEqual(units[0].diagnostics[0].code, "device.device_type_missing")
+
+    def test_derived_dependency_slug_collision_refuses_each_source_row(self):
+        """Different source identities cannot silently share one generated dependency identity."""
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", make="Acme!", model="Widget"),
+            self._row(3, "D-2", "srv-02", make="Acme?", model="Widget"),
+        )
+
+        self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
+        self.assertTrue(all(unit.diagnostics[0].code == "device.derived_slug_collision" for unit in units))
 
     def test_a_rack_the_row_names_but_netbox_does_not_have_is_blocked(self):
         """A device row cannot create the rack it is placed in."""
@@ -285,6 +326,17 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].changes[0].operation, "update")
         self.assertEqual(units[0].changes[0].payload["serial"], "NEW")
 
+    def test_update_existing_false_leaves_a_differing_device_alone(self):
+        """The profile policy disables reconciliation of matched Devices."""
+        self._with_provenance(self._device("srv-01", rack=self.rack, serial="OLD"))
+        self.profile.adapter_config = {**self.profile.adapter_config, "update_existing": False}
+        self.profile.save(update_fields=["adapter_config"])
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="NEW"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP)
+        self.assertEqual(units[0].changes, ())
+
     def test_a_matched_device_moving_to_a_batch_created_rack_is_an_update(self):
         """A deferred rack name is placement work even though it has no ID yet."""
         self._with_provenance(self._device("srv-01"))
@@ -312,6 +364,26 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
 
+    def test_a_name_in_another_tenant_does_not_match(self):
+        """Name identity is scoped by both site and tenant."""
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Other Name Tenant", slug="other-name-tenant")
+        self._device("srv-01", rack=self.rack, tenant=tenant)
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].changes[-1].operation, "create")
+
+    def test_a_name_only_match_with_different_placement_is_invalid(self):
+        """A coincidental name must not move a Device to the source placement."""
+        self._device("srv-01")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.name_placement_conflict")
+
     def test_an_explicit_binding_outranks_every_other_identifier(self):
         """The operator linked this row to this device, which is the strongest statement there is."""
         self._device("srv-01", rack=self.rack)
@@ -321,6 +393,18 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         units = self._plan(self._row(2, "D-1", "srv-01", status="Offline"))
 
         self.assertEqual(units[0].changes[0].preconditions["device_id"], bound.pk)
+
+    def test_a_strong_match_already_bound_to_another_source_is_invalid(self):
+        """One NetBox Device cannot represent two source identities."""
+        device = self._device("stored-name", rack=self.rack, serial="SN-BOUND")
+        DeviceExistingMatch.objects.create(
+            profile=self.profile, source_id="D-OTHER", netbox_device_id=device.pk, device_name=device.name
+        )
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="SN-BOUND"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.already_bound")
 
     def test_an_ambiguous_serial_refuses_the_row_rather_than_guessing(self):
         """Two stored devices carry the serial, so no automatic answer is the safe one."""
@@ -343,13 +427,25 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].changes[0].operation, "create")
 
-    def test_a_device_the_actor_cannot_view_is_not_matched(self):
-        """Planning must not report target state the operator cannot see."""
+    def test_a_serial_match_at_another_site_is_invalid(self):
+        """A strong identity is global, so the import refuses to move or duplicate it."""
+        from dcim.models import Site
+
+        other = Site.objects.create(name="Serial Other Site", slug="serial-other-site")
+        self._device("stored-name", site=other, serial="SN-CROSS-SITE")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", serial="SN-CROSS-SITE"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.cross_site_match")
+
+    def test_a_strong_match_the_actor_cannot_view_is_invalid(self):
+        """A hidden global identity must not become a duplicate create."""
         from dcim.models import Device, Rack
 
         from netbox_data_import.tests.helpers import user_with_object_permission
 
-        self._device("srv-01", rack=self.rack)
+        self._device("hidden-device", rack=self.rack, serial="SN-HIDDEN")
         # The rack stays visible, so the only thing the actor cannot see is the device itself.
         actor = user_with_object_permission(
             "device-module-blind",
@@ -357,9 +453,12 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         )
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
-        units = DeviceModule().plan(self._batch(self._row(2, "D-1", "srv-01")), self.profile, None, reader)
+        units = DeviceModule().plan(
+            self._batch(self._row(2, "D-1", "srv-01", serial="SN-HIDDEN")), self.profile, None, reader
+        )
 
-        self.assertEqual(units[0].changes[0].operation, "create")
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.inaccessible_match")
 
 
 class DeviceModulePlacementTest(DeviceModulePlanTestBase):
@@ -544,6 +643,30 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         self.assertEqual(device.device_type_id, self.device_type.pk)
         self.assertEqual(device.role_id, self.role.pk)
 
+    def test_dependency_changes_create_the_type_and_role_before_the_device(self):
+        """Applying the complete unit preserves the legacy automatic dependency behavior."""
+        from django.contrib.auth import get_user_model
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
+
+        ClassRoleMapping.objects.create(
+            profile=self.profile, source_class="Appliance", creates_rack=False, role_slug="appliance"
+        )
+        unit = self._plan(
+            self._row(2, "D-AUTO", "appliance-01", device_class="Appliance", make="Example", model="Unit")
+        )[0]
+        actor = get_user_model().objects.create_superuser(
+            username="dependency-writer", email="dependency-writer@example.invalid", password="testpass"
+        )
+        context = ExecutionContext(actor=actor, reader=self.reader, profile=self.profile)
+
+        for change in unit.changes:
+            DeviceModule().apply(change, context)
+
+        self.assertTrue(Manufacturer.objects.filter(slug="example").exists())
+        self.assertTrue(DeviceType.objects.filter(manufacturer__slug="example", slug="example-unit").exists())
+        self.assertTrue(DeviceRole.objects.filter(slug="appliance").exists())
+        self.assertTrue(Device.objects.filter(name="appliance-01", site=self.site).exists())
+
     def test_an_update_change_reconciles_the_stored_device(self):
         stored = self._device("srv-01", rack=self.rack, serial="OLD")
 
@@ -552,6 +675,29 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
 
         stored.refresh_from_db()
         self.assertEqual(stored.serial, "NEW")
+
+    def test_an_update_clears_a_tenant_when_the_import_target_has_none(self):
+        """Blank target context is an explicit value for Device location and tenant."""
+        from tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(name="Old Tenant", slug="old-tenant")
+        stored = self._with_provenance(self._device("srv-01", rack=self.rack, tenant=tenant))
+
+        change = self._only_change(self._row(2, "D-1", "srv-01"))
+        DeviceModule().apply(change, self.context)
+
+        stored.refresh_from_db()
+        self.assertIsNone(stored.tenant_id)
+
+    def test_an_update_clears_a_face_the_source_omits(self):
+        """The preview and writer agree that an empty face clears the stored face."""
+        stored = self._with_provenance(self._device("srv-01", rack=self.rack, position=5, face="front"))
+
+        change = self._only_change(self._row(2, "D-1", "srv-01"))
+        DeviceModule().apply(change, self.context)
+
+        stored.refresh_from_db()
+        self.assertEqual(stored.face, "")
 
     def test_a_deferred_rack_that_is_still_absent_is_refused(self):
         """A device change cannot run before the rack change it depends on."""
@@ -573,6 +719,14 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         with self.assertRaises(PreconditionFailed):
             DeviceModule().apply(change, self.context)
 
+    def test_a_create_is_refused_when_its_identity_appears_after_planning(self):
+        """Execution cannot turn a previewed create into a duplicate of a late Device."""
+        change = self._only_change(self._row(2, "D-1", "srv-01", serial="SN-LATE"))
+        self._device("late-device", rack=self.rack, serial="SN-LATE")
+
+        with self.assertRaises(PreconditionFailed):
+            DeviceModule().apply(change, self.context)
+
     def test_a_device_type_that_moved_since_the_plan_is_refused(self):
         """The type decides the height, so the placement the plan checked no longer holds."""
         from dcim.models import Device, DeviceType
@@ -581,6 +735,16 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         change = self._only_change(self._row(2, "D-1", "srv-01", serial="NEW"))
         other = DeviceType.objects.create(manufacturer=self.manufacturer, model="R760", slug="dell-r760", u_height=1)
         Device.objects.filter(pk=stored.pk).update(device_type=other)
+
+        with self.assertRaises(PreconditionFailed):
+            DeviceModule().apply(change, self.context)
+
+    def test_any_writable_target_state_change_invalidates_the_precondition(self):
+        """The apply guard covers more than the Device Type relation."""
+        stored = self._with_provenance(self._device("srv-01", rack=self.rack, serial="OLD"))
+        change = self._only_change(self._row(2, "D-1", "srv-01", serial="NEW"))
+        stored.status = "offline"
+        stored.save(update_fields=["status"])
 
         with self.assertRaises(PreconditionFailed):
             DeviceModule().apply(change, self.context)
@@ -758,15 +922,10 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
         diagnostic = units[0].diagnostics[0]
         self.assertEqual(diagnostic.code, "device.unparseable_ip")
         self.assertEqual(diagnostic.severity, Severity.WARNING)
-        self.assertEqual(
-            dict(diagnostic.display),
-            {
-                "device_name": "srv-01",
-                "source_id": "D-1",
-                "field": "primary_ip4",
-                "value": "not-an-address",
-            },
-        )
+        self.assertEqual(diagnostic.display["device_name"], "srv-01")
+        self.assertEqual(diagnostic.display["source_id"], "D-1")
+        self.assertEqual(diagnostic.display["field"], "primary_ip4")
+        self.assertEqual(diagnostic.display["value"], "not-an-address")
         change = units[0].changes[0]
         self.assertEqual(dict(change.payload["ip_fields"]), {})
         device = DeviceModule().apply(change, self.context)
@@ -997,7 +1156,10 @@ class DeviceModuleContactTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].disposition, Disposition.INVALID, units[0].diagnostics)
         self.assertEqual(units[0].diagnostics[0].code, "device.contact_resolution_required")
-        self.assertEqual(units[0].diagnostics[0].display["candidate_values"], {"Owner": "OBO"})
+        self.assertEqual(
+            units[0].diagnostics[0].display["extra_data"]["candidate_values"],
+            {"contact": {"Owner": "OBO"}},
+        )
 
     def test_a_row_with_no_contact_values_plans_no_contact(self):
         """A profile with a contact role must not invent a contact for a row that names none."""

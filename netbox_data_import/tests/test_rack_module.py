@@ -89,6 +89,19 @@ class RackModulePlanTest(RackModulePlanTestBase):
         self.assertEqual(units[0].changes[0].operation, "update")
         self.assertEqual(units[0].changes[0].payload["u_height"], 42)
 
+    def test_update_existing_false_leaves_a_differing_rack_alone(self):
+        """The profile policy disables updates, so an existing rack has no executable work."""
+        from dcim.models import Rack
+
+        Rack.objects.create(name="cab-01", site=self.site, u_height=20)
+        self.profile.adapter_config = {**self.profile.adapter_config, "update_existing": False}
+        self.profile.save(update_fields=["adapter_config"])
+
+        units = self._plan(self._row(2, "RACK-1", "cab-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP)
+        self.assertEqual(units[0].changes, ())
+
     def test_an_ignored_source_id_is_excluded(self):
         """`excluded` is reserved for operator policy, which is exactly what an ignore is."""
         IgnoredDevice.objects.create(profile=self.profile, source_id="RACK-1")
@@ -126,8 +139,8 @@ class RackModulePlanTest(RackModulePlanTestBase):
 
         self.assertEqual(first[0].identity, second[0].identity)
 
-    def test_a_rack_the_actor_cannot_view_is_not_matched(self):
-        """Planning reads through the scoped reader, so an invisible rack is not a match."""
+    def test_a_rack_the_actor_cannot_view_is_refused_without_add_permission(self):
+        """Planning refuses the apparent create when the actor cannot add racks."""
         from dcim.models import Rack
 
         from netbox_data_import.tests.helpers import user_with_object_permission
@@ -138,7 +151,8 @@ class RackModulePlanTest(RackModulePlanTestBase):
 
         units = RackModule().plan(self._batch(self._row(2, "RACK-1", "cab-01")), self.profile, None, scoped)
 
-        self.assertEqual(units[0].changes[0].operation, "create")
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "rack.add_permission")
 
 
 class RackModuleApplyTest(TestCase):
@@ -200,6 +214,25 @@ class RackModuleApplyTest(TestCase):
 
         rack.refresh_from_db()
         self.assertEqual(rack.u_height, 42)
+
+    def test_a_rack_type_mapping_reaches_the_written_rack(self):
+        """The class mapping selects the Rack Type for both planning and execution."""
+        from dcim.models import Manufacturer, RackType
+
+        manufacturer = Manufacturer.objects.create(name="Rack Module Vendor", slug="rack-module-vendor")
+        rack_type = RackType.objects.create(
+            manufacturer=manufacturer,
+            model="Distribution",
+            slug="distribution",
+            u_height=42,
+        )
+        mapping = self.profile.class_role_mappings.get(source_class="Cabinet")
+        mapping.rack_type = rack_type
+        mapping.save(update_fields=["rack_type"])
+
+        rack = RackModule().apply(self._only_change(self._row("RACK-TYPE", "typed-cab")), self.context)
+
+        self.assertEqual(rack.rack_type, rack_type)
 
     def test_a_precondition_that_no_longer_holds_is_refused(self):
         """Section 4.6: the module rechecks its preconditions inside the transaction."""
@@ -289,8 +322,8 @@ class RackModuleEdgeTest(TestCase):
 
         self.assertEqual(units[0].changes[0].payload["u_height"], 42)
 
-    def test_a_reader_with_no_target_matches_nothing(self):
-        """Without a site there is no target state to compare against, so every row is a create."""
+    def test_a_reader_with_no_target_refuses_an_invalid_rack(self):
+        """Without a target site, planning refuses the invalid rack candidate."""
         from dcim.models import Rack
 
         Rack.objects.create(name="edge-cab-03", site=self.site, u_height=42)
@@ -298,7 +331,8 @@ class RackModuleEdgeTest(TestCase):
             self._batch(self._row("E-3", "edge-cab-03")), self.profile, None, NetBoxReader.unrestricted()
         )
 
-        self.assertEqual(units[0].changes[0].operation, "create")
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "rack.validation_failed")
 
     def test_a_location_bound_reader_only_matches_racks_in_that_location(self):
         """The operator chose a location, so a rack elsewhere in the site is not this rack."""
@@ -311,6 +345,17 @@ class RackModuleEdgeTest(TestCase):
 
         self.assertEqual(units[0].changes[0].operation, "create")
         self.assertEqual(units[0].changes[0].payload["location_id"], self.location.pk)
+
+    def test_a_site_only_import_does_not_match_a_rack_in_a_location(self):
+        """A blank target location means an unlocated rack, not any rack in the site."""
+        from dcim.models import Rack
+
+        Rack.objects.create(name="edge-cab-located", site=self.site, location=self.location, u_height=42)
+        reader = NetBoxReader.unrestricted().for_target(site=self.site)
+
+        units = RackModule().plan(self._batch(self._row("E-LOCATION", "edge-cab-located")), self.profile, None, reader)
+
+        self.assertEqual(units[0].changes[0].operation, "create")
 
     def test_a_created_rack_carries_the_serial_and_tenant_the_plan_named(self):
         """Both are optional in the payload, and both have to reach the written row."""

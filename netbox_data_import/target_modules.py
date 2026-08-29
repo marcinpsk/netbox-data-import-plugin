@@ -12,7 +12,12 @@ module is the behaviour behind that declaration.
 
 from __future__ import annotations
 
+import datetime
+import math
+import re
+from copy import copy
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Protocol
 
 from django.core.exceptions import ValidationError
@@ -22,8 +27,9 @@ from .catalog import OutputKind
 from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
 from .device_identity import DeviceTypeIdentityResolver
+from .object_permissions import ObjectPermissionDenied
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
-from .values import normalize_for_compare, translation_maps
+from .values import effective_device_name, identity_text, normalize_for_compare, source_position, translation_maps
 
 DEFAULT_RACK_HEIGHT = 42
 
@@ -61,9 +67,54 @@ def _text(value) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _identity_text(value) -> str:
-    """Return the case-insensitive comparison form of a name."""
-    return _text(value).casefold()
+def _duplicate_value_detail(label: str, value: str, other_rows: list[int]) -> str:
+    """Name a duplicated identity value and every other source row that carries it."""
+    where = ", ".join(f"row {number}" for number in other_rows)
+    return f"Duplicate {label} '{value}' appears more than once in this import" + (
+        f", also on {where}." if where else "."
+    )
+
+
+def _display_value(value):
+    """Return detached JSON display data for a source value."""
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return str(value)
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, (datetime.date, datetime.datetime, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _display_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_display_value(item) for item in value]
+    return str(value)
+
+
+def _unit_display(row, object_type: str, name: str, rack_name: str = "") -> dict:
+    """Return source and presentation facts shared by all unit dispositions."""
+    source_row = {str(key): _display_value(value) for key, value in row.items()}
+    return {
+        "row_number": row.get("_row_number"),
+        "source_id": _text(row.get("source_id")),
+        "name": name,
+        "rack_name": rack_name,
+        "source_row": source_row,
+        "extra_data": {
+            "asset_tag": _text(row.get("asset_tag"))[:50],
+            "candidate_values": _display_value(row.get("_candidate_values") or {}),
+            "conflicts": _display_value(row.get("_conflicts") or {}),
+            "extra_columns": _display_value(row.get("_extra_columns") or {}),
+            "source_class": _text(row.get("device_class")),
+            "source_make": _text(row.get("make")),
+            "source_model": _text(row.get("model")),
+            "source_serial": _text(row.get("serial")),
+        },
+        "object_type": object_type,
+    }
 
 
 def _ignored_source_ids(profile) -> frozenset[str]:
@@ -82,18 +133,6 @@ def _repeated(values) -> frozenset[str]:
             repeated.add(value)
         seen.add(value)
     return frozenset(repeated)
-
-
-def _coerce_position(value):
-    """Return the rack position the row asks for, or None when it names none."""
-    text = _text(value)
-    if not text:
-        return None
-    try:
-        number = float(text)
-    except (TypeError, ValueError):
-        return None
-    return int(number) if number == int(number) else number
 
 
 def _translate(value, table) -> str:
@@ -125,13 +164,13 @@ def rack_unit_identity(row) -> str:
     source_id = _text(row.get("source_id"))
     if source_id:
         return f"rack:source:{source_id}"
-    return f"rack:name:{_identity_text(rack_row_name(row))}"
+    return f"rack:name:{identity_text(rack_row_name(row))}"
 
 
 def rack_duplicate_keys(rows) -> tuple[frozenset[str], frozenset[str]]:
     """Return the rack names and source IDs more than one row in this batch claims."""
     return (
-        _repeated(_identity_text(rack_row_name(row)) for row in rows),
+        _repeated(identity_text(rack_row_name(row)) for row in rows),
         _repeated(_text(row.get("source_id")) for row in rows),
     )
 
@@ -148,7 +187,7 @@ def rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) -> t
         return "rack.missing_name", {"source_id": source_id}
     if source_id and source_id in ignored:
         return "rack.ignored", {"rack_name": name, "source_id": source_id}
-    if _identity_text(name) in duplicate_names:
+    if identity_text(name) in duplicate_names:
         return "rack.duplicate_name", {"rack_name": name, "source_id": source_id}
     if source_id and source_id in duplicate_source_ids:
         return "rack.duplicate_source_id", {"rack_name": name, "source_id": source_id}
@@ -169,8 +208,19 @@ class RackModule:
         ignored = _ignored_source_ids(profile)
         duplicate_names, duplicate_source_ids = rack_duplicate_keys(rows)
         existing = self._existing_by_name(netbox_reader)
+        mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         return [
-            self._unit(row, netbox_reader, ignored, duplicate_names, duplicate_source_ids, existing) for row in rows
+            self._unit(
+                row,
+                profile,
+                mappings[_text(row.get("device_class"))],
+                netbox_reader,
+                ignored,
+                duplicate_names,
+                duplicate_source_ids,
+                existing,
+            )
+            for row in rows
         ]
 
     @staticmethod
@@ -184,28 +234,43 @@ class RackModule:
         return [row for row in source_batch.rows if _text(row.get("device_class")) in creates_rack]
 
     @staticmethod
-    def _existing_by_name(netbox_reader) -> dict[str, Any]:
-        """Return the racks the actor may view at the import site, keyed by comparison name."""
+    def _existing_by_name(netbox_reader) -> dict[str, list[Any]]:
+        """Return visible racks at the exact import target, grouped by comparison name."""
         if netbox_reader.site is None:
             return {}
-        racks = netbox_reader.racks().filter(site=netbox_reader.site)
-        if netbox_reader.location is not None:
-            racks = racks.filter(location=netbox_reader.location)
-        return {_identity_text(rack.name): rack for rack in racks}
+        location_filter = (
+            {"location": netbox_reader.location} if netbox_reader.location is not None else {"location__isnull": True}
+        )
+        existing: dict[str, list[Any]] = {}
+        for rack in netbox_reader.racks().filter(site=netbox_reader.site, **location_filter):
+            existing.setdefault(identity_text(rack.name), []).append(rack)
+        return existing
 
     @staticmethod
     def unit_identity(row) -> str:
         """Return the identity that survives replanning, which is never the row number."""
         return rack_unit_identity(row)
 
-    def _unit(self, row, netbox_reader, ignored, duplicate_names, duplicate_source_ids, existing):
+    def _unit(self, row, profile, mapping, netbox_reader, ignored, duplicate_names, duplicate_source_ids, existing):
         """Return the one unit this row produces."""
         identity = self.unit_identity(row)
         name = rack_row_name(row)
+        source_id = _text(row.get("source_id"))
+        if identity_text(name) in duplicate_names or (source_id and source_id in duplicate_source_ids):
+            identity = f"{identity}:row:{row.get('_row_number')}"
+        unit_display = _unit_display(row, self.key, name, name)
+        unit_display["extra_data"].update(
+            {
+                "rack_type_id": mapping.rack_type_id or "",
+                "rack_type_name": str(mapping.rack_type) if mapping.rack_type_id else "",
+                "rack_type_set": bool(mapping.rack_type_id),
+            }
+        )
 
         rejection = rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids)
         if rejection is not None:
             code, display = rejection
+            display = {**unit_display, **display}
             if code == "rack.ignored":
                 return SynchronizationUnit(
                     identity=identity,
@@ -213,26 +278,88 @@ class RackModule:
                     diagnostics=(
                         Diagnostic(code=code, severity=Severity.INFO, identities=(identity,), display=display),
                     ),
+                    display=unit_display,
                 )
             return _refused(identity, code, display)
 
         height = _coerce_height(row.get("u_height"))
         serial = _text(row.get("serial"))
-        rack = existing.get(_identity_text(name))
+        rack_type_id = mapping.rack_type_id
+        matches = existing.get(identity_text(name), ())
+        if len(matches) > 1:
+            return _refused(identity, "rack.ambiguous_name", unit_display)
+        rack = matches[0] if matches else None
         if rack is None:
+            actor = netbox_reader.actor
+            if actor is not None and not actor.has_perm("dcim.add_rack"):
+                return _refused(identity, "rack.add_permission", unit_display)
+            validation = self._validated_candidate(
+                None, name, height, serial, rack_type_id, netbox_reader, source_id=_text(row.get("source_id"))
+            )
+            if validation is not None:
+                return _refused(identity, "rack.validation_failed", {**unit_display, "message": validation})
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.ACTIONABLE,
-                changes=(self._change(identity, "create", name, height, serial, netbox_reader, None),),
+                changes=(
+                    self._change(
+                        identity,
+                        "create",
+                        name,
+                        height,
+                        serial,
+                        rack_type_id,
+                        netbox_reader,
+                        None,
+                        _text(row.get("source_id")),
+                    ),
+                ),
+                display=unit_display,
             )
 
         tenant_id = netbox_reader.tenant.pk if netbox_reader.tenant is not None else None
-        if not self._differs(rack, height, serial, tenant_id):
-            return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP)
+        existing_display = {
+            **unit_display,
+            "netbox_url": rack.get_absolute_url(),
+            "extra_data": {
+                **unit_display["extra_data"],
+                "netbox_rack_id": rack.pk,
+            },
+        }
+        update_existing = profile.adapter_settings.update_existing
+        if not update_existing or not self._differs(
+            rack, height, serial, rack_type_id, netbox_reader.location, tenant_id
+        ):
+            if update_existing:
+                existing_display["extra_data"]["writes_nothing"] = True
+                existing_display["detail"] = f"Rack '{name}' already exists and this row changes nothing"
+            else:
+                existing_display["detail"] = f"Rack '{name}' already exists (update_existing=False)"
+            return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP, display=existing_display)
+        validation = self._validated_candidate(
+            rack, name, height, serial, rack_type_id, netbox_reader, source_id=_text(row.get("source_id"))
+        )
+        if validation is not None:
+            return _refused(identity, "rack.validation_failed", {**existing_display, "message": validation})
+        if netbox_reader.actor is not None and not netbox_reader.racks("change").filter(pk=rack.pk).exists():
+            return _refused(identity, "rack.change_permission", existing_display)
         return SynchronizationUnit(
             identity=identity,
             disposition=Disposition.ACTIONABLE,
-            changes=(self._change(identity, "update", name, height, serial, netbox_reader, rack),),
+            changes=(
+                self._change(
+                    identity,
+                    "update",
+                    name,
+                    height,
+                    serial,
+                    rack_type_id,
+                    netbox_reader,
+                    rack,
+                    _text(row.get("source_id")),
+                ),
+            ),
+            display=existing_display,
         )
 
     def apply(self, planned_change: PlannedChange, execution_context) -> Any:
@@ -244,6 +371,13 @@ class RackModule:
         payload = planned_change.payload
         rack_id = planned_change.preconditions.get("rack_id")
         if rack_id is None:
+            existing = Rack.objects.filter(
+                site_id=payload["site_id"],
+                location_id=payload["location_id"],
+                name__iexact=payload["name"],
+            ).first()
+            if existing is not None:
+                raise PreconditionFailed(f"Rack '{payload['name']}' appeared after the plan was made.")
             rack = Rack(site_id=payload["site_id"], location_id=payload["location_id"])
             action = "add"
         else:
@@ -251,16 +385,24 @@ class RackModule:
             rack = Rack.objects.filter(pk=rack_id).select_for_update(of=("self",)).first()
             if rack is None:
                 raise PreconditionFailed(f"Rack {rack_id} is gone, so '{payload['name']}' cannot be updated.")
-            if rack.u_height != planned_change.preconditions.get("u_height"):
-                raise PreconditionFailed(f"Rack '{rack.name}' changed height since the plan was made.")
+            current = self._precondition_state(rack)
+            expected = planned_change.preconditions.get("state")
+            if current != expected:
+                raise PreconditionFailed(f"Rack '{rack.name}' changed after the plan was made.")
             action = "change"
 
         rack.name = payload["name"]
         rack.u_height = payload["u_height"]
         if payload["serial"]:
             rack.serial = payload["serial"]
+        rack.rack_type_id = payload["rack_type_id"]
+        if payload["location_id"] is not None:
+            rack.location_id = payload["location_id"]
         if payload["tenant_id"] is not None:
             rack.tenant_id = payload["tenant_id"]
+        custom_field = execution_context.profile.adapter_settings.custom_field_name
+        if action == "add" and custom_field and payload["source_id"]:
+            rack.custom_field_data[custom_field] = payload["source_id"]
         rack.full_clean()
         rack.save()
         # An ObjectPermission's constraints are only evaluated against the saved row.
@@ -268,9 +410,13 @@ class RackModule:
         return rack
 
     @staticmethod
-    def _differs(rack, height: int, serial: str, tenant_id=None) -> bool:
+    def _differs(rack, height: int, serial: str, rack_type_id, location, tenant_id=None) -> bool:
         """Return whether the stored rack already matches what the row asks for."""
         if normalize_for_compare(rack.u_height) != normalize_for_compare(height):
+            return True
+        if rack.rack_type_id != rack_type_id:
+            return True
+        if location is not None and rack.location_id != location.pk:
             return True
         # The write assigns the target tenant whenever the import names one.
         if tenant_id is not None and rack.tenant_id != tenant_id:
@@ -278,17 +424,25 @@ class RackModule:
         return bool(serial) and _text(rack.serial) != serial
 
     @staticmethod
-    def _change(identity, operation, name, height, serial, netbox_reader, rack) -> PlannedChange:
+    def _change(
+        identity, operation, name, height, serial, rack_type_id, netbox_reader, rack, source_id
+    ) -> PlannedChange:
         """Return the one write this unit performs, with the target state it assumed."""
         payload = {
             "name": name,
             "u_height": height,
             "serial": serial,
+            "rack_type_id": rack_type_id,
+            "source_id": source_id,
             "site_id": netbox_reader.site.pk if netbox_reader.site is not None else None,
             "location_id": netbox_reader.location.pk if netbox_reader.location is not None else None,
             "tenant_id": netbox_reader.tenant.pk if netbox_reader.tenant is not None else None,
         }
-        preconditions = {"rack_id": rack.pk, "u_height": rack.u_height} if rack is not None else {"rack_id": None}
+        preconditions = (
+            {"rack_id": rack.pk, "state": RackModule._precondition_state(rack)}
+            if rack is not None
+            else {"rack_id": None}
+        )
         return PlannedChange(
             identity=f"{identity}:{operation}",
             target_module=RackModule.key,
@@ -296,6 +450,39 @@ class RackModule:
             payload=payload,
             preconditions=preconditions,
         )
+
+    @staticmethod
+    def _precondition_state(rack) -> dict:
+        """Return every rack field this module can overwrite."""
+        return {
+            "name": rack.name,
+            "u_height": rack.u_height,
+            "serial": rack.serial,
+            "rack_type_id": rack.rack_type_id,
+            "location_id": rack.location_id,
+            "tenant_id": rack.tenant_id,
+        }
+
+    @staticmethod
+    def _validated_candidate(rack, name, height, serial, rack_type_id, reader, source_id):
+        """Return a model validation message, or None when the planned rack is valid."""
+        from dcim.models import Rack
+
+        candidate = copy(rack) if rack is not None else Rack(site=reader.site, location=reader.location)
+        candidate.name = name
+        candidate.u_height = height
+        if serial:
+            candidate.serial = serial
+        candidate.rack_type_id = rack_type_id
+        if reader.location is not None:
+            candidate.location = reader.location
+        if reader.tenant is not None:
+            candidate.tenant = reader.tenant
+        try:
+            candidate.full_clean()
+        except ValidationError as exc:
+            return "; ".join(exc.messages)
+        return None
 
 
 def _occupied_units(position, height):
@@ -314,6 +501,7 @@ def _refused(identity, code, display) -> SynchronizationUnit:
         identity=identity,
         disposition=Disposition.INVALID,
         diagnostics=(Diagnostic(code=code, severity=Severity.ERROR, identities=(identity,), display=display),),
+        display=display,
     )
 
 
@@ -323,6 +511,7 @@ def _blocked(identity, code, display) -> SynchronizationUnit:
         identity=identity,
         disposition=Disposition.BLOCKED,
         diagnostics=(Diagnostic(code=code, severity=Severity.ERROR, identities=(identity,), display=display),),
+        display=display,
     )
 
 
@@ -334,6 +523,11 @@ class _Dependencies:
     role: Any = None
     rack: Any = None
     rack_identity: str | None = None
+    device_type_slugs: tuple[str, str] = ("", "")
+    role_slug: str = ""
+    explicit_device_type: bool = False
+    device_type_exists: bool = True
+    changes: tuple[PlannedChange, ...] = ()
     missing: tuple[str, dict] | None = None
 
 
@@ -355,12 +549,31 @@ class _Match:
     device: Any = None
     ambiguous: str | None = None
     value: str = ""
+    method: str = ""
+    inaccessible: bool = False
+
+
+@dataclass(frozen=True)
+class _PlannedDeviceType:
+    """The placement facts of a Device Type this unit will create."""
+
+    u_height: int
+    is_full_depth: bool
+    pk: None = None
+
+
+@dataclass(frozen=True)
+class _PlannedRole:
+    """The identity of a Device Role this unit will create."""
+
+    slug: str
+    pk: None = None
 
 
 _REVIEWED_PAYLOAD_FIELDS: dict[str, tuple[str, Any]] = {
     "serial": ("serial", lambda device: _text(device.serial)),
     "asset_tag": ("asset_tag", lambda device: _text(device.asset_tag)),
-    "u_position": ("u_position", lambda device: device.position),
+    "u_position": ("u_position", lambda device: source_position(device.position)),
     "face": ("face", lambda device: _text(device.face)),
     "airflow": ("airflow", lambda device: _text(device.airflow)),
     "status": ("status", lambda device: _text(device.status)),
@@ -541,53 +754,188 @@ class _DeviceBatch:
         self._identity = DeviceTypeIdentityResolver.for_profile(profile)
         self._reviewer = DeviceFieldReviewer.for_profile(profile)
         self._candidate_columns = PrimaryContactResolver.candidate_source_columns(profile)
-        self._stored_by_source = self._stored_sources(rows, profile, netbox_reader)
-        self._roles = {mapping.source_class: _text(mapping.role_slug) for mapping in profile.class_role_mappings.all()}
-        self._clashes = {field: self._rows_by_value(rows, field, fold) for field, _code, fold in self._CLASH_FIELDS}
+        self._mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
+        self._roles = {source_class: _text(mapping.role_slug) for source_class, mapping in self._mappings.items()}
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
-        self._duplicate_names = _repeated(_identity_text(row.get("device_name")) for row in rows)
+        self._bound_sources = {match.netbox_device_id: _text(match.source_id) for match in profile.device_matches.all()}
+        identity_rows = [row for row in rows if self._is_identity_writing_row(row)]
+        self._duplicate_names = _repeated(identity_text(effective_device_name(row)) for row in identity_rows)
+        self._reserved_names = {
+            identity_text(name)
+            for name in netbox_reader.devices()
+            .filter(
+                site=netbox_reader.site,
+                **({"tenant": netbox_reader.tenant} if netbox_reader.tenant is not None else {"tenant__isnull": True}),
+            )
+            .values_list("name", flat=True)
+        }
+        self._reserved_names.update(identity_text(effective_device_name(row)) for row in identity_rows)
+        self._effective_identity = self._effective_identity_values(identity_rows)
+        self._ignored_device_type_rows = self._active_ignored_device_type_rows(identity_rows)
+        self._slug_conflicts = self._derived_slug_conflicts(identity_rows)
+        self._clashes = {
+            "source_id": self._rows_by_value(source_batch.rows, "source_id", False),
+            "serial": self._rows_by_effective("serial", fold=False),
+            "asset_tag": self._rows_by_effective("asset_tag", fold=True),
+        }
         self._racks = self._racks_by_name(netbox_reader)
         self._planned_racks = self._planned_racks_by_name(source_batch, profile)
         self.side_map, self.airflow_map, self.status_map = translation_maps()
         # Row order decides who keeps a slot two rows claim, so the first row planned wins it.
         self._claimed: dict[tuple[int | str, str | None, Any], int] = {}
+        self._claimed_devices: dict[int, tuple[int | None, str]] = {}
+
+    def _active_ignored_device_type_rows(self, rows) -> frozenset[int]:
+        """Return rows whose saved review keeps the matched Device Type."""
+        ignored = set()
+        for row in rows:
+            source_id = _text(row.get("source_id"))
+            reviewed_ids = self._reviewer.review_device_ids(source_id) if source_id else frozenset()
+            if len(reviewed_ids) != 1:
+                continue
+            device = self.reader.devices().filter(pk=next(iter(reviewed_ids))).first()
+            if device is None:
+                continue
+            make = " ".join((_text(row.get("make")) or "Unknown").split())
+            model = " ".join((_text(row.get("model")) or "Unknown").split())
+            mfg_slug, dt_slug, _explicit = self._identity.resolve(make, model)
+            review = self._reviewer.review(
+                source_id,
+                device,
+                {"device_type": (mfg_slug, dt_slug, make, model)},
+            )
+            if "device_type" in review.ignored:
+                ignored.add(row.get("_row_number"))
+        return frozenset(ignored)
+
+    def _derived_slug_conflicts(self, rows) -> dict[int, dict[str, Any]]:
+        """Return source identities that collapse onto one generated dependency slug."""
+        manufacturer_groups: dict[str, list[dict[str, Any]]] = {}
+        device_type_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in rows:
+            row_number = row.get("_row_number")
+            if row_number in self._ignored_device_type_rows:
+                continue
+            make = " ".join((_text(row.get("make")) or "Unknown").split())
+            model = " ".join((_text(row.get("model")) or "Unknown").split())
+            mfg_slug, dt_slug, explicit_device_type = self._identity.resolve(make, model)
+            record = {
+                "row_number": row_number,
+                "make": make,
+                "model": model,
+                "explicit_device_type": explicit_device_type,
+                "explicit_manufacturer": explicit_device_type or make in self._identity.mapped_source_makes,
+            }
+            manufacturer_groups.setdefault(mfg_slug, []).append(record)
+            device_type_groups.setdefault((mfg_slug, dt_slug), []).append(record)
+
+        conflicts = {}
+        for slug, records in manufacturer_groups.items():
+            manufacturer_labels = {identity_text(record["make"]) for record in records}
+            if len(manufacturer_labels) <= 1 or all(record["explicit_manufacturer"] for record in records):
+                continue
+            message = f"Different manufacturer names derive the same slug '{slug}'. Add explicit manufacturer mappings."
+            row_numbers = tuple(record["row_number"] for record in records)
+            for record in records:
+                conflicts[record["row_number"]] = {
+                    "message": message,
+                    "mfg_slug": slug,
+                    "rows": row_numbers,
+                }
+
+        for (mfg_slug, dt_slug), records in device_type_groups.items():
+            device_type_labels = {(identity_text(record["make"]), identity_text(record["model"])) for record in records}
+            if len(device_type_labels) <= 1 or all(record["explicit_device_type"] for record in records):
+                continue
+            message = (
+                f"Different device types derive the same slug '{mfg_slug}/{dt_slug}'. "
+                "Add explicit device type mappings."
+            )
+            row_numbers = tuple(record["row_number"] for record in records)
+            for record in records:
+                conflicts[record["row_number"]] = {
+                    "message": message,
+                    "mfg_slug": mfg_slug,
+                    "dt_slug": dt_slug,
+                    "rows": row_numbers,
+                }
+        return conflicts
+
+    def _is_identity_writing_row(self, row) -> bool:
+        """Return whether a row can write Device identity fields."""
+        mapping = self._mappings.get(_text(row.get("device_class")))
+        source_id = _text(row.get("source_id"))
+        position = source_position(row.get("u_position"))
+        return bool(
+            mapping
+            and not mapping.creates_rack
+            and not mapping.ignore
+            and mapping.role_slug
+            and source_id not in self.ignored
+            and not (position is not None and position < 1)
+        )
 
     @staticmethod
     def _rows_by_value(rows, field, fold) -> dict[str, list[int]]:
         """Return the source row numbers each non-empty value of *field* appears on."""
         found: dict[str, list[int]] = {}
         for row in rows:
-            value = _identity_text(row.get(field)) if fold else _text(row.get(field))
+            raw = _text(row.get(field))[:50] if field == "asset_tag" else row.get(field)
+            value = identity_text(raw) if fold else _text(raw)
             if value:
                 found.setdefault(value, []).append(row.get("_row_number"))
         return {value: numbers for value, numbers in found.items() if len(numbers) > 1}
 
-    @staticmethod
-    def _stored_sources(rows, profile, netbox_reader) -> dict[str, list]:
-        """Return the devices an earlier import of this profile wrote, by the source ID it stored."""
-        source_ids = {_text(row.get("source_id")) for row in rows}
-        source_ids.discard("")
-        if not source_ids:
-            return {}
-        devices = (
-            netbox_reader.devices()
-            .filter(data_import_source__profile=profile, data_import_source__source_id__in=source_ids)
-            .select_related("data_import_source")
-        )
-        stored: dict[str, list] = {}
-        for device in devices:
-            stored.setdefault(_text(device.data_import_source.source_id), []).append(device)
-        return stored
+    def _effective_identity_values(self, rows) -> dict[int, dict[str, str]]:
+        """Return review-aware serial and asset-tag writes for duplicate checks."""
+        from dcim.models import Device
+
+        values = {}
+        for row in rows:
+            row_number = row.get("_row_number")
+            source_id = _text(row.get("source_id"))
+            proposal = {
+                "serial": _text(row.get("serial")),
+                "asset_tag": _text(row.get("asset_tag"))[:50],
+            }
+            device_id = self._bindings.get(source_id)
+            if device_id is None and source_id:
+                reviewed_ids = self._reviewer.review_device_ids(source_id)
+                if len(reviewed_ids) == 1:
+                    device_id = next(iter(reviewed_ids))
+            device = Device.objects.filter(pk=device_id).first() if device_id is not None else None
+            if device is not None:
+                review = self._reviewer.review(source_id, device, proposal)
+                effective = review.effective_proposal
+                proposal = {
+                    "serial": "" if "serial" in review.ignored else _text(effective.get("serial")),
+                    "asset_tag": "" if "asset_tag" in review.ignored else _text(effective.get("asset_tag"))[:50],
+                }
+            values[row_number] = proposal
+        return values
+
+    def _rows_by_effective(self, field, fold) -> dict[str, list[int]]:
+        """Return duplicate row numbers from review-aware identity values."""
+        found: dict[str, list[int]] = {}
+        for row_number, values in self._effective_identity.items():
+            raw = values[field]
+            value = identity_text(raw) if fold else raw
+            if value:
+                found.setdefault(value, []).append(row_number)
+        return {value: numbers for value, numbers in found.items() if len(numbers) > 1}
 
     @staticmethod
     def _racks_by_name(netbox_reader) -> dict[str, Any]:
-        """Return the racks the actor may view at the import site, keyed by comparison name."""
+        """Return visible racks at the exact import target, grouped by comparison name."""
         if netbox_reader.site is None:
             return {}
-        racks = netbox_reader.racks().filter(site=netbox_reader.site)
-        if netbox_reader.location is not None:
-            racks = racks.filter(location=netbox_reader.location)
-        return {_identity_text(rack.name): rack for rack in racks}
+        location_filter = (
+            {"location": netbox_reader.location} if netbox_reader.location is not None else {"location__isnull": True}
+        )
+        grouped: dict[str, list[Any]] = {}
+        for rack in netbox_reader.racks().filter(site=netbox_reader.site, **location_filter):
+            grouped.setdefault(identity_text(rack.name), []).append(rack)
+        return grouped
 
     def _planned_racks_by_name(self, source_batch, profile) -> dict[str, str]:
         """Return valid rack creates in this batch, keyed by comparison name."""
@@ -598,7 +946,7 @@ class _DeviceBatch:
         for row in rows:
             if rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) is not None:
                 continue
-            name_key = _identity_text(rack_row_name(row))
+            name_key = identity_text(rack_row_name(row))
             # A rack NetBox already holds is an update, so it is there before any device change runs.
             if name_key in self._racks:
                 continue
@@ -608,40 +956,140 @@ class _DeviceBatch:
     def clash(self, row) -> tuple[str, str, list[int]] | None:
         """Return the first identity another row in this batch also claims."""
         for field, code, fold in self._CLASH_FIELDS:
-            value = _identity_text(row.get(field)) if fold else _text(row.get(field))
-            numbers = self._clashes[field].get(value) if value else None
+            raw = (
+                row.get(field)
+                if field == "source_id"
+                else self._effective_identity.get(row.get("_row_number"), {}).get(field, "")
+            )
+            value = _text(raw)
+            key = identity_text(value) if fold else value
+            numbers = self._clashes[field].get(key) if key else None
             if numbers:
                 return code, value, numbers
         return None
 
     def dependencies(self, row) -> _Dependencies:
-        """Return the Device Type, Role and Rack the row needs, or the first one missing."""
-        from dcim.models import DeviceRole, DeviceType
+        """Return existing or planned relation objects, or the first unmet dependency."""
+        from dcim.models import DeviceRole, DeviceType, Manufacturer
 
         make = " ".join((_text(row.get("make")) or "Unknown").split())
         model = " ".join((_text(row.get("model")) or "Unknown").split())
-        mfg_slug, dt_slug, _explicit = self._identity.resolve(make, model)
+        mfg_slug, dt_slug, explicit = self._identity.resolve(make, model)
+        changes = []
+        actor = self.reader.actor
         device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
         if device_type is None:
-            return _Dependencies(missing=("device.device_type_missing", {"mfg_slug": mfg_slug, "dt_slug": dt_slug}))
+            if not self.profile.adapter_settings.create_missing_device_types:
+                return _Dependencies(missing=("device.device_type_missing", {"mfg_slug": mfg_slug, "dt_slug": dt_slug}))
+            manufacturer = Manufacturer.objects.filter(slug=mfg_slug).first()
+            if manufacturer is not None and not explicit and identity_text(manufacturer.name) != identity_text(make):
+                return _Dependencies(
+                    missing=(
+                        "device.manufacturer_slug_collision",
+                        {"mfg_slug": mfg_slug, "source_make": make, "stored_make": manufacturer.name},
+                    )
+                )
+            if manufacturer is None:
+                if actor is not None and not actor.has_perm("dcim.add_manufacturer"):
+                    return _Dependencies(missing=("device.manufacturer_permission", {"mfg_slug": mfg_slug}))
+                changes.append(self._manufacturer_change(mfg_slug, make))
+            if actor is not None and not actor.has_perm("dcim.add_devicetype"):
+                return _Dependencies(missing=("device.device_type_permission", {"dt_slug": dt_slug}))
+            u_height = _coerce_height(row.get("u_height"))
+            changes.append(
+                self._device_type_change(
+                    mfg_slug,
+                    dt_slug,
+                    make,
+                    model,
+                    u_height,
+                    manufacturer_missing=manufacturer is None,
+                )
+            )
+            default_full_depth = DeviceType._meta.get_field("is_full_depth").get_default()
+            device_type = _PlannedDeviceType(u_height=u_height, is_full_depth=default_full_depth)
+        elif not explicit and identity_text(device_type.model) != identity_text(model):
+            return _Dependencies(
+                missing=(
+                    "device.device_type_slug_collision",
+                    {"dt_slug": dt_slug, "source_model": model, "stored_model": device_type.model},
+                )
+            )
 
         role_slug = self._roles.get(_text(row.get("device_class")), "")
+        if not role_slug:
+            return _Dependencies(missing=("device.role_unconfigured", {"source_class": row.get("device_class")}))
         role = DeviceRole.objects.filter(slug=role_slug).first() if role_slug else None
         if role is None:
-            return _Dependencies(missing=("device.role_missing", {"role_slug": role_slug}))
+            if actor is not None and not actor.has_perm("dcim.add_devicerole"):
+                return _Dependencies(missing=("device.role_permission", {"role_slug": role_slug}))
+            changes.append(self._role_change(role_slug))
+            role = _PlannedRole(role_slug)
 
         rack_name = _text(row.get("rack_name"))
-        rack_key = _identity_text(rack_name)
-        rack = self._racks.get(rack_key) if rack_name else None
+        rack_key = identity_text(rack_name)
+        rack_matches = self._racks.get(rack_key, ()) if rack_name else ()
+        if len(rack_matches) > 1:
+            return _Dependencies(missing=("device.rack_ambiguous", {"rack_name": rack_name}))
+        rack = rack_matches[0] if rack_matches else None
         rack_identity = self._planned_racks.get(rack_key) if rack_name and rack is None else None
         if rack_name and rack is None and rack_identity is None:
             return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
-        return _Dependencies(device_type=device_type, role=role, rack=rack, rack_identity=rack_identity)
+        return _Dependencies(
+            device_type=device_type,
+            role=role,
+            rack=rack,
+            rack_identity=rack_identity,
+            device_type_slugs=(mfg_slug, dt_slug),
+            role_slug=role_slug,
+            explicit_device_type=explicit,
+            device_type_exists=not isinstance(device_type, _PlannedDeviceType),
+            changes=tuple(changes),
+        )
+
+    @staticmethod
+    def _manufacturer_change(slug, name) -> PlannedChange:
+        identity = f"manufacturer:{slug}:create"
+        return PlannedChange(
+            identity=identity,
+            target_module=DeviceModule.key,
+            operation="create_manufacturer",
+            payload={"slug": slug, "name": name},
+            preconditions={"manufacturer_id": None},
+        )
+
+    @staticmethod
+    def _device_type_change(mfg_slug, dt_slug, make, model, u_height, manufacturer_missing) -> PlannedChange:
+        identity = f"device_type:{mfg_slug}:{dt_slug}:create"
+        return PlannedChange(
+            identity=identity,
+            target_module=DeviceModule.key,
+            operation="create_device_type",
+            payload={
+                "manufacturer_slug": mfg_slug,
+                "manufacturer_name": make,
+                "slug": dt_slug,
+                "model": model,
+                "u_height": u_height,
+            },
+            dependencies=(f"manufacturer:{mfg_slug}:create",) if manufacturer_missing else (),
+            preconditions={"device_type_id": None},
+        )
+
+    @staticmethod
+    def _role_change(role_slug) -> PlannedChange:
+        return PlannedChange(
+            identity=f"device_role:{role_slug}:create",
+            target_module=DeviceModule.key,
+            operation="create_role",
+            payload={"slug": role_slug, "name": role_slug.replace("-", " ").title(), "color": "9e9e9e"},
+            preconditions={"role_id": None},
+        )
 
     def placement(self, row, device_type, rack, rack_identity) -> _Placement:
         """Return where this row puts the device, or the first reason it cannot go there."""
         zero_u = device_type.u_height == 0
-        position = None if zero_u else _coerce_position(row.get("u_position"))
+        position = None if zero_u else source_position(row.get("u_position"))
         face = "" if zero_u else _translate(row.get("face"), self.side_map)
         airflow = _translate(row.get("airflow"), self.airflow_map)
         status = _translate(row.get("status"), self.status_map) or "active"
@@ -682,20 +1130,32 @@ class _DeviceBatch:
 
     def match(self, row, name) -> _Match:
         """Return the stored device this row reconciles, strongest identifier first."""
-        devices = self.reader.devices()
+        from dcim.models import Device
+
+        devices = Device.objects.select_related("rack__location", "site", "tenant")
+        visible_devices = self.reader.devices()
         source_id = _text(row.get("source_id"))
 
         bound_id = self._bindings.get(source_id) if source_id else None
         if bound_id is not None:
             bound = devices.filter(pk=bound_id).first()
             if bound is not None:
-                return _Match(device=bound)
+                return self._visible_match(bound, "source ID link", visible_devices)
 
-        stored = self._stored_by_source.get(source_id, ()) if source_id else ()
+        stored = (
+            list(
+                devices.filter(
+                    data_import_source__profile=self.profile,
+                    data_import_source__source_id=source_id,
+                )[:2]
+            )
+            if source_id
+            else ()
+        )
         if len(stored) > 1:
             return _Match(ambiguous="device.ambiguous_stored_source_id", value=source_id)
         if stored:
-            return _Match(device=stored[0])
+            return self._visible_match(stored[0], "stored source ID", visible_devices)
 
         reviewed_ids = self._reviewer.review_device_ids(source_id) if source_id else frozenset()
         if len(reviewed_ids) > 1:
@@ -703,32 +1163,82 @@ class _DeviceBatch:
         if reviewed_ids:
             reviewed = devices.filter(pk=next(iter(reviewed_ids))).first()
             if reviewed is not None:
-                return _Match(device=reviewed)
+                return self._visible_match(reviewed, "field review", visible_devices)
 
         for field, lookup, code in (
             ("serial", "serial", "device.ambiguous_serial"),
             ("asset_tag", "asset_tag__iexact", "device.ambiguous_asset_tag"),
         ):
-            value = _text(row.get(field))
+            value = _text(row.get(field))[:50] if field == "asset_tag" else _text(row.get(field))
             if not value:
                 continue
             found = list(devices.filter(**{lookup: value})[:2])
             if len(found) > 1:
                 return _Match(ambiguous=code, value=value)
             if found:
-                return _Match(device=found[0])
+                return self._visible_match(found[0], field.replace("_", " "), visible_devices)
 
-        if _identity_text(name) in self._duplicate_names or self.reader.site is None:
+        if identity_text(name) in self._duplicate_names or self.reader.site is None:
             return _Match()
-        by_name = list(devices.filter(name__iexact=name, site=self.reader.site)[:2])
+        tenant_filter = {"tenant": self.reader.tenant} if self.reader.tenant is not None else {"tenant__isnull": True}
+        by_name = list(devices.filter(name__iexact=name, site=self.reader.site, **tenant_filter)[:2])
         if len(by_name) > 1:
             return _Match(ambiguous="device.ambiguous_name", value=name)
-        return _Match(device=by_name[0] if by_name else None)
+        return self._visible_match(by_name[0], "name", visible_devices) if by_name else _Match()
+
+    def _visible_match(self, device, method, visible_devices) -> _Match:
+        """Return a global match with its scope and site safety attached."""
+        inaccessible = not visible_devices.filter(pk=device.pk).exists()
+        return _Match(device=device, method=method, inaccessible=inaccessible)
+
+    def binding_conflict(self, row, match) -> str:
+        """Return the source identity that already claims a matched device."""
+        source_id = _text(row.get("source_id"))
+        bound_source = self._bound_sources.get(match.device.pk)
+        if bound_source and bound_source != source_id:
+            return bound_source
+        previous = self._claimed_devices.get(match.device.pk)
+        if previous is not None and previous[0] != row.get("_row_number"):
+            return previous[1] or f"row {previous[0]}"
+        self._claimed_devices[match.device.pk] = (row.get("_row_number"), source_id)
+        return ""
+
+    def suggest_name(self, row) -> str:
+        """Return and reserve one deterministic name for a duplicate source row."""
+        name = effective_device_name(row)
+        rack_name = _text(row.get("rack_name")) or "NO-RACK"
+        position = normalize_for_compare(row.get("u_position")) or "NO-U"
+        base = f"{name}-{rack_name}-U{position}" if position != "NO-U" else f"{name}-{rack_name}"
+        candidate = base[:64]
+        if identity_text(candidate) in self._reserved_names:
+            source_suffix = _text(row.get("source_id")) or str(row.get("_row_number") or "ROW")
+            source_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_suffix).strip("-") or "ROW"
+            candidate = f"{base[: max(1, 63 - len(source_suffix))]}-{source_suffix}"[:64]
+        unique = candidate
+        counter = 2
+        while identity_text(unique) in self._reserved_names:
+            suffix = f"-{counter}"
+            unique = f"{candidate[: 64 - len(suffix)]}{suffix}"
+            counter += 1
+        self._reserved_names.add(identity_text(unique))
+        return unique
 
     def review(self, row, device, dependencies, placement, payload):
         """Return the operator's saved review for one matched device, in the reviewer's terms."""
         device_type = dependencies.device_type
-        manufacturer = device_type.manufacturer
+        make = " ".join((_text(row.get("make")) or "Unknown").split())
+        model = " ".join((_text(row.get("model")) or "Unknown").split())
+        if device_type.pk is None:
+            mfg_slug, dt_slug = dependencies.device_type_slugs
+            device_type_identity = (mfg_slug, dt_slug, make, model)
+        else:
+            manufacturer = device_type.manufacturer
+            device_type_identity = (
+                manufacturer.slug,
+                device_type.slug,
+                manufacturer.name,
+                device_type.model,
+            )
         ip_fields = payload.get("ip_fields") or {}
         proposal = {
             "device_name": payload["name"],
@@ -740,7 +1250,7 @@ class _DeviceBatch:
             "status": placement.status,
             "rack_name": _text(row.get("rack_name")),
             "_rack_location_id": self.reader.location.pk if self.reader.location is not None else None,
-            "device_type": (manufacturer.slug, device_type.slug, manufacturer.name, device_type.model),
+            "device_type": device_type_identity,
             "role": _text(dependencies.role.slug),
             "tenant": self.reader.tenant,
             "location": self.reader.location,
@@ -780,13 +1290,13 @@ class DeviceModule:
 
     @staticmethod
     def _device_rows(source_batch, profile) -> list[dict]:
-        """Return the batch rows whose class the profile maps to a device."""
-        device_classes = {
-            mapping.source_class: mapping
-            for mapping in profile.class_role_mappings.all()
-            if not mapping.creates_rack and not mapping.ignore
-        }
-        return [row for row in source_batch.rows if _text(row.get("device_class")) in device_classes]
+        """Return every non-rack row, including rows whose policy must be reviewed."""
+        mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
+        return [
+            row
+            for row in source_batch.rows
+            if not ((mapping := mappings.get(_text(row.get("device_class")))) is not None and mapping.creates_rack)
+        ]
 
     @staticmethod
     def unit_identity(row) -> str:
@@ -794,18 +1304,72 @@ class DeviceModule:
         source_id = _text(row.get("source_id"))
         if source_id:
             return f"device:source:{source_id}"
-        return f"device:name:{_identity_text(row.get('device_name'))}"
+        return f"device:name:{identity_text(effective_device_name(row))}"
 
-    def _unit(self, row, batch) -> SynchronizationUnit:
+    def _unit(self, row, batch) -> SynchronizationUnit:  # noqa: C901
         """Return the one unit this row produces."""
         identity = self.unit_identity(row)
-        name = _text(row.get("device_name"))
+        name = effective_device_name(row)
         source_id = _text(row.get("source_id"))
-        display = {"device_name": name, "source_id": source_id}
+        if source_id in batch._clashes["source_id"] or (
+            not source_id and identity_text(name) in batch._duplicate_names
+        ):
+            identity = f"{identity}:row:{row.get('_row_number')}"
+        display = _unit_display(row, self.key, name, _text(row.get("rack_name")))
+        display["device_name"] = name
+        display["source_id"] = source_id
+
+        clash = batch.clash(row)
+        if clash is not None:
+            code, value, numbers = clash
+            other_rows = [number for number in numbers if number != row.get("_row_number")]
+            label = {
+                "device.duplicate_source_id": "source ID",
+                "device.duplicate_serial": "serial",
+                "device.duplicate_asset_tag": "asset tag",
+            }[code]
+            conflict_display = {
+                **display,
+                "message": _duplicate_value_detail(label, value, other_rows),
+                "value": value,
+                "rows": numbers,
+            }
+            if code == "device.duplicate_serial":
+                conflict_display["duplicate_serial"] = value
+            return _refused(identity, code, conflict_display)
+
+        mapping = batch._mappings.get(_text(row.get("device_class")))
+        if mapping is None:
+            return _refused(
+                identity,
+                "device.class_unmapped",
+                {**display, "source_class": _text(row.get("device_class"))},
+            )
+        if mapping.ignore:
+            return SynchronizationUnit(
+                identity=identity,
+                disposition=Disposition.EXCLUDED,
+                diagnostics=(
+                    Diagnostic(
+                        code="device.class_ignored",
+                        severity=Severity.INFO,
+                        identities=(identity,),
+                        display={
+                            **display,
+                            "extra_data": {**display["extra_data"], "ignore_kind": "class"},
+                        },
+                    ),
+                ),
+                display={**display, "extra_data": {**display["extra_data"], "ignore_kind": "class"}},
+            )
 
         if not name:
             return _refused(identity, "device.missing_name", display)
         if source_id and source_id in batch.ignored:
+            ignored_display = {
+                **display,
+                "extra_data": {**display["extra_data"], "ignore_kind": "individual"},
+            }
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.EXCLUDED,
@@ -814,15 +1378,30 @@ class DeviceModule:
                         code="device.ignored",
                         severity=Severity.INFO,
                         identities=(identity,),
-                        display=display,
+                        display=ignored_display,
                     ),
                 ),
+                display=ignored_display,
             )
 
-        clash = batch.clash(row)
-        if clash is not None:
-            code, value, numbers = clash
-            return _refused(identity, code, {**display, "value": value, "rows": numbers})
+        position = source_position(row.get("u_position"))
+        if position is not None and position < 1:
+            return SynchronizationUnit(
+                identity=identity,
+                disposition=Disposition.NO_OP,
+                diagnostics=(
+                    Diagnostic(
+                        code="device.below_rack",
+                        severity=Severity.INFO,
+                        identities=(identity,),
+                        display={**display, "u_position": position},
+                    ),
+                ),
+                display=display,
+            )
+
+        if slug_conflict := batch._slug_conflicts.get(row.get("_row_number")):
+            return _refused(identity, "device.derived_slug_collision", {**display, **slug_conflict})
 
         dependencies = batch.dependencies(row)
         if dependencies.missing is not None:
@@ -832,34 +1411,109 @@ class DeviceModule:
         match = batch.match(row, name)
         if match.ambiguous is not None:
             return _refused(identity, match.ambiguous, {**display, "value": match.value})
+        if match.inaccessible:
+            return _refused(identity, "device.inaccessible_match", display)
+        if match.device is not None and match.device.site_id != batch.reader.site.pk:
+            return _refused(
+                identity,
+                "device.cross_site_match",
+                {**display, "netbox_device_id": match.device.pk, "match_method": match.method},
+            )
+        if identity_text(name) in batch._duplicate_names and match.device is None:
+            return _refused(
+                identity,
+                "device.duplicate_name",
+                {
+                    **display,
+                    "extra_data": {**display["extra_data"], "suggested_name": batch.suggest_name(row)},
+                },
+            )
+        if match.device is not None and (bound_source := batch.binding_conflict(row, match)):
+            return _refused(
+                identity,
+                "device.already_bound",
+                {**display, "bound_source_id": bound_source, "netbox_device_id": match.device.pk},
+            )
+
+        if match.device is not None:
+            name_note = (
+                f"; name stays '{match.device.name}' (source: '{name}')"
+                if match.device.name != name
+                else "; name unchanged"
+            )
+            display = {
+                **display,
+                "detail": f"Will update '{match.device.name}' (matched by {match.method}{name_note})",
+                "netbox_url": match.device.get_absolute_url(),
+                "extra_data": {
+                    **display["extra_data"],
+                    "netbox_device_id": match.device.pk,
+                    "netbox_face": match.device.face or "",
+                    "netbox_position": normalize_for_compare(match.device.position),
+                    "netbox_rack_name": match.device.rack.name if match.device.rack_id else "",
+                },
+            }
+            if not batch.profile.adapter_settings.update_existing:
+                display["detail"] = (
+                    f"Matched to '{match.device.name}' (by {match.method}{name_note}, skip: update_existing off)"
+                )
+                return SynchronizationUnit(
+                    identity=identity,
+                    disposition=Disposition.NO_OP,
+                    display=display,
+                )
 
         placement = batch.placement(row, dependencies.device_type, dependencies.rack, dependencies.rack_identity)
         if placement.refused is not None:
             code, placement_display = placement.refused
             return _refused(identity, code, {**display, **placement_display})
-        taken = batch.claim(
-            row,
-            dependencies.rack,
-            dependencies.rack_identity,
-            placement,
-            dependencies.device_type,
-            match.device,
-        )
-        if taken is not None:
-            code, taken_display = taken
-            return _refused(identity, code, {**display, **taken_display})
+        display = {
+            **display,
+            "extra_data": {
+                **display["extra_data"],
+                "airflow": placement.airflow,
+                "dt_exists": dependencies.device_type_exists,
+                "dt_slug": dependencies.device_type_slugs[1],
+                "face": placement.face,
+                "is_explicit_mapping": dependencies.explicit_device_type,
+                "mfg_slug": dependencies.device_type_slugs[0],
+                "status": placement.status,
+                "u_height": _display_value(dependencies.device_type.u_height),
+                "u_position": placement.position,
+                **({"zero_u": True} if dependencies.device_type.u_height == 0 else {}),
+            },
+        }
 
         payload = self._payload(row, name, dependencies, placement, batch)
         try:
             contact = batch.contact_review(row, match.device)
+        except ObjectPermissionDenied as exc:
+            return _refused(identity, "device.contact_permission", {**display, "message": str(exc)})
         except ContactResolutionRequired as exc:
+            contact_display = {
+                **display,
+                "extra_data": {
+                    **display["extra_data"],
+                    "candidate_values": {"contact": exc.candidate_values},
+                    "contact_suggestion": exc.suggestion or {},
+                },
+            }
             return _refused(
                 identity,
                 "device.contact_resolution_required",
-                {**display, "candidate_values": exc.candidate_values},
+                contact_display,
             )
         except ValidationError as exc:
             return _refused(identity, "device.contact_invalid", {**display, "error": "; ".join(exc.messages)})
+        display = {
+            **display,
+            "extra_data": {
+                **display["extra_data"],
+                "candidate_values": {"contact": contact.candidate_values} if contact.candidate_values else {},
+                "contact_suggestion": contact.suggestion or {},
+                "extra_columns": contact.extra_columns,
+            },
+        }
         ip_fields, ip_diagnostics = self._ip_fields(row, identity, display)
         payload = {
             **payload,
@@ -869,40 +1523,255 @@ class DeviceModule:
             "ip_fields": ip_fields,
         }
         if match.device is None:
+            taken = batch.claim(
+                row,
+                dependencies.rack,
+                dependencies.rack_identity,
+                placement,
+                dependencies.device_type,
+                None,
+            )
+            if taken is not None:
+                code, taken_display = taken
+                return _refused(identity, code, {**display, **taken_display})
+            actor = batch.reader.actor
+            if actor is not None and not actor.has_perm("dcim.add_device"):
+                return _refused(identity, "device.add_permission", display)
+            if validation := self._validation_error(None, payload):
+                return _refused(identity, "device.validation_failed", {**display, "message": validation})
+            device_change = self._change(
+                identity,
+                "create",
+                payload,
+                None,
+                dependencies.rack_identity,
+                dependencies.changes,
+                batch.profile,
+            )
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.ACTIONABLE,
-                changes=(self._change(identity, "create", payload, None, dependencies.rack_identity),),
+                changes=(*dependencies.changes, device_change),
                 diagnostics=ip_diagnostics,
+                display=display,
             )
         review = batch.review(row, match.device, dependencies, placement, payload)
+        display = self._review_display(display, review)
         payload = _reviewed_payload(payload, review, match.device)
+        relation_changes = tuple(
+            change
+            for change in dependencies.changes
+            if not (
+                ("device_type" in review.ignored and change.operation in {"create_manufacturer", "create_device_type"})
+                or ("role" in review.ignored and change.operation == "create_role")
+            )
+        )
+        effective_type = dependencies.device_type
+        if payload["device_type_id"] is not None and payload["device_type_id"] != dependencies.device_type.pk:
+            from dcim.models import DeviceType
+
+            effective_type = DeviceType.objects.filter(pk=payload["device_type_id"]).first()
+            if effective_type is None:
+                return _refused(identity, "device.device_type_missing", display)
+        if effective_type.u_height == 0:
+            zero_u_conflicts = []
+            if "u_position" in review.ignored and payload["u_position"] is not None:
+                zero_u_conflicts.append("u_position")
+            else:
+                payload["u_position"] = None
+            if "face" in review.ignored and payload["face"]:
+                zero_u_conflicts.append("face")
+            else:
+                payload["face"] = ""
+            if zero_u_conflicts:
+                return _refused(
+                    identity,
+                    "device.zero_u_review_conflict",
+                    {**display, "fields": zero_u_conflicts},
+                )
+        effective_rack = dependencies.rack
+        effective_rack_identity = dependencies.rack_identity
+        if payload["rack_name"] is None:
+            effective_rack_identity = None
+            if payload["rack_id"] != (dependencies.rack.pk if dependencies.rack is not None else None):
+                from dcim.models import Rack
+
+                effective_rack = Rack.objects.filter(pk=payload["rack_id"]).first() if payload["rack_id"] else None
+        effective_placement = _Placement(
+            position=payload["u_position"],
+            face=payload["face"],
+            airflow=payload["airflow"],
+            status=payload["status"],
+        )
+        taken = batch.claim(
+            row,
+            effective_rack,
+            effective_rack_identity,
+            effective_placement,
+            effective_type,
+            match.device,
+        )
+        if taken is not None:
+            code, taken_display = taken
+            return _refused(identity, code, {**display, **taken_display})
+        if not self._placement_differs(match.device, payload):
+            display = {
+                **display,
+                "detail": f"Device '{match.device.name}' matches this row, which writes nothing",
+                "extra_data": {**display["extra_data"], "placement_sync_writes_nothing": True},
+            }
+        if match.method == "name" and self._placement_differs(match.device, payload):
+            return _refused(identity, "device.name_placement_conflict", display)
         if (
             not self._differs(match.device, payload)
             and _contact_writes_nothing(contact)
             and _provenance_is_current(match.device, payload, batch.profile)
         ):
+            display = {
+                **display,
+                "extra_data": {
+                    **display["extra_data"],
+                    "placement_sync_writes_nothing": not self._placement_differs(match.device, payload),
+                    "writes_nothing": True,
+                },
+            }
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.NO_OP,
                 diagnostics=ip_diagnostics,
+                display=display,
             )
+        actor = batch.reader.actor
+        if actor is not None and not batch.reader.devices("change").filter(pk=match.device.pk).exists():
+            return _refused(identity, "device.change_permission", display)
+        if validation := self._validation_error(match.device, payload):
+            return _refused(identity, "device.validation_failed", {**display, "message": validation})
+        device_change = self._change(
+            identity,
+            "update",
+            payload,
+            match.device,
+            dependencies.rack_identity,
+            relation_changes,
+            batch.profile,
+        )
         return SynchronizationUnit(
             identity=identity,
             disposition=Disposition.ACTIONABLE,
-            changes=(self._change(identity, "update", payload, match.device, dependencies.rack_identity),),
+            changes=(*relation_changes, device_change),
             diagnostics=ip_diagnostics,
+            display=display,
         )
 
-    def apply(self, planned_change: PlannedChange, execution_context) -> Any:
+    @staticmethod
+    def _placement_differs(device, payload) -> bool:
+        """Return whether a name-only match would move the stored Device."""
+        return (
+            payload["rack_name"] is not None
+            or device.location_id != payload["location_id"]
+            or device.rack_id != payload["rack_id"]
+            or normalize_for_compare(device.position) != normalize_for_compare(payload["u_position"])
+            or (device.face or "") != payload["face"]
+        )
+
+    @staticmethod
+    def _validation_error(device, payload) -> str:
+        """Return a model validation message for a fully resolvable Device change."""
+        from dcim.models import Device
+
+        if payload["device_type_id"] is None or payload["role_id"] is None or payload["rack_name"] is not None:
+            return ""
+        candidate = copy(device) if device is not None else Device(name=payload["name"])
+        candidate.device_type_id = payload["device_type_id"]
+        candidate.role_id = payload["role_id"]
+        candidate.site_id = payload["site_id"]
+        candidate.location_id = payload["location_id"]
+        candidate.rack_id = payload["rack_id"]
+        candidate.position = payload["u_position"]
+        candidate.face = payload["face"]
+        candidate.status = payload["status"]
+        candidate.tenant_id = payload["tenant_id"]
+        if payload["airflow"]:
+            candidate.airflow = payload["airflow"]
+        for field in ("serial", "asset_tag"):
+            if payload[field]:
+                setattr(candidate, field, payload[field])
+        try:
+            candidate.full_clean()
+        except ValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                return "; ".join(f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items())
+            return "; ".join(exc.messages)
+        return ""
+
+    @staticmethod
+    def _review_display(display, review) -> dict:
+        """Attach the matched Device review state as display-only plan data."""
+        snapshots = {
+            field: {"file": file_snapshot, "netbox": netbox_snapshot}
+            for field, (file_snapshot, netbox_snapshot) in review.snapshots.items()
+        }
+        return {
+            **display,
+            "extra_data": {
+                **display["extra_data"],
+                "field_diff": review.differing,
+                "field_ignored": review.ignored,
+                "field_informational": review.informational,
+                "field_review_snapshots": snapshots,
+                "field_non_writable": sorted(DeviceFieldReviewer.non_writable_fields()),
+            },
+        }
+
+    def apply(self, planned_change: PlannedChange, execution_context) -> Any:  # noqa: C901
         """Apply one device change, having locked its row and rechecked its preconditions."""
-        from dcim.models import Device, Rack
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack
 
         from .object_permissions import enforce_saved_object_permission
 
         payload = planned_change.payload
+        if planned_change.operation == "create_manufacturer":
+            if Manufacturer.objects.filter(slug=payload["slug"]).exists():
+                raise PreconditionFailed(f"Manufacturer slug '{payload['slug']}' appeared after planning.")
+            manufacturer = Manufacturer(name=payload["name"], slug=payload["slug"])
+            manufacturer.full_clean()
+            manufacturer.save()
+            enforce_saved_object_permission(manufacturer, execution_context.actor, "add")
+            return manufacturer
+        if planned_change.operation == "create_device_type":
+            manufacturer = Manufacturer.objects.filter(slug=payload["manufacturer_slug"]).first()
+            if manufacturer is None:
+                raise PreconditionFailed(
+                    f"Manufacturer '{payload['manufacturer_slug']}' is absent, so the Device Type cannot be created."
+                )
+            if DeviceType.objects.filter(manufacturer=manufacturer, slug=payload["slug"]).exists():
+                raise PreconditionFailed(
+                    f"Device Type '{payload['manufacturer_slug']}/{payload['slug']}' appeared after planning."
+                )
+            device_type = DeviceType(
+                manufacturer=manufacturer,
+                slug=payload["slug"],
+                model=payload["model"],
+                u_height=payload["u_height"],
+            )
+            device_type.full_clean()
+            device_type.save()
+            enforce_saved_object_permission(device_type, execution_context.actor, "add")
+            return device_type
+        if planned_change.operation == "create_role":
+            if DeviceRole.objects.filter(slug=payload["slug"]).exists():
+                raise PreconditionFailed(f"Device Role slug '{payload['slug']}' appeared after planning.")
+            role = DeviceRole(name=payload["name"], slug=payload["slug"], color=payload["color"])
+            role.full_clean()
+            role.save()
+            enforce_saved_object_permission(role, execution_context.actor, "add")
+            return role
+
         device_id = planned_change.preconditions.get("device_id")
         if device_id is None:
+            conflict = self._create_identity_conflict(payload, execution_context.profile)
+            if conflict:
+                raise PreconditionFailed(f"{conflict} appeared after planning.")
             device = Device()
             action = "add"
         else:
@@ -910,9 +1779,29 @@ class DeviceModule:
             device = Device.objects.filter(pk=device_id).select_for_update(of=("self",)).first()
             if device is None:
                 raise PreconditionFailed(f"Device {device_id} is gone, so '{payload['name']}' cannot be updated.")
-            if device.device_type_id != planned_change.preconditions.get("device_type_id"):
-                raise PreconditionFailed(f"Device '{device.name}' changed type since the plan was made.")
+            current = self._precondition_state(
+                device,
+                execution_context.profile,
+                payload.get("source_id") or "",
+            )
+            if current != planned_change.preconditions.get("state"):
+                raise PreconditionFailed(f"Device '{device.name}' changed after the plan was made.")
             action = "change"
+
+        device_type_id = payload["device_type_id"]
+        if device_type_id is None:
+            device_type = DeviceType.objects.filter(
+                manufacturer__slug=payload["manufacturer_slug"], slug=payload["device_type_slug"]
+            ).first()
+            if device_type is None:
+                raise PreconditionFailed("The planned Device Type dependency is still absent.")
+            device_type_id = device_type.pk
+        role_id = payload["role_id"]
+        if role_id is None:
+            role = DeviceRole.objects.filter(slug=payload["role_slug"]).first()
+            if role is None:
+                raise PreconditionFailed("The planned Device Role dependency is still absent.")
+            role_id = role.pk
 
         rack_id = payload["rack_id"]
         rack_name = payload["rack_name"]
@@ -934,16 +1823,15 @@ class DeviceModule:
 
         if action == "add":
             device.name = payload["name"]
-        device.device_type_id = payload["device_type_id"]
-        device.role_id = payload["role_id"]
+        device.device_type_id = device_type_id
+        device.role_id = role_id
         device.site_id = payload["site_id"]
         device.location_id = payload["location_id"]
         device.rack_id = rack_id
         device.position = payload["u_position"]
         device.face = payload["face"]
         device.status = payload["status"]
-        if payload["tenant_id"] is not None:
-            device.tenant_id = payload["tenant_id"]
+        device.tenant_id = payload["tenant_id"]
         if payload["airflow"]:
             device.airflow = payload["airflow"]
         for field in ("serial", "asset_tag"):
@@ -987,13 +1875,16 @@ class DeviceModule:
         return {
             "name": name,
             "serial": _text(row.get("serial")),
-            "asset_tag": _text(row.get("asset_tag")),
+            "asset_tag": _text(row.get("asset_tag"))[:50],
             "u_position": placement.position,
             "face": placement.face,
             "airflow": placement.airflow,
             "status": placement.status,
             "device_type_id": dependencies.device_type.pk,
             "role_id": dependencies.role.pk,
+            "manufacturer_slug": dependencies.device_type_slugs[0],
+            "device_type_slug": dependencies.device_type_slugs[1],
+            "role_slug": dependencies.role_slug,
             "rack_id": dependencies.rack.pk if dependencies.rack is not None else None,
             "rack_name": _text(row.get("rack_name")) if dependencies.rack_identity is not None else None,
             "site_id": batch.reader.site.pk if batch.reader.site is not None else None,
@@ -1012,20 +1903,21 @@ class DeviceModule:
             return True
         if payload["rack_name"] is not None:
             return True
-        if payload["rack_id"] is not None and device.rack_id != payload["rack_id"]:
+        if device.rack_id != payload["rack_id"]:
             return True
-        # The write assigns the target's location always and its tenant only when there is one.
+        # The target context assigns both fields, including a blank value that clears one.
         if device.location_id != payload["location_id"]:
             return True
-        if payload["tenant_id"] is not None and device.tenant_id != payload["tenant_id"]:
+        if device.tenant_id != payload["tenant_id"]:
             return True
         if normalize_for_compare(device.position) != normalize_for_compare(payload["u_position"]):
             return True
         if _text(device.status) != payload["status"]:
             return True
-        for field, stored in (("face", device.face), ("airflow", device.airflow)):
-            if payload[field] and _text(stored) != payload[field]:
-                return True
+        if _text(device.face) != payload["face"]:
+            return True
+        if payload["airflow"] and _text(device.airflow) != payload["airflow"]:
+            return True
         for field in ("serial", "asset_tag"):
             if payload[field] and _text(getattr(device, field)) != payload[field]:
                 return True
@@ -1037,22 +1929,118 @@ class DeviceModule:
         return False
 
     @staticmethod
-    def _change(identity, operation, payload, device, rack_identity=None) -> PlannedChange:
+    def _change(
+        identity,
+        operation,
+        payload,
+        device,
+        rack_identity=None,
+        relation_changes=(),
+        profile=None,
+    ) -> PlannedChange:
         """Return the one write this unit performs, with the target state it assumed."""
         if device is None:
             preconditions: dict = {"device_id": None}
         else:
-            preconditions = {"device_id": device.pk, "device_type_id": device.device_type_id}
+            preconditions = {
+                "device_id": device.pk,
+                "state": DeviceModule._precondition_state(device, profile, payload.get("source_id") or ""),
+            }
+        dependencies = [change.identity for change in relation_changes]
+        if rack_identity is not None and payload["rack_name"] is not None:
+            dependencies.append(f"{rack_identity}:create")
         return PlannedChange(
             identity=f"{identity}:{operation}",
             target_module=DeviceModule.key,
             operation=operation,
             payload=payload,
-            dependencies=(f"{rack_identity}:create",)
-            if rack_identity is not None and payload["rack_name"] is not None
-            else (),
+            dependencies=tuple(dependencies),
             preconditions=preconditions,
         )
+
+    @staticmethod
+    def _precondition_state(device, profile=None, source_id="") -> dict:
+        """Return every Device field and relation this module can overwrite."""
+        state = {
+            "name": device.name,
+            "device_type_id": device.device_type_id,
+            "role_id": device.role_id,
+            "site_id": device.site_id,
+            "location_id": device.location_id,
+            "rack_id": device.rack_id,
+            "position": normalize_for_compare(device.position),
+            "face": device.face or "",
+            "status": device.status,
+            "tenant_id": device.tenant_id,
+            "airflow": device.airflow or "",
+            "serial": device.serial or "",
+            "asset_tag": device.asset_tag or "",
+            "primary_ip4_id": device.primary_ip4_id,
+            "primary_ip6_id": device.primary_ip6_id,
+            "oob_ip_id": device.oob_ip_id,
+            "custom_field_data": dict(device.custom_field_data),
+        }
+        if profile is None:
+            return state
+        from .models import DeviceImportSource
+
+        stored = DeviceImportSource.objects.filter(device_id=device.pk).first()
+        state["provenance"] = (
+            {
+                "profile_id": stored.profile_id,
+                "source_id": stored.source_id,
+                "extra_columns": stored.extra_columns,
+                "unassigned_ips": stored.unassigned_ips,
+            }
+            if stored is not None
+            else None
+        )
+        state["source_binding"] = tuple(
+            tuple(values)
+            for values in profile.device_matches.filter(source_id=source_id).values_list(
+                "source_id", "netbox_device_id", "device_name", "source_asset_tag"
+            )
+        )
+        state["device_bindings"] = tuple(
+            tuple(values)
+            for values in profile.device_matches.filter(netbox_device_id=device.pk).values_list(
+                "source_id", "netbox_device_id", "device_name", "source_asset_tag"
+            )
+        )
+        return state
+
+    @staticmethod
+    def _create_identity_conflict(payload, profile) -> str:
+        """Return the first target identity that would turn a planned create into a duplicate."""
+        from dcim.models import Device
+
+        source_id = payload.get("source_id") or ""
+        if source_id and profile.device_matches.filter(source_id=source_id).exists():
+            return f"A Device link for source ID '{source_id}'"
+        if (
+            source_id
+            and Device.objects.filter(
+                data_import_source__profile=profile,
+                data_import_source__source_id=source_id,
+            ).exists()
+        ):
+            return f"A Device with stored source ID '{source_id}'"
+        serial = payload.get("serial") or ""
+        if serial and Device.objects.filter(serial=serial).exists():
+            return f"A Device with serial '{serial}'"
+        asset_tag = payload.get("asset_tag") or ""
+        if asset_tag and Device.objects.filter(asset_tag__iexact=asset_tag).exists():
+            return f"A Device with asset tag '{asset_tag}'"
+        tenant_filter = (
+            {"tenant_id": payload["tenant_id"]} if payload.get("tenant_id") is not None else {"tenant__isnull": True}
+        )
+        if Device.objects.filter(
+            site_id=payload["site_id"],
+            name__iexact=payload["name"],
+            **tenant_filter,
+        ).exists():
+            return f"A Device named '{payload['name']}' at the target site and tenant"
+        return ""
 
 
 MODULE_RUNTIMES: dict[str, Any] = {

@@ -12,7 +12,7 @@ from __future__ import annotations
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError
 
-from . import adapters, catalog, target_modules
+from . import adapter_config, adapters, catalog, target_modules
 from .models import FailureReason, ImportExecution, SourceDocument, locked_profile_policy
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
@@ -68,7 +68,15 @@ class ImportEngine:
             raise adapters.UnknownSourceAdapter(
                 f"This release does not register the source adapter '{profile.source_adapter}'."
             )
-        source_batch = adapter.interpret(bytes(document.content), adapter.config_for(profile))
+        if not catalog.has_implemented_module(adapter.output_kinds):
+            raise adapters.UnknownSourceAdapter(
+                f"This release has no Target Module for source adapter '{profile.source_adapter}'."
+            )
+        source_batch = adapter.interpret(
+            bytes(document.content),
+            adapter_config.interpreter_config_for(profile),
+            collect_unused=True,
+        )
         # The catalog already declares which output kinds the resolution policy applies to.
         if _resolution_section().applies_to(source_batch.output_kinds):
             source_batch = adapters.SourceBatch(
@@ -91,7 +99,10 @@ class ImportEngine:
         merge_changes(executable_units(units))
         return ImportPlan(
             units=tuple(units),
-            diagnostics=tuple(cls._source_diagnostic(item) for item in source_batch.diagnostics),
+            diagnostics=(
+                *(cls._source_diagnostic(item) for item in source_batch.diagnostics),
+                *(cls._unused_column_diagnostic(name, stats) for name, stats in source_batch.unused_columns.items()),
+            ),
             source_fingerprint=document.content_fingerprint,
             profile_fingerprint=profile.planning_fingerprint,
             actor=str(actor.pk),
@@ -107,6 +118,9 @@ class ImportEngine:
         selection,
         idempotency_key,
         actor,
+        *,
+        job=None,
+        progress_callback=None,
     ) -> ImportExecution:
         """Apply selected units from one accepted serialized plan and return their audit row."""
         accepted = ImportPlan.from_dict(accepted_plan)
@@ -126,9 +140,19 @@ class ImportEngine:
             return execution
 
         try:
+            if job is not None:
+                execution.link_job(job)
             # One lock over the replan, the comparison and the writes: policy cannot move between them.
             with locked_profile_policy(profile.pk):
-                cls._write_selection(execution, profile, source_document, accepted, selected_identities, actor)
+                cls._write_selection(
+                    execution,
+                    profile,
+                    source_document,
+                    accepted,
+                    selected_identities,
+                    actor,
+                    progress_callback,
+                )
         except _ExecutionFailed as failure:
             cls._mark_failed(
                 execution,
@@ -149,7 +173,16 @@ class ImportEngine:
         return execution
 
     @classmethod
-    def _write_selection(cls, execution, profile, source_document, accepted, selected_identities, actor) -> None:
+    def _write_selection(
+        cls,
+        execution,
+        profile,
+        source_document,
+        accepted,
+        selected_identities,
+        actor,
+        progress_callback,
+    ) -> None:
         """Compare the selection against a fresh plan and apply it, inside the caller's transaction."""
         current = cls.plan(profile, source_document, actor, accepted.planning_context)
         units = cls._selected_units(accepted, current, selected_identities)
@@ -157,6 +190,10 @@ class ImportEngine:
             changes = merge_changes(units)
         except PlanInvalid as exc:
             raise SelectionError(str(exc)) from exc
+        total = len(units) + len(changes)
+        if progress_callback is not None:
+            progress_callback(0, total)
+            progress_callback(len(units), total)
         context = ExecutionContext(
             actor=actor,
             reader=NetBoxReader.for_actor(actor).for_planning_context(accepted.planning_context),
@@ -178,6 +215,8 @@ class ImportEngine:
                     not_attempted=[later.identity for later in changes[index + 1 :]],
                 ) from exc
             completed.append(change.identity)
+            if progress_callback is not None:
+                progress_callback(len(units) + index + 1, total)
         execution.mark_succeeded(applied_changes={"changes": completed, "deleted": []})
 
     @staticmethod
@@ -264,5 +303,18 @@ class ImportEngine:
             display["row_number"] = diagnostic.row_number
         return Diagnostic(code=diagnostic.code, severity=Severity.WARNING, display=display)
 
+    @staticmethod
+    def _unused_column_diagnostic(name, stats) -> Diagnostic:
+        """Carry one unmapped source column as display-only review information."""
+        return Diagnostic(
+            code="flat_workbook.unused_column",
+            severity=Severity.INFO,
+            display={
+                "name": str(name),
+                "count": int((stats or {}).get("count", 0)),
+                "samples": [str(value) for value in (stats or {}).get("samples", ())],
+            },
+        )
 
-__all__ = ("ImportEngine", "SelectionError", "StalePlan", "StaleSourceDocument")
+
+__all__ = ("ImportEngine", "PreconditionFailed", "SelectionError", "StalePlan", "StaleSourceDocument")

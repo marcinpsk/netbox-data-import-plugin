@@ -122,7 +122,14 @@ class ImportEngineTestDataMixin:
 
         grants = {Site: {}, Rack: {}, Device: {}}
         grants.update(overrides or {})
-        return [(model, ("view",), constraints) for model, constraints in grants.items()]
+        return [
+            (
+                model,
+                ("view",) if model is Site else ("view", "add", "change"),
+                constraints,
+            )
+            for model, constraints in grants.items()
+        ]
 
     def _plan(self, document=None, actor=None, planning_context=None):
         """Plan the default document with the shared target context."""
@@ -396,7 +403,7 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
             self._plan()
 
     def test_the_reader_is_bound_to_the_actor(self):
-        """A device hidden from the actor plans as a create, not an update."""
+        """A device hidden from the actor is refused, never duplicated."""
         from dcim.models import Device
 
         Device.objects.create(
@@ -416,7 +423,8 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
         scoped = scoped_plan.unit("device:source:D-1")
 
         self.assertEqual(unrestricted.changes[0].operation, "update")
-        self.assertEqual(scoped.changes[0].operation, "create")
+        self.assertEqual(scoped.disposition, Disposition.INVALID)
+        self.assertEqual(scoped.diagnostics[0].code, "device.inaccessible_match")
         self.assertEqual(scoped_plan.actor, str(actor.pk))
 
     def test_an_adapter_diagnostic_becomes_a_plan_diagnostic(self):

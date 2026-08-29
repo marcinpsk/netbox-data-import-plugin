@@ -58,11 +58,6 @@ class SourceAdapter:
         raise NotImplementedError
 
     @classmethod
-    def config_for(cls, profile):
-        """Return the interpreter configuration the profile describes."""
-        raise NotImplementedError
-
-    @classmethod
     def interpret(cls, content, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
         """Return the Source Batch the content carries under *adapter_config*."""
         raise NotImplementedError
@@ -81,30 +76,6 @@ class FlatWorkbookAdapter(SourceAdapter):
         from .adapter_forms import FlatWorkbookConfigForm
 
         return FlatWorkbookConfigForm
-
-    @classmethod
-    def config_for(cls, profile):
-        """Return the flat interpretation configuration the profile describes.
-
-        The read happens here, not in `flat_workbook`, which stays free of the ORM and of a
-        database in its tests (section 2.2).
-        """
-        from .flat_workbook import FlatWorkbookConfig, TransformRule
-
-        return FlatWorkbookConfig(
-            sheet_name=profile.adapter_settings.sheet_name,
-            column_map={field: tuple(columns) for field, columns in profile.grouped_column_map().items()},
-            transform_rules=tuple(
-                TransformRule(
-                    source_column=rule.source_column,
-                    pattern=rule.pattern,
-                    group_1_target=rule.group_1_target or "",
-                    group_2_target=rule.group_2_target or "",
-                )
-                for rule in profile.column_transform_rules.all()
-            ),
-            capture_extra_data=profile.adapter_settings.capture_extra_data,
-        )
 
     @classmethod
     def interpret(cls, content, adapter_config, *, collect_unused: bool = False) -> SourceBatch:

@@ -63,23 +63,6 @@ class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase
         self.assertIn(".ndi-badge-create", body)
 
 
-class ResultsAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase):
-    """The results page is reached from the same boosted flow."""
-
-    def test_the_results_stylesheet_renders_inside_the_body(self):
-        """A results page reached through the boost keeps its own styling."""
-        self._setup_session()
-        response = self.client.get(reverse("plugins:netbox_data_import:import_results"))
-        self.assertEqual(response.status_code, 200)
-        html = response.content.decode()
-        head_end = html.find("</head>")
-        self.assertNotEqual(head_end, -1, "the results page must render a full document")
-        body = html[head_end:]
-        self.assertIn("<style", body)
-        # The badges carry these names as plain attributes too, so the rule needs its leading dot.
-        self.assertIn(".ndi-badge-create", body)
-
-
 class EveryRowCarriesADetailRowTest(PreviewSessionMixin, BaseViewTestCase):
     """A detail row per source row is what makes a row click answer and a placement reachable."""
 
@@ -238,10 +221,8 @@ class ResolvedContactRowIsMarkedTest(BaseViewTestCase):
         """Populate the session from a workbook that carries contact candidates."""
         from dcim.models import Site
 
-        from netbox_data_import.engine import parse_file, run_import
         from netbox_data_import.models import ColumnMapping
         from netbox_data_import.tests.test_views import _make_profile
-        from netbox_data_import.views import _serialize_rows
 
         site = Site.objects.create(name="ContactSite", slug="contact-site")
         profile = _make_profile("ContactProfile")
@@ -250,19 +231,13 @@ class ResolvedContactRowIsMarkedTest(BaseViewTestCase):
         for source_column, target_field in self.CONTACT_COLUMNS.items():
             ColumnMapping.objects.create(profile=profile, source_column=source_column, target_field=target_field)
 
-        rows = parse_file(self._workbook(), profile)
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "contacts.xlsx",
-        }
-        session.save()
+        workbook = self._workbook()
+        workbook.name = "contacts.xlsx"
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": profile.pk, "site": site.pk, "excel_file": workbook},
+        )
+        self.assertEqual(response.status_code, 302)
         return profile
 
     def _preview_html(self):
@@ -356,7 +331,7 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
     def _detail_for(self, match):
         """Return (action, detail-row HTML) for the first preview row `match` accepts."""
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
-        rows = list(response.context["result"].rows)
+        rows = list(response.context["result"].units)
         index = next(i for i, row in enumerate(rows, start=1) if match(row))
         html = response.content.decode()
         start = html.index(f'<tr id="diff-{index}" class="ndi-diff-row"')
@@ -375,7 +350,7 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
 
         self._setup_session()
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
-        rack_row = next(row for row in response.context["result"].rows if row.object_type == "rack")
+        rack_row = next(row for row in response.context["result"].units if row.object_type == "rack")
         site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
         Rack.objects.create(name=rack_row.name, site=site, u_height=u_height)
 
@@ -428,7 +403,7 @@ class DetailRowSummaryReadsTheActionTest(PreviewSessionMixin, BaseViewTestCase):
     def _rack_main_row(self):
         """Return the HTML of the rack row itself, not of its detail row."""
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
-        rows = list(response.context["result"].rows)
+        rows = list(response.context["result"].units)
         index = next(i for i, row in enumerate(rows, start=1) if row.object_type == "rack")
         html = response.content.decode()
         end = html.index(f'<tr id="diff-{index}" class="ndi-diff-row"')
@@ -449,18 +424,19 @@ class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
 
     def _preview_html_with_a_shared_serial(self):
         """Give two workbook rows one serial and render the preview."""
-        self._setup_session()
-        session = self.client.session
-        rows = session["import_rows"]
-        # A row that already carries a serial is a device row, not the Cabinet row.
-        devices = [row for row in rows if row.get("serial")][:2]
-        self.assertEqual(len(devices), 2, "the sample workbook must carry two device rows")
-        for row in devices:
-            row["serial"] = "SHARED-PREVIEW-SERIAL"
-        session["import_rows"] = rows
-        session.save()
+        row_numbers = []
+
+        def share_serial(rows):
+            """Put one serial on the first two source Device rows."""
+            devices = [row for row in rows if row.get("serial")][:2]
+            self.assertEqual(len(devices), 2, "the sample workbook must carry two device rows")
+            for row in devices:
+                row["serial"] = "SHARED-PREVIEW-SERIAL"
+                row_numbers.append(row["_row_number"])
+
+        self._setup_session(mutate_rows=share_serial)
         html = self.client.get(reverse("plugins:netbox_data_import:import_preview")).content.decode()
-        return [row["_row_number"] for row in devices], html
+        return row_numbers, html
 
     def test_a_duplicate_serial_row_offers_the_ignore_action(self):
         """The operator gives the serial up on one row so the other keeps it."""

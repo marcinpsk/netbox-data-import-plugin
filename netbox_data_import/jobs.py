@@ -2,22 +2,20 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Native NetBox background jobs for data imports."""
 
+from typing import NoReturn
+
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import DatabaseError
 from rq import get_current_job
 
 from core.exceptions import JobFailed
 from netbox.jobs import JobRunner, system_job
 
-from . import engine
-from .models import (
-    ImportExecution,
-    ImportProfile,
-    SourceDocument,
-    locked_profile_policy,
-    validate_registered_adapter,
-)
-from .source_resolution import derive_effective_rows
+from .import_engine import ImportEngine, PreconditionFailed, SelectionError, StalePlan, StaleSourceDocument
+from .models import ExecutionOutcome, ImportExecution, ImportProfile, SourceDocument, validate_registered_adapter
+from .netbox_reader import PlanningTargetUnavailable
+from .object_permissions import ObjectPermissionDenied
+from .plan import PlanError
 
 
 _PROGRESS_REPORT_INTERVAL = 25
@@ -36,14 +34,12 @@ class ImportJobRunner(JobRunner):
         self.job.data = {**(self.job.data or {}), **values}
         self.job.save(update_fields=["data"])
 
-    def _fail(self, message, preview_result=None, context_data=None):
+    def _fail(self, message) -> NoReturn:
         """Record a recoverable failure and stop the native Job."""
         values = {"phase": "failed", "message": message}
-        if preview_result is not None:
-            values.update(
-                preview_result=preview_result.to_session_dict(),
-                context_data=context_data,
-            )
+        execution = ImportExecution.objects.filter(job=self.job).first()
+        if execution is not None:
+            values["import_execution_id"] = execution.pk
         self._save_data(**values)
         raise JobFailed()
 
@@ -58,104 +54,62 @@ class ImportJobRunner(JobRunner):
         rq_job.meta.update({"processed": processed, "total": total, "phase": "importing"})
         rq_job.save_meta()
 
-    def run(self, rows, context_data, stored_preview):
-        """Revalidate the preview, execute the import, and persist its audit record."""
-        from dcim.models import Location, Site
-        from tenancy.models import Tenant
-
-        from .views import _import_intents, _previewed_writes_changed
-
+    def run(self, profile_id, source_document_id, accepted_plan, selection, idempotency_key):
+        """Execute one accepted Import Plan as the Job's actor."""
         user = self.job.user
         if user is None:
             self._fail("The user who started this import is no longer available.")
 
-        profile = ImportProfile.objects.restrict(user, "change").filter(pk=context_data["profile_id"]).first()
+        profile = ImportProfile.objects.restrict(user, "change").filter(pk=profile_id).first()
         if profile is None:
             self._fail("The import profile is no longer available.")
-        # A queued job can outlive the release that registered its adapter.
         try:
             validate_registered_adapter(profile)
         except ValidationError as exc:
             self._fail("; ".join(exc.messages))
-        site = Site.objects.filter(pk=context_data["site_id"]).first()
-        if site is None:
-            self._fail("The target site is no longer available.")
-        location_id = context_data.get("location_id")
-        location = Location.objects.filter(pk=location_id).first() if location_id else None
-        if location_id and location is None:
-            self._fail("The target location is no longer available.")
-        tenant_id = context_data.get("tenant_id")
-        tenant = Tenant.objects.filter(pk=tenant_id).first() if tenant_id else None
-        if tenant_id and tenant is None:
-            self._fail("The target tenant is no longer available.")
-        context = {"site": site, "location": location, "tenant": tenant}
-        pristine_rows = rows
-        rows = derive_effective_rows(pristine_rows, profile)
+        source_document = SourceDocument.objects.filter(pk=source_document_id, profile=profile).first()
+        if source_document is None:
+            self._fail("The stored source is no longer available. Upload it again.")
 
         self._save_data(phase="validating")
-        current_preview = engine.run_import(rows, profile, context, dry_run=True, user=user)
-        if _previewed_writes_changed(stored_preview, current_preview):
-            self._fail(
-                "The import preview changed. Review the refreshed preview before importing.",
-                current_preview,
-                context_data,
-            )
+        progress = {"processed": 0, "total": 0}
 
-        identity_changed = False
-        superseded = False
-        profile_gone = False
-        with transaction.atomic():
-            # Every resolution write takes this same lock, so none can commit between this check
-            # and the writes below. Locking the resolution rows would leave an insert free to land.
-            try:
-                with locked_profile_policy(profile.pk):
-                    superseded = derive_effective_rows(pristine_rows, profile) != rows
-            except ImportProfile.DoesNotExist:
-                # A delete takes this same lock, so it can commit between the read above and here.
-                profile_gone = True
-            if profile_gone or superseded:
-                transaction.set_rollback(True)
-            else:
-                result = engine.run_import(
-                    rows,
-                    profile,
-                    context,
-                    dry_run=False,
-                    user=user,
-                    expected_intents=_import_intents(current_preview),
-                    progress_callback=self._publish_progress,
-                )
-                identity_changed = any(row.extra_data.get("identity_state_changed") for row in result.rows)
-                if identity_changed:
-                    transaction.set_rollback(True)
-        if profile_gone:
-            self._fail("The import profile is no longer available.")
-        if superseded:
-            self._fail(
-                "A saved resolution changed while this import was starting. "
-                "Review the refreshed preview before importing.",
-                current_preview,
-                context_data,
-            )
-        if identity_changed:
-            self._fail(
-                "NetBox identity changed during import. No changes were saved. Review the refreshed preview.",
-                current_preview,
-                context_data,
-            )
+        def publish_progress(processed, total):
+            """Remember final progress and publish the bounded RQ updates."""
+            progress.update(processed=processed, total=total)
+            self._publish_progress(processed, total)
 
-        history = ImportExecution.objects.create(
-            profile=profile,
-            input_filename=context_data.get("filename", ""),
-            site_name=site.name,
-            result_counts=result.counts,
-        )
+        try:
+            execution = ImportEngine.execute(
+                profile,
+                source_document,
+                accepted_plan,
+                selection,
+                idempotency_key,
+                user,
+                job=self.job,
+                progress_callback=publish_progress,
+            )
+        except (
+            DatabaseError,
+            ObjectPermissionDenied,
+            PlanError,
+            PlanningTargetUnavailable,
+            PreconditionFailed,
+            SelectionError,
+            StalePlan,
+            StaleSourceDocument,
+            ValidationError,
+        ) as exc:
+            self._fail(str(exc))
+        if execution.outcome == ExecutionOutcome.FAILED:
+            reason = (execution.failure_detail or {}).get("reason", "failed")
+            self._fail(f"The accepted import execution already failed ({reason}).")
         self._save_data(
             phase="completed",
-            processed=len(rows),
-            total=len(rows),
-            import_job_id=history.pk,
-            result=result.to_session_dict(),
+            processed=progress["processed"],
+            total=progress["total"],
+            import_execution_id=execution.pk,
         )
 
 

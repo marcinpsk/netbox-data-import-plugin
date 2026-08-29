@@ -9,13 +9,12 @@ from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from django.urls import reverse
 
-from netbox_data_import.engine import run_import
-from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
+from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceDocument, SourceResolution
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_REVISION_SESSION_KEY,
+    record_recalculated_preview,
 )
-from netbox_data_import.source_resolution import derive_effective_rows
 from netbox_data_import.tests.helpers import make_dcim_objects
 
 JSON = "application/json"
@@ -46,7 +45,7 @@ class ContactResolutionSessionMixin:
         )
 
         self.row = {
-            "_row_number": 1,
+            "_row_number": 2,
             "source_id": "AJAX-001",
             "device_name": "ajax-contact-device",
             "device_class": "Server",
@@ -59,23 +58,56 @@ class ContactResolutionSessionMixin:
                 }
             },
         }
-        result = run_import([self.row], self.profile, {"site": self.site}, dry_run=True)
-
         user = get_user_model().objects.create_superuser(
             username="contact-ajax-user",
             email="contact-ajax@example.invalid",
             password="testpass",
         )
+        self.user = user
         self.client.force_login(user)
+        import io
+
+        import openpyxl
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        workbook = openpyxl.Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Data"
+        worksheet.append(["Id", "Name", "Class", "Make", "Model", "Contact", "Contact Number"])
+        worksheet.append(
+            [
+                self.row["source_id"],
+                self.row["device_name"],
+                self.row["device_class"],
+                self.row["make"],
+                self.row["model"],
+                self.row["_candidate_values"]["contact"]["Contact"],
+                self.row["_candidate_values"]["contact"]["Contact Number"],
+            ]
+        )
+        content = io.BytesIO()
+        workbook.save(content)
+        self.document = SourceDocument.store(
+            profile=self.profile,
+            content=content.getvalue(),
+            filename="contact-ajax.xlsx",
+            uploaded_by=user,
+        )
+        self.planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
+        plan = ImportEngine.plan(self.profile, self.document, user, self.planning_context)
+        workspace = ReviewWorkspace(plan)
         session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = [self.row]
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = workspace.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,
             "site_id": self.site.pk,
             "location_id": None,
             "tenant_id": None,
             "filename": "contact-ajax.xlsx",
+            "source_document_id": self.document.pk,
         }
         session["import_preview_pending"] = True
         session[PREVIEW_REVISION_SESSION_KEY] = "revision-one"
@@ -187,7 +219,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         """The row action contract carries the row number, so the caller can address the row."""
         body = json.loads(self._post().content)
 
-        self.assertEqual(body["row_number"], 1)
+        self.assertEqual(body["row_number"], 2)
 
     def test_a_json_caller_never_gets_a_redirect(self):
         """`fetch` follows a redirect, which would recalculate the preview and rotate its revision."""
@@ -220,7 +252,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
 
         from core.models import Job
 
-        from netbox_data_import.views import _IMPORT_SOURCE_ROWS_JOB_SESSION_KEY, _restore_import_session
+        from netbox_data_import.views import _restore_import_session
 
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         session = self.client.session
@@ -233,11 +265,11 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
             queue_name="default",
             data={
                 "job_type": "netbox_data_import.import",
-                "preview_result": session["import_result"],
+                "accepted_plan": session["import_plan"],
                 "context_data": session["import_context"],
+                "source_document_id": self.document.pk,
             },
         )
-        session[_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY] = job.pk
         session.save()
 
         request = self.client.request().wsgi_request
@@ -307,7 +339,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
     def test_a_resolution_with_no_preview_in_the_session_is_still_saved(self):
         """A decision saved outside a preview is standalone and must not need one."""
         session = self.client.session
-        for key in ("import_rows", "import_context", "import_result", "import_preview_pending"):
+        for key in ("import_rows", "import_context", "import_plan", "import_preview_pending"):
             session.pop(key, None)
         session.save()
 
@@ -376,6 +408,9 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         from dcim.models import Device
         from tenancy.models import ContactRole
 
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
         role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
         self.profile.adapter_config["primary_contact_role"] = role.name
         self.profile.save()
@@ -387,14 +422,19 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         )
         # The first decision unblocks the row, so the second one meets a matched device.
         self._post()
-        rows = derive_effective_rows([self.row], self.profile)
-        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
-        device_row = next(r for r in result.rows if r.object_type == "device")
+        plan = ImportEngine.plan(
+            self.profile,
+            self.document,
+            self.user,
+            self.planning_context,
+        )
+        result = ReviewWorkspace(plan)
+        device_row = next(row for row in result.units if row.object_type == "device")
         self.assertEqual(device_row.extra_data.get("netbox_device_id"), device.pk)
 
         session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = rows
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = result.source_rows
         session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
         session.save()
 

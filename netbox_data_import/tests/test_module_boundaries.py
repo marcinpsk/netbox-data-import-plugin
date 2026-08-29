@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Views and jobs call the engine's public seam, never its private helpers.
-
-Section 2.4 of the architecture lists private engine helpers among the things a view may not call.
-The coupling is also invisible to the linter: `engine._helper` is an attribute lookup on a module, so
-renaming or moving the helper leaves ruff silent and fails at request time instead. One such rename
-reached the full suite before this guard existed.
-
-`PERMITTED` records the calls that already exist. It is a permit list, so removing a call needs no
-edit here, and a new one fails until it is either a public seam or a deliberate entry.
-"""
+"""Views and jobs use only the public target-neutral import seams."""
 
 import ast
 import pathlib
@@ -19,51 +10,48 @@ from django.test import SimpleTestCase
 PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 CALLERS = ("views.py", "jobs.py")
 
-# Layer 6 of the engine cutover removes these. Until then they are inherited, not new.
-PERMITTED = {
-    "views.py": {
-        "_coerce_position",
-        "_device_placement_differs",
-        "_effective_device_name",
-        "_has_below_rack_position",
-        "_identity_text",
-        "_normalize_for_compare",
-        "_str_val",
-    },
-    "jobs.py": set(),
-}
 
-
-def _private_engine_attributes(path: pathlib.Path) -> set[str]:
-    """Return every `engine._name` attribute this module reads."""
+def _import_engine_calls(path: pathlib.Path) -> set[str]:
+    """Return methods called directly on `ImportEngine` in one module."""
     tree = ast.parse(path.read_text())
-    found = set()
+    return {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ImportEngine"
+    }
+
+
+def _imports_target_modules(path: pathlib.Path) -> bool:
+    """Return whether a caller bypasses the coordinator for a Target Module."""
+    tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "engine"
-            and node.attr.startswith("_")
-        ):
-            found.add(node.attr)
-    return found
+        if isinstance(node, ast.ImportFrom) and node.module in {"target_modules", "netbox_data_import.target_modules"}:
+            return True
+        if isinstance(node, ast.Import) and any(name.name.endswith("target_modules") for name in node.names):
+            return True
+    return False
 
 
-class ViewsUsePublicEngineSeamTest(SimpleTestCase):
-    """A new private-helper call has to be justified, because the linter cannot see it."""
+class TargetNeutralCallerBoundaryTest(SimpleTestCase):
+    """The cutover leaves no route back to fixed passes or Target Module writes."""
 
-    maxDiff = None
+    def test_the_legacy_engine_is_deleted(self):
+        self.assertFalse((PACKAGE / "engine.py").exists())
 
-    def test_no_caller_reaches_a_new_private_engine_helper(self):
-        """The set only shrinks as the cutover lands, so anything unlisted is new coupling."""
-        added = sorted(
-            f"{name}: engine.{attribute}"
-            for name in CALLERS
-            for attribute in _private_engine_attributes(PACKAGE / name) - PERMITTED[name]
-        )
+    def test_views_and_jobs_call_only_the_public_coordinator_methods(self):
+        calls = {name: _import_engine_calls(PACKAGE / name) for name in CALLERS}
 
-        self.assertEqual(
-            added,
-            [],
-            "Call the engine's public seam, or record the helper in PERMITTED with the reason.",
-        )
+        self.assertEqual(calls, {"views.py": {"plan", "execute"}, "jobs.py": {"execute"}})
+
+    def test_views_and_jobs_do_not_import_target_modules(self):
+        self.assertEqual([name for name in CALLERS if _imports_target_modules(PACKAGE / name)], [])
+
+    def test_source_adapters_do_not_project_profile_policy(self):
+        """A Source Adapter receives plain settings and never reads an Import Profile."""
+        from netbox_data_import.adapters import FlatWorkbookAdapter, SourceAdapter
+
+        self.assertFalse(hasattr(SourceAdapter, "config_for"))
+        self.assertFalse(hasattr(FlatWorkbookAdapter, "config_for"))
