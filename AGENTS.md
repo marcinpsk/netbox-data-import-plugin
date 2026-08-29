@@ -23,7 +23,7 @@ Standard NetBox plugin pattern:
 - **`target_modules.py`** - Target-specific planning and write runtimes
 - **`models.py`** - ImportProfile, ColumnMapping, ClassRoleMapping, SourceDocument, ImportExecution
 - **`views.py`** - CRUD for import profiles + import wizard (upload, preview, execute, results)
-- **`api/`** - DRF REST API using NetBox's `NetBoxModelViewSet`/`NetBoxModelSerializer`
+- **`api/`** - DRF REST API. NetBoxModel resources use NetBox API bases; plain Django models use suitable DRF bases
 - **`jobs.py`** - Background import job and the source-document retention system job
 - **`forms.py`, `tables.py`, `filters.py`, `navigation.py`, `urls.py`** - Standard NetBox UI
 

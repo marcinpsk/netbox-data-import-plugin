@@ -224,7 +224,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         device_unit = next(
             unit for unit in session["import_plan"]["units"] if unit["display"].get("source_id") == "AJAX-001"
         )
-        device_unit["display"]["extra_data"]["candidate_values"] = ["invalid"]
+        device_unit["display"].setdefault("extra_data", {})["candidate_values"] = ["invalid"]
         session.save()
 
         response = self._post()

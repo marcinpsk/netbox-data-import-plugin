@@ -33,8 +33,7 @@ from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object
 def _workbook(*rows) -> bytes:
     """Return one stored-source workbook with the coordinator test columns."""
     book = openpyxl.Workbook()
-    # `active` is optional to the type checker, and this helper is annotated so mypy checks it.
-    sheet = book.active or book.create_sheet()
+    sheet = book.worksheets[0]
     sheet.title = "Data"
     sheet.append(["Source ID", "Class", "Name", "Rack", "Make", "Model", "Height"])
     for row in rows:

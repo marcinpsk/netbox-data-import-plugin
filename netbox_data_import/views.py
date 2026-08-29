@@ -1499,7 +1499,7 @@ class ImportResultsView(PermissionRequiredMixin, View):
             )
             .first()
         )
-        if execution is None:
+        if execution is None or not request.user.has_perm(self.permission_required, execution):
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         if restored_execution_id is None:
             request.session.pop("import_background_job_id", None)

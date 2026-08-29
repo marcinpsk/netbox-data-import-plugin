@@ -1204,8 +1204,14 @@ class _DeviceBatch:
         previous = self._claimed_devices.get(match.device.pk)
         if previous is not None and previous[0] != row.get("_row_number"):
             return previous[1] or f"row {previous[0]}"
-        self._claimed_devices[match.device.pk] = (row.get("_row_number"), source_id)
         return ""
+
+    def commit_device_claim(self, row, match) -> None:
+        """Reserve a matched Device for one accepted unit."""
+        self._claimed_devices[match.device.pk] = (
+            row.get("_row_number"),
+            _text(row.get("source_id")),
+        )
 
     def suggest_name(self, row) -> str:
         """Return and reserve one deterministic name for a duplicate source row."""
@@ -1463,6 +1469,7 @@ class DeviceModule:
                 display["detail"] = (
                     f"Matched to '{match.device.name}' (by {match.method}{name_note}, skip: update_existing off)"
                 )
+                batch.commit_device_claim(row, match)
                 return SynchronizationUnit(
                     identity=identity,
                     disposition=Disposition.NO_OP,
@@ -1633,6 +1640,7 @@ class DeviceModule:
             and _provenance_is_current(match.device, payload, batch.profile)
         ):
             batch.commit_claim(row, claim)
+            batch.commit_device_claim(row, match)
             display = {
                 **display,
                 "extra_data": {
@@ -1653,6 +1661,7 @@ class DeviceModule:
         if validation := self._validation_error(match.device, payload):
             return _refused(identity, "device.validation_failed", {**display, "message": validation})
         batch.commit_claim(row, claim)
+        batch.commit_device_claim(row, match)
         device_change = self._change(
             identity,
             "update",

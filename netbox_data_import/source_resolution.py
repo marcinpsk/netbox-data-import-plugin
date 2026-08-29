@@ -27,11 +27,7 @@ def _clear_resolved_conflicts(row_dict: dict[str, Any], resolved_fields: dict) -
 
 
 def _apply_one_resolution(row_dict: dict, resolution, source_to_targets: dict[str, list[str]]) -> None:
-    """Apply one saved Source Resolution and clear its ignored mapped values.
-
-    Clear an omitted Target Field only while it still equals the original source value. Preserve a
-    different value because another source column supplied it.
-    """
+    """Apply one saved Source Resolution and clear its ignored mapped values."""
     row_dict.update(resolution.resolved_fields)
     _clear_resolved_conflicts(row_dict, resolution.resolved_fields)
 
@@ -49,12 +45,7 @@ def _apply_one_resolution(row_dict: dict, resolution, source_to_targets: dict[st
 
 
 def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
-    """Return *rows* with every saved SourceResolution applied, leaving *rows* untouched.
-
-    `rows` must be the pristine parsed rows. Applying a resolution only ever sets fields, so a
-    derivation that starts from an earlier result cannot express a target field the operator has
-    since dropped. Every caller derives, and none stores what it derived.
-    """
+    """Return new effective rows derived from pristine source rows and saved resolutions."""
     resolutions_by_source_id: dict[str, list] = {}
     # Source columns give resolutions with one source ID a stable override order.
     for resolution in profile.source_resolutions.order_by("source_id", "source_column"):

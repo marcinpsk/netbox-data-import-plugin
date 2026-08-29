@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+from inspect import signature
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def _root_conftest():
     return module
 
 
-def _run_empty_pytest(*arguments, timeout=None):
+def _run_empty_pytest(*arguments, timeout=120):
     """Run pytest without collecting this plugin's test suite."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
     environment["TEST_DB_NAME"] = "test_worker_pool_contract"
@@ -57,6 +58,11 @@ def test_xdist_worker_gets_private_postgresql_and_redis_databases():
     """Assign one PostgreSQL database and two Redis databases to a worker."""
     assert isolated_test_database_name("test_netbox_data_import", "gw3") == "test_netbox_data_import_gw3"
     assert isolated_redis_databases("gw3") == (3, 11)
+
+
+def test_empty_pytest_runs_have_a_bounded_default_timeout():
+    """A broken nested test run cannot hang the outer suite indefinitely."""
+    assert signature(_run_empty_pytest).parameters["timeout"].default == 120
 
 
 def test_serial_run_keeps_default_database_targets():

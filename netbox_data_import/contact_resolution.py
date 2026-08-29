@@ -205,7 +205,9 @@ class PrimaryContactResolver:
 
         legacy_primary_contact = _text(row.get("primary_contact")) or _text(extra_columns.get("primary_contact"))
         extra_columns.pop("primary_contact", None)
-        source_columns = candidate_source_columns or cls.candidate_source_columns(profile)
+        source_columns = (
+            cls.candidate_source_columns(profile) if candidate_source_columns is None else candidate_source_columns
+        )
         candidate_values = cls._candidate_values(row, source_columns, extra_columns)
         try:
             selection = cls._selection(row, profile, candidate_values, legacy_primary_contact)

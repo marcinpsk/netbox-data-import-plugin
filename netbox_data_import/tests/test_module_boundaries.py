@@ -4,6 +4,7 @@
 
 import ast
 import pathlib
+from tempfile import TemporaryDirectory
 
 from django.test import SimpleTestCase
 
@@ -28,8 +29,11 @@ def _imports_target_modules(path: pathlib.Path) -> bool:
     """Return whether a caller bypasses the coordinator for a Target Module."""
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in {"target_modules", "netbox_data_import.target_modules"}:
-            return True
+        if isinstance(node, ast.ImportFrom):
+            if node.module in {"target_modules", "netbox_data_import.target_modules"}:
+                return True
+            if node.level and node.module is None and any(name.name == "target_modules" for name in node.names):
+                return True
         if isinstance(node, ast.Import) and any(name.name.endswith("target_modules") for name in node.names):
             return True
     return False
@@ -47,6 +51,7 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
         self.assertIn("`import_engine.py`", architecture)
         self.assertNotIn("`engine.py`", architecture)
+        self.assertIn("plain Django models use suitable DRF bases", architecture)
 
     def test_views_and_jobs_call_only_the_public_coordinator_methods(self):
         calls = {name: _import_engine_calls(PACKAGE / name) for name in CALLERS}
@@ -55,6 +60,21 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
     def test_views_and_jobs_do_not_import_target_modules(self):
         self.assertEqual([name for name in CALLERS if _imports_target_modules(PACKAGE / name)], [])
+
+    def test_relative_package_imports_of_target_modules_are_detected(self):
+        """The boundary guard recognizes ``from . import target_modules``."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text("from . import target_modules\n")
+
+            self.assertTrue(_imports_target_modules(path))
+
+    def test_source_resolution_helpers_have_one_line_purpose_docstrings(self):
+        """Implementation helpers keep their explanation at the module boundary."""
+        from netbox_data_import.source_resolution import _apply_one_resolution, derive_effective_rows
+
+        self.assertNotIn("\n", _apply_one_resolution.__doc__ or "")
+        self.assertNotIn("\n", derive_effective_rows.__doc__ or "")
 
     def test_source_adapters_do_not_project_profile_policy(self):
         """A Source Adapter receives plain settings and never reads an Import Profile."""

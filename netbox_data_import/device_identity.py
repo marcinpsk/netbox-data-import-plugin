@@ -30,7 +30,8 @@ class DeviceTypeIdentityResolver:
         self._device_types_by_make = {}
         for mapping in self.device_type_mappings:
             self._device_types_exact.setdefault((mapping.source_make, mapping.source_model), mapping)
-            self._device_types_by_make.setdefault(mapping.source_make.lower(), []).append(mapping)
+            normalized_make = normalize_mapping_text(mapping.source_make).lower()
+            self._device_types_by_make.setdefault(normalized_make, []).append(mapping)
         self._manufacturers_exact = {}
         for mapping in self.manufacturer_mappings:
             self._manufacturers_exact.setdefault(mapping.source_make, mapping)

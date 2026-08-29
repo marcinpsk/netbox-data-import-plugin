@@ -11,7 +11,9 @@ from unittest import skipUnless
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
+from django.db import connection
 from django.test import SimpleTestCase, TestCase
+from django.test.utils import CaptureQueriesContext
 from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 from tenancy.models import Contact, ContactAssignment, ContactRole
 
@@ -374,6 +376,20 @@ class NativeContactResolverTest(TestCase):
         self.assertEqual(review.candidate_values, {"Candidate Email": "candidate@example.invalid"})
         self.assertEqual(review.extra_columns, {})
         self.assertEqual(review.plan["assignment_action"], "create")
+
+    def test_an_empty_preloaded_candidate_map_skips_the_profile_query(self):
+        """A batch with no candidate mappings does not query them again for each Device."""
+        with CaptureQueriesContext(connection) as queries:
+            PrimaryContactResolver.review(
+                self.device,
+                self._row(),
+                self.profile,
+                candidate_source_columns={},
+            )
+
+        self.assertFalse(
+            any("netbox_data_import_columnmapping" in query["sql"].lower() for query in queries.captured_queries)
+        )
 
     def test_invalid_candidate_decision_preserves_candidates_and_validation_message(self):
         """A bad saved choice remains editable and keeps its precise validation reason."""

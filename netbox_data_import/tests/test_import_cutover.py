@@ -24,6 +24,7 @@ from netbox_data_import.models import (
     ColumnMapping,
     DeviceTypeMapping,
     ExecutionOutcome,
+    FailureReason,
     ImportExecution,
     ImportProfile,
     SourceDocument,
@@ -388,6 +389,33 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertIn(response.status_code, (302, 403))
 
+    def test_results_apply_the_execution_object_constraint(self):
+        """A model-level grant does not expose an execution outside its object constraint."""
+        self._upload()
+        actor = user_with_object_permission(
+            "cutover-constrained-execution-viewer",
+            [(ImportExecution, ("view",), {"outcome": ExecutionOutcome.SUCCEEDED})],
+        )
+        execution = ImportExecution.objects.create(
+            profile=self.profile,
+            source_document=SourceDocument.objects.get(profile=self.profile),
+            actor=actor,
+            outcome=ExecutionOutcome.FAILED,
+        )
+        client = Client()
+        client.force_login(actor)
+        session = client.session
+        session["import_execution_id"] = execution.pk
+        session.save()
+
+        response = client.get(reverse("plugins:netbox_data_import:import_results"))
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:import_setup"),
+            fetch_redirect_response=False,
+        )
+
     def test_results_redirect_for_missing_or_foreign_execution(self):
         """A session cannot expose an absent audit row or another actor's result."""
         results_url = reverse("plugins:netbox_data_import:import_results")
@@ -615,6 +643,21 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
                 with patch("netbox_data_import.views.ImportEngine.execute", side_effect=failure):
                     response = self._sync_single_row({"row_number": 2})
                 self.assertEqual(response.status_code, status)
+
+    def test_single_row_sync_reports_real_stale_target_state(self):
+        """A Rack that appears after planning invalidates the accepted unit."""
+        from dcim.models import Rack
+
+        self._upload()
+        Rack.objects.create(site=self.site, name="rack-a")
+
+        response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            ImportExecution.objects.latest("pk").failure_detail["reason"],
+            FailureReason.STALE_PLAN,
+        )
 
     def test_single_row_sync_marks_the_materialized_preview_stale(self):
         """A selective execution returns immediately and leaves recalculation to the operator."""

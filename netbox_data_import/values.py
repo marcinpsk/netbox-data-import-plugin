@@ -91,6 +91,7 @@ def status_map() -> dict[str, str]:
         "production": DeviceStatusChoices.STATUS_ACTIVE,
         "planned": DeviceStatusChoices.STATUS_PLANNED,
         "staged": DeviceStatusChoices.STATUS_STAGED,
+        "inventory": DeviceStatusChoices.STATUS_INVENTORY,
         "failed": DeviceStatusChoices.STATUS_FAILED,
         "offline": DeviceStatusChoices.STATUS_OFFLINE,
         "decommissioning": DeviceStatusChoices.STATUS_DECOMMISSIONING,

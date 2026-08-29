@@ -9,9 +9,17 @@ const previewTemplate = readFileSync(
   resolve(process.cwd(), "netbox_data_import/templates/netbox_data_import/import_preview.html"),
   "utf8",
 );
-const syncControllerSource = previewTemplate.match(
-  /<script>\n(\(function \(\) \{\n  var modal = document\.getElementById\('syncRowModal'\);[\s\S]*?)\n<\/script>/,
-)[1];
+function extractSyncController(template) {
+  const match = template.match(
+    /<script>\n(\(function \(\) \{\n  var modal = document\.getElementById\('syncRowModal'\);[\s\S]*?)\n<\/script>/,
+  );
+  if (!match) {
+    throw new Error("import_preview.html is missing the syncRowModal controller script.");
+  }
+  return match[1];
+}
+
+const syncControllerSource = extractSyncController(previewTemplate);
 
 const fixture = `
   <button id="sync-row-1" data-row-number="1" data-name="row one">Sync row one</button>
@@ -54,6 +62,12 @@ async function setUp(page) {
   });
   await page.addScriptTag({ content: syncControllerSource });
 }
+
+test("a missing sync controller reports the template marker", () => {
+  expect(() => extractSyncController("<main>No inline script</main>")).toThrow(
+    /import_preview.*syncRowModal/i,
+  );
+});
 
 test("a late sync response updates the row that submitted it", async ({ page }) => {
   await setUp(page);

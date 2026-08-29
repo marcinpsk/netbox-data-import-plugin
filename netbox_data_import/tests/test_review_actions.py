@@ -16,7 +16,6 @@ from netbox_data_import.models import (
     IgnoredFieldDifference,
     ImportProfile,
 )
-from netbox_data_import.object_permissions import ObjectPermissionDenied
 from netbox_data_import.preview_row_actions import record_recalculated_preview
 from netbox_data_import.tests.helpers import plan_source_rows, user_with_object_permission
 
@@ -265,11 +264,30 @@ class TargetNeutralFieldReviewTest(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("linked elsewhere", response.json()["error"])
 
-    def test_ignore_sanitizes_permission_validation_and_integrity_failures(self):
-        """Expected persistence failures return bounded row-action errors."""
+    def test_ignore_sanitizes_a_real_object_permission_failure(self):
+        """A constrained add permission rolls back and returns a bounded row-action error."""
+        from dcim.models import Device
+
+        actor = user_with_object_permission(
+            "review-action-denied",
+            [
+                (ImportProfile, ("change",), {"pk": self.profile.pk}),
+                (Device, ("view",), {"pk": self.device.pk}),
+                (IgnoredFieldDifference, ("add",), {"source_id": "OTHER-ROW"}),
+            ],
+        )
+        self.client.force_login(actor)
+        self._materialize()
+
+        response = self._post("ignore_field_difference")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+
+    def test_ignore_sanitizes_validation_and_integrity_failures(self):
+        """Coordinator validation and concurrent integrity failures remain bounded."""
         endpoint = "netbox_data_import.views.save_permission_scoped_object"
         for failure, status in (
-            (ObjectPermissionDenied("denied"), 409),
             (ValidationError("invalid review"), 400),
             (IntegrityError("duplicate"), 409),
         ):

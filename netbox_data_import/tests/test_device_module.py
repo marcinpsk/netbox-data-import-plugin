@@ -15,6 +15,7 @@ from netbox_data_import.models import (
     ClassRoleMapping,
     DeviceExistingMatch,
     DeviceImportSource,
+    DeviceTypeMapping,
     IgnoredDevice,
     IgnoredFieldDifference,
     ImportProfile,
@@ -294,6 +295,29 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
             any(diagnostic.code == "device.derived_slug_collision" for unit in units for diagnostic in unit.diagnostics)
         )
 
+    def test_device_type_mapping_normalizes_the_source_make_before_lookup(self):
+        """Escaped whitespace in a mapping still selects its explicit Device Type."""
+        from dcim.models import DeviceType, Manufacturer
+
+        manufacturer = Manufacturer.objects.create(name="Mapped Make", slug="mapped-make")
+        mapped_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Mapped Type",
+            slug="mapped-type",
+            u_height=1,
+        )
+        DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make=r"Dell\u0020\u0020",
+            source_model=r"R\u0036\u0036\u0030",
+            netbox_manufacturer_slug=manufacturer.slug,
+            netbox_device_type_slug=mapped_type.slug,
+        )
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].changes[-1].payload["device_type_id"], mapped_type.pk)
+
     def test_a_rack_the_row_names_but_netbox_does_not_have_is_blocked(self):
         """A device row cannot create the rack it is placed in."""
         units = self._plan(self._row(2, "D-1", "srv-01", rack_name="no-such-rack"))
@@ -441,6 +465,24 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.already_bound")
 
+    def test_a_refused_row_does_not_claim_its_matched_device(self):
+        """A later valid row may use a Device that an invalid row only considered."""
+        device = self._device(
+            "stored-name",
+            rack=self.rack,
+            serial="SN-SHARED",
+            asset_tag="ASSET-SHARED",
+        )
+
+        units = self._plan(
+            self._row(2, "D-INVALID", "first-name", rack_name="", u_position="5", serial=device.serial),
+            self._row(3, "D-VALID", "second-name", asset_tag=device.asset_tag),
+        )
+
+        self.assertEqual(units[0].diagnostics[0].code, "device.rack_required")
+        self.assertNotEqual(units[1].diagnostics[0].code if units[1].diagnostics else None, "device.already_bound")
+        self.assertIn(units[1].disposition, {Disposition.ACTIONABLE, Disposition.NO_OP})
+
     def test_an_ambiguous_serial_refuses_the_row_rather_than_guessing(self):
         """Two stored devices carry the serial, so no automatic answer is the safe one."""
         self._device("first", rack=self.rack, serial="SN-1")
@@ -517,6 +559,13 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         units = self._plan(self._row(2, "D-1", "srv-01", status="Live"))
 
         self.assertEqual(units[0].changes[0].payload["status"], "active")
+
+    def test_inventory_status_uses_netbox_inventory_semantics(self):
+        from dcim.choices import DeviceStatusChoices
+
+        units = self._plan(self._row(2, "D-1", "srv-01", status="Inventory"))
+
+        self.assertEqual(units[0].changes[0].payload["status"], DeviceStatusChoices.STATUS_INVENTORY)
 
     def test_a_position_with_no_rack_is_invalid(self):
         units = self._plan(self._row(2, "D-1", "srv-01", rack_name="", u_position="5", face="Front"))

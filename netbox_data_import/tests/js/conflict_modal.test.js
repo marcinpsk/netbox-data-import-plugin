@@ -28,6 +28,10 @@ let submitted;
 
 function render() {
   submitted = 0;
+  if (window.ndiConflictResolutionState) {
+    window.ndiConflictResolutionState.activeToken = null;
+    window.ndiConflictResolutionState.nextToken = 0;
+  }
   window.ndiPostPreviewAction = vi.fn(() =>
     Promise.resolve({ ok: true, preview_state: "recalculation_required", message: "Saved." }),
   );
@@ -64,6 +68,15 @@ function buttons() {
 
 describe("conflict modal", () => {
   beforeEach(render);
+
+  it("starts a new render without stale pending state", async () => {
+    window.ndiConflictResolutionState.activeToken = "stale-request";
+
+    render();
+    buttons()[0].click();
+
+    await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
+  });
 
   it("names each field the way the catalog does, not by its key", () => {
     const headings = [...document.querySelectorAll("#conflictModalBody h6")].map((h) => h.textContent);
