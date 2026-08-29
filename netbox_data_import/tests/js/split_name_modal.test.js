@@ -113,6 +113,10 @@ async function settleDeviceCheck() {
 }
 
 beforeEach(() => {
+  window.ndiPostPreviewAction = vi.fn(() =>
+    Promise.resolve({ ok: true, preview_state: "recalculation_required", message: "Saved." }),
+  );
+  window.ndiMarkPreviewStale = vi.fn();
   vi.stubGlobal(
     "fetch",
     vi.fn((url) => {
@@ -141,9 +145,11 @@ describe("split modal parts", () => {
     expect([partValue(0).value, partValue(1).value, partValue(2).value]).toEqual(["AT900", "host", "900"]);
   });
 
-  it("saves the field each part was sent to", () => {
+  it("saves the field each part was sent to without navigating away", async () => {
     submitForm();
     expect(resolvedFields()).toEqual({ asset_tag: "AT900", device_name: "host-900" });
+    await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
+    expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
   });
 });
 

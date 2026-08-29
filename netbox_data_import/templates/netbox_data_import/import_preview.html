@@ -518,8 +518,10 @@
 
                 {% if row.object_type == 'manufacturer' and row.action == 'create' and profile_id %}
                   {# Manufacturer: create now OR map to existing #}
-                  <form method="post" action="{% url 'plugins:netbox_data_import:quick_create_manufacturer' %}" class="d-inline">
+                  <form method="post" action="{% url 'plugins:netbox_data_import:quick_create_manufacturer' %}"
+                        class="d-inline ndi-deferred-preview-form">
                     {% csrf_token %}
+                    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
                     <input type="hidden" name="profile_id" value="{{ profile_id }}">
                     <input type="hidden" name="mfg_name" value="{{ row.name }}">
                     <input type="hidden" name="mfg_slug" value="{{ row.extra_data.mfg_slug }}">
@@ -1137,7 +1139,7 @@
           <div class="d-flex gap-2">
             <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
             <button type="submit" class="btn btn-primary">
-              <i class="mdi mdi-content-save"></i> Save &amp; Re-run import
+              <i class="mdi mdi-content-save"></i> Save resolution
             </button>
           </div>
         </div>
@@ -1833,8 +1835,10 @@ function unlinkFromModal(btn) {
         <h5 class="modal-title"><i class="mdi mdi-link-variant"></i> Map Device Type</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
-      <form method="post" action="{% url 'plugins:netbox_data_import:quick_resolve_device_type' %}">
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_resolve_device_type' %}"
+            class="ndi-deferred-preview-form">
         {% csrf_token %}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <div class="modal-body">
           <input type="hidden" name="profile_id" id="dtm_profile_id">
           <input type="hidden" name="source_make" id="dtm_source_make">
@@ -1911,8 +1915,10 @@ function unlinkFromModal(btn) {
         <h5 class="modal-title"><i class="mdi mdi-cog"></i> Configure Class: <span id="cm_title_class"></span></h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
-      <form method="post" action="{% url 'plugins:netbox_data_import:quick_add_class_mapping' %}">
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_add_class_mapping' %}"
+            class="ndi-deferred-preview-form">
         {% csrf_token %}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <div class="modal-body">
           <input type="hidden" name="profile_id" id="cm_profile_id">
           <input type="hidden" name="source_class" id="cm_source_class">
@@ -2097,8 +2103,10 @@ function unlinkFromModal(btn) {
         <h5 class="modal-title"><i class="mdi mdi-factory"></i> Map Manufacturer</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
-      <form method="post" action="{% url 'plugins:netbox_data_import:quick_resolve_manufacturer' %}">
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_resolve_manufacturer' %}"
+            class="ndi-deferred-preview-form">
         {% csrf_token %}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <div class="modal-body">
           <input type="hidden" name="profile_id" id="mm_profile_id">
           <input type="hidden" name="source_make" id="mm_source_make">
@@ -2148,8 +2156,10 @@ function unlinkFromModal(btn) {
 <div class="modal fade" id="ndiQuickMapModal" tabindex="-1" aria-labelledby="ndiQuickMapModalLabel" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
-      <form method="post" action="{% url 'plugins:netbox_data_import:quick_add_column_mapping' %}">
+      <form method="post" action="{% url 'plugins:netbox_data_import:quick_add_column_mapping' %}"
+            class="ndi-deferred-preview-form">
         {% csrf_token %}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
         <input type="hidden" name="profile_id" value="{{ profile_id }}">
         <input type="hidden" name="source_column" id="ndi_qmap_source_col">
         <div class="modal-header">
@@ -2292,7 +2302,7 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
         </table>
         <div class="alert alert-warning mb-0">
           <i class="mdi mdi-alert-outline"></i>
-          This will write to NetBox immediately. The preview will reload after syncing.
+          This will write to NetBox immediately. Recalculate the preview when you finish your changes.
         </div>
         <div id="syncRowError" class="alert alert-danger mt-2 d-none"></div>
       </div>
@@ -2312,11 +2322,15 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
   if (!modal) return;
 
   var currentRowNumber = null;
+  var currentSyncButton = null;
+  var currentSyncRequest = null;
+  var pendingSyncRequests = new WeakMap();
 
   modal.addEventListener('show.bs.modal', function (e) {
     var btn = e.relatedTarget;
     if (!btn) return;
     currentRowNumber = btn.dataset.rowNumber;
+    currentSyncButton = btn;
 
     document.getElementById('syncRowName').textContent = btn.dataset.name || '—';
     document.getElementById('syncRowNumber').textContent = currentRowNumber || '—';
@@ -2427,46 +2441,45 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
     var errorDiv = document.getElementById('syncRowError');
     errorDiv.classList.add('d-none');
 
-    var csrfToken = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || '';
-
-    fetch('{% url "plugins:netbox_data_import:sync_single_row" %}', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-CSRFToken': csrfToken,
-      },
-      body: 'row_number=' + encodeURIComponent(currentRowNumber),
-    })
-    .then(function (r) { return r.json(); })
+    var submittedRowNumber = currentRowNumber;
+    var submittedSyncButton = currentSyncButton;
+    var submittedSyncRequest = {};
+    currentSyncRequest = submittedSyncRequest;
+    pendingSyncRequests.set(submittedSyncButton, submittedSyncRequest);
+    submittedSyncButton.disabled = true;
+    var body = new URLSearchParams({row_number: submittedRowNumber});
+    window.ndiPostPreviewAction('{% url "plugins:netbox_data_import:sync_single_row" %}', body)
     .then(function (data) {
-      if (data.ok) {
-        window.location.reload();
-      } else {
-        confirmBtn.disabled = false;
-        confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
-        confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
-        var msgs = data.errors ? data.errors.join('\n') : (data.detail || data.error || 'Sync failed');
-        errorDiv.textContent = '';
-        if (data.errors && data.errors.length > 1) {
-          var ul = document.createElement('ul');
-          ul.className = 'mb-0';
-          data.errors.forEach(function (msg) {
-            var li = document.createElement('li');
-            li.textContent = msg;
-            ul.appendChild(li);
-          });
-          errorDiv.appendChild(ul);
-        } else {
-          errorDiv.textContent = msgs;
-        }
-        errorDiv.classList.remove('d-none');
+      submittedSyncButton.disabled = true;
+      submittedSyncButton.removeAttribute('data-ndi-modal');
+      submittedSyncButton.title = data.message;
+      submittedSyncButton.innerHTML = '<i class="mdi mdi-check"></i> Synced';
+      if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
+        pendingSyncRequests.delete(submittedSyncButton);
+      }
+      window.ndiMarkPreviewStale();
+      var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
+        && currentSyncButton === submittedSyncButton;
+      if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
+      if (!ownsCurrentModal) return;
+      var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
+      if (ModalClass) {
+        ModalClass.getOrCreateInstance(modal).hide();
       }
     })
-    .catch(function () {
+    .catch(function (error) {
+      if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
+        pendingSyncRequests.delete(submittedSyncButton);
+        submittedSyncButton.disabled = false;
+      }
+      var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
+        && currentSyncButton === submittedSyncButton;
+      if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
+      if (!ownsCurrentModal) return;
       confirmBtn.disabled = false;
       confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
       confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
-      errorDiv.textContent = 'Network error — sync failed';
+      errorDiv.textContent = error.message || 'Sync failed';
       errorDiv.classList.remove('d-none');
     });
   });

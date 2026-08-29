@@ -2,7 +2,7 @@
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
 /* Several source columns can fill one Target Field. The modal shows what each column says and
- * saves the one the operator picks as a resolution, which re-runs the preview. */
+ * saves the one the operator picks as a resolution. */
 (function () {
   function readJson(id) {
     var node = document.getElementById(id);
@@ -16,11 +16,24 @@
   var conflictModal = document.getElementById('conflictModal');
   if (!conflictModal) return;
 
+  var resolutionState = window.ndiConflictResolutionState || { activeToken: null, nextToken: 0 };
+  window.ndiConflictResolutionState = resolutionState;
+
   conflictModal.addEventListener('show.bs.modal', function (e) {
     var trigger = e.relatedTarget;
     if (!trigger) return;
 
-    document.getElementById('conf_source_id').value = trigger.dataset.sourceId || '';
+    window.ndiConflictModalGeneration = (window.ndiConflictModalGeneration || 0) + 1;
+    var form = document.getElementById('conflictForm');
+    form.dataset.ndiConflictModalGeneration = window.ndiConflictModalGeneration;
+    form.dataset.ndiSubmitting = resolutionState.activeToken ? 'true' : 'false';
+    if (resolutionState.activeToken) {
+      form.dataset.ndiConflictRequestToken = resolutionState.activeToken;
+    } else {
+      delete form.dataset.ndiConflictRequestToken;
+    }
+    var sourceId = trigger.dataset.sourceId || '';
+    document.getElementById('conf_source_id').value = sourceId;
 
     var conflicts = CONFLICTS_BY_ROW[trigger.dataset.rowNumber] || {};
     var body = document.getElementById('conflictModalBody');
@@ -56,6 +69,7 @@
         useBtn.textContent = 'Use this';
         useBtn.dataset.fieldName = fieldName;
         useBtn.dataset.value = candidates[sourceName];
+        useBtn.disabled = Boolean(resolutionState.activeToken);
         tdBtn.appendChild(useBtn);
 
         tr.appendChild(tdSource);
@@ -78,9 +92,23 @@
     if (!btn) return;
 
     var form = document.getElementById('conflictForm');
-    // The save re-runs the whole preview, so the page stays put for seconds with nothing to show.
-    if (form.dataset.ndiSubmitting === 'true') return;
+    if (resolutionState.activeToken || form.dataset.ndiSubmitting === 'true') return;
+    resolutionState.nextToken += 1;
+    var requestToken = String(resolutionState.nextToken);
+    resolutionState.activeToken = requestToken;
     form.dataset.ndiSubmitting = 'true';
+    form.dataset.ndiConflictRequestToken = requestToken;
+    var submissionGeneration = form.dataset.ndiConflictModalGeneration;
+
+    function releaseSubmission() {
+      if (resolutionState.activeToken !== requestToken) return null;
+      resolutionState.activeToken = null;
+      var currentForm = document.getElementById('conflictForm');
+      if (currentForm.dataset.ndiConflictRequestToken !== requestToken) return null;
+      currentForm.dataset.ndiSubmitting = 'false';
+      delete currentForm.dataset.ndiConflictRequestToken;
+      return currentForm;
+    }
 
     document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
       other.disabled = true;
@@ -92,6 +120,37 @@
     document.getElementById('conf_source_column').value = '_merge_' + btn.dataset.fieldName;
     document.getElementById('conf_original_value').value = '';
     document.getElementById('conf_resolved_fields').value = JSON.stringify(resolved);
-    form.submit();
+    window.ndiPostPreviewAction(form.action, new FormData(form))
+      .then(function (payload) {
+        window.ndiMarkPreviewStale();
+        var currentForm = releaseSubmission();
+        if (!currentForm) return;
+        if (currentForm.dataset.ndiConflictModalGeneration !== submissionGeneration) {
+          document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
+            other.disabled = false;
+          });
+          return;
+        }
+        btn.textContent = 'Saved';
+        btn.title = payload.message;
+        document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
+          other.disabled = other.dataset.fieldName === btn.dataset.fieldName;
+        });
+      })
+      .catch(function (error) {
+        var currentForm = releaseSubmission();
+        if (!currentForm) return;
+        if (currentForm.dataset.ndiConflictModalGeneration !== submissionGeneration) {
+          document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
+            other.disabled = false;
+          });
+          return;
+        }
+        document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
+          other.disabled = false;
+        });
+        btn.textContent = 'Use this';
+        btn.title = error.message;
+      });
   });
 })();
