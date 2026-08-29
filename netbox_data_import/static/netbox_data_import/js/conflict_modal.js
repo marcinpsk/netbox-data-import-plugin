@@ -20,6 +20,10 @@
     var trigger = e.relatedTarget;
     if (!trigger) return;
 
+    window.ndiConflictModalGeneration = (window.ndiConflictModalGeneration || 0) + 1;
+    var form = document.getElementById('conflictForm');
+    form.dataset.ndiConflictModalGeneration = window.ndiConflictModalGeneration;
+    form.dataset.ndiSubmitting = 'false';
     document.getElementById('conf_source_id').value = trigger.dataset.sourceId || '';
 
     var conflicts = CONFLICTS_BY_ROW[trigger.dataset.rowNumber] || {};
@@ -80,6 +84,15 @@
     var form = document.getElementById('conflictForm');
     if (form.dataset.ndiSubmitting === 'true') return;
     form.dataset.ndiSubmitting = 'true';
+    var submissionGeneration = form.dataset.ndiConflictModalGeneration;
+
+    function submissionIsCurrent() {
+      var currentForm = document.getElementById('conflictForm');
+      return (
+        currentForm === form &&
+        currentForm.dataset.ndiConflictModalGeneration === submissionGeneration
+      );
+    }
 
     document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
       other.disabled = true;
@@ -93,15 +106,17 @@
     document.getElementById('conf_resolved_fields').value = JSON.stringify(resolved);
     window.ndiPostPreviewAction(form.action, new FormData(form))
       .then(function (payload) {
+        window.ndiMarkPreviewStale();
+        if (!submissionIsCurrent()) return;
         btn.textContent = 'Saved';
         btn.title = payload.message;
         document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
           other.disabled = other.dataset.fieldName === btn.dataset.fieldName;
         });
-        window.ndiMarkPreviewStale();
         form.dataset.ndiSubmitting = 'false';
       })
       .catch(function (error) {
+        if (!submissionIsCurrent()) return;
         form.dataset.ndiSubmitting = 'false';
         document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
           other.disabled = false;

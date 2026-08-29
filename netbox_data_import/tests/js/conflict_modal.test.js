@@ -17,6 +17,9 @@ const CONFLICTS = {
     device_name: { Name: "L1798 - EH 01", Hostname: "L1798" },
     primary_ip4: { "IP Address (IPv4)": "10.0.0.1", "Management IP Address": "10.0.0.2" },
   },
+  5: {
+    device_name: { Name: "L1799 - EH 01", Hostname: "L1799" },
+  },
 };
 
 const LABELS = { device_name: "Device Name", primary_ip4: "Primary IPv4" };
@@ -31,6 +34,7 @@ function render() {
   window.ndiMarkPreviewStale = vi.fn();
   document.body.innerHTML = `
     <button id="trigger" data-ndi-modal="#conflictModal" data-row-number="4" data-source-id="L1798">2 conflicts</button>
+    <button id="other-trigger" data-ndi-modal="#conflictModal" data-row-number="5" data-source-id="L1799">1 conflict</button>
     <div class="modal" id="conflictModal">
       <form id="conflictForm">
         <input type="hidden" id="conf_source_id" name="source_id">
@@ -105,5 +109,62 @@ describe("conflict modal", () => {
 
     await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
     expect(submitted).toBe(0);
+  });
+
+  it("does not apply an earlier success to a newly opened conflict", async () => {
+    let resolveRequest;
+    window.ndiPostPreviewAction.mockImplementationOnce(
+      () =>
+        new Promise((resolvePending) => {
+          resolveRequest = resolvePending;
+        }),
+    );
+
+    buttons()[1].click();
+    document
+      .getElementById("conflictModal")
+      .dispatchEvent(
+        Object.assign(new Event("show.bs.modal"), {
+          relatedTarget: document.getElementById("other-trigger"),
+        }),
+      );
+    const currentButtons = buttons();
+
+    resolveRequest({ message: "Saved." });
+    await vi.waitFor(() => expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce());
+
+    expect(currentButtons.every((button) => !button.disabled)).toBe(true);
+    expect(currentButtons.every((button) => button.textContent === "Use this")).toBe(true);
+  });
+
+  it("does not apply an earlier failure to a newly submitted conflict", async () => {
+    const requests = [];
+    window.ndiPostPreviewAction.mockImplementation(
+      () =>
+        new Promise((resolvePending, rejectPending) => {
+          requests.push({ resolvePending, rejectPending });
+        }),
+    );
+
+    buttons()[1].click();
+    document
+      .getElementById("conflictModal")
+      .dispatchEvent(
+        Object.assign(new Event("show.bs.modal"), {
+          relatedTarget: document.getElementById("other-trigger"),
+        }),
+      );
+    const currentButtons = buttons();
+    currentButtons[0].click();
+
+    expect(window.ndiPostPreviewAction).toHaveBeenCalledTimes(2);
+    requests[0].rejectPending(new Error("Earlier save failed."));
+    await Promise.resolve();
+
+    expect(currentButtons.every((button) => button.disabled)).toBe(true);
+    expect(currentButtons[0].textContent).toMatch(/saving/i);
+
+    requests[1].resolvePending({ message: "Saved." });
+    await vi.waitFor(() => expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce());
   });
 });
