@@ -58,8 +58,13 @@ class SourceAdapter:
         raise NotImplementedError
 
     @classmethod
-    def interpret(cls, source_document, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
-        """Return the Source Batch one source document carries under *adapter_config*."""
+    def config_for(cls, profile):
+        """Return the interpreter configuration the profile describes."""
+        raise NotImplementedError
+
+    @classmethod
+    def interpret(cls, content, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
+        """Return the Source Batch the content carries under *adapter_config*."""
         raise NotImplementedError
 
 
@@ -78,11 +83,35 @@ class FlatWorkbookAdapter(SourceAdapter):
         return FlatWorkbookConfigForm
 
     @classmethod
-    def interpret(cls, source_document, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
+    def config_for(cls, profile):
+        """Return the flat interpretation configuration the profile describes.
+
+        The read happens here, not in `flat_workbook`, which stays free of the ORM and of a
+        database in its tests (section 2.2).
+        """
+        from .flat_workbook import FlatWorkbookConfig, TransformRule
+
+        return FlatWorkbookConfig(
+            sheet_name=profile.adapter_settings.sheet_name,
+            column_map={field: tuple(columns) for field, columns in profile.grouped_column_map().items()},
+            transform_rules=tuple(
+                TransformRule(
+                    source_column=rule.source_column,
+                    pattern=rule.pattern,
+                    group_1_target=rule.group_1_target or "",
+                    group_2_target=rule.group_2_target or "",
+                )
+                for rule in profile.column_transform_rules.all()
+            ),
+            capture_extra_data=profile.adapter_settings.capture_extra_data,
+        )
+
+    @classmethod
+    def interpret(cls, content, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
         """Interpret workbook bytes under a `FlatWorkbookConfig`."""
         from . import flat_workbook
 
-        rows, unused = flat_workbook.interpret(source_document, adapter_config, collect_unused=collect_unused)
+        rows, unused = flat_workbook.interpret(content, adapter_config, collect_unused=collect_unused)
         return SourceBatch(output_kinds=cls.output_kinds, rows=tuple(rows), unused_columns=unused)
 
 

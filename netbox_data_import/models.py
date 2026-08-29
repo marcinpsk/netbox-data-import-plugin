@@ -20,7 +20,8 @@ from .adapters import (
     get_adapter,
     output_kinds_for,
 )
-from .catalog import CATALOG, has_implemented_module, policy_section
+from . import plan
+from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -268,6 +269,44 @@ class ImportProfile(NetBoxModel):
                 value = dict(field.choices).get(value, value)
             rows.append((field.label or pretty_name(name), value))
         return rows
+
+    def grouped_column_map(self) -> dict[str, list[str]]:
+        """Return this profile's mapped source columns, keyed by Target Field."""
+        grouped: dict[str, list[str]] = {}
+        # Two columns can feed one Target Field, and which one wins must not be a query-order accident.
+        for mapping in self.column_mappings.order_by("target_field", "pk"):
+            grouped.setdefault(mapping.target_field, []).append(mapping.source_column)
+        return grouped
+
+    @property
+    def planning_fingerprint(self) -> str:
+        """Return the fingerprint of every profile value planning depends on."""
+        related_sections = {
+            getattr(relation.related_model, "POLICY_SECTION", ""): relation.get_accessor_name()
+            for relation in self._meta.related_objects
+        }
+        sections = []
+        for section in POLICY_SECTIONS:
+            accessor = related_sections[section.key]
+            serialized_rows = []
+            for row in getattr(self, accessor).all():
+                serialized_rows.append(
+                    {
+                        field.name: field.value_from_object(row)
+                        for field in row._meta.concrete_fields
+                        if field.name not in {"id", "profile"}
+                    }
+                )
+            serialized_rows.sort(key=plan.canonical_json)
+            sections.append({"key": section.key, "rows": serialized_rows})
+        return plan.fingerprint_of(
+            {
+                "profile_id": self.pk,
+                "source_adapter": self.source_adapter,
+                "adapter_config": self.adapter_config,
+                "policy_sections": sections,
+            }
+        )
 
     @property
     def resolved_primary_contact_role(self):

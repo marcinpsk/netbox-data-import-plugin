@@ -11,7 +11,7 @@ from io import BytesIO
 import openpyxl
 from django.test import SimpleTestCase
 
-from netbox_data_import.adapters import FlatWorkbookAdapter, SourceBatch, SourceUnreadable
+from netbox_data_import.adapters import FlatWorkbookAdapter, SourceBatch, SourceUnreadable, TraceWorkbookAdapter
 from netbox_data_import.flat_workbook import FlatWorkbookConfig, TransformRule
 
 
@@ -181,6 +181,11 @@ class SourceAdapterContractTest(SimpleTestCase):
 
         with self.assertRaises(NotImplementedError):
             SourceAdapter.interpret(b"", None)
+
+    def test_an_adapter_without_config_derivation_refuses_it(self):
+        """The trace adapter keeps the base failure until it has an interpreter."""
+        with self.assertRaises(NotImplementedError):
+            TraceWorkbookAdapter.config_for(None)
 
     def test_the_base_refuses_to_name_a_configuration_form(self):
         """Every adapter validates its own `adapter_config` at the boundary."""

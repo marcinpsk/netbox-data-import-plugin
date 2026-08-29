@@ -13,6 +13,10 @@ default so that an unscoped read is always something the caller asked for.
 from __future__ import annotations
 
 
+class PlanningTargetUnavailable(Exception):
+    """The planning context names a target this reader cannot resolve."""
+
+
 class NetBoxReader:
     """Permission-scoped reads of the NetBox objects planning compares against."""
 
@@ -29,6 +33,34 @@ class NetBoxReader:
         the accessor of target state carries which target state is relevant.
         """
         return type(self)(self._actor, site=site, location=location, tenant=tenant)
+
+    def for_planning_context(self, planning_context) -> NetBoxReader:
+        """Return this reader bound to the target a planning context names.
+
+        The target resolves through this reader's own scope, so an operator cannot plan against a
+        site, location or tenant they may not view.
+        """
+        from dcim.models import Location, Site
+        from tenancy.models import Tenant
+
+        if planning_context.get("site_id") is None:
+            raise PlanningTargetUnavailable("A planning context names the site the import writes into.")
+        return self.for_target(
+            site=self._required(Site, planning_context["site_id"]),
+            location=self._optional(Location, planning_context.get("location_id")),
+            tenant=self._optional(Tenant, planning_context.get("tenant_id")),
+        )
+
+    def _required(self, model, pk):
+        """Return the object *pk* names, or refuse when it is gone or out of scope."""
+        found = self._scoped(model, "view").filter(pk=pk).first()
+        if found is None:
+            raise PlanningTargetUnavailable(f"{model._meta.verbose_name} {pk} is gone, or this actor cannot view it.")
+        return found
+
+    def _optional(self, model, pk):
+        """Return the object *pk* names, or None when the context names none."""
+        return None if pk is None else self._required(model, pk)
 
     @property
     def site(self):
@@ -90,4 +122,4 @@ class NetBoxReader:
         return self._scoped(Rack, action)
 
 
-__all__ = ("NetBoxReader",)
+__all__ = ("NetBoxReader", "PlanningTargetUnavailable")

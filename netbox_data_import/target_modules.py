@@ -965,11 +965,24 @@ class DeviceModule:
         )
 
 
+MODULE_RUNTIMES: dict[str, Any] = {
+    RackModule.key: RackModule(),
+    DeviceModule.key: DeviceModule(),
+}
+
+
+def runtime_for(key: str) -> Any | None:
+    """Return the Target Module runtime registered under *key*, or None."""
+    return MODULE_RUNTIMES.get(key)
+
+
 __all__ = (
     "DEFAULT_RACK_HEIGHT",
     "DeviceModule",
     "ExecutionContext",
+    "MODULE_RUNTIMES",
     "PreconditionFailed",
     "RackModule",
     "TargetModuleRuntime",
+    "runtime_for",
 )

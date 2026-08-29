@@ -27,7 +27,7 @@ from .device_field_review import DeviceFieldReviewer
 from .device_identity import DeviceTypeIdentityResolver
 from .adapters import SourceUnreadable
 from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
-from .flat_workbook import FlatWorkbookConfig, TransformRule, promote_extra_json_fields
+from .flat_workbook import promote_extra_json_fields
 from .ip_assignment import already_assigned, parse_address
 from .values import comparison_key, normalize_for_compare, translation_maps
 from .models import DeviceImportSource, ImportProfile
@@ -312,14 +312,6 @@ def _effective_device_name(row) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_grouped_col_map(profile: ImportProfile) -> dict[str, list[str]]:
-    """Return a target-field keyed map of all mapped source columns."""
-    grouped: dict[str, list[str]] = {}
-    for cm in profile.column_mappings.all():
-        grouped.setdefault(cm.target_field, []).append(cm.source_column)
-    return grouped
-
-
 def _build_source_to_targets_map(profile: ImportProfile) -> dict[str, list[str]]:
     """Return a source-column keyed map of all target fields that column feeds."""
     rev: dict[str, list[str]] = {}
@@ -379,7 +371,7 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
     Handles multi-source merge: if a newly-mapped source column conflicts with an
     already-mapped value for the same target field, a _conflicts entry is recorded.
     """
-    grouped = _build_grouped_col_map(profile)
+    grouped = profile.grouped_column_map()
 
     for row in rows:
         extra_columns = row.get("_extra_columns", {})
@@ -429,27 +421,6 @@ def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict
     return rows
 
 
-def flat_workbook_config(profile: ImportProfile) -> FlatWorkbookConfig:
-    """Read the profile's source-format policy into the frozen config the adapter takes.
-
-    Section 2.2 keeps the adapter off the ORM, so the engine does this read and passes data.
-    """
-    return FlatWorkbookConfig(
-        sheet_name=profile.adapter_settings.sheet_name,
-        column_map={field: tuple(columns) for field, columns in _build_grouped_col_map(profile).items()},
-        transform_rules=tuple(
-            TransformRule(
-                source_column=rule.source_column,
-                pattern=rule.pattern,
-                group_1_target=rule.group_1_target or "",
-                group_2_target=rule.group_2_target or "",
-            )
-            for rule in profile.column_transform_rules.all()
-        ),
-        capture_extra_data=profile.adapter_settings.capture_extra_data,
-    )
-
-
 def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
     """Read the source file and return a list of row-dicts keyed by target_field name.
 
@@ -465,7 +436,7 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
         raise ParseError(f"Unknown source adapter '{profile.source_adapter}'.")
 
     try:
-        batch = adapter.interpret(file_obj.read(), flat_workbook_config(profile), collect_unused=return_stats)
+        batch = adapter.interpret(file_obj.read(), adapter.config_for(profile), collect_unused=return_stats)
     except SourceUnreadable as exc:
         raise ParseError(str(exc)) from exc
 
