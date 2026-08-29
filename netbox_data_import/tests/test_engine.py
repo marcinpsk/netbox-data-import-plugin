@@ -199,7 +199,7 @@ class MultiColumnMergeTest(TestCase):
 
     def test_conflict_cleared_by_saved_resolution(self):
         """A saved SourceResolution for the target field clears the conflict when rows are derived."""
-        from netbox_data_import.engine import derive_effective_rows
+        from netbox_data_import.source_resolution import derive_effective_rows
         from netbox_data_import.models import SourceResolution
 
         profile = self._make_merge_profile()
@@ -246,7 +246,7 @@ class DerivationOrderTest(TestCase):
         """The job compares two derivations, so an undefined order reads as a changed policy."""
         from django.db import connection
 
-        from netbox_data_import.engine import derive_effective_rows
+        from netbox_data_import.source_resolution import derive_effective_rows
         from netbox_data_import.models import SourceResolution
 
         profile = self._profile_with_two_resolutions_for_one_row()
@@ -267,7 +267,7 @@ class DerivationOrderTest(TestCase):
 
     def test_the_resolution_that_wins_does_not_depend_on_the_database(self):
         """Applying the same rows in the other order would name the other decision."""
-        from netbox_data_import.engine import derive_effective_rows
+        from netbox_data_import.source_resolution import derive_effective_rows
 
         profile = self._profile_with_two_resolutions_for_one_row()
         rows = [{"source_id": "ORDER-1", "device_name": "pristine"}]
@@ -1668,7 +1668,7 @@ class DuplicateSerialReportTest(TestCase):
             resolved_fields={"serial": ""},
         )
 
-        from netbox_data_import.engine import derive_effective_rows
+        from netbox_data_import.source_resolution import derive_effective_rows
 
         rows = self._rows()
         derived = derive_effective_rows(rows, self.profile)

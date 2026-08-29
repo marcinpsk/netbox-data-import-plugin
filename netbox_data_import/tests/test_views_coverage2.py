@@ -728,8 +728,6 @@ class SyncSingleRowViewTest(TestCase):
 
     @patch("netbox_data_import.views.engine")
     def test_non_create_preview_row_returns_400(self, mock_engine):
-        mock_engine.derive_effective_rows.return_value = [{"_row_number": 1, "source_id": "D001"}]
-
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
         session["import_result"] = {"rows": [{"row_number": 1, "action": "update", "object_type": "device"}]}
@@ -745,8 +743,6 @@ class SyncSingleRowViewTest(TestCase):
 
     @patch("netbox_data_import.views.engine")
     def test_missing_preview_result_returns_400(self, mock_engine):
-        mock_engine.derive_effective_rows.return_value = [{"_row_number": 1, "source_id": "D001"}]
-
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         resp = self.client.post(self._url(), {"row_number": "1"})
 
@@ -758,8 +754,6 @@ class SyncSingleRowViewTest(TestCase):
 
     @patch("netbox_data_import.views.engine")
     def test_missing_preview_row_returns_400(self, mock_engine):
-        mock_engine.derive_effective_rows.return_value = [{"_row_number": 1, "source_id": "D001"}]
-
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
         session["import_result"] = {"rows": [{"row_number": 2, "action": "create"}]}
@@ -830,7 +824,6 @@ class SyncSingleRowViewTest(TestCase):
         ]
         execute_result.has_errors = True
         mock_engine.run_import.side_effect = [preview_result, execute_result]
-        mock_engine.derive_effective_rows.return_value = [{"_row_number": 1, "source_id": "D001"}]
 
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
@@ -856,8 +849,6 @@ class SyncSingleRowViewTest(TestCase):
         with action='create' — causing the guard to pass even though the device action
         was 'update'.  The fix filters by ``object_type in ('device', 'rack')``.
         """
-        mock_engine.derive_effective_rows.return_value = [{"_row_number": 1, "source_id": "D001"}]
-
         self._set_session([{"_row_number": 1, "source_id": "D001"}])
         session = self.client.session
         session["import_result"] = {
@@ -908,9 +899,6 @@ class SyncRowButtonTemplateTest(TestCase):
         mock_result.counts = {}
         mock_result.has_errors = False
         mock_engine.run_import.return_value = mock_result
-        mock_engine.derive_effective_rows.return_value = [
-            {"_row_number": 1, "source_id": "D001", "device_name": "new-device"}
-        ]
         mock_engine.ImportResult = ImportResult
 
         session = self.client.session
@@ -948,9 +936,6 @@ class SyncRowButtonTemplateTest(TestCase):
         mock_result.counts = {}
         mock_result.has_errors = False
         mock_engine.run_import.return_value = mock_result
-        mock_engine.derive_effective_rows.return_value = [
-            {"_row_number": 1, "source_id": "D002", "device_name": "existing-device"}
-        ]
         mock_engine.ImportResult = ImportResult
 
         session = self.client.session

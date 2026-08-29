@@ -17,7 +17,7 @@ import re
 from copy import copy
 from functools import partial
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
@@ -29,13 +29,14 @@ from .adapters import SourceUnreadable
 from .catalog import CANDIDATE_TARGET_PREFIX, has_implemented_module
 from .flat_workbook import promote_extra_json_fields
 from .ip_assignment import already_assigned, parse_address
-from .values import comparison_key, normalize_for_compare, translation_maps
+from .values import comparison_key, normalize_for_compare, source_text as _str_val, translation_maps
 from .models import DeviceImportSource, ImportProfile
 from .netbox_reader import NetBoxReader
 from .object_permissions import (
     ObjectPermissionDenied as _ObjectPermissionDenied,
     enforce_saved_object_permission as _enforce_saved_object_permission,
 )
+from .source_resolution import derive_effective_rows as derive_effective_rows
 
 logger = logging.getLogger(__name__)
 
@@ -229,8 +230,6 @@ class ImportContext:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_NONE_LIKE = frozenset({"none", "nan", "null", "n/a", "#n/a"})
-
 
 def _duplicate_value_detail(label: str, value: str, other_rows: list[int]) -> str:
     """Name a duplicated identity value and every other source row that carries it."""
@@ -238,18 +237,6 @@ def _duplicate_value_detail(label: str, value: str, other_rows: list[int]) -> st
     return f"Duplicate {label} '{value}' appears more than once in this import" + (
         f", also on {where}." if where else "."
     )
-
-
-def _str_val(v) -> str:
-    """Safely convert a cell value to a stripped string.
-
-    None, NaN (pandas), and sentinel strings like "None"/"nan"/"null" are
-    returned as an empty string so callers never see the literal text "None".
-    """
-    if v is None:
-        return ""
-    s = str(v).strip()
-    return "" if s.lower() in _NONE_LIKE else s
 
 
 def _coerce_int(value, default=None):
@@ -310,57 +297,6 @@ def _effective_device_name(row) -> str:
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
-
-
-def _build_source_to_targets_map(profile: ImportProfile) -> dict[str, list[str]]:
-    """Return a source-column keyed map of all target fields that column feeds."""
-    rev: dict[str, list[str]] = {}
-    for cm in profile.column_mappings.all():
-        rev.setdefault(cm.source_column, []).append(cm.target_field)
-    return rev
-
-
-def _apply_one_resolution(row_dict: dict, res, source_to_targets: dict[str, list[str]]) -> None:
-    """Apply a single SourceResolution to a row dict.
-
-    The user's split modal lets them assign each split part to a target field
-    OR ignore it (no field selected).  Ignored parts must result in the
-    corresponding target field being cleared — otherwise the original
-    pre-split value (e.g. ``"TEST-ASSET-002 - temporary device ..."``) silently
-    persists in the device_name field.
-
-    Logic:
-      1. Apply explicit ``resolved_fields`` overrides.
-      2. For each target_field that the resolution's source_column originally
-         feeds: if it's not in ``resolved_fields`` and its current value still
-         equals the resolution's ``original_value`` (i.e. no other column
-         contributed a different value via multi-source merge), clear it.
-    """
-    row_dict.update(res.resolved_fields)
-    _clear_resolved_conflicts(row_dict, res.resolved_fields)
-
-    # The split modal's data-source-column attribute stores the target field
-    # name (e.g. "device_name"), not the original CSV column header — so we
-    # treat the resolution's source_column as a candidate target_field too.
-    candidate_targets = list(source_to_targets.get(res.source_column, []))
-    if res.source_column not in candidate_targets:
-        candidate_targets.append(res.source_column)
-    for target_field in candidate_targets:
-        if target_field in res.resolved_fields:
-            continue
-        current = row_dict.get(target_field)
-        if current is None:
-            continue
-        if str(current) == str(res.original_value):
-            row_dict[target_field] = None
-
-
-def _clear_resolved_conflicts(row_dict: dict[str, Any], resolved_fields: dict) -> None:
-    """Remove conflicts for fields overridden by saved resolutions."""
-    for resolved_field in resolved_fields:
-        row_dict.get("_conflicts", {}).pop(resolved_field, None)
-    if not row_dict.get("_conflicts"):
-        row_dict.pop("_conflicts", None)
 
 
 def apply_column_mappings(rows: list[dict], profile: ImportProfile) -> list[dict]:
@@ -442,38 +378,6 @@ def parse_file(file_obj, profile: ImportProfile, return_stats: bool = False):
 
     rows = list(batch.rows)
     return (rows, batch.unused_columns) if return_stats else rows
-
-
-def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
-    """Return *rows* with every saved SourceResolution applied, leaving *rows* untouched.
-
-    `rows` must be the pristine parsed rows. Applying a resolution only ever sets fields, so a
-    derivation that starts from an earlier result cannot express a target field the operator has
-    since dropped. Every caller derives, and none stores what it derived.
-    """
-    resolutions_by_source_id: dict[str, list] = {}
-    # Two resolutions can share a source_id, and a later one overrides the fields an earlier one
-    # set. Meta.ordering stops at source_id, so source_column completes the order the callers
-    # compare against each other.
-    for res in profile.source_resolutions.order_by("source_id", "source_column"):
-        resolutions_by_source_id.setdefault(str(res.source_id), []).append(res)
-
-    if not resolutions_by_source_id:
-        return rows
-
-    source_to_targets = _build_source_to_targets_map(profile)
-
-    result = []
-    for row in rows:
-        source_id = _str_val(row.get("source_id"))
-        if source_id and source_id in resolutions_by_source_id:
-            row = dict(row)  # shallow copy — don't mutate the session dict
-            if "_conflicts" in row:
-                row["_conflicts"] = dict(row["_conflicts"])
-            for res in resolutions_by_source_id[source_id]:
-                _apply_one_resolution(row, res, source_to_targets)
-        result.append(row)
-    return result
 
 
 def _resolve_device_type_slugs(

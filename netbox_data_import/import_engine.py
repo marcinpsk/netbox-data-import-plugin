@@ -13,6 +13,18 @@ from . import adapters, catalog, target_modules
 from .models import SourceDocument
 from .netbox_reader import NetBoxReader
 from .plan import Diagnostic, ImportPlan, Severity, executable_units, merge_changes
+from .source_resolution import derive_effective_rows
+
+
+_RESOLUTION_SECTION = "source_resolutions"
+
+
+def _resolution_section():
+    """Return the policy section that declares where a saved Source Resolution applies."""
+    section = catalog.policy_section(_RESOLUTION_SECTION)
+    if section is None:
+        raise LookupError(f"The catalog declares no '{_RESOLUTION_SECTION}' policy section.")
+    return section
 
 
 class StaleSourceDocument(Exception):
@@ -32,6 +44,14 @@ class ImportEngine:
                 f"This release does not register the source adapter '{profile.source_adapter}'."
             )
         source_batch = adapter.interpret(bytes(document.content), adapter.config_for(profile))
+        # The catalog already declares which output kinds the resolution policy applies to.
+        if _resolution_section().applies_to(source_batch.output_kinds):
+            source_batch = adapters.SourceBatch(
+                output_kinds=source_batch.output_kinds,
+                rows=tuple(derive_effective_rows(list(source_batch.rows), profile)),
+                diagnostics=source_batch.diagnostics,
+                unused_columns=source_batch.unused_columns,
+            )
         reader = NetBoxReader.for_actor(actor).for_planning_context(planning_context)
 
         units = []

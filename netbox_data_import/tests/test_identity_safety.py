@@ -21,7 +21,6 @@ from netbox_data_import.engine import (
     _pass1_ensure_types,
     _rack_position_error_row,
     _suggest_unique_device_name,
-    derive_effective_rows,
     run_import,
 )
 from netbox_data_import.forms import ImportSetupForm
@@ -30,6 +29,7 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_REVISION_SESSION_KEY,
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
 )
+from netbox_data_import.source_resolution import derive_effective_rows
 from netbox_data_import.tests.helpers import set_import_source
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.object_permissions import (

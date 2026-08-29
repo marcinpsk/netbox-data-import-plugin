@@ -11,6 +11,17 @@ from __future__ import annotations
 
 NUMERIC_TARGET_FIELDS: frozenset[str] = frozenset({"u_position", "u_height"})
 
+# A spreadsheet exports an empty cell as one of these words, and no caller wants the literal text.
+_NONE_LIKE = frozenset({"none", "nan", "null", "n/a", "#n/a"})
+
+
+def source_text(value) -> str:
+    """Return a source value as stripped text, with a null-like word read as empty."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in _NONE_LIKE else text
+
 
 def normalize_for_compare(value) -> str:
     """Normalize a value for field-diff comparison.
@@ -68,6 +79,7 @@ __all__ = (
     "NUMERIC_TARGET_FIELDS",
     "STATUS_MAP",
     "comparison_key",
+    "source_text",
     "normalize_for_compare",
     "translation_maps",
 )

@@ -9,12 +9,13 @@ from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from django.urls import reverse
 
-from netbox_data_import.engine import derive_effective_rows, run_import
+from netbox_data_import.engine import run_import
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_REVISION_SESSION_KEY,
 )
+from netbox_data_import.source_resolution import derive_effective_rows
 from netbox_data_import.tests.helpers import make_dcim_objects
 
 JSON = "application/json"

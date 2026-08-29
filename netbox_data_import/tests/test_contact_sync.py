@@ -23,7 +23,7 @@ from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 from tenancy.models import Contact, ContactAssignment, ContactRole
 
 from netbox_data_import.contact_resolution import ContactSelection, PrimaryContactResolver
-from netbox_data_import.engine import parse_file, derive_effective_rows, run_import
+from netbox_data_import.engine import parse_file, run_import
 from netbox_data_import.jobs import ImportJobRunner
 from netbox_data_import.models import (
     ClassRoleMapping,
@@ -35,6 +35,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.object_permissions import ObjectPermissionDenied
 from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
+from netbox_data_import.source_resolution import derive_effective_rows
 from netbox_data_import.tests.helpers import set_import_source
 
 

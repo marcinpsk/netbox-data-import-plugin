@@ -535,7 +535,7 @@ class SourceResolutionInEngineTest(TestCase):
 
     def test_derivation_applies_the_resolution(self):
         """The one derivation step every reader shares applies it instead."""
-        from netbox_data_import.engine import derive_effective_rows
+        from netbox_data_import.source_resolution import derive_effective_rows
 
         if not self.first_source_id:
             self.skipTest("No source_id in fixture rows")

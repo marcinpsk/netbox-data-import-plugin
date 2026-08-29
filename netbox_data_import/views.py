@@ -78,6 +78,7 @@ from .preview_row_actions import (
     record_recalculated_preview,
     retire_preview_revision,
 )
+from .source_resolution import derive_effective_rows
 
 
 _IMPORT_SOURCE_ROWS_JOB_SESSION_KEY = "import_source_rows_job_id"
@@ -853,7 +854,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
 
         context = {"site": site, "location": location, "tenant": tenant}
         result = engine.run_import(
-            engine.derive_effective_rows(rows, profile), profile, context, dry_run=True, user=request.user
+            derive_effective_rows(rows, profile), profile, context, dry_run=True, user=request.user
         )
 
         # The session keeps the pristine parsed rows, JSON-safe; every reader derives from them.
@@ -1015,7 +1016,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
 
         stored_result = request.session.get("import_result")
         # Derived for both branches, never stored: storing it would bake the resolution in.
-        rows = engine.derive_effective_rows(rows, profile)
+        rows = derive_effective_rows(rows, profile)
         if use_materialized_result and isinstance(stored_result, dict):
             result = engine.ImportResult.from_session_dict(stored_result)
         else:
@@ -2612,7 +2613,7 @@ class ResolveDuplicateNameView(PermissionRequiredMixin, View):
                     refusal = "The saved import target is no longer available. Start a new preview."
                 else:
                     refusal = _device_name_already_claimed(
-                        engine.derive_effective_rows(rows, profile), row_number, new_name, target
+                        derive_effective_rows(rows, profile), row_number, new_name, target
                     )
                 if refusal is None:
                     save_permission_scoped_object(
@@ -2695,7 +2696,7 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
                     refusal = "The saved import target is no longer available. Start a new preview."
                 else:
                     current = engine.run_import(
-                        engine.derive_effective_rows(rows, profile),
+                        derive_effective_rows(rows, profile),
                         profile,
                         target,
                         dry_run=True,
@@ -4017,7 +4018,7 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
         class_mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         eligible_rows = []
         # Match on the resolved identity: the pristine name would override the approved resolution.
-        for row in engine.derive_effective_rows(rows, profile):
+        for row in derive_effective_rows(rows, profile):
             source_id = engine._str_val(row.get("source_id"))
             mapping = class_mappings.get(engine._str_val(row.get("device_class")))
             if (
@@ -4189,7 +4190,7 @@ class SyncSingleRowView(_AjaxPermissionView):
         except ValidationError as exc:
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
 
-        rows = engine.derive_effective_rows(rows, profile)
+        rows = derive_effective_rows(rows, profile)
 
         target = next((r for r in rows if r.get("_row_number") == row_number), None)
         if target is None:

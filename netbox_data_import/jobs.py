@@ -17,6 +17,7 @@ from .models import (
     locked_profile_policy,
     validate_registered_adapter,
 )
+from .source_resolution import derive_effective_rows
 
 
 _PROGRESS_REPORT_INTERVAL = 25
@@ -89,7 +90,7 @@ class ImportJobRunner(JobRunner):
             self._fail("The target tenant is no longer available.")
         context = {"site": site, "location": location, "tenant": tenant}
         pristine_rows = rows
-        rows = engine.derive_effective_rows(pristine_rows, profile)
+        rows = derive_effective_rows(pristine_rows, profile)
 
         self._save_data(phase="validating")
         current_preview = engine.run_import(rows, profile, context, dry_run=True, user=user)
@@ -108,7 +109,7 @@ class ImportJobRunner(JobRunner):
             # and the writes below. Locking the resolution rows would leave an insert free to land.
             try:
                 with locked_profile_policy(profile.pk):
-                    superseded = engine.derive_effective_rows(pristine_rows, profile) != rows
+                    superseded = derive_effective_rows(pristine_rows, profile) != rows
             except ImportProfile.DoesNotExist:
                 # A delete takes this same lock, so it can commit between the read above and here.
                 profile_gone = True

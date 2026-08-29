@@ -300,9 +300,10 @@ class ConflictRowComparisonTest(BaseViewTestCase):
         """Render the preview from the stored result, the way the setup step reaches it once."""
         from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
 
-        from netbox_data_import.engine import derive_effective_rows, parse_file, run_import
+        from netbox_data_import.engine import parse_file, run_import
         from netbox_data_import.models import SourceResolution
         from netbox_data_import.preview_row_actions import PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY
+        from netbox_data_import.source_resolution import derive_effective_rows
         from netbox_data_import.views import _serialize_rows
 
         site = Site.objects.create(name="Resolution Site", slug="resolution-site")

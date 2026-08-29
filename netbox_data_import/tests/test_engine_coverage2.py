@@ -9,7 +9,6 @@ from netbox_data_import.engine import (
     ImportContext,
     ImportResult,
     _assign_ip_to_device,
-    _clear_resolved_conflicts,
     _compute_field_differences,
     _ensure_device_role,
     _ensure_device_type,
@@ -17,10 +16,10 @@ from netbox_data_import.engine import (
     _identity_text,
     _preview_device_row,
     _store_source_id,
-    derive_effective_rows,
     run_import,
 )
 from netbox_data_import.models import ClassRoleMapping, ImportProfile, SourceResolution, stored_import_source
+from netbox_data_import.source_resolution import _clear_resolved_conflicts, derive_effective_rows
 from netbox_data_import.tests.helpers import set_import_source
 
 User = get_user_model()

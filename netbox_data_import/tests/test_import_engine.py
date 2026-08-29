@@ -17,7 +17,14 @@ from netbox_data_import.adapters import (
 from netbox_data_import.catalog import TARGET_MODULES, TargetModuleKey
 from netbox_data_import.import_engine import ImportEngine, StaleSourceDocument
 from netbox_data_import.netbox_reader import PlanningTargetUnavailable
-from netbox_data_import.models import ClassRoleMapping, ColumnMapping, IgnoredDevice, ImportProfile, SourceDocument
+from netbox_data_import.models import (
+    ClassRoleMapping,
+    ColumnMapping,
+    IgnoredDevice,
+    ImportProfile,
+    SourceDocument,
+    SourceResolution,
+)
 from netbox_data_import.plan import ImportPlan, Severity
 from netbox_data_import.target_modules import MODULE_RUNTIMES, runtime_for
 from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object_permission
@@ -26,7 +33,8 @@ from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object
 def _workbook(*rows) -> bytes:
     """Return one stored-source workbook with the coordinator test columns."""
     book = openpyxl.Workbook()
-    sheet = book.active
+    # `active` is optional to the type checker, and this helper is annotated so mypy checks it.
+    sheet = book.active or book.create_sheet()
     sheet.title = "Data"
     sheet.append(["Source ID", "Class", "Name", "Rack", "Make", "Model", "Height"])
     for row in rows:
@@ -138,6 +146,69 @@ class ImportEnginePlanTest(TestCase):
         # A blocked device row would also carry these identities, so prove the row really planned.
         self.assertEqual(plan.unit("device:source:D-1").changes[0].operation, "create")
 
+    def test_saved_source_resolution_supplies_a_missing_device_name(self):
+        """A saved row decision supplies a name before the Device Module plans."""
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=_workbook(
+                (
+                    "D-RESOLVED",
+                    "Server",
+                    "",
+                    self.rack.name,
+                    self.manufacturer.name,
+                    self.device_type.model,
+                    1,
+                )
+            ),
+            filename="resolved-source.xlsx",
+        )
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="D-RESOLVED",
+            source_column="Name",
+            original_value="",
+            resolved_fields={"device_name": "resolved-server"},
+        )
+
+        unit = self._plan(document).unit("device:source:D-RESOLVED")
+
+        self.assertNotIn("device.missing_name", [diagnostic.code for diagnostic in unit.diagnostics])
+        self.assertEqual(unit.changes[0].operation, "create")
+
+    def test_deleting_source_resolution_restores_the_missing_name_diagnostic(self):
+        """Deleting the saved row decision makes the unchanged source row invalid again."""
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=_workbook(
+                (
+                    "D-DELETED",
+                    "Server",
+                    "",
+                    self.rack.name,
+                    self.manufacturer.name,
+                    self.device_type.model,
+                    1,
+                )
+            ),
+            filename="deleted-resolution-source.xlsx",
+        )
+        resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="D-DELETED",
+            source_column="Name",
+            original_value="",
+            resolved_fields={"device_name": "temporary-name"},
+        )
+        resolved = self._plan(document).unit("device:source:D-DELETED")
+
+        resolution.delete()
+        unresolved = self._plan(document).unit("device:source:D-DELETED")
+
+        self.assertEqual(resolved.changes[0].operation, "create")
+        self.assertEqual([diagnostic.code for diagnostic in unresolved.diagnostics], ["device.missing_name"])
+        self.assertEqual(unresolved.changes, ())
+
     def test_replanning_unchanged_input_is_deterministic(self):
         """Equivalent inputs keep the plan fingerprint and unit order."""
         first = self._plan()
@@ -148,6 +219,40 @@ class ImportEnginePlanTest(TestCase):
             [unit.identity for unit in first.units],
             [unit.identity for unit in second.units],
         )
+
+    def test_source_resolution_replanning_keeps_the_stored_source_pristine(self):
+        """Resolution planning is repeatable and leaves the stored workbook unchanged."""
+        content = _workbook(
+            (
+                "D-PRISTINE",
+                "Server",
+                "",
+                self.rack.name,
+                self.manufacturer.name,
+                self.device_type.model,
+                1,
+            )
+        )
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=content,
+            filename="pristine-source.xlsx",
+        )
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="D-PRISTINE",
+            source_column="Name",
+            original_value="",
+            resolved_fields={"device_name": "pristine-server"},
+        )
+
+        first = self._plan(document)
+        second = self._plan(document)
+        document.refresh_from_db()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.fingerprint, second.fingerprint)
+        self.assertEqual(bytes(document.content), content)
 
     def test_policy_changes_invalidate_the_plan_and_every_unit(self):
         """A policy edit changes the profile, plan, and selection fingerprints."""
@@ -170,6 +275,26 @@ class ImportEnginePlanTest(TestCase):
         IgnoredDevice.objects.create(profile=self.profile, source_id="R-1", device_name="rack-a")
         IgnoredDevice.objects.create(profile=self.profile, source_id="D-1", device_name="server-a")
         self.assertEqual(stable, self.profile.planning_fingerprint)
+
+    def test_saving_source_resolution_changes_plan_and_unit_fingerprints(self):
+        """A saved row decision invalidates the plan and its affected unit selection."""
+        before = self._plan()
+
+        SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="D-1",
+            source_column="Name",
+            original_value="server-a",
+            resolved_fields={"device_name": "resolved-server-a"},
+        )
+        after = self._plan()
+
+        self.assertNotEqual(before.profile_fingerprint, after.profile_fingerprint)
+        self.assertNotEqual(before.fingerprint, after.fingerprint)
+        self.assertNotEqual(
+            before.unit_fingerprint("device:source:D-1"),
+            after.unit_fingerprint("device:source:D-1"),
+        )
 
     def test_policy_fingerprint_is_independent_of_database_row_order(self):
         """Equivalent policy rows fingerprint equally in any insertion order."""
