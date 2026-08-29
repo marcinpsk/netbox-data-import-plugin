@@ -225,6 +225,37 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.BLOCKED)
         self.assertEqual(units[0].diagnostics[0].code, "device.rack_missing")
 
+    def test_a_rack_netbox_holds_stays_an_id_based_dependency(self):
+        """A stored rack needs no deferred change dependency."""
+        change = self._plan(self._row(2, "D-1", "srv-01"))[0].changes[0]
+
+        self.assertEqual(change.payload["rack_id"], self.rack.pk)
+        self.assertEqual(change.dependencies, ())
+
+    def test_an_ignored_rack_row_does_not_satisfy_a_device_dependency(self):
+        """An excluded rack unit supplies no rack create for a device to use."""
+        IgnoredDevice.objects.create(profile=self.profile, source_id="R-1")
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_row = self._row(3, "D-1", "srv-01", rack_name="batch-rack")
+
+        unit = self._plan(rack_row, device_row)[0]
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.diagnostics[0].code, "device.rack_missing")
+
+    def test_duplicate_rack_rows_do_not_satisfy_a_device_dependency(self):
+        """Refused rack units supply no rack create for a device to use."""
+        rows = (
+            self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack"),
+            self._row(3, "R-2", "batch-rack", device_class="Cabinet", rack_name="batch-rack"),
+            self._row(4, "D-1", "srv-01", rack_name="batch-rack"),
+        )
+
+        unit = self._plan(*rows)[0]
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.diagnostics[0].code, "device.rack_missing")
+
 
 class DeviceModuleMatchTest(DeviceModulePlanTestBase):
     """Matching decides whether the row creates a device or reconciles one."""
@@ -253,6 +284,17 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
         self.assertEqual(units[0].changes[0].operation, "update")
         self.assertEqual(units[0].changes[0].payload["serial"], "NEW")
+
+    def test_a_matched_device_moving_to_a_batch_created_rack_is_an_update(self):
+        """A deferred rack name is placement work even though it has no ID yet."""
+        self._with_provenance(self._device("srv-01"))
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_row = self._row(3, "D-1", "srv-01", rack_name="batch-rack")
+
+        unit = self._plan(rack_row, device_row)[0]
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        self.assertEqual(unit.changes[0].operation, "update")
 
     def test_a_serial_matches_a_device_the_name_does_not(self):
         """The serial is a stronger identifier than the name, so it decides first."""
@@ -348,6 +390,22 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.rack_required")
 
+    def test_a_position_in_a_batch_created_rack_is_actionable(self):
+        """A new rack is empty, so its dependency can accept a placement."""
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_row = self._row(
+            3,
+            "D-1",
+            "srv-01",
+            rack_name="batch-rack",
+            u_position="5",
+            face="Front",
+        )
+
+        unit = self._plan(rack_row, device_row)[0]
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+
     def test_a_position_with_no_face_is_invalid(self):
         units = self._plan(self._row(2, "D-1", "srv-01", u_position="5"))
 
@@ -381,6 +439,21 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         self.assertEqual(units[1].disposition, Disposition.INVALID)
         self.assertEqual(units[1].diagnostics[0].code, "device.rack_position_claimed")
         self.assertEqual(units[1].diagnostics[0].display["claimed_by_row"], 2)
+
+    def test_two_rows_still_cannot_claim_one_slot_in_a_batch_created_rack(self):
+        """The batch claim works before the new rack has an ORM identity."""
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_rows = (
+            self._row(3, "D-1", "srv-01", rack_name="batch-rack", u_position="5", face="Front"),
+            self._row(4, "D-2", "srv-02", rack_name="batch-rack", u_position="5", face="Front"),
+        )
+
+        units = self._plan(rack_row, *device_rows)
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual(units[1].disposition, Disposition.INVALID)
+        self.assertEqual(units[1].diagnostics[0].code, "device.rack_position_claimed")
+        self.assertEqual(units[1].diagnostics[0].display["claimed_by_row"], 3)
 
     def test_a_device_keeping_its_own_slot_is_not_refused(self):
         """A matched device already occupies the position, and staying put is not a conflict."""
@@ -479,6 +552,15 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
 
         stored.refresh_from_db()
         self.assertEqual(stored.serial, "NEW")
+
+    def test_a_deferred_rack_that_is_still_absent_is_refused(self):
+        """A device change cannot run before the rack change it depends on."""
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_row = self._row(3, "D-1", "srv-01", rack_name="batch-rack")
+        change = self._only_change(rack_row, device_row)
+
+        with self.assertRaises(PreconditionFailed):
+            DeviceModule().apply(change, self.context)
 
     def test_a_vanished_device_is_refused_rather_than_recreated(self):
         """The plan named a device to update, and creating a new one instead is not that."""
@@ -782,6 +864,25 @@ class DeviceModuleFieldReviewTest(DeviceModulePlanTestBase):
         payload = units[0].changes[0].payload
         self.assertEqual(payload["asset_tag"], "AT-NEW")
         self.assertEqual(payload["serial"], "OLD")
+
+    def test_an_ignored_deferred_rack_difference_is_a_no_op(self):
+        """Ignoring the rack keeps the matched device out of the new rack dependency."""
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id="D-1",
+            netbox_device_id=device.pk,
+            target_field="rack_name",
+            file_snapshot={"canonical": ":batch-rack", "display": "batch-rack"},
+            netbox_snapshot={"canonical": ":dm-rack", "display": "dm-rack"},
+        )
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_row = self._row(3, "D-1", "srv-01", rack_name="batch-rack")
+
+        unit = self._plan(rack_row, device_row)[0]
+
+        self.assertEqual(unit.disposition, Disposition.NO_OP, unit.diagnostics)
+        self.assertEqual(unit.changes, ())
 
     def test_a_review_saved_against_another_device_does_not_apply(self):
         """A review names one device, so it cannot settle a difference on a different one."""

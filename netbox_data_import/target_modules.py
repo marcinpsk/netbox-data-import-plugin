@@ -115,6 +115,38 @@ def _coerce_height(value) -> int:
         return DEFAULT_RACK_HEIGHT
 
 
+def rack_unit_identity(row) -> str:
+    """Return the stable Synchronization Unit identity for one rack row."""
+    source_id = _text(row.get("source_id"))
+    if source_id:
+        return f"rack:source:{source_id}"
+    return f"rack:name:{_identity_text(row.get('rack_name'))}"
+
+
+def rack_row_name(row) -> str:
+    """Return the rack name one rack row carries."""
+    return _text(row.get("rack_name")) or _text(row.get("device_name"))
+
+
+def rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) -> tuple[str, dict] | None:
+    """Return why this rack row plans no rack, or None when it plans one.
+
+    The Rack module turns this into a unit and the Device module asks it which racks a batch
+    creates. Deciding it twice would let a device row depend on a rack change that never exists.
+    """
+    name = rack_row_name(row)
+    source_id = _text(row.get("source_id"))
+    if not name:
+        return "rack.missing_name", {"source_id": source_id}
+    if source_id and source_id in ignored:
+        return "rack.ignored", {"rack_name": name, "source_id": source_id}
+    if _identity_text(name) in duplicate_names:
+        return "rack.duplicate_name", {"rack_name": name, "source_id": source_id}
+    if source_id and source_id in duplicate_source_ids:
+        return "rack.duplicate_source_id", {"rack_name": name, "source_id": source_id}
+    return None
+
+
 class RackModule:
     """Plans and applies the Racks a flat source batch describes."""
 
@@ -134,7 +166,8 @@ class RackModule:
             self._unit(row, netbox_reader, ignored, duplicate_names, duplicate_source_ids, existing) for row in rows
         ]
 
-    def _rack_rows(self, source_batch, profile) -> list[dict]:
+    @staticmethod
+    def _rack_rows(source_batch, profile) -> list[dict]:
         """Return the batch rows whose class the profile maps to a rack."""
         creates_rack = {
             mapping.source_class
@@ -156,36 +189,25 @@ class RackModule:
     @staticmethod
     def unit_identity(row) -> str:
         """Return the identity that survives replanning, which is never the row number."""
-        source_id = _text(row.get("source_id"))
-        if source_id:
-            return f"rack:source:{source_id}"
-        return f"rack:name:{_identity_text(row.get('rack_name'))}"
+        return rack_unit_identity(row)
 
     def _unit(self, row, netbox_reader, ignored, duplicate_names, duplicate_source_ids, existing):
         """Return the one unit this row produces."""
         identity = self.unit_identity(row)
-        name = _text(row.get("rack_name")) or _text(row.get("device_name"))
-        source_id = _text(row.get("source_id"))
+        name = rack_row_name(row)
 
-        if not name:
-            return _refused(identity, "rack.missing_name", {"source_id": source_id})
-        if source_id and source_id in ignored:
-            return SynchronizationUnit(
-                identity=identity,
-                disposition=Disposition.EXCLUDED,
-                diagnostics=(
-                    Diagnostic(
-                        code="rack.ignored",
-                        severity=Severity.INFO,
-                        identities=(identity,),
-                        display={"rack_name": name, "source_id": source_id},
+        rejection = rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids)
+        if rejection is not None:
+            code, display = rejection
+            if code == "rack.ignored":
+                return SynchronizationUnit(
+                    identity=identity,
+                    disposition=Disposition.EXCLUDED,
+                    diagnostics=(
+                        Diagnostic(code=code, severity=Severity.INFO, identities=(identity,), display=display),
                     ),
-                ),
-            )
-        if _identity_text(name) in duplicate_names:
-            return _refused(identity, "rack.duplicate_name", {"rack_name": name, "source_id": source_id})
-        if source_id and source_id in duplicate_source_ids:
-            return _refused(identity, "rack.duplicate_source_id", {"rack_name": name, "source_id": source_id})
+                )
+            return _refused(identity, code, display)
 
         height = _coerce_height(row.get("u_height"))
         serial = _text(row.get("serial"))
@@ -300,6 +322,7 @@ class _Dependencies:
     device_type: Any = None
     role: Any = None
     rack: Any = None
+    rack_identity: str | None = None
     missing: tuple[str, dict] | None = None
 
 
@@ -356,6 +379,8 @@ def _reviewed_payload(payload, review, device) -> dict:
             continue
         key, stored = mapped
         effective[key] = stored(device)
+        if target_field == "rack_name":
+            effective["rack_name"] = None
     return effective
 
 
@@ -498,7 +523,7 @@ class _DeviceBatch:
         ("asset_tag", "device.duplicate_asset_tag", True),
     )
 
-    def __init__(self, rows, profile, netbox_reader):
+    def __init__(self, source_batch, rows, profile, netbox_reader):
         self.profile = profile
         self.reader = netbox_reader
         self.ignored = _ignored_source_ids(profile)
@@ -511,9 +536,10 @@ class _DeviceBatch:
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
         self._duplicate_names = _repeated(_identity_text(row.get("device_name")) for row in rows)
         self._racks = self._racks_by_name(netbox_reader)
+        self._planned_racks = self._planned_racks_by_name(source_batch, profile)
         self.side_map, self.airflow_map, self.status_map = translation_maps()
         # Row order decides who keeps a slot two rows claim, so the first row planned wins it.
-        self._claimed: dict[tuple[int, str | None, Any], int] = {}
+        self._claimed: dict[tuple[int | str, str | None, Any], int] = {}
 
     @staticmethod
     def _rows_by_value(rows, field, fold) -> dict[str, list[int]]:
@@ -552,6 +578,23 @@ class _DeviceBatch:
             racks = racks.filter(location=netbox_reader.location)
         return {_identity_text(rack.name): rack for rack in racks}
 
+    def _planned_racks_by_name(self, source_batch, profile) -> dict[str, str]:
+        """Return valid rack creates in this batch, keyed by comparison name."""
+        rows = RackModule._rack_rows(source_batch, profile)
+        ignored = _ignored_source_ids(profile)
+        duplicate_names = _repeated(_identity_text(row.get("rack_name")) or "" for row in rows)
+        duplicate_source_ids = _repeated(_text(row.get("source_id")) for row in rows)
+        planned = {}
+        for row in rows:
+            if rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) is not None:
+                continue
+            name_key = _identity_text(rack_row_name(row))
+            # A rack NetBox already holds is an update, so it is there before any device change runs.
+            if name_key in self._racks:
+                continue
+            planned[name_key] = rack_unit_identity(row)
+        return planned
+
     def clash(self, row) -> tuple[str, str, list[int]] | None:
         """Return the first identity another row in this batch also claims."""
         for field, code, fold in self._CLASH_FIELDS:
@@ -578,40 +621,46 @@ class _DeviceBatch:
             return _Dependencies(missing=("device.role_missing", {"role_slug": role_slug}))
 
         rack_name = _text(row.get("rack_name"))
-        rack = self._racks.get(_identity_text(rack_name)) if rack_name else None
-        if rack_name and rack is None:
+        rack_key = _identity_text(rack_name)
+        rack = self._racks.get(rack_key) if rack_name else None
+        rack_identity = self._planned_racks.get(rack_key) if rack_name and rack is None else None
+        if rack_name and rack is None and rack_identity is None:
             return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
-        return _Dependencies(device_type=device_type, role=role, rack=rack)
+        return _Dependencies(device_type=device_type, role=role, rack=rack, rack_identity=rack_identity)
 
-    def placement(self, row, device_type, rack) -> _Placement:
+    def placement(self, row, device_type, rack, rack_identity) -> _Placement:
         """Return where this row puts the device, or the first reason it cannot go there."""
         zero_u = device_type.u_height == 0
         position = None if zero_u else _coerce_position(row.get("u_position"))
         face = "" if zero_u else _translate(row.get("face"), self.side_map)
         airflow = _translate(row.get("airflow"), self.airflow_map)
         status = _translate(row.get("status"), self.status_map) or "active"
+        has_rack = rack is not None or rack_identity is not None
 
         if position is None:
             # NetBox refuses a rack face on a device in no rack, so the plan never asks for one.
-            return _Placement(position=None, face=face if rack is not None else "", airflow=airflow, status=status)
-        if rack is None:
+            return _Placement(position=None, face=face if has_rack else "", airflow=airflow, status=status)
+        if not has_rack:
             return _Placement(refused=("device.rack_required", {"u_position": position}))
         if not face:
             return _Placement(refused=("device.face_required", {"u_position": position}))
         return _Placement(position=position, face=face, airflow=airflow, status=status)
 
-    def claim(self, row, rack, placement, device_type, matched) -> tuple[str, dict] | None:
+    def claim(self, row, rack, rack_identity, placement, device_type, matched) -> tuple[str, dict] | None:
         """Take the units this row occupies, or name what already holds them."""
-        if rack is None or placement.position is None or device_type.u_height == 0:
+        rack_key = rack.pk if rack is not None else rack_identity
+        if rack_key is None or placement.position is None or device_type.u_height == 0:
             return None
         rack_face = None if device_type.is_full_depth else placement.face
         for unit in _occupied_units(placement.position, device_type.u_height):
-            key = (rack.pk, rack_face, unit)
+            key = (rack_key, rack_face, unit)
             claimed_by = self._claimed.get(key)
             if claimed_by is not None:
                 return "device.rack_position_claimed", {"u_position": placement.position, "claimed_by_row": claimed_by}
             self._claimed[key] = row.get("_row_number")
 
+        if rack is None:
+            return None
         available = rack.get_available_units(
             u_height=device_type.u_height,
             rack_face=rack_face,
@@ -716,7 +765,7 @@ class DeviceModule:
         rows = self._device_rows(source_batch, profile)
         if not rows:
             return []
-        batch = _DeviceBatch(rows, profile, netbox_reader)
+        batch = _DeviceBatch(source_batch, rows, profile, netbox_reader)
         return [self._unit(row, batch) for row in rows]
 
     @staticmethod
@@ -774,11 +823,18 @@ class DeviceModule:
         if match.ambiguous is not None:
             return _refused(identity, match.ambiguous, {**display, "value": match.value})
 
-        placement = batch.placement(row, dependencies.device_type, dependencies.rack)
+        placement = batch.placement(row, dependencies.device_type, dependencies.rack, dependencies.rack_identity)
         if placement.refused is not None:
             code, placement_display = placement.refused
             return _refused(identity, code, {**display, **placement_display})
-        taken = batch.claim(row, dependencies.rack, placement, dependencies.device_type, match.device)
+        taken = batch.claim(
+            row,
+            dependencies.rack,
+            dependencies.rack_identity,
+            placement,
+            dependencies.device_type,
+            match.device,
+        )
         if taken is not None:
             code, taken_display = taken
             return _refused(identity, code, {**display, **taken_display})
@@ -806,7 +862,7 @@ class DeviceModule:
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.ACTIONABLE,
-                changes=(self._change(identity, "create", payload, None),),
+                changes=(self._change(identity, "create", payload, None, dependencies.rack_identity),),
                 diagnostics=ip_diagnostics,
             )
         review = batch.review(row, match.device, dependencies, placement, payload)
@@ -824,13 +880,13 @@ class DeviceModule:
         return SynchronizationUnit(
             identity=identity,
             disposition=Disposition.ACTIONABLE,
-            changes=(self._change(identity, "update", payload, match.device),),
+            changes=(self._change(identity, "update", payload, match.device, dependencies.rack_identity),),
             diagnostics=ip_diagnostics,
         )
 
     def apply(self, planned_change: PlannedChange, execution_context) -> Any:
         """Apply one device change, having locked its row and rechecked its preconditions."""
-        from dcim.models import Device
+        from dcim.models import Device, Rack
 
         from .object_permissions import enforce_saved_object_permission
 
@@ -848,13 +904,31 @@ class DeviceModule:
                 raise PreconditionFailed(f"Device '{device.name}' changed type since the plan was made.")
             action = "change"
 
+        rack_id = payload["rack_id"]
+        rack_name = payload["rack_name"]
+        if rack_id is None and rack_name:
+            rack = (
+                Rack.objects.filter(
+                    site_id=payload["site_id"],
+                    location_id=payload["location_id"],
+                    name__iexact=rack_name,
+                )
+                .select_for_update(of=("self",))
+                .first()
+            )
+            if rack is None:
+                raise PreconditionFailed(
+                    f"Rack '{rack_name}' is still absent, so '{payload['name']}' cannot be placed."
+                )
+            rack_id = rack.pk
+
         if action == "add":
             device.name = payload["name"]
         device.device_type_id = payload["device_type_id"]
         device.role_id = payload["role_id"]
         device.site_id = payload["site_id"]
         device.location_id = payload["location_id"]
-        device.rack_id = payload["rack_id"]
+        device.rack_id = rack_id
         device.position = payload["u_position"]
         device.face = payload["face"]
         device.status = payload["status"]
@@ -911,6 +985,7 @@ class DeviceModule:
             "device_type_id": dependencies.device_type.pk,
             "role_id": dependencies.role.pk,
             "rack_id": dependencies.rack.pk if dependencies.rack is not None else None,
+            "rack_name": _text(row.get("rack_name")) if dependencies.rack_identity is not None else None,
             "site_id": batch.reader.site.pk if batch.reader.site is not None else None,
             "location_id": batch.reader.location.pk if batch.reader.location is not None else None,
             "tenant_id": batch.reader.tenant.pk if batch.reader.tenant is not None else None,
@@ -924,6 +999,8 @@ class DeviceModule:
         the device it matched rather than retitling it.
         """
         if device.device_type_id != payload["device_type_id"] or device.role_id != payload["role_id"]:
+            return True
+        if payload["rack_name"] is not None:
             return True
         if payload["rack_id"] is not None and device.rack_id != payload["rack_id"]:
             return True
@@ -950,7 +1027,7 @@ class DeviceModule:
         return False
 
     @staticmethod
-    def _change(identity, operation, payload, device) -> PlannedChange:
+    def _change(identity, operation, payload, device, rack_identity=None) -> PlannedChange:
         """Return the one write this unit performs, with the target state it assumed."""
         if device is None:
             preconditions: dict = {"device_id": None}
@@ -961,6 +1038,9 @@ class DeviceModule:
             target_module=DeviceModule.key,
             operation=operation,
             payload=payload,
+            dependencies=(f"{rack_identity}:create",)
+            if rack_identity is not None and payload["rack_name"] is not None
+            else (),
             preconditions=preconditions,
         )
 
@@ -984,5 +1064,8 @@ __all__ = (
     "PreconditionFailed",
     "RackModule",
     "TargetModuleRuntime",
+    "rack_row_name",
+    "rack_row_rejection",
+    "rack_unit_identity",
     "runtime_for",
 )

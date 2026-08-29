@@ -25,7 +25,7 @@ from netbox_data_import.models import (
     SourceDocument,
     SourceResolution,
 )
-from netbox_data_import.plan import ImportPlan, Severity
+from netbox_data_import.plan import Disposition, ImportPlan, Severity, executable_units, merge_changes
 from netbox_data_import.target_modules import MODULE_RUNTIMES, runtime_for
 from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object_permission
 
@@ -145,6 +145,62 @@ class ImportEnginePlanTest(TestCase):
         self.assertEqual(plan.planning_context, self.planning_context)
         # A blocked device row would also carry these identities, so prove the row really planned.
         self.assertEqual(plan.unit("device:source:D-1").changes[0].operation, "create")
+
+    def test_a_device_can_use_the_rack_its_batch_creates(self):
+        """One stored workbook can create a rack and place a device in it."""
+        self.rack.delete()
+
+        unit = self._plan().unit("device:source:D-1")
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        self.assertNotIn("device.rack_missing", [diagnostic.code for diagnostic in unit.diagnostics])
+
+    def test_a_device_change_runs_after_its_batch_rack_change(self):
+        """The rack change identity orders the two independent target modules."""
+        self.rack.delete()
+
+        plan = self._plan()
+        rack_change = plan.unit("rack:source:R-1").changes[0]
+        device_change = plan.unit("device:source:D-1").changes[0]
+        ordered = merge_changes(executable_units(plan.units))
+
+        self.assertEqual(device_change.dependencies, (rack_change.identity,))
+        self.assertIsNone(device_change.payload["rack_id"])
+        self.assertEqual(device_change.payload["rack_name"], "rack-a")
+        self.assertEqual([change.identity for change in ordered], [rack_change.identity, device_change.identity])
+
+    def test_merged_rack_and_device_changes_apply_in_dependency_order(self):
+        """Applying the merged changes places the device in the new rack."""
+        from django.contrib.auth import get_user_model
+        from django.db import transaction
+
+        from dcim.models import Device, Rack
+
+        from netbox_data_import.netbox_reader import NetBoxReader
+        from netbox_data_import.target_modules import ExecutionContext
+
+        self.rack.delete()
+        actor = get_user_model().objects.create_superuser(
+            username="coordinator-writer",
+            email="coordinator-writer@example.invalid",
+            password="testpass",
+        )
+        plan = self._plan(actor=actor)
+        context = ExecutionContext(
+            actor=actor,
+            reader=NetBoxReader.for_actor(actor).for_planning_context(self.planning_context),
+            profile=self.profile,
+        )
+
+        with transaction.atomic():
+            for change in merge_changes(executable_units(plan.units)):
+                runtime = runtime_for(change.target_module)
+                self.assertIsNotNone(runtime)
+                runtime.apply(change, context)
+
+        rack = Rack.objects.get(name="rack-a", site=self.site)
+        device = Device.objects.get(name="server-a", site=self.site)
+        self.assertEqual(device.rack_id, rack.pk)
 
     def test_saved_source_resolution_supplies_a_missing_device_name(self):
         """A saved row decision supplies a name before the Device Module plans."""
