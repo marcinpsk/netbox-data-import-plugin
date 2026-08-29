@@ -1440,7 +1440,7 @@ class RackExpandedInTheSameBatchTest(TestCase):
         self.assertEqual(device_row.action, "create", device_row.detail)
 
     def test_the_import_agrees_with_the_preview(self):
-        """A preview that errors and an import that writes disagree, and the batch rolls back."""
+        """Execution must preserve a successful preview when the batch grows the rack."""
         from dcim.models import Device
 
         from netbox_data_import.views import _import_intents

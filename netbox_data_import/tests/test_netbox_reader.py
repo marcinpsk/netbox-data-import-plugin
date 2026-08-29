@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Planning reads target state through one accessor, scoped to the actor.
-
-Section 2.1 requires that planning cannot see target state the operator cannot view. Real
-`ObjectPermission` rows are the only way to assert that: NetBox resolves permissions through
-`ObjectPermissionBackend`, so a Django `user_permissions` row would grant nothing and a mock would
-assert only that this test agrees with itself.
-"""
+"""Use real ObjectPermission rows because NetBox object access ignores Django user permissions."""
 
 from django.test import TestCase
 

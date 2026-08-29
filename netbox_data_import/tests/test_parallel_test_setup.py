@@ -144,13 +144,9 @@ def test_an_explicit_worker_count_above_the_ceiling_is_rejected():
 
 
 def test_a_gateway_specification_above_the_ceiling_is_rejected():
-    """`--tx` names the workers itself, so neither the auto hook nor a worker count sees it.
-
-    Without this the run starts `gw8`, and that worker fails in the isolation helper during
-    collection, after the databases of the other workers already exist.
-    """
+    """Reject an explicit gateway list before workers exceed the isolation limit."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith(("PYTEST_", "COV_"))}
-    # Nothing is collected, so no database is created. The name only keeps this run off the outer one.
+    # The distinct name keeps this empty run separate from the outer test database.
     environment["TEST_DB_NAME"] = "test_worker_pool_contract"
 
     result = subprocess.run(
@@ -158,12 +154,12 @@ def test_a_gateway_specification_above_the_ceiling_is_rejected():
             sys.executable,
             "-m",
             "pytest",
-            # xdist rewrites the gateway list from a worker count, so this path drops the addopts.
+            # Clear addopts because xdist rewrites the gateway list from its worker count.
             "-o",
             "addopts=",
             "--tx",
             f"{MAX_PARALLEL_WORKERS + 1}*popen",
-            # `--tx` alone leaves distribution off, and then xdist starts none of the workers.
+            # Enable distribution because `--tx` alone starts no workers.
             "--dist",
             "load",
             "--no-cov",
@@ -176,7 +172,7 @@ def test_a_gateway_specification_above_the_ceiling_is_rejected():
         env=environment,
         cwd=REPOSITORY_ROOT,
         check=False,
-        # Unguarded, this run starts the workers and waits on the one that cannot isolate itself.
+        # The timeout bounds an unguarded run whose last worker cannot isolate itself.
         timeout=120,
     )
 

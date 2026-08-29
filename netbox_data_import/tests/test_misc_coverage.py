@@ -129,38 +129,38 @@ class ImportSetupFormValidationTest(TestCase):
 
 
 class ImportExecutionTableRenderTest(TestCase):
-    """Tests for ImportExecutionTable render methods."""
+    """Keep execution history readable after related profiles and source data are gone."""
 
     def test_render_profile_with_valid_profile(self):
-        """render_profile() returns the profile name when profile is set."""
+        """A retained execution stays identifiable through its profile name."""
         profile = _make_profile("TableProfile")
         job = ImportExecution.objects.create(profile=profile, input_filename="test.xlsx")
         table = ImportExecutionTable([job])
         self.assertEqual(table.render_profile(job), "TableProfile")
 
     def test_render_profile_with_null_profile(self):
-        """render_profile() returns '(deleted)' when profile is None."""
+        """SET_NULL keeps an execution visible after its profile is deleted."""
         job = ImportExecution.objects.create(profile=None, input_filename="test.xlsx")
         table = ImportExecutionTable([job])
         self.assertEqual(table.render_profile(job), "(deleted)")
 
     def test_render_racks_created_with_counts(self):
-        """render_racks_created() extracts racks_created from result_counts dict."""
+        """Stored aggregate counts remain available after source data expires."""
         table = ImportExecutionTable([])
         self.assertEqual(table.render_racks_created({"racks_created": 3, "devices_created": 7}), 3)
 
     def test_render_racks_created_with_none(self):
-        """render_racks_created() returns 0 when value is None."""
+        """Rows from before aggregate tracking have no stored counts."""
         table = ImportExecutionTable([])
         self.assertEqual(table.render_racks_created(None), 0)
 
     def test_render_devices_created_with_counts(self):
-        """render_devices_created() extracts devices_created from result_counts dict."""
+        """Stored aggregate counts remain available after source data expires."""
         table = ImportExecutionTable([])
         self.assertEqual(table.render_devices_created({"racks_created": 2, "devices_created": 12}), 12)
 
     def test_render_devices_created_with_none(self):
-        """render_devices_created() returns 0 when value is None."""
+        """Rows from before aggregate tracking have no stored counts."""
         table = ImportExecutionTable([])
         self.assertEqual(table.render_devices_created(None), 0)
 

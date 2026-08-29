@@ -16,7 +16,7 @@ from netbox_data_import.flat_workbook import FlatWorkbookConfig, TransformRule
 
 
 def _workbook(sheet_name, header, *rows):
-    """Return the bytes of a one-sheet workbook."""
+    """Build workbook bytes in memory so SimpleTestCase keeps database access disabled."""
     book = openpyxl.Workbook()
     sheet = book.active
     sheet.title = sheet_name

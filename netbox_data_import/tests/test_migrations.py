@@ -117,7 +117,7 @@ class MigrationGraphDescribesTheModelsTest(SimpleTestCase):
     """The committed migrations must fully describe the models, as `makemigrations --check` asks."""
 
     def test_no_model_change_is_missing_a_migration(self):
-        """A hand-edited or stale migration silently drops field state, such as `choices`."""
+        """A stale migration silently drops field state that the autodetector still sees."""
         loader = MigrationLoader(None, ignore_no_migrations=True)
         autodetector = MigrationAutodetector(
             loader.project_state(),

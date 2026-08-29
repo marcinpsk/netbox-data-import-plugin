@@ -20,25 +20,14 @@ def pytest_xdist_auto_num_workers(config):
 
 
 def _requested_worker_count(config):
-    """Return how many workers xdist will start, read from the gateway specs it has resolved.
-
-    xdist owns this grammar, down to a signed multiplier in `+9*popen`, so its own parser answers
-    here rather than a copy of it. A rename in xdist then breaks the import instead of quietly
-    miscounting.
-    """
+    """Use xdist's resolved specs so the isolation cap matches its worker count."""
     from xdist.workermanage import parse_tx_spec_config
 
     return len(parse_tx_spec_config(config))
 
 
 def pytest_configure(config):
-    """Refuse more workers than the isolation covers, before any of them starts.
-
-    The hook above caps `auto` and `logical`, which is all xdist asks it about. Reading the
-    resolved specs instead reaches an explicit `-n` and a `--tx` gateway list as well, and each of
-    those otherwise starts a worker that fails in the isolation helper during collection, after
-    the databases of the other workers already exist.
-    """
+    """Validate the resolved worker count before isolated databases are created."""
     # The two conditions xdist itself starts workers on, and the list it reads them from.
     if config.getoption("dist", "no") == "no" or config.getoption("collectonly", False):
         return
