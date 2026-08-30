@@ -161,7 +161,9 @@ def interpret(content: bytes, config: FlatWorkbookConfig, *, collect_unused: boo
     sheet = _open_sheet(content, config.sheet_name)
     headers = _header_index_map(sheet)
     mapped = {column for columns in config.column_map.values() for column in columns}
-    unmapped_columns = [column for column in headers if column not in mapped]
+    transformed = {rule.source_column for rule in config.transform_rules}
+    consumed_columns = mapped | transformed
+    unmapped_columns = [column for column in headers if column not in consumed_columns]
     unused_stats: dict[str, dict] = {}
 
     rows = []

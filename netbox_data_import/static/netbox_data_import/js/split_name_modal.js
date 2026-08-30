@@ -294,6 +294,12 @@
     return true;
   }
 
+  function clearSaveError() {
+    var saveError = document.getElementById('res_save_error');
+    saveError.textContent = '';
+    saveError.classList.add('d-none');
+  }
+
   // Bound once: an HTMX swap re-runs this script, and a second listener would render twice.
   if (window.ndiSplitNameModalBound) return;
   window.ndiSplitNameModalBound = true;
@@ -320,6 +326,7 @@
     var saveBtn = document.querySelector('#splitForm button[type="submit"]');
     saveBtn.textContent = 'Save resolution';
     saveBtn.removeAttribute('title');
+    clearSaveError();
   });
 
   document.addEventListener('input', function (event) {
@@ -337,6 +344,7 @@
     event.preventDefault();
     var form = event.target;
     var saveBtn = form.querySelector('button[type="submit"]');
+    clearSaveError();
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
     window.ndiPostPreviewAction(form.action, new FormData(form))
@@ -348,7 +356,9 @@
       .catch(function (error) {
         saveBtn.disabled = false;
         saveBtn.textContent = 'Save resolution';
-        saveBtn.title = error.message;
+        var saveError = document.getElementById('res_save_error');
+        saveError.textContent = error.message;
+        saveError.classList.remove('d-none');
       });
   });
 })();

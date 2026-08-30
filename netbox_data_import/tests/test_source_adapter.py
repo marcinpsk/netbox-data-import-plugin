@@ -92,6 +92,28 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
         self.assertEqual(batch.rows[0]["rack_name"], "rack-7")
         self.assertEqual(batch.rows[0]["u_position"], "12")
 
+    def test_a_transform_input_is_not_reported_or_captured_as_unused(self):
+        """A transform consumes its source column even when no direct mapping names it."""
+        content = _workbook("Data", ("Combined", "Notes"), ("rack-7/U12", "on loan"))
+        config = FlatWorkbookConfig(
+            sheet_name="Data",
+            column_map={},
+            transform_rules=(
+                TransformRule(
+                    source_column="Combined",
+                    pattern=r"(.+)/U(\d+)",
+                    group_1_target="rack_name",
+                    group_2_target="u_position",
+                ),
+            ),
+            capture_extra_data=True,
+        )
+
+        batch = FlatWorkbookAdapter.interpret(content, config, collect_unused=True)
+
+        self.assertEqual(batch.rows[0]["_extra_columns"], {"Notes": "on loan"})
+        self.assertEqual(batch.unused_columns, {"Notes": {"count": 1, "samples": ["on loan"]}})
+
     def test_capture_extra_data_keeps_the_unmapped_columns(self):
         """The adapter reports what it did not map, so nothing is lost silently."""
         content = _workbook("Data", ("Id", "Notes"), ("SRC-1", "on loan"))

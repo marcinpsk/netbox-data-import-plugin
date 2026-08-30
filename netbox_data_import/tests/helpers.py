@@ -166,15 +166,7 @@ def make_dcim_objects(name_prefix=""):
 
 
 def setup_preview_with_device_matches(client, profile):
-    """Populate *client*'s session with import state and DeviceExistingMatch records.
-
-    Plans a stored source against a freshly-created site, links the first two
-    device result rows to two newly-created Device objects, and writes the
-    resulting state into the test client's session.
-
-    Returns ``(site, device1, device2, device_rows)`` so callers can make
-    assertions against the created objects.
-    """
+    """Populate a preview with two persisted device matches."""
     from dcim.models import Device
 
     from netbox_data_import.import_engine import ImportEngine

@@ -1629,7 +1629,6 @@ class DeviceModule:
         if not self._placement_differs(match.device, payload):
             display = {
                 **display,
-                "detail": f"Device '{match.device.name}' matches this row, which writes nothing",
                 "extra_data": {**display["extra_data"], "placement_sync_writes_nothing": True},
             }
         if match.method == "name" and self._placement_differs(match.device, payload):
@@ -1643,6 +1642,7 @@ class DeviceModule:
             batch.commit_device_claim(row, match)
             display = {
                 **display,
+                "detail": f"Device '{match.device.name}' matches this row, which writes nothing",
                 "extra_data": {
                     **display["extra_data"],
                     "placement_sync_writes_nothing": not self._placement_differs(match.device, payload),

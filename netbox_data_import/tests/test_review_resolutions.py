@@ -11,6 +11,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.test import Client, TransactionTestCase
 from django.urls import reverse
+from openpyxl.worksheet.worksheet import Worksheet
 
 from netbox_data_import.import_engine import ImportEngine
 from netbox_data_import.models import (
@@ -78,7 +79,8 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
     def _workbook(self, duplicate):
         """Return a workbook with either one duplicate name or one duplicate serial."""
         book = openpyxl.Workbook()
-        sheet = book.active or book.create_sheet()
+        active = book.active
+        sheet = active if isinstance(active, Worksheet) else book.create_sheet()
         sheet.title = "Data"
         sheet.append(["Source ID", "Class", "Name", "Rack", "Make", "Model", "Serial"])
         first_name = "duplicate-device" if duplicate == "name" else "serial-device-a"

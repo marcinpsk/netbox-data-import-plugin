@@ -62,6 +62,16 @@ class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase
         self.assertIn("<style", body)
         self.assertIn(".ndi-badge-create", body)
 
+    def test_the_split_modal_carries_an_accessible_save_error_region(self):
+        """A failed save must report its reason without relying on a pointer tooltip."""
+        self._setup_session()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertContains(response, 'id="res_save_error"')
+        self.assertContains(response, 'role="alert"')
+        self.assertContains(response, 'aria-live="polite"')
+
 
 class EveryRowCarriesADetailRowTest(PreviewSessionMixin, BaseViewTestCase):
     """A detail row per source row is what makes a row click answer and a placement reachable."""

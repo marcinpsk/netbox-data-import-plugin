@@ -36,6 +36,7 @@ function render({ existingResolutions = {} } = {}) {
         <div id="res_conflict_alert" class="d-none"></div>
         <div id="res_duplicate_alert" class="d-none"></div>
         <div id="res_device_check" class="d-none"><small id="res_device_check_msg"></small></div>
+        <div id="res_save_error" class="d-none" role="alert" aria-live="polite"></div>
         <button type="submit">Save</button>
       </form>
     </div>
@@ -161,6 +162,31 @@ describe("split modal parts", () => {
 
     expect(saveButton().textContent).toBe("Save resolution");
     expect(saveButton().title).toBe("");
+  });
+
+  it("reports a save failure inside the modal and clears it when reopened", async () => {
+    window.ndiPostPreviewAction = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Resolution was rejected."))
+      .mockResolvedValueOnce({ ok: true, preview_state: "recalculation_required", message: "Saved." });
+
+    submitForm();
+
+    const alertBox = document.getElementById("res_save_error");
+    await vi.waitFor(() => expect(alertBox.textContent).toBe("Resolution was rejected."));
+    expect(alertBox.classList.contains("d-none")).toBe(false);
+    expect(saveButton().title).toBe("");
+
+    submitForm();
+
+    expect(alertBox.textContent).toBe("");
+    expect(alertBox.classList.contains("d-none")).toBe(true);
+    await vi.waitFor(() => expect(saveButton().textContent).toBe("Saved"));
+
+    openModal();
+
+    expect(alertBox.textContent).toBe("");
+    expect(alertBox.classList.contains("d-none")).toBe(true);
   });
 });
 

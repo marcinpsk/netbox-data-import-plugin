@@ -1342,6 +1342,10 @@ class DeviceModuleDoesNotRenameTest(DeviceModulePlanTestBase):
         device = self._device("stored-name", rack=self.rack, serial="SN-1", asset_tag="AT-OLD")
 
         units = self._plan(self._row(2, "D-1", "srv-01", serial="SN-1", asset_tag="AT-NEW"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertIn("Will update", units[0].display["detail"])
+        self.assertTrue(units[0].display["extra_data"]["placement_sync_writes_nothing"])
         DeviceModule().apply(units[0].changes[0], self.context)
 
         device.refresh_from_db()

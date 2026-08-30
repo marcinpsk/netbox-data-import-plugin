@@ -4,7 +4,6 @@
 
 import datetime
 from decimal import Decimal
-from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
@@ -45,48 +44,6 @@ class TargetModuleJsonBoundaryTest(SimpleTestCase):
         self.assertEqual(_display_value({1: (Decimal("3.5"),)}), {"1": [3.5]})
         self.assertEqual(_display_value(object()).startswith("<object object"), True)
 
-    def test_rack_and_device_difference_checks_cover_relation_and_text_fields(self):
-        """Each writable relation and scalar can independently make an update actionable."""
-        rack = SimpleNamespace(u_height=42, rack_type_id=1, location_id=2, tenant_id=None, serial="")
-        self.assertTrue(RackModule._differs(rack, 42, "", 3, None))
-        self.assertTrue(RackModule._differs(rack, 42, "", 1, SimpleNamespace(pk=3)))
-
-        device = SimpleNamespace(
-            device_type_id=1,
-            role_id=2,
-            rack_id=3,
-            location_id=4,
-            tenant_id=5,
-            position=6,
-            status="active",
-            face="front",
-            airflow="front-to-rear",
-            serial="SERIAL",
-            asset_tag="ASSET",
-        )
-        payload = {
-            "device_type_id": 1,
-            "role_id": 2,
-            "rack_name": None,
-            "rack_id": 3,
-            "location_id": 4,
-            "tenant_id": 5,
-            "u_position": 6,
-            "status": "active",
-            "face": "rear",
-            "airflow": "front-to-rear",
-            "serial": "SERIAL",
-            "asset_tag": "ASSET",
-            "ip_fields": {},
-        }
-        self.assertTrue(DeviceModule._differs(device, payload))
-        payload["face"] = "front"
-        payload["airflow"] = "rear-to-front"
-        self.assertTrue(DeviceModule._differs(device, payload))
-        payload["airflow"] = "front-to-rear"
-        payload["rack_name"] = "rack-a"
-        self.assertTrue(DeviceModule._differs(device, payload))
-
 
 class TargetModuleDatabaseEdgeTest(TestCase):
     """Target mutations reject identities and dependencies that appeared after planning."""
@@ -122,6 +79,48 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         )
         self.reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
         self.context = ExecutionContext(actor=self.actor, reader=self.reader, profile=self.profile)
+
+    def test_rack_and_device_difference_checks_use_persisted_target_rows(self):
+        """Each writable relation and scalar can independently make an update actionable."""
+        from dcim.models import Device, Location, RackType
+
+        location = Location.objects.create(name="Target Edge Room", slug="target-edge-room", site=self.site)
+        rack_type = RackType.objects.create(
+            manufacturer=self.manufacturer,
+            model="Target Edge Rack",
+            slug="target-edge-rack-type",
+            u_height=42,
+        )
+        self.assertTrue(RackModule._differs(self.rack, 42, "", rack_type.pk, None))
+        self.assertTrue(RackModule._differs(self.rack, 42, "", None, location))
+
+        device = Device.objects.create(
+            name="target-edge-difference-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            rack=self.rack,
+            position=6,
+            face="front",
+            airflow="front-to-rear",
+            serial="SERIAL",
+            asset_tag="ASSET",
+        )
+        payload = self._payload(
+            rack_id=self.rack.pk,
+            u_position=6,
+            face="rear",
+            airflow="front-to-rear",
+            serial="SERIAL",
+            asset_tag="ASSET",
+        )
+        self.assertTrue(DeviceModule._differs(device, payload))
+        payload["face"] = "front"
+        payload["airflow"] = "rear-to-front"
+        self.assertTrue(DeviceModule._differs(device, payload))
+        payload["airflow"] = "front-to-rear"
+        payload["rack_name"] = self.rack.name
+        self.assertTrue(DeviceModule._differs(device, payload))
 
     def _payload(self, **values):
         """Return the minimum complete Device payload used by apply preconditions."""
