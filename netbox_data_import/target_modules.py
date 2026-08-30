@@ -163,7 +163,7 @@ def _coerce_height(value) -> int:
     """Return the rack height the row asks for, never below one unit."""
     try:
         return max(1, int(float(_source_text(value) or DEFAULT_RACK_HEIGHT)))
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return DEFAULT_RACK_HEIGHT
 
 
@@ -1160,7 +1160,12 @@ class _DeviceBatch:
         if rack_key is None or placement.position is None or device_type.u_height == 0:
             return _PlacementClaim()
         rack_face = None if device_type.is_full_depth else placement.face
-        keys = tuple((rack_key, rack_face, unit) for unit in _occupied_units(placement.position, device_type.u_height))
+        claim_faces = tuple(dict.fromkeys(self.side_map.values())) if device_type.is_full_depth else (placement.face,)
+        keys = tuple(
+            (rack_key, claim_face, unit)
+            for claim_face in claim_faces
+            for unit in _occupied_units(placement.position, device_type.u_height)
+        )
         for key in keys:
             claimed_by = self._claimed.get(key)
             if claimed_by is not None:

@@ -154,7 +154,7 @@ class DeviceModuleSelectionTest(DeviceModulePlanTestBase):
             DeviceModule().plan(
                 self._batch(self._row(2, "D-1", "source-name", rack_name="", serial="SITE-BOUND-SERIAL")),
                 self.profile,
-                None,
+                CATALOG,
                 NetBoxReader.unrestricted(),
             )
 
@@ -647,7 +647,7 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
         units = DeviceModule().plan(
-            self._batch(self._row(2, "D-1", "srv-01", serial="SN-HIDDEN")), self.profile, None, reader
+            self._batch(self._row(2, "D-1", "srv-01", serial="SN-HIDDEN")), self.profile, CATALOG, reader
         )
 
         self.assertEqual(units[0].disposition, Disposition.INVALID)
@@ -758,6 +758,40 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         device_rows = (
             self._row(3, "D-1", "srv-01", rack_name="batch-rack", u_position="5", face="Front"),
             self._row(4, "D-2", "srv-02", rack_name="batch-rack", u_position="5", face="Front"),
+        )
+
+        units = self._plan(rack_row, *device_rows)
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual(units[1].disposition, Disposition.INVALID)
+        self.assertEqual(units[1].diagnostics[0].code, "device.rack_position_claimed")
+        self.assertEqual(units[1].diagnostics[0].display["claimed_by_row"], 3)
+
+    def test_full_depth_and_half_depth_rows_conflict_in_a_batch_created_rack(self):
+        """A full-depth placement occupies the same unit on both faces of a new rack."""
+        from dcim.models import DeviceType
+
+        self.device_type.is_full_depth = True
+        self.device_type.save(update_fields=["is_full_depth"])
+        DeviceType.objects.create(
+            manufacturer=self.manufacturer,
+            model="R661",
+            slug="dell-r661",
+            u_height=1,
+            is_full_depth=False,
+        )
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_rows = (
+            self._row(3, "D-1", "srv-01", rack_name="batch-rack", u_position="5", face="Front"),
+            self._row(
+                4,
+                "D-2",
+                "srv-02",
+                rack_name="batch-rack",
+                model="R661",
+                u_position="5",
+                face="Rear",
+            ),
         )
 
         units = self._plan(rack_row, *device_rows)

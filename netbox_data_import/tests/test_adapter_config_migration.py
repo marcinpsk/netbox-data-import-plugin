@@ -101,8 +101,7 @@ class ProfileAdapterConfigMigrationTest(TransactionTestCase):
 
     def setUp(self):
         super().setUp()
-        # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
-        # skips tearDown. Register before walking down, so a rewound worker always recovers.
+        # Register cleanup before rewinding because setUp failures skip tearDown.
         self.addCleanup(_restore_every_leaf)
         _rewind_to_before_the_cutover()
 

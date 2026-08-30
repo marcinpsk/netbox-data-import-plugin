@@ -891,7 +891,7 @@ class ColumnTransformRule(PolicySectionModel):
     )
     pattern = models.CharField(
         max_length=500,
-        help_text=r"Python regex with capture groups (re.fullmatch). E.g. ^(\w+) - (.+)$",
+        help_text=r"Python regex with capture groups (regex.fullmatch). E.g. ^(\w+) - (.+)$",
     )
     group_1_target = models.CharField(
         max_length=100,

@@ -442,7 +442,11 @@ class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
         def share_serial(worksheet):
             """Put one serial on the first two source Device rows."""
             headings = {cell.value: cell.column for cell in worksheet[1]}
-            devices = [row for row in worksheet.iter_rows(min_row=2) if row[headings["Serial Number"] - 1].value][:2]
+            devices = [
+                row
+                for row in worksheet.iter_rows(min_row=2)
+                if row[headings["Class"] - 1].value in {"Server", "Switch"}
+            ][:2]
             self.assertEqual(len(devices), 2, "the sample workbook must carry two device rows")
             for row in devices:
                 row[headings["Serial Number"] - 1].value = "SHARED-PREVIEW-SERIAL"

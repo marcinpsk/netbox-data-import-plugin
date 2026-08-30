@@ -6,14 +6,15 @@ import uuid
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import Client, TransactionTestCase
+from django.test import Client, SimpleTestCase, TransactionTestCase
 from django.urls import reverse
 
 from core.exceptions import JobFailed
 from core.models import Job
 
-from netbox_data_import.jobs import ImportJobRunner
+from netbox_data_import.jobs import ImportJobRunner, _operator_failure_message
 from netbox_data_import.models import (
     ClassRoleMapping,
     ColumnMapping,
@@ -39,6 +40,18 @@ def _workbook() -> bytes:
             ["D-1", "Server", "server-a", "rack-a", "Example", "Model"],
         ],
     )
+
+
+class ImportJobRunnerMessageTest(SimpleTestCase):
+    """Render worker failures without exposing Django exception internals."""
+
+    def test_validation_messages_are_joined_for_the_operator(self):
+        error = ValidationError(["First validation failure.", "Second validation failure."])
+
+        self.assertEqual(
+            _operator_failure_message(error),
+            "First validation failure.; Second validation failure.",
+        )
 
 
 class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):

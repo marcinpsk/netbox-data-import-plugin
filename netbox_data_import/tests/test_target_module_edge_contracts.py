@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 
 from netbox_data_import.adapters import SourceBatch
-from netbox_data_import.catalog import OutputKind
+from netbox_data_import.catalog import CATALOG, OutputKind
 from netbox_data_import.models import (
     ClassRoleMapping,
     DeviceExistingMatch,
@@ -180,7 +180,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         """Plan one Device row in the supplied actor's target scope."""
         batch = SourceBatch(output_kinds=frozenset({OutputKind.DEVICE_SOURCE_ROW}), rows=(row,))
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
-        return DeviceModule().plan(batch, self.profile, None, reader)[0]
+        return DeviceModule().plan(batch, self.profile, CATALOG, reader)[0]
 
     def test_dependency_creates_reject_rows_that_appeared_after_planning(self):
         """Manufacturer, DeviceType, and role dependencies never become silent no-ops."""
@@ -331,7 +331,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
                 },
             ),
         )
-        change = RackModule().plan(batch, self.profile, None, self.reader)[0].changes[0]
+        change = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0].changes[0]
         Rack.objects.create(name="late-rack", site=self.site, u_height=42)
 
         with self.assertRaises(PreconditionFailed):
@@ -357,7 +357,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             ),
         )
 
-        unit = RackModule().plan(batch, self.profile, None, scoped)[0]
+        unit = RackModule().plan(batch, self.profile, CATALOG, scoped)[0]
 
         self.assertEqual(unit.disposition, Disposition.INVALID)
         self.assertEqual(unit.diagnostics[0].code, "rack.change_permission")

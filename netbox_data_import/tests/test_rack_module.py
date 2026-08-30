@@ -6,27 +6,15 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from netbox_data_import.adapters import SourceBatch
-from netbox_data_import.catalog import OutputKind
+from netbox_data_import.catalog import CATALOG, OutputKind
 from netbox_data_import.models import ClassRoleMapping, IgnoredDevice, ImportProfile
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.plan import Disposition
 from netbox_data_import.target_modules import ExecutionContext, PreconditionFailed, RackModule
 
 
-class RackModulePlanTestBase(TestCase):
-    """Provide the target state and source-row helpers for rack planning tests."""
-
-    def setUp(self):
-        """A site, a rack-creating class, and a profile that maps to it."""
-        from dcim.models import Site
-
-        self.site = Site.objects.create(name="Rack Module Site", slug="rack-module-site")
-        self.profile = ImportProfile.objects.create(
-            name="Rack Module Profile", adapter_config={"sheet_name": "Data", "update_existing": True}
-        )
-        ClassRoleMapping.objects.create(profile=self.profile, source_class="Cabinet", creates_rack=True)
-        ClassRoleMapping.objects.create(profile=self.profile, source_class="Server", creates_rack=False)
-        self.reader = NetBoxReader.unrestricted().for_target(site=self.site)
+class RackModuleRowMixin:
+    """Provide the source-row helpers shared by rack module tests."""
 
     def _batch(self, *rows):
         """Wrap rows the way the flat adapter hands them over."""
@@ -44,8 +32,24 @@ class RackModulePlanTestBase(TestCase):
         row.update(extra)
         return row
 
+
+class RackModulePlanTestBase(RackModuleRowMixin, TestCase):
+    """Provide the target state and source-row helpers for rack planning tests."""
+
+    def setUp(self):
+        """A site, a rack-creating class, and a profile that maps to it."""
+        from dcim.models import Site
+
+        self.site = Site.objects.create(name="Rack Module Site", slug="rack-module-site")
+        self.profile = ImportProfile.objects.create(
+            name="Rack Module Profile", adapter_config={"sheet_name": "Data", "update_existing": True}
+        )
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="Cabinet", creates_rack=True)
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="Server", creates_rack=False)
+        self.reader = NetBoxReader.unrestricted().for_target(site=self.site)
+
     def _plan(self, *rows):
-        return RackModule().plan(self._batch(*rows), self.profile, None, self.reader)
+        return RackModule().plan(self._batch(*rows), self.profile, CATALOG, self.reader)
 
 
 class RackModulePlanTest(RackModulePlanTestBase):
@@ -60,6 +64,13 @@ class RackModulePlanTest(RackModulePlanTestBase):
         self.assertEqual(len(units[0].changes), 1)
         self.assertEqual(units[0].changes[0].operation, "create")
         self.assertEqual(units[0].changes[0].payload["name"], "cab-01")
+        self.assertEqual(units[0].changes[0].payload["u_height"], 42)
+
+    def test_a_nonfinite_height_falls_back_to_the_default(self):
+        """An infinite spreadsheet value must not abort planning for the whole workbook."""
+        units = self._plan(self._row(2, "RACK-1", "cab-01", u_height="Infinity"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
         self.assertEqual(units[0].changes[0].payload["u_height"], 42)
 
     def test_a_row_whose_class_does_not_create_a_rack_produces_no_unit(self):
@@ -158,13 +169,13 @@ class RackModulePlanTest(RackModulePlanTestBase):
         actor = user_with_object_permission("rack-module-actor", [(Rack, ["view"], {"name": "somewhere-else"})])
         scoped = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
-        units = RackModule().plan(self._batch(self._row(2, "RACK-1", "cab-01")), self.profile, None, scoped)
+        units = RackModule().plan(self._batch(self._row(2, "RACK-1", "cab-01")), self.profile, CATALOG, scoped)
 
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "rack.add_permission")
 
 
-class RackModuleApplyTest(TestCase):
+class RackModuleApplyTest(RackModuleRowMixin, TestCase):
     """Applying one Planned Change writes exactly what the plan said, or refuses."""
 
     def setUp(self):
@@ -183,27 +194,14 @@ class RackModuleApplyTest(TestCase):
         self.context = ExecutionContext(actor=self.actor, reader=self.reader, profile=self.profile)
 
     def _only_change(self, *rows):
-        batch = SourceBatch(output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}), rows=tuple(rows))
-        units = RackModule().plan(batch, self.profile, None, self.reader)
+        units = RackModule().plan(self._batch(*rows), self.profile, CATALOG, self.reader)
         return units[0].changes[0]
-
-    def _row(self, source_id, rack_name, **extra):
-        row = {
-            "_row_number": 2,
-            "source_id": source_id,
-            "device_class": "Cabinet",
-            "rack_name": rack_name,
-            "u_height": 42,
-            "serial": "",
-        }
-        row.update(extra)
-        return row
 
     def test_a_create_change_writes_the_rack_the_plan_described(self):
         """The payload is the whole instruction, so applying it needs no second look at the source."""
         from dcim.models import Rack
 
-        change = self._only_change(self._row("RACK-1", "apply-cab-01"))
+        change = self._only_change(self._row(2, "RACK-1", "apply-cab-01"))
 
         rack = RackModule().apply(change, self.context)
 
@@ -216,7 +214,7 @@ class RackModuleApplyTest(TestCase):
         from dcim.models import Rack
 
         Rack.objects.create(name="apply-cab-02", site=self.site, u_height=20)
-        change = self._only_change(self._row("RACK-2", "apply-cab-02"))
+        change = self._only_change(self._row(2, "RACK-2", "apply-cab-02"))
         self.assertEqual(change.operation, "update")
 
         rack = RackModule().apply(change, self.context)
@@ -239,7 +237,7 @@ class RackModuleApplyTest(TestCase):
         mapping.rack_type = rack_type
         mapping.save(update_fields=["rack_type"])
 
-        rack = RackModule().apply(self._only_change(self._row("RACK-TYPE", "typed-cab")), self.context)
+        rack = RackModule().apply(self._only_change(self._row(2, "RACK-TYPE", "typed-cab")), self.context)
 
         self.assertEqual(rack.rack_type, rack_type)
 
@@ -248,7 +246,7 @@ class RackModuleApplyTest(TestCase):
         from dcim.models import Rack
 
         rack = Rack.objects.create(name="apply-cab-03", site=self.site, u_height=20)
-        change = self._only_change(self._row("RACK-3", "apply-cab-03"))
+        change = self._only_change(self._row(2, "RACK-3", "apply-cab-03"))
         rack.u_height = 30
         rack.save(update_fields=["u_height"])
 
@@ -260,7 +258,7 @@ class RackModuleApplyTest(TestCase):
         from dcim.models import Rack
 
         rack = Rack.objects.create(name="apply-cab-04", site=self.site, u_height=20)
-        change = self._only_change(self._row("RACK-4", "apply-cab-04"))
+        change = self._only_change(self._row(2, "RACK-4", "apply-cab-04"))
         rack.delete()
 
         with self.assertRaises(PreconditionFailed):
@@ -274,7 +272,7 @@ class RackModuleApplyTest(TestCase):
         from netbox_data_import.tests.helpers import user_with_object_permission
 
         Rack.objects.create(name="apply-cab-05", site=self.site, u_height=20)
-        change = self._only_change(self._row("RACK-5", "apply-cab-05"))
+        change = self._only_change(self._row(2, "RACK-5", "apply-cab-05"))
         viewer = user_with_object_permission("rack-apply-viewer", [(Rack, ["view"], None)])
         context = ExecutionContext(
             actor=viewer, reader=NetBoxReader.for_actor(viewer).for_target(site=self.site), profile=self.profile
@@ -284,7 +282,7 @@ class RackModuleApplyTest(TestCase):
             RackModule().apply(change, context)
 
 
-class RackModuleEdgeTest(TestCase):
+class RackModuleEdgeTest(RackModuleRowMixin, TestCase):
     """The narrower paths through rack planning and writing."""
 
     def setUp(self):
@@ -298,26 +296,11 @@ class RackModuleEdgeTest(TestCase):
         )
         ClassRoleMapping.objects.create(profile=self.profile, source_class="Cabinet", creates_rack=True)
 
-    def _batch(self, *rows):
-        return SourceBatch(output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}), rows=tuple(rows))
-
-    def _row(self, source_id, rack_name, **extra):
-        row = {
-            "_row_number": 2,
-            "source_id": source_id,
-            "device_class": "Cabinet",
-            "rack_name": rack_name,
-            "u_height": 42,
-            "serial": "",
-        }
-        row.update(extra)
-        return row
-
     def test_a_row_with_no_source_id_is_identified_by_its_name(self):
         """Not every source carries an identity column, so the name is the fallback key."""
         reader = NetBoxReader.unrestricted().for_target(site=self.site)
 
-        units = RackModule().plan(self._batch(self._row("", "edge-cab-01")), self.profile, None, reader)
+        units = RackModule().plan(self._batch(self._row(2, "", "edge-cab-01")), self.profile, CATALOG, reader)
 
         self.assertEqual(units[0].identity, "rack:name:edge-cab-01")
 
@@ -326,7 +309,7 @@ class RackModuleEdgeTest(TestCase):
         reader = NetBoxReader.unrestricted().for_target(site=self.site)
 
         units = RackModule().plan(
-            self._batch(self._row("E-1", "edge-cab-02", u_height="tall")), self.profile, None, reader
+            self._batch(self._row(2, "E-1", "edge-cab-02", u_height="tall")), self.profile, CATALOG, reader
         )
 
         self.assertEqual(units[0].changes[0].payload["u_height"], 42)
@@ -337,7 +320,10 @@ class RackModuleEdgeTest(TestCase):
 
         Rack.objects.create(name="edge-cab-03", site=self.site, u_height=42)
         units = RackModule().plan(
-            self._batch(self._row("E-3", "edge-cab-03")), self.profile, None, NetBoxReader.unrestricted()
+            self._batch(self._row(2, "E-3", "edge-cab-03")),
+            self.profile,
+            CATALOG,
+            NetBoxReader.unrestricted(),
         )
 
         self.assertEqual(units[0].disposition, Disposition.INVALID)
@@ -350,7 +336,7 @@ class RackModuleEdgeTest(TestCase):
         Rack.objects.create(name="edge-cab-04", site=self.site, u_height=42)
         reader = NetBoxReader.unrestricted().for_target(site=self.site, location=self.location)
 
-        units = RackModule().plan(self._batch(self._row("E-4", "edge-cab-04")), self.profile, None, reader)
+        units = RackModule().plan(self._batch(self._row(2, "E-4", "edge-cab-04")), self.profile, CATALOG, reader)
 
         self.assertEqual(units[0].changes[0].operation, "create")
         self.assertEqual(units[0].changes[0].payload["location_id"], self.location.pk)
@@ -362,7 +348,9 @@ class RackModuleEdgeTest(TestCase):
         Rack.objects.create(name="edge-cab-located", site=self.site, location=self.location, u_height=42)
         reader = NetBoxReader.unrestricted().for_target(site=self.site)
 
-        units = RackModule().plan(self._batch(self._row("E-LOCATION", "edge-cab-located")), self.profile, None, reader)
+        units = RackModule().plan(
+            self._batch(self._row(2, "E-LOCATION", "edge-cab-located")), self.profile, CATALOG, reader
+        )
 
         self.assertEqual(units[0].changes[0].operation, "create")
 
@@ -376,7 +364,10 @@ class RackModuleEdgeTest(TestCase):
         )
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site, tenant=tenant)
         units = RackModule().plan(
-            self._batch(self._row("E-5", "edge-cab-05", serial="EDGE-SERIAL")), self.profile, None, reader
+            self._batch(self._row(2, "E-5", "edge-cab-05", serial="EDGE-SERIAL")),
+            self.profile,
+            CATALOG,
+            reader,
         )
 
         rack = RackModule().apply(
@@ -394,7 +385,7 @@ class RackModuleEdgeTest(TestCase):
         reader = NetBoxReader.unrestricted().for_target(site=self.site)
 
         units = RackModule().plan(
-            self._batch(self._row("E-6", "edge-cab-06", serial="NEW")), self.profile, None, reader
+            self._batch(self._row(2, "E-6", "edge-cab-06", serial="NEW")), self.profile, CATALOG, reader
         )
 
         self.assertEqual(units[0].changes[0].operation, "update")

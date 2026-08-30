@@ -29,6 +29,11 @@ from .plan import PlanError
 _PROGRESS_REPORT_INTERVAL = 25
 
 
+def _operator_failure_message(exc) -> str:
+    """Return one exception as readable text for the native Job record."""
+    return "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
+
+
 class ImportJobRunner(JobRunner):
     """Validate and execute one import while publishing row progress to RQ."""
 
@@ -74,7 +79,7 @@ class ImportJobRunner(JobRunner):
         try:
             validate_registered_adapter(profile)
         except ValidationError as exc:
-            self._fail("; ".join(exc.messages))
+            self._fail(_operator_failure_message(exc))
         source_document = SourceDocument.objects.filter(pk=source_document_id, profile=profile).first()
         if source_document is None:
             self._fail("The stored source is no longer available. Upload it again.")
@@ -114,7 +119,7 @@ class ImportJobRunner(JobRunner):
             UnknownSourceAdapter,
             ValidationError,
         ) as exc:
-            self._fail(str(exc))
+            self._fail(_operator_failure_message(exc))
         if execution.outcome != ExecutionOutcome.SUCCEEDED:
             reason = (execution.failure_detail or {}).get("reason") or execution.outcome or "unknown"
             self._fail(f"The accepted import execution did not succeed ({reason}).")
