@@ -9,11 +9,15 @@ would let a row promise one interface and the write pick another.
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass
 from typing import Any
 
 # `oob_ip` carries no family in NetBox, so it takes either.
 IP_FIELD_FAMILY: dict[str, int | None] = {"primary_ip4": 4, "primary_ip6": 6, "oob_ip": None}
+
+# Bounded at both ends: a word cannot leave a shorter valid address, and 45 covers the longest one.
+_IP_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9A-Fa-f:.]{1,45}(?:/\d{1,3})?(?![0-9A-Za-z])")
 
 
 class IPAssignmentError(Exception):
@@ -59,11 +63,39 @@ class IPTarget:
         return f"would go to {self.interface_name}"
 
 
+def _normalized_ip(token: str) -> str | None:
+    """Return *token* as 'address/prefix', or None when it is not one address."""
+    try:
+        if "/" in token:
+            return str(ipaddress.ip_interface(token))
+        addr = ipaddress.ip_address(token)
+    except ValueError:
+        return None
+    return f"{addr}/32" if addr.version == 4 else f"{addr}/128"
+
+
+def parse_address(raw_value) -> str | None:
+    """Return the one address a source value names, as 'address/prefix', or None.
+
+    Sources export an address inside a label or with a separator appended, so the whole value is
+    tried first and the addresses spelled inside it only after that.
+    """
+    raw = str(raw_value).strip()
+    if not raw:
+        return None
+    whole = _normalized_ip(raw)
+    if whole is not None:
+        return whole
+    for token in _IP_TOKEN.findall(raw):
+        found = _normalized_ip(token)
+        if found is not None:
+            return found
+    return None
+
+
 def normalized_address(field: str, value) -> str:
     """Return the address the row names as 'host/prefix', in the family the field takes."""
-    from .engine import _parse_ip_with_prefix
-
-    address = _parse_ip_with_prefix(value)
+    address = parse_address(value)
     if address is None:
         raise IPAssignmentError(f"Cannot read an IP address from '{value}'.")
     family = IP_FIELD_FAMILY.get(field)
@@ -71,6 +103,37 @@ def normalized_address(field: str, value) -> str:
     if family is not None and version != family:
         raise IPAssignmentError(f"'{value}' is an IPv{version} address; this field takes IPv{family}.")
     return address
+
+
+def already_assigned(device, field, address) -> bool:
+    """Return whether the device already carries exactly this address on *field*.
+
+    The writer only assigns after finding an interface of this device that already carries the
+    address, and it resolves the IPAddress by that interface's VRF. Anything else it would either
+    create or record as unassigned, so only that exact state counts as settled.
+    """
+    from ipam.models import IPAddress
+
+    current = getattr(device, field, None)
+    if current is None:
+        return False
+    try:
+        # `held_by_device` matches on the host, so a stored mask that differs is still settled.
+        if _host(current.address) != _host(address):
+            return False
+    except ValueError:
+        return False
+    same_address = list(
+        IPAddress.objects.filter(address=str(current.address), vrf_id=current.vrf_id).values_list("pk", flat=True)[:2]
+    )
+    if same_address != [current.pk]:
+        return False
+    interface = current.assigned_object
+    return (
+        interface is not None
+        and getattr(interface, "device_id", None) == device.pk
+        and getattr(interface, "vrf_id", None) == current.vrf_id
+    )
 
 
 def _host(address) -> str:

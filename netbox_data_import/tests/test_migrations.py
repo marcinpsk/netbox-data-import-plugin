@@ -6,8 +6,14 @@ from contextlib import contextmanager
 
 from django.apps import apps
 from django.db import connection
+from django.db.migrations.autodetector import MigrationAutodetector
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase
+from django.db.migrations.loader import MigrationLoader
+from django.db.migrations.questioner import NonInteractiveMigrationQuestioner
+from django.db.migrations.state import ProjectState
+from django.test import SimpleTestCase, TransactionTestCase
+
+APP = "netbox_data_import"
 
 
 class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
@@ -105,3 +111,23 @@ class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
         self.assertEqual(matches, [])
         self.assertIn("LEGACY-SOURCE-A", logs.output[0])
         self.assertIn("LEGACY-SOURCE-B", logs.output[0])
+
+
+class MigrationGraphDescribesTheModelsTest(SimpleTestCase):
+    """The committed migrations must fully describe the models, as `makemigrations --check` asks."""
+
+    def test_no_model_change_is_missing_a_migration(self):
+        """A stale migration silently drops field state that the autodetector still sees."""
+        loader = MigrationLoader(None, ignore_no_migrations=True)
+        autodetector = MigrationAutodetector(
+            loader.project_state(),
+            ProjectState.from_apps(apps),
+            NonInteractiveMigrationQuestioner(specified_apps={APP}, dry_run=True),
+        )
+        changes = autodetector.changes(graph=loader.graph, trim_to_apps={APP}, convert_apps={APP})
+        described = [
+            f"{migration.app_label}: {operation.describe()}"
+            for migration in changes.get(APP, [])
+            for operation in migration.operations
+        ]
+        self.assertEqual(described, [], "Run `netbox-manage makemigrations netbox_data_import` and commit the result.")

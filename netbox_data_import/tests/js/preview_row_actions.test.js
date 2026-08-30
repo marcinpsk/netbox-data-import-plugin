@@ -24,12 +24,17 @@ function addPreviewFixture() {
     <form class="ndi-field-review-form" action="/sync-device-field/">
       <button type="submit">Ignore</button>
     </form>
+    <form id="mapping-form" class="ndi-deferred-preview-form" action="/quick-map/">
+      <input type="hidden" name="source_model" value="Source Model">
+      <button type="submit">Save mapping</button>
+    </form>
     <a href="/preview/" class="btn ndi-recalculate-preview" id="ndi-recalculate-preview">
       <i class="mdi mdi-refresh"></i> Recalculate Preview
     </a>
     <div id="ndi-preview-stale" hidden>
       <a href="/preview/" class="alert-link ndi-recalculate-preview">Recalculate Preview</a>
     </div>
+    <button type="submit" id="ndi-run-import">Run import</button>
   `;
   if (!controllerLoaded) {
     window.eval(controllerSource);
@@ -94,6 +99,22 @@ describe("preview row actions", () => {
 
     expect(document.querySelector(".ndi-row-action-error")).toBeNull();
     expect(document.querySelector("button[type=submit]").textContent).toContain("Saved");
+  });
+
+  it("saves a quick mapping without leaving the preview", async () => {
+    stubResponse({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ ok: true, preview_state: "recalculation_required", message: "Mapped." }),
+    });
+    const form = document.getElementById("mapping-form");
+
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+
+    expect(form.querySelector("button").textContent).toContain("Saved");
+    expect(document.getElementById("ndi-preview-stale").hidden).toBe(false);
+    expect(document.getElementById("ndi-run-import").disabled).toBe(true);
   });
 
   it("reports that recalculation started and ignores a second press", () => {

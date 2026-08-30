@@ -46,9 +46,6 @@ AUDITED_EXITS = {
     ("UnignoreFieldDifferenceView.post", "binding-refused-before-delete"): (
         "The binding helper either wrote nothing or rolled back, and the delete has not run."
     ),
-    ("SyncSingleRowView.post", "stale-preview-after-dry-run"): (
-        "The only call before this return is run_import with dry_run True, which writes nothing."
-    ),
     ("ImportProfile.delete", "locked-cascade-committed"): (
         "The success path: the lock only orders the cascade, so committing the delete is the point."
     ),

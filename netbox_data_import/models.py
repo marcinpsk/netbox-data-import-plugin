@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+import hashlib
 from contextlib import contextmanager
+from datetime import timedelta
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.urls import reverse
+from django.utils import timezone
+from core.choices import JobStatusChoices
+from core.models import Job
 from netbox.models import NetBoxModel
 
 from .adapters import (
@@ -14,7 +20,8 @@ from .adapters import (
     get_adapter,
     output_kinds_for,
 )
-from .catalog import CATALOG, has_implemented_module, policy_section
+from . import plan
+from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -263,6 +270,44 @@ class ImportProfile(NetBoxModel):
             rows.append((field.label or pretty_name(name), value))
         return rows
 
+    def grouped_column_map(self) -> dict[str, list[str]]:
+        """Return this profile's mapped source columns, keyed by Target Field."""
+        grouped: dict[str, list[str]] = {}
+        # Two columns can feed one Target Field, and which one wins must not be a query-order accident.
+        for mapping in self.column_mappings.order_by("target_field", "pk"):
+            grouped.setdefault(mapping.target_field, []).append(mapping.source_column)
+        return grouped
+
+    @property
+    def planning_fingerprint(self) -> str:
+        """Return the fingerprint of every profile value planning depends on."""
+        related_sections = {
+            getattr(relation.related_model, "POLICY_SECTION", ""): relation.get_accessor_name()
+            for relation in self._meta.related_objects
+        }
+        sections = []
+        for section in POLICY_SECTIONS:
+            accessor = related_sections[section.key]
+            serialized_rows = []
+            for row in getattr(self, accessor).all():
+                serialized_rows.append(
+                    {
+                        field.name: field.value_from_object(row)
+                        for field in row._meta.concrete_fields
+                        if field.name not in {"id", "profile"}
+                    }
+                )
+            serialized_rows.sort(key=plan.canonical_json)
+            sections.append({"key": section.key, "rows": serialized_rows})
+        return plan.fingerprint_of(
+            {
+                "profile_id": self.pk,
+                "source_adapter": self.source_adapter,
+                "adapter_config": self.adapter_config,
+                "policy_sections": sections,
+            }
+        )
+
     @property
     def resolved_primary_contact_role(self):
         """Return the referenced Contact Role object, or None when unset or dangling.
@@ -290,8 +335,7 @@ class ImportProfile(NetBoxModel):
             raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
         stored = self._validate_source_adapter_immutability()
         if stored is None:
-            # A creation rule only: the adapter is immutable, so a stored profile keeps validating
-            # once the release that implements its Target Module ships.
+            # A creation rule only: the adapter is immutable, so a stored profile keeps validating.
             validate_adapter_target_module(self.source_adapter)
         self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
 
@@ -439,36 +483,261 @@ class ClassRoleMapping(PolicySectionModel):
         return reverse("plugins:netbox_data_import:classrolemapping_edit", args=[self.pk])
 
 
-class ImportJob(models.Model):
-    """Records a completed import run with its results."""
+class SourceDocument(models.Model):
+    """The stored uploaded workbook that a plan and its executions read.
+
+    Preview, replanning, a background execution, and an audit read all resolve the same bytes, so the
+    plan carries a reference instead of the content.
+    """
+
+    RETENTION = timedelta(days=30)
+
+    # Audit input outlives its profile, so a delete orphans the row and retention reclaims it.
+    profile = models.ForeignKey(
+        ImportProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name="source_documents"
+    )
+    content = models.BinaryField()
+    content_fingerprint = models.CharField(max_length=64)
+    filename = models.CharField(max_length=255, blank=True)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created"]
+        indexes = [models.Index(fields=["profile", "content_fingerprint"])]
+        verbose_name = "Source Document"
+        verbose_name_plural = "Source Documents"
+
+    def __str__(self):
+        return f"{self.filename or 'upload'} ({self.content_fingerprint[:12]})"
+
+    @staticmethod
+    def fingerprint(content: bytes) -> str:
+        """Return the content fingerprint, which is what a plan compares against."""
+        return hashlib.sha256(bytes(content)).hexdigest()
+
+    @classmethod
+    def store(cls, *, profile, content, filename="", uploaded_by=None):
+        """Store one upload. A newer upload never removes an older one."""
+        return cls.objects.create(
+            profile=profile,
+            content=bytes(content),
+            content_fingerprint=cls.fingerprint(content),
+            filename=filename,
+            uploaded_by=uploaded_by,
+        )
+
+    @classmethod
+    def purge_unreferenced(cls, *, now=None) -> int:
+        """Delete unreferenced uploads past the retention window and return the count.
+
+        A document an Import Execution references is permanent audit input, so the queryset excludes
+        it and the protecting foreign key backs that up.
+        """
+        cutoff = (now or timezone.now()) - cls.RETENTION
+        # The protecting relation forces a row-by-row collect, so defer the bytes one purge would load.
+        stale = cls.objects.filter(import_executions__isnull=True, created__lt=cutoff).defer("content")
+        return stale.delete()[0]
+
+
+class ExecutionOutcome:
+    """The outcome vocabulary of an Import Execution (section 9.2)."""
+
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+    CHOICES = ((PENDING, "Pending"), (SUCCEEDED, "Succeeded"), (FAILED, "Failed"))
+
+
+class FailureReason:
+    """Typed failure reasons an Import Execution records."""
+
+    ABANDONED = "abandoned"
+    DATABASE = "database"
+    PERMISSION = "permission"
+    PRECONDITION = "precondition"
+    PLANNING = "planning"
+    SELECTION = "selection"
+    STALE_PLAN = "stale_plan"
+    VALIDATION = "validation"
+
+
+class ImportExecution(models.Model):
+    """The audit record of one selective or final execution.
+
+    Rows created before the plan cutover keep their historical columns, have null new fields, and are
+    display-only: they never satisfy an idempotency lookup and never take part in plan comparison.
+    """
+
+    #: A synchronous attempt cannot outlive the web request bound, so an older pending row is gone.
+    SYNCHRONOUS_BOUND = timedelta(minutes=10)
 
     profile = models.ForeignKey(
         ImportProfile,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="import_jobs",
+        related_name="import_executions",
     )
     created = models.DateTimeField(auto_now_add=True)
     input_filename = models.CharField(max_length=255, blank=True)
-    dry_run = models.BooleanField(default=False)
     site_name = models.CharField(max_length=100, blank=True)
     result_counts = models.JSONField(default=dict)
-    result_rows = models.JSONField(default=list)
+
+    source_document = models.ForeignKey(
+        SourceDocument,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="import_executions",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    idempotency_key = models.CharField(max_length=64, null=True, blank=True)
+    plan_schema_version = models.PositiveIntegerField(null=True, blank=True)
+    accepted_plan_fingerprint = models.CharField(max_length=64, null=True, blank=True)
+    selected_units = models.JSONField(null=True, blank=True)
+    outcome = models.CharField(max_length=16, choices=ExecutionOutcome.CHOICES, null=True, blank=True)
+    applied_changes = models.JSONField(null=True, blank=True)
+    failure_detail = models.JSONField(null=True, blank=True)
+    # Set by link_job: the reservation commits before the Job exists, and outlives a deleted Job.
+    job_backed = models.BooleanField(default=False)
+    job = models.OneToOneField(
+        "core.Job", on_delete=models.SET_NULL, null=True, blank=True, related_name="import_execution"
+    )
 
     class Meta:
         ordering = ["-created"]
-        verbose_name = "Import Job"
-        verbose_name_plural = "Import Jobs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="ndi_execution_profile_idempotency_key",
+            ),
+        ]
+        verbose_name = "Import Execution"
+        verbose_name_plural = "Import Executions"
 
     def __str__(self):
         return f"Import {self.pk} — {self.created:%Y-%m-%d %H:%M} ({self.input_filename})"
 
     def get_absolute_url(self):
-        """Return the associated profile's URL (no per-job detail view exists)."""
+        """Return the associated profile's URL (no per-execution detail view exists)."""
         if not self.profile_id:
             return reverse("plugins:netbox_data_import:importprofile_list")
         return reverse("plugins:netbox_data_import:importprofile", args=[self.profile_id])
+
+    @classmethod
+    def reserve(cls, **fields):
+        """Insert and commit the pending row, or return the row already holding this key.
+
+        The insert reserves the unique (Import Profile, idempotency key), so a duplicate submission
+        or job delivery loses the race and returns the existing row in any outcome.
+        """
+        if transaction.get_connection().in_atomic_block:
+            raise RuntimeError("The Import Execution reservation must commit before the target transaction opens.")
+        if not fields.get("idempotency_key"):
+            raise ValueError("An Import Execution reservation requires an idempotency key.")
+        # PostgreSQL treats two NULL profiles as distinct, so the partial unique index cannot hold.
+        if not fields.get("profile"):
+            raise ValueError("An Import Execution reservation requires an Import Profile.")
+        required_audit_fields = {
+            "source_document": "a Source Document",
+            "actor": "an actor",
+            "plan_schema_version": "a plan schema version",
+            "accepted_plan_fingerprint": "an accepted plan fingerprint",
+            "selected_units": "selected Synchronization Unit identities",
+        }
+        for field_name, label in required_audit_fields.items():
+            if fields.get(field_name) is None:
+                raise ValueError(f"An Import Execution reservation requires {label}.")
+        existing = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
+        if existing is not None:
+            return existing, False
+        try:
+            return cls.objects.create(outcome=ExecutionOutcome.PENDING, **fields), True
+        except IntegrityError:
+            # Only a lost race for this key is recoverable; any other constraint failure must surface.
+            winner = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
+            if winner is None:
+                raise
+            return winner, False
+
+    def link_job(self, job):
+        """Record the native Job that runs this execution, after the reservation has committed."""
+        self.job = job
+        self.job_backed = True
+        self.save(update_fields=["job", "job_backed"])
+        return self
+
+    @classmethod
+    def for_idempotency(cls, profile, idempotency_key):
+        """Return the reserved row for this key, reconciled, or None. A legacy row never matches."""
+        if not idempotency_key:
+            return None
+        found = cls.objects.filter(profile=profile, idempotency_key=idempotency_key).first()
+        return found.reconcile_pending() if found is not None else None
+
+    def reconcile_pending(self, *, now=None):
+        """Transition an abandoned pending row to failed, so no sweeper is needed."""
+        if self.outcome != ExecutionOutcome.PENDING:
+            return self
+        if self.job_backed:
+            # The Job decides once it exists; a deleted Job leaves no way to finish the attempt.
+            job = Job.objects.filter(pk=self.job_id).first() if self.job_id else None
+            live = job is not None and job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES
+        else:
+            # Either a synchronous attempt or a background one still between reserving and enqueuing.
+            live = self.created > (now or timezone.now()) - self.SYNCHRONOUS_BOUND
+        if live:
+            return self
+        try:
+            self.mark_failed(reason=FailureReason.ABANDONED)
+        except ValueError:
+            # A worker finished the row between this read and the transition; its outcome wins.
+            pass
+        return self
+
+    def _finish(self, **values):
+        """Transition this row out of pending exactly once, with the database as the arbiter.
+
+        Two instances can both hold a pending copy, so an in-memory check would let the second
+        write overwrite a committed outcome and destroy the audit evidence.
+        """
+        updated = type(self).objects.filter(pk=self.pk, outcome=ExecutionOutcome.PENDING).update(**values)
+        if not updated:
+            self.refresh_from_db()
+            raise ValueError(f"Import Execution {self.pk} already finished as '{self.outcome}'.")
+        for name, value in values.items():
+            setattr(self, name, value)
+        return self
+
+    def mark_succeeded(self, *, applied_changes, result_counts=None):
+        """Record the applied identities and the deleted-object snapshot."""
+        return self._finish(
+            outcome=ExecutionOutcome.SUCCEEDED,
+            applied_changes=applied_changes,
+            failure_detail=None,
+            result_counts=result_counts or {},
+        )
+
+    def mark_failed(self, *, reason, failed_change=None, rolled_back=(), not_attempted=()):
+        """Record what failed, what rolled back, and what was never attempted."""
+        return self._finish(
+            outcome=ExecutionOutcome.FAILED,
+            applied_changes=None,
+            result_counts={"created": {}, "errors": 1},
+            failure_detail={
+                "failed_change": failed_change,
+                "rolled_back": list(rolled_back),
+                "not_attempted": list(not_attempted),
+                "reason": reason,
+            },
+        )
 
 
 class DeviceTypeMapping(PolicySectionModel):

@@ -26,14 +26,18 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: uv pip install --system ruff pre-commit
+        run: uv sync --locked --group dev
 
       - name: Run Ruff linting
-        run: ruff check .
+        run: uv run --locked ruff check .
 
       - name: Run Ruff formatting check
-        run: ruff format --check .
+        run: uv run --locked ruff format --check .
+
+      # Every NetBox module is named in the mypy overrides, so this job needs no NetBox checkout.
+      - name: Run mypy
+        run: uv run --locked mypy
 
       # Runs the pinned hook from .pre-commit-config.yaml, so the version lives in one place.
       - name: Audit the workflows
-        run: pre-commit run --all-files zizmor
+        run: uv run --locked pre-commit run --all-files zizmor

@@ -4,11 +4,11 @@
 
 from django.test import TestCase
 
-from netbox_data_import.engine import _str_val
-from netbox_data_import.models import ImportJob, ImportProfile
-from netbox_data_import.tables import ColumnMappingTable, ImportJobTable
+from netbox_data_import.models import ImportExecution, ImportProfile
+from netbox_data_import.tables import ColumnMappingTable, ImportExecutionTable
 from netbox_data_import.template_content import DeviceImportDataExtension
 from netbox_data_import.tests.helpers import set_import_source
+from netbox_data_import.values import source_text
 
 
 def _make_profile(name="MiscTest") -> ImportProfile:
@@ -128,40 +128,48 @@ class ImportSetupFormValidationTest(TestCase):
         self.assertEqual(result, small_file)
 
 
-class ImportJobTableRenderTest(TestCase):
-    """Tests for ImportJobTable render methods."""
+class ImportExecutionTableRenderTest(TestCase):
+    """Keep execution history readable after related profiles and source data are gone."""
 
     def test_render_profile_with_valid_profile(self):
-        """render_profile() returns the profile name when profile is set."""
+        """A retained execution stays identifiable through its profile name."""
         profile = _make_profile("TableProfile")
-        job = ImportJob.objects.create(profile=profile, input_filename="test.xlsx")
-        table = ImportJobTable([job])
+        job = ImportExecution.objects.create(profile=profile, input_filename="test.xlsx")
+        table = ImportExecutionTable([job])
         self.assertEqual(table.render_profile(job), "TableProfile")
 
     def test_render_profile_with_null_profile(self):
-        """render_profile() returns '(deleted)' when profile is None."""
-        job = ImportJob.objects.create(profile=None, input_filename="test.xlsx")
-        table = ImportJobTable([job])
+        """SET_NULL keeps an execution visible after its profile is deleted."""
+        job = ImportExecution.objects.create(profile=None, input_filename="test.xlsx")
+        table = ImportExecutionTable([job])
         self.assertEqual(table.render_profile(job), "(deleted)")
 
     def test_render_racks_created_with_counts(self):
-        """render_racks_created() extracts racks_created from result_counts dict."""
-        table = ImportJobTable([])
+        """Stored aggregate counts remain available after source data expires."""
+        table = ImportExecutionTable([])
         self.assertEqual(table.render_racks_created({"racks_created": 3, "devices_created": 7}), 3)
 
+    def test_render_racks_created_with_current_counts(self):
+        table = ImportExecutionTable([])
+        self.assertEqual(table.render_racks_created({"created": {"rack": 3, "device": 7}}), 3)
+
     def test_render_racks_created_with_none(self):
-        """render_racks_created() returns 0 when value is None."""
-        table = ImportJobTable([])
+        """Rows from before aggregate tracking have no stored counts."""
+        table = ImportExecutionTable([])
         self.assertEqual(table.render_racks_created(None), 0)
 
     def test_render_devices_created_with_counts(self):
-        """render_devices_created() extracts devices_created from result_counts dict."""
-        table = ImportJobTable([])
+        """Stored aggregate counts remain available after source data expires."""
+        table = ImportExecutionTable([])
         self.assertEqual(table.render_devices_created({"racks_created": 2, "devices_created": 12}), 12)
 
+    def test_render_devices_created_with_current_counts(self):
+        table = ImportExecutionTable([])
+        self.assertEqual(table.render_devices_created({"created": {"rack": 2, "device": 12}}), 12)
+
     def test_render_devices_created_with_none(self):
-        """render_devices_created() returns 0 when value is None."""
-        table = ImportJobTable([])
+        """Rows from before aggregate tracking have no stored counts."""
+        table = ImportExecutionTable([])
         self.assertEqual(table.render_devices_created(None), 0)
 
 
@@ -175,44 +183,44 @@ class ColumnMappingTableTest(TestCase):
         self.assertEqual(tuple(table.columns["target_field"].order_by), ("target_field",))
 
 
-class StrValHelperTests(TestCase):
-    """Tests for engine._str_val — guards against None/NaN cells producing literal 'None'."""
+class SourceTextTests(TestCase):
+    """Null-like spreadsheet cells must not produce literal placeholder text."""
 
     def test_none_returns_empty(self):
-        self.assertEqual(_str_val(None), "")
+        self.assertEqual(source_text(None), "")
 
     def test_string_none_returns_empty(self):
-        """str(None) == 'None'; _str_val must not return that literal."""
-        self.assertEqual(_str_val("None"), "")
+        """str(None) is 'None', but source text must not return that literal."""
+        self.assertEqual(source_text("None"), "")
 
     def test_string_nan_returns_empty(self):
-        self.assertEqual(_str_val("nan"), "")
-        self.assertEqual(_str_val("NaN"), "")
+        self.assertEqual(source_text("nan"), "")
+        self.assertEqual(source_text("NaN"), "")
 
     def test_string_null_returns_empty(self):
-        self.assertEqual(_str_val("null"), "")
-        self.assertEqual(_str_val("NULL"), "")
+        self.assertEqual(source_text("null"), "")
+        self.assertEqual(source_text("NULL"), "")
 
     def test_normal_string_passes_through(self):
-        self.assertEqual(_str_val("RACK-01"), "RACK-01")
+        self.assertEqual(source_text("RACK-01"), "RACK-01")
 
     def test_strips_whitespace(self):
-        self.assertEqual(_str_val("  rack-01  "), "rack-01")
+        self.assertEqual(source_text("  rack-01  "), "rack-01")
 
     def test_integer_converts(self):
-        self.assertEqual(_str_val(42), "42")
+        self.assertEqual(source_text(42), "42")
 
     def test_empty_string_returns_empty(self):
-        self.assertEqual(_str_val(""), "")
+        self.assertEqual(source_text(""), "")
 
     def test_rack_name_falls_back_to_device_name_when_empty(self):
         """Cabinet rows have rack_name=None (Rack column empty); device_name holds the cabinet name."""
         row = {"device_name": "ITC-RACK-01", "rack_name": None}
-        resolved = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
+        resolved = source_text(row.get("rack_name")) or source_text(row.get("device_name"))
         self.assertEqual(resolved, "ITC-RACK-01")
 
     def test_rack_name_wins_over_device_name_when_set(self):
         """When rack_name is explicitly set it takes precedence over device_name."""
         row = {"device_name": "CABINET-X", "rack_name": "RACK-01"}
-        resolved = _str_val(row.get("rack_name")) or _str_val(row.get("device_name"))
+        resolved = source_text(row.get("rack_name")) or source_text(row.get("device_name"))
         self.assertEqual(resolved, "RACK-01")

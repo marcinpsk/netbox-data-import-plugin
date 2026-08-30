@@ -9,6 +9,7 @@ from netbox_data_import.models import ImportProfile
 
 _FILTER_BASE_MODULE = "netbox.graphql.filters"
 
+
 try:
     from netbox.graphql.filters import NetBoxModelFilter
 except ModuleNotFoundError as exc:  # pragma: no cover
@@ -17,17 +18,14 @@ except ModuleNotFoundError as exc:  # pragma: no cover
         raise
     ImportProfileFilter = None
 else:  # pragma: no cover
-    StrFilterLookup = getattr(strawberry_django, "StrFilterLookup", None)
-    if StrFilterLookup is None:
-        StrFilterLookup = strawberry_django.FilterLookup
 
     @strawberry_django.filter_type(ImportProfile, lookups=True)
-    class ImportProfileFilter(NetBoxModelFilter):
+    class ImportProfileFilter(NetBoxModelFilter):  # type: ignore[no-redef]
         """Filter profiles by their imported configuration fields."""
 
-        name: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        description: StrFilterLookup[str] | None = strawberry_django.filter_field()
-        source_adapter: StrFilterLookup[str] | None = strawberry_django.filter_field()
+        name: strawberry_django.StrFilterLookup | None = strawberry_django.filter_field()
+        description: strawberry_django.StrFilterLookup | None = strawberry_django.filter_field()
+        source_adapter: strawberry_django.StrFilterLookup | None = strawberry_django.filter_field()
 
 
 __all__ = ("ImportProfileFilter",)

@@ -27,4 +27,5 @@ _test_database_name = os.environ["TEST_DB_NAME"]
 if not _test_database_name.startswith("test_"):
     raise ValueError("TEST_DB_NAME must start with 'test_'.")
 
-DATABASES["default"].setdefault("TEST", {})["NAME"] = _test_database_name  # noqa: F405
+# DATABASES comes from the starred NetBox settings, which mypy is not given.
+DATABASES["default"].setdefault("TEST", {})["NAME"] = _test_database_name  # type: ignore[name-defined]  # noqa: F405

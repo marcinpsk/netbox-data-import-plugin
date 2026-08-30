@@ -21,7 +21,7 @@
        aria-valuenow="{{ percentage }}" aria-valuemin="0" aria-valuemax="100">
     <div class="progress-bar" style="width: {{ percentage }}%">{{ percentage }}%</div>
   </div>
-  <p class="mb-3 fw-semibold">Processed {{ processed }} of {{ total }} rows</p>
+  <p class="mb-3 fw-semibold">Completed {{ processed }} of {{ total }} plan steps</p>
 
   <div class="d-flex gap-2">
     {% if is_completed %}

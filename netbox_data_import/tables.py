@@ -2,7 +2,14 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
-from .models import ImportProfile, ColumnMapping, ClassRoleMapping, DeviceTypeMapping, ColumnTransformRule, ImportJob
+from .models import (
+    ImportProfile,
+    ColumnMapping,
+    ClassRoleMapping,
+    DeviceTypeMapping,
+    ColumnTransformRule,
+    ImportExecution,
+)
 
 
 class ImportProfileTable(NetBoxTable):
@@ -128,8 +135,8 @@ class DeviceTypeMappingTable(tables.Table):
         )
 
 
-class ImportJobTable(NetBoxTable):
-    """Table for listing ImportJob objects in the history view."""
+class ImportExecutionTable(NetBoxTable):
+    """Table for listing Import Execution records in the history view."""
 
     created = tables.DateTimeColumn(format="Y-m-d H:i")
     profile = tables.Column(linkify=lambda record: record.profile.get_absolute_url() if record.profile else None)
@@ -156,7 +163,7 @@ class ImportJobTable(NetBoxTable):
     )
 
     class Meta(NetBoxTable.Meta):
-        model = ImportJob
+        model = ImportExecution
         fields = (
             "pk",
             "created",
@@ -186,11 +193,15 @@ class ImportJobTable(NetBoxTable):
     def render_racks_created(self, value):
         """Extract racks_created count from the JSON result_counts dict."""
         value = value or {}
+        if isinstance(value.get("created"), dict):
+            return value["created"].get("rack", 0)
         return value.get("racks_created", 0)
 
     def render_devices_created(self, value):
         """Extract devices_created count from the JSON result_counts dict."""
         value = value or {}
+        if isinstance(value.get("created"), dict):
+            return value["created"].get("device", 0)
         return value.get("devices_created", 0)
 
 

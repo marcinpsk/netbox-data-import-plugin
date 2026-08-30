@@ -18,11 +18,13 @@ Standard NetBox plugin pattern:
 
 - **`catalog.py`** - Target-field catalog and policy applicability: the one source of Target Field keys
 - **`adapters.py`**, **`adapter_forms.py`** - Source Adapter registry and the adapter-declared configuration forms
-- **`models.py`** - ImportProfile, ColumnMapping, ClassRoleMapping, ImportJob
-- **`engine.py`** - Core import logic: parse file, apply mappings, create/update NetBox objects
+- **`plan.py`** - The target-neutral Import Plan: units, changes, dispositions, diagnostics, fingerprints
+- **`import_engine.py`** - Public coordinator for planning and executing accepted Import Plans
+- **`target_modules.py`** - Target-specific planning and write runtimes
+- **`models.py`** - ImportProfile, ColumnMapping, ClassRoleMapping, SourceDocument, ImportExecution
 - **`views.py`** - CRUD for import profiles + import wizard (upload, preview, execute, results)
-- **`api/`** - DRF REST API using NetBox's `NetBoxModelViewSet`/`NetBoxModelSerializer`
-- **`jobs.py`** - Background job for running imports through NetBox's job system
+- **`api/`** - DRF REST API. NetBoxModel resources use NetBox API bases; plain Django models use suitable DRF bases
+- **`jobs.py`** - Background import job and the source-document retention system job
 - **`forms.py`, `tables.py`, `filters.py`, `navigation.py`, `urls.py`** - Standard NetBox UI
 
 ## Development environment

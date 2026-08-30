@@ -19,10 +19,10 @@ def current_preview_revision(session) -> str:
     return revision
 
 
-def record_recalculated_preview(session, result) -> str:
+def record_recalculated_preview(session, plan) -> str:
     """Store one authoritative preview and return its new revision."""
     revision = secrets.token_urlsafe(18)
-    session["import_result"] = result.to_session_dict()
+    session["import_plan"] = plan.to_dict()
     session[PREVIEW_DIRTY_SESSION_KEY] = False
     session[PREVIEW_REVISION_SESSION_KEY] = revision
     return revision
@@ -36,16 +36,17 @@ def retire_preview_revision(session) -> str:
 
 
 def load_cached_preview(request):
-    """Return the active Import Profile and materialized preview result."""
-    from .engine import ImportResult
+    """Return the active Import Profile and materialized Review Workspace."""
     from .models import ImportProfile
+    from .plan import PlanError
+    from .review_workspace import ReviewWorkspace
 
     context = request.session.get("import_context")
-    result_data = request.session.get("import_result")
+    plan_data = request.session.get("import_plan")
     if (
         request.session.get("import_preview_pending") is not True
         or not isinstance(context, dict)
-        or not isinstance(result_data, dict)
+        or not isinstance(plan_data, dict)
     ):
         return None
     revision = current_preview_revision(request.session)
@@ -55,7 +56,11 @@ def load_cached_preview(request):
     profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
     if profile is None:
         return None
-    return profile, ImportResult.from_session_dict(result_data)
+    try:
+        workspace = ReviewWorkspace.from_dict(plan_data)
+    except PlanError:
+        return None
+    return profile, workspace
 
 
 def mark_preview_dirty(session) -> None:

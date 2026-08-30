@@ -848,13 +848,22 @@ class AdapterRuntimeSupportTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("trace_workbook", response.content.decode())
 
-    def test_parse_file_refuses_an_adapter_the_engine_does_not_consume(self):
-        """The engine states what it consumes rather than reading a setting the adapter lacks."""
-        from netbox_data_import import engine
+    def test_import_engine_refuses_an_adapter_with_no_target_module(self):
+        """The coordinator refuses a source batch no registered Target Module consumes."""
+        from netbox_data_import.adapters import UnknownSourceAdapter
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import SourceDocument
 
+        actor = _superuser()
         with open(FIXTURE_PATH, "rb") as handle:
-            with self.assertRaises(engine.ParseError):
-                engine.parse_file(handle, self.trace)
+            document = SourceDocument.store(profile=self.trace, content=handle.read())
+        with self.assertRaises(UnknownSourceAdapter):
+            ImportEngine.plan(
+                self.trace,
+                document,
+                actor,
+                {"site_id": self.site.pk, "location_id": None, "tenant_id": None},
+            )
 
 
 class StaleAdapterRuntimeGuardTest(TestCase):
@@ -898,16 +907,13 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         self.assertIn("retired_adapter", response.content.decode())
 
     def _syncable_row_number(self):
-        """Return a preview row number `SyncSingleRowView` accepts, so the probe reaches the engine."""
-        preview = self.client.session.get("import_result") or {}
-        numbers = {row.get("_row_number") for row in (self.client.session.get("import_rows") or [])}
-        for row in preview.get("rows", []):
-            if (
-                row.get("action") == "create"
-                and row.get("object_type") in ("device", "rack")
-                and row.get("row_number") in numbers
-            ):
-                return row["row_number"]
+        """Return a preview row number `SyncSingleRowView` accepts."""
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        workspace = ReviewWorkspace.from_dict(self.client.session["import_plan"])
+        for row in workspace.units:
+            if row.action == "create" and row.object_type in ("device", "rack"):
+                return row.row_number
         self.fail("the sample workbook must offer one syncable create row")
 
     def test_the_single_row_sync_refuses_a_stale_adapter(self):
@@ -916,21 +922,33 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         row_number = self._syncable_row_number()
         self._retire_the_adapter()
         response = self.client.post(
-            reverse("plugins:netbox_data_import:sync_single_row"), {"row_number": str(row_number)}
+            reverse("plugins:netbox_data_import:sync_single_row"),
+            {
+                "row_number": str(row_number),
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
         )
         self.assertEqual(response.status_code, 400, response.content)
         self.assertIn("retired_adapter", response.json()["error"])
 
     def test_the_engine_refuses_a_stale_adapter_at_its_own_boundary(self):
-        """Every adapter setting is read deep inside the passes, so the door has to check."""
-        from netbox_data_import import engine
+        """The coordinator checks the adapter before it interprets the stored source."""
+        from netbox_data_import.adapters import UnknownSourceAdapter
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import SourceDocument
 
         self._start_a_preview()
-        rows = list(self.client.session["import_rows"])
+        session = self.client.session
         self._retire_the_adapter()
         profile = ImportProfile.objects.get(pk=self.profile.pk)
-        with self.assertRaisesMessage(ValidationError, "retired_adapter"):
-            engine.run_import(rows, profile, {"site": self.site}, dry_run=True)
+        document = SourceDocument.objects.get(pk=session["import_context"]["source_document_id"])
+        with self.assertRaisesMessage(UnknownSourceAdapter, "retired_adapter"):
+            ImportEngine.plan(
+                profile,
+                document,
+                self.user,
+                {"site_id": self.site.pk, "location_id": None, "tenant_id": None},
+            )
 
     def test_the_job_runner_fails_the_job_on_a_stale_adapter(self):
         """A job queued before the upgrade still reaches the worker, so it needs its own guard."""
@@ -944,6 +962,8 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         self._start_a_preview()
         self._retire_the_adapter()
         session = self.client.session
+        plan = session["import_plan"]
+        selection = [unit["identity"] for unit in plan["units"] if unit["disposition"] == "actionable"]
         job = Job.objects.create(
             name="Data Import",
             user=self.user,
@@ -953,7 +973,13 @@ class StaleAdapterRuntimeGuardTest(TestCase):
             data={"job_type": ImportJobRunner.job_type},
         )
         with self.assertRaises(JobFailed):
-            ImportJobRunner(job).run(session["import_rows"], session["import_context"], session["import_result"])
+            ImportJobRunner(job).run(
+                self.profile.pk,
+                session["import_context"]["source_document_id"],
+                plan,
+                selection,
+                "stale-adapter-test",
+            )
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "failed")
         self.assertIn("retired_adapter", job.data["message"])
@@ -1015,28 +1041,20 @@ class StaleAdapterContactResolutionTest(TestCase):
         return buffer
 
     def setUp(self):
-        from netbox_data_import.engine import parse_file, run_import
         from netbox_data_import.tests.test_views import _make_profile
-        from netbox_data_import.views import _serialize_rows
 
         self.site = Site.objects.create(name="Stale Contact Site", slug="stale-contact-site")
         self.profile = _make_profile("Stale Contact")
         ColumnMapping.objects.create(profile=self.profile, source_column="Owner", target_field="candidate:contact")
         self.client.force_login(_superuser())
 
-        rows = parse_file(self._workbook(), self.profile)
-        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": self.profile.pk,
-            "site_id": self.site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "stale-contact.xlsx",
-        }
-        session.save()
+        workbook = self._workbook()
+        workbook.name = "stale-contact.xlsx"
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": workbook},
+        )
+        self.assertEqual(response.status_code, 302)
 
     def test_it_reports_the_stale_adapter_instead_of_raising(self):
         """`primary_contact_lookup_field` is read straight off the profile, so it needs its own guard."""

@@ -36,6 +36,7 @@ function render({ existingResolutions = {} } = {}) {
         <div id="res_conflict_alert" class="d-none"></div>
         <div id="res_duplicate_alert" class="d-none"></div>
         <div id="res_device_check" class="d-none"><small id="res_device_check_msg"></small></div>
+        <div id="res_save_error" class="d-none" role="alert" aria-live="polite"></div>
         <button type="submit">Save</button>
       </form>
     </div>
@@ -113,6 +114,10 @@ async function settleDeviceCheck() {
 }
 
 beforeEach(() => {
+  window.ndiPostPreviewAction = vi.fn(() =>
+    Promise.resolve({ ok: true, preview_state: "recalculation_required", message: "Saved." }),
+  );
+  window.ndiMarkPreviewStale = vi.fn();
   vi.stubGlobal(
     "fetch",
     vi.fn((url) => {
@@ -141,9 +146,47 @@ describe("split modal parts", () => {
     expect([partValue(0).value, partValue(1).value, partValue(2).value]).toEqual(["AT900", "host", "900"]);
   });
 
-  it("saves the field each part was sent to", () => {
+  it("saves the field each part was sent to without navigating away", async () => {
     submitForm();
     expect(resolvedFields()).toEqual({ asset_tag: "AT900", device_name: "host-900" });
+    await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
+    expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
+  });
+
+  it("restores the unsaved button state when the modal opens again", async () => {
+    submitForm();
+    await vi.waitFor(() => expect(saveButton().textContent).toBe("Saved"));
+    expect(saveButton().title).toBe("Saved.");
+
+    openModal();
+
+    expect(saveButton().textContent).toBe("Save resolution");
+    expect(saveButton().title).toBe("");
+  });
+
+  it("reports a save failure inside the modal and clears it when reopened", async () => {
+    window.ndiPostPreviewAction = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Resolution was rejected."))
+      .mockResolvedValueOnce({ ok: true, preview_state: "recalculation_required", message: "Saved." });
+
+    submitForm();
+
+    const alertBox = document.getElementById("res_save_error");
+    await vi.waitFor(() => expect(alertBox.textContent).toBe("Resolution was rejected."));
+    expect(alertBox.classList.contains("d-none")).toBe(false);
+    expect(saveButton().title).toBe("");
+
+    submitForm();
+
+    expect(alertBox.textContent).toBe("");
+    expect(alertBox.classList.contains("d-none")).toBe(true);
+    await vi.waitFor(() => expect(saveButton().textContent).toBe("Saved"));
+
+    openModal();
+
+    expect(alertBox.textContent).toBe("");
+    expect(alertBox.classList.contains("d-none")).toBe(true);
   });
 });
 

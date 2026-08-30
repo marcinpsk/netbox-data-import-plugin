@@ -9,7 +9,7 @@ from netbox_data_import.models import (
     ColumnMapping,
     ColumnTransformRule,
     DeviceTypeMapping,
-    ImportJob,
+    ImportExecution,
     ImportProfile,
 )
 
@@ -43,10 +43,9 @@ class ImportProfileModelTest(TestCase):
         self.assertIn(str(profile.pk), url)
 
     def test_get_absolute_url_without_profile(self):
-        """get_absolute_url returns the list URL when profile_id is None."""
-        job = ImportJob.__new__(ImportJob)
-        job.profile_id = None
-        url = job.get_absolute_url()
+        """A retained execution with a deleted profile falls back to the profile list."""
+        execution = ImportExecution.objects.create(profile=None)
+        url = execution.get_absolute_url()
         self.assertIn("/plugins/data-import/profiles/", url)
 
 
