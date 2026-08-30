@@ -13,7 +13,6 @@
     ['make', 'Make (manufacturer)'],
     ['model', 'Model (device type)'],
     ['rack_name', 'Rack name'],
-    ['source_id', 'Source ID'],
   ];
 
   /* The values this row already carries, so a part can say whether it overwrites one. */

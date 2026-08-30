@@ -61,6 +61,7 @@ from .models import (
     stored_import_source,
     validate_contact_candidate_resolution,
     validate_registered_adapter,
+    validate_source_resolution_fields,
 )
 from .tables import (
     ClassRoleMappingTable,
@@ -2858,6 +2859,7 @@ class SaveResolutionView(_AjaxPermissionView):
                 original_value = json.dumps(candidates, sort_keys=True)
                 contact_context = (source_row, result_row)
             try:
+                validate_source_resolution_fields(profile, source_column, resolved_fields)
                 # Serialize against an executing import, which holds the same profile row.
                 with locked_profile_policy(profile.pk):
                     save_permission_scoped_object(

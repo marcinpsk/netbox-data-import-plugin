@@ -26,6 +26,7 @@ from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_se
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
 CONTACT_RESOLUTION_KEYS = CONTACT_RESOLUTION_REQUIRED_KEYS | frozenset({"contact_field_values", "contact_id"})
+SOURCE_RESOLUTION_RESERVED_FIELDS = frozenset({"source_id", "_conflicts"})
 
 
 def validate_adapter_target_module(adapter_key):
@@ -117,6 +118,32 @@ def validate_contact_candidate_resolution(
         "field_values": {field: value.strip() for field, value in field_values.items()},
         "contact_id": contact_id,
     }
+
+
+def validate_source_resolution_fields(profile, source_column, resolved_fields):
+    """Reject resolved fields that cannot safely merge into one source row."""
+    if not isinstance(resolved_fields, dict):
+        raise ValidationError({"resolved_fields": "Enter the resolved fields as a JSON object."})
+    if any(not isinstance(key, str) for key in resolved_fields):
+        raise ValidationError({"resolved_fields": "Each resolved field name must be text."})
+
+    reserved = sorted(set(resolved_fields) & SOURCE_RESOLUTION_RESERVED_FIELDS)
+    if reserved:
+        raise ValidationError(
+            {"resolved_fields": f"The resolved field '{reserved[0]}' is reserved for import planning."}
+        )
+
+    if source_column == "candidate:contact":
+        invalid = sorted(set(resolved_fields) - CONTACT_RESOLUTION_KEYS)
+    else:
+        output_kinds = profile.output_kinds if profile is not None else None
+        invalid = sorted(
+            key
+            for key in resolved_fields
+            if not CATALOG.is_valid(key, output_kinds=output_kinds, allow_candidates=False)
+        )
+    if invalid:
+        raise ValidationError({"resolved_fields": CATALOG.invalid_key_message(invalid[0])})
 
 
 @contextmanager
@@ -967,10 +994,13 @@ class SourceResolution(PolicySectionModel):
         verbose_name_plural = "Source Resolutions"
 
     def clean(self):
-        """Require the target-field decisions to use a JSON object."""
+        """Require target-field decisions that can safely merge into the profile's source rows."""
         super().clean()
-        if not isinstance(self.resolved_fields, dict):
-            raise ValidationError({"resolved_fields": "Enter the resolved fields as a JSON object."})
+        validate_source_resolution_fields(
+            self.profile if self.profile_id else None,
+            self.source_column,
+            self.resolved_fields,
+        )
 
     def __str__(self):
         return f"{self.source_id}/{self.source_column}: {self.original_value!r}"

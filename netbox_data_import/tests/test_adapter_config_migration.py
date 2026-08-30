@@ -90,7 +90,7 @@ class ProfileAdapterConfigMigrationStructureTest(SimpleTestCase):
 
 
 def _restore_every_leaf():
-    """Restore every current plugin migration after a cutover test."""
+    """Restore every leaf because a migration merge can leave later worker tests incomplete."""
     executor = MigrationExecutor(connection)
     executor.loader.build_graph()
     executor.migrate(list(executor.loader.graph.leaf_nodes(APP)))

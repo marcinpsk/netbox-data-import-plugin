@@ -7,7 +7,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .models import ImportProfile
+from django.core.exceptions import ValidationError
+
+from .models import ImportProfile, validate_source_resolution_fields
 from .values import source_text as _str_val
 
 
@@ -27,10 +29,17 @@ def _clear_resolved_conflicts(row_dict: dict[str, Any], resolved_fields: Mapping
         row_dict.pop("_conflicts", None)
 
 
-def _apply_one_resolution(row_dict: dict, resolution, source_to_targets: dict[str, list[str]]) -> None:
+def _apply_one_resolution(
+    row_dict: dict,
+    resolution,
+    source_to_targets: dict[str, list[str]],
+    profile: ImportProfile,
+) -> None:
     """Apply one saved Source Resolution and clear its ignored mapped values."""
     resolved_fields = resolution.resolved_fields
-    if not isinstance(resolved_fields, Mapping):
+    try:
+        validate_source_resolution_fields(profile, resolution.source_column, resolved_fields)
+    except ValidationError:
         return
     row_dict.update(resolved_fields)
     _clear_resolved_conflicts(row_dict, resolved_fields)
@@ -68,7 +77,7 @@ def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
             if "_conflicts" in row:
                 row["_conflicts"] = dict(row["_conflicts"])
             for resolution in resolutions_by_source_id[source_id]:
-                _apply_one_resolution(row, resolution, source_to_targets)
+                _apply_one_resolution(row, resolution, source_to_targets, profile)
         result.append(row)
     return result
 

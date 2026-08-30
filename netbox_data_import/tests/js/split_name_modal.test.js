@@ -45,11 +45,6 @@ function render({ existingResolutions = {} } = {}) {
   /* The script binds once and looks every element up by id, so one evaluation serves every
    * render in this file. */
   window.eval(source);
-  if (!window.ndiTestSubmitBlocked) {
-    window.ndiTestSubmitBlocked = true;
-    // Registered after the script's own handler, so jsdom stops short of navigating away.
-    document.addEventListener("submit", (event) => event.preventDefault());
-  }
   openModal();
 }
 
@@ -86,7 +81,9 @@ function saveButton() {
 }
 
 function submitForm() {
-  document.getElementById("splitForm").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  return document
+    .getElementById("splitForm")
+    .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 }
 
 function resolvedFields() {
@@ -156,10 +153,14 @@ describe("split modal parts", () => {
   it("leaves native submission available when the preview-action helper is unavailable", () => {
     window.ndiPostPreviewAction = undefined;
 
-    submitForm();
+    expect(submitForm()).toBe(true);
 
     expect(saveButton().disabled).toBe(false);
     expect(saveButton().textContent).toBe("Save resolution");
+  });
+
+  it("does not offer the source identity as a resolution target", () => {
+    expect([...partField(0).options].map((option) => option.value)).not.toContain("source_id");
   });
 
   it("restores the unsaved button state when the modal opens again", async () => {

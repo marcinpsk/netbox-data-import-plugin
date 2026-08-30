@@ -364,6 +364,17 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
 
         self.assertTrue(SourceResolution.objects.filter(source_id="STANDALONE-1").exists())
 
+    def test_an_ordinary_resolution_cannot_replace_the_source_identity(self):
+        """The resolution endpoint rejects a target-neutral planning key."""
+        response = self._post(
+            source_column="device_name",
+            resolved_fields=json.dumps({"source_id": "REPLACED"}),
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("reserved", response.json()["error"])
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
     def test_the_native_contact_form_carries_the_preview_revision(self):
         """Without scripts the form is the only thing that can present a token to check."""
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))

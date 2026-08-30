@@ -17,11 +17,13 @@ from netbox_data_import.ip_assignment import IPAssignmentError, IPTarget, alread
 from netbox_data_import.models import (
     ColumnMapping,
     DeviceImportSource,
+    DeviceTypeMapping,
     ExecutionOutcome,
     FailureReason,
     IgnoredFieldDifference,
     ImportExecution,
     ImportProfile,
+    ManufacturerMapping,
     SourceDocument,
     SourceResolution,
     _validated_contact_id,
@@ -133,14 +135,20 @@ class IdentityAndResolutionBoundaryTest(TestCase):
 
     def test_mapping_identity_is_case_insensitive_on_both_sides(self):
         """Source casing cannot bypass an explicit Device Type or manufacturer mapping."""
-        device_type = SimpleNamespace(
+        profile = ImportProfile.objects.create(name="Persisted Identity Mapping Profile")
+        DeviceTypeMapping.objects.create(
+            profile=profile,
             source_make="Dell",
             source_model="R660",
             netbox_manufacturer_slug="mapped-make",
             netbox_device_type_slug="mapped-type",
         )
-        manufacturer = SimpleNamespace(source_make="ACME", netbox_manufacturer_slug="mapped-manufacturer")
-        resolver = DeviceTypeIdentityResolver([device_type], [manufacturer])
+        ManufacturerMapping.objects.create(
+            profile=profile,
+            source_make="ACME",
+            netbox_manufacturer_slug="mapped-manufacturer",
+        )
+        resolver = DeviceTypeIdentityResolver.for_profile(profile)
 
         self.assertEqual(resolver.resolve("dell", "r660"), ("mapped-make", "mapped-type", True))
         self.assertEqual(
@@ -186,6 +194,42 @@ class IdentityAndResolutionBoundaryTest(TestCase):
             resolved_fields=["not", "a", "mapping"],
         )
         rows = [{"source_id": "BOUNDARY-2", "device_name": "unchanged"}]
+
+        self.assertEqual(derive_effective_rows(rows, profile), rows)
+
+    def test_resolution_validation_rejects_reserved_and_unknown_target_fields(self):
+        """A saved decision cannot name planning internals or fields outside the catalog."""
+        profile = ImportProfile.objects.create(name="Resolution Key Validation Profile")
+        invalid_fields = ({"source_id": "REPLACED"}, {"_conflicts": {}}, {"unknown": "value"})
+
+        for resolved_fields in invalid_fields:
+            resolution = SourceResolution(
+                profile=profile,
+                source_id="BOUNDARY-3",
+                source_column="Raw",
+                original_value="OLD",
+                resolved_fields=resolved_fields,
+            )
+            with self.subTest(resolved_fields=resolved_fields), self.assertRaises(ValidationError):
+                resolution.full_clean()
+
+    def test_a_legacy_resolution_cannot_replace_planning_internals(self):
+        """Planning ignores a stored mapping that predates resolution-key validation."""
+        profile = ImportProfile.objects.create(name="Legacy Resolution Key Profile")
+        SourceResolution.objects.create(
+            profile=profile,
+            source_id="BOUNDARY-4",
+            source_column="Raw",
+            original_value="OLD",
+            resolved_fields={"source_id": "REPLACED", "_conflicts": {}},
+        )
+        rows = [
+            {
+                "source_id": "BOUNDARY-4",
+                "device_name": "unchanged",
+                "_conflicts": {"device_name": ["a", "b"]},
+            }
+        ]
 
         self.assertEqual(derive_effective_rows(rows, profile), rows)
 
