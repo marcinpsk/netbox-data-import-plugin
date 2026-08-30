@@ -68,9 +68,11 @@ class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
-        self.assertContains(response, 'id="res_save_error"')
-        self.assertContains(response, 'role="alert"')
-        self.assertContains(response, 'aria-live="polite"')
+        self.assertRegex(
+            response.content.decode(),
+            r'<[^>]*(?=[^>]*\bid="res_save_error")(?=[^>]*\brole="alert")'
+            r'(?=[^>]*\baria-live="polite")[^>]*>',
+        )
 
 
 class EveryRowCarriesADetailRowTest(PreviewSessionMixin, BaseViewTestCase):

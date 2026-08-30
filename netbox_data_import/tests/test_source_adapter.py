@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""A Source Adapter interprets one file format and reaches nothing else.
-
-`SimpleTestCase` is the assertion, not a convenience: it forbids database access, so an adapter that
-grew an ORM read would fail these tests rather than pass them quietly.
-"""
+"""Use SimpleTestCase to enforce the Source Adapter's no-database boundary."""
 
 from io import BytesIO
 

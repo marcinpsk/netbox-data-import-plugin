@@ -104,6 +104,14 @@ def _frozen_json(value: Any, label: str) -> Any:
         raise PlanInvalid(f"{label} must be JSON-serializable plan data: {exc}") from exc
 
 
+def _plan_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    """Return *value* as the immutable JSON object the field declares."""
+    frozen = _frozen_json(value, label)
+    if not isinstance(frozen, Mapping):
+        raise PlanInvalid(f"{label} must be a JSON object, not {type(value).__name__}.")
+    return frozen
+
+
 def _plan_text(value, label: str) -> str:
     """Return *value* as the string the field declares."""
     if not isinstance(value, str):
@@ -161,7 +169,7 @@ class Diagnostic:
         if _plan_text(self.severity, "Diagnostic severity") not in Severity.ALL:
             raise PlanInvalid(f"Unknown diagnostic severity '{self.severity}'.")
         object.__setattr__(self, "identities", _identities(self.identities, "Diagnostic identities"))
-        object.__setattr__(self, "display", _frozen_json(self.display, "Diagnostic display"))
+        object.__setattr__(self, "display", _plan_mapping(self.display, "Diagnostic display"))
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
@@ -212,11 +220,11 @@ class PlannedChange:
             if not isinstance(value, str) or not value:
                 raise PlanInvalid(f"A Planned Change needs a non-empty {name.replace('_', ' ')}.")
         object.__setattr__(self, "dependencies", _identities(self.dependencies, "Planned Change dependencies"))
-        object.__setattr__(self, "payload", _frozen_json(self.payload, "Planned Change payload"))
+        object.__setattr__(self, "payload", _plan_mapping(self.payload, "Planned Change payload"))
         object.__setattr__(
             self,
             "preconditions",
-            _frozen_json(self.preconditions, "Planned Change preconditions"),
+            _plan_mapping(self.preconditions, "Planned Change preconditions"),
         )
 
     def __hash__(self):
@@ -272,7 +280,7 @@ class SynchronizationUnit:
         object.__setattr__(
             self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Synchronization Unit diagnostics")
         )
-        object.__setattr__(self, "display", _frozen_json(self.display, "Synchronization Unit display"))
+        object.__setattr__(self, "display", _plan_mapping(self.display, "Synchronization Unit display"))
 
     def __hash__(self):
         """Hash over the serialized form, which mirrors the generated equality."""
@@ -327,7 +335,7 @@ class ImportPlan:
         """Detach the planning context from planning state."""
         object.__setattr__(self, "units", _elements(self.units, SynchronizationUnit, "Import Plan units"))
         object.__setattr__(self, "diagnostics", _elements(self.diagnostics, Diagnostic, "Import Plan diagnostics"))
-        object.__setattr__(self, "planning_context", _frozen_json(self.planning_context, "Planning context"))
+        object.__setattr__(self, "planning_context", _plan_mapping(self.planning_context, "Planning context"))
         # canonical_json raises a bare TypeError past `except PlanError`, and takes a dict for a str.
         for name in ("source_fingerprint", "profile_fingerprint", "actor"):
             _plan_text(getattr(self, name), f"Import Plan {name}")

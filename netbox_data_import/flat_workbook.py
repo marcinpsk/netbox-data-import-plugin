@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Flat-workbook source interpretation.
-
-One worksheet becomes a list of row dicts keyed by Target Field. Section 3.5 of the architecture
-calls column mappings, transform rules and the workbook settings source-format facts, so they reach
-this module as a frozen `FlatWorkbookConfig` the caller builds. That is what keeps the module free of
-the ORM, and free of a database in its tests.
-"""
+"""Interpret flat workbooks without accessing the ORM."""
 
 from __future__ import annotations
 

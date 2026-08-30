@@ -71,6 +71,21 @@ class PlanStructureTest(SimpleTestCase):
         with self.assertRaises(PlanInvalid):
             _change(payload={"device": object()})
 
+    def test_mapping_fields_reject_json_values_that_are_not_objects(self):
+        """Declared mappings must fail at the plan boundary, not at a later consumer."""
+        builders = (
+            lambda value: Diagnostic(code="device.name_conflict", severity=Severity.ERROR, display=value),
+            lambda value: _change(payload=value),
+            lambda value: _change(preconditions=value),
+            lambda value: _unit(display=value),
+            lambda value: _plan(planning_context=value),
+        )
+        for build in builders:
+            for value in ([], "not-an-object", 7):
+                with self.subTest(build=build, value=value):
+                    with self.assertRaises(PlanInvalid):
+                        build(value)
+
     def test_a_payload_is_detached_from_the_caller_mapping(self):
         """A plan never aliases planning state, so a later mutation cannot rewrite it."""
         payload = {"name": "sw-1", "nested": {"face": "front"}}

@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""The Device Target Module turns device source rows into Synchronization Units.
-
-Every branch the current device pass reports as a row action maps onto exactly one disposition from
-section 4.2, so these tests are the mapping written down. They cover identity, duplicate checks,
-matching against NetBox, field review, contacts, IP assignment, and each resulting disposition.
-"""
+"""Verify Device Target Module planning and execution behavior."""
 
 from django.test import TestCase
 
