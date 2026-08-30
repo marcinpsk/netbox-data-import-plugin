@@ -317,6 +317,9 @@
       document.getElementById('res_existing_display').textContent = JSON.stringify(existing.resolved_fields);
     }
     renderParts(btn.dataset.originalValue, existing ? existing.resolved_fields : null);
+    var saveBtn = document.querySelector('#splitForm button[type="submit"]');
+    saveBtn.textContent = 'Save resolution';
+    saveBtn.removeAttribute('title');
   });
 
   document.addEventListener('input', function (event) {

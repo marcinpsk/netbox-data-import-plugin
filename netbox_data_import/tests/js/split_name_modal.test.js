@@ -151,6 +151,17 @@ describe("split modal parts", () => {
     await vi.waitFor(() => expect(window.ndiPostPreviewAction).toHaveBeenCalledOnce());
     expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
   });
+
+  it("restores the unsaved button state when the modal opens again", async () => {
+    submitForm();
+    await vi.waitFor(() => expect(saveButton().textContent).toBe("Saved"));
+    expect(saveButton().title).toBe("Saved.");
+
+    openModal();
+
+    expect(saveButton().textContent).toBe("Save resolution");
+    expect(saveButton().title).toBe("");
+  });
 });
 
 describe("the device that a part would name", () => {

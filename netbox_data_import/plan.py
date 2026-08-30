@@ -205,7 +205,7 @@ class PlannedChange:
 
     def __post_init__(self):
         """Detach the mappings from planning state and reject anything a plan may not carry."""
-        if not self.identity:
+        if not _plan_text(self.identity, "Planned Change identity"):
             raise PlanInvalid("A Planned Change needs a stable identity.")
         for name in ("target_module", "operation"):
             value = getattr(self, name)
@@ -264,7 +264,7 @@ class SynchronizationUnit:
 
     def __post_init__(self):
         """Validate the disposition and detach the display data."""
-        if not self.identity:
+        if not _plan_text(self.identity, "Synchronization Unit identity"):
             raise PlanInvalid("A Synchronization Unit needs a stable identity.")
         if self.disposition not in Disposition.ALL:
             raise PlanInvalid(f"Unknown disposition '{self.disposition}'.")

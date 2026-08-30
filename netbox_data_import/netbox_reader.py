@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""The read-only target-state accessor planning uses (section 2.1).
-
-Every read is bound to one actor and scoped to that actor's object permissions, so planning cannot
-report target state the operator cannot view. The scope decision therefore lives here once, instead
-of at each call site where forgetting it silently widens the read.
-
-`unrestricted()` exists for a caller that has no actor. It is a named constructor rather than a None
-default so that an unscoped read is always something the caller asked for.
-"""
+"""Permission-scoped target-state reads for import planning."""
 
 from __future__ import annotations
 
@@ -27,19 +19,11 @@ class NetBoxReader:
         self._tenant = tenant
 
     def for_target(self, *, site, location=None, tenant=None) -> NetBoxReader:
-        """Return this reader bound to the import target as well as the actor.
-
-        Section 2.1 fixes `TargetModule.plan` at four parameters and none of them is the target, so
-        the accessor of target state carries which target state is relevant.
-        """
+        """Bind the planning target without widening the actor's read scope."""
         return type(self)(self._actor, site=site, location=location, tenant=tenant)
 
     def for_planning_context(self, planning_context) -> NetBoxReader:
-        """Return this reader bound to the target a planning context names.
-
-        The target resolves through this reader's own scope, so an operator cannot plan against a
-        site, location or tenant they may not view.
-        """
+        """Resolve a planning context through this reader's permission scope."""
         from dcim.models import Location, Site
         from tenancy.models import Tenant
 

@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import openpyxl
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TransactionTestCase
 from django.urls import reverse
@@ -18,7 +17,6 @@ from core.exceptions import JobFailed
 from core.models import Job
 
 from netbox_data_import.jobs import ImportJobRunner
-from netbox_data_import.import_engine import PreconditionFailed
 from netbox_data_import.models import (
     ClassRoleMapping,
     ColumnMapping,
@@ -631,18 +629,14 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
 
-    def test_single_row_sync_classifies_expected_and_unexpected_engine_failures(self):
-        """Inline execution exposes bounded errors from every coordinator failure class."""
-        for failure, status in (
-            (PreconditionFailed("changed"), 409),
-            (ValidationError("invalid"), 400),
-            (RuntimeError("unexpected"), 500),
-        ):
-            with self.subTest(failure=type(failure).__name__):
-                self._upload()
-                with patch("netbox_data_import.views.ImportEngine.execute", side_effect=failure):
-                    response = self._sync_single_row({"row_number": 2})
-                self.assertEqual(response.status_code, status)
+    def test_single_row_sync_classifies_an_unexpected_engine_failure(self):
+        """Inline execution returns a bounded response for an unexpected coordinator failure."""
+        self._upload()
+
+        with patch("netbox_data_import.views.ImportEngine.execute", side_effect=RuntimeError("unexpected")):
+            response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 500)
 
     def test_single_row_sync_reports_real_stale_target_state(self):
         """A Rack that appears after planning invalidates the accepted unit."""
@@ -657,6 +651,35 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(
             ImportExecution.objects.latest("pk").failure_detail["reason"],
             FailureReason.STALE_PLAN,
+        )
+
+    def test_single_row_sync_reports_a_real_object_permission_failure(self):
+        """A saved Rack outside the actor's object constraint returns a bounded 400."""
+        from dcim.models import Rack, Site
+
+        actor = user_with_object_permission(
+            "cutover-restricted-writer",
+            [
+                (ImportProfile, ("change",), {"pk": self.profile.pk}),
+                (Site, ("view",), {"pk": self.site.pk}),
+                (Rack, ("add",), {"name": "allowed-rack"}),
+            ],
+        )
+        self.client.force_login(actor)
+        upload = self._upload()
+        self.assertRedirects(
+            upload,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+
+        response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
+        self.assertEqual(
+            ImportExecution.objects.latest("pk").failure_detail["reason"],
+            FailureReason.PERMISSION,
         )
 
     def test_single_row_sync_marks_the_materialized_preview_stale(self):

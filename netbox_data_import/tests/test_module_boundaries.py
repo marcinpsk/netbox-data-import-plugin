@@ -13,15 +13,12 @@ CALLERS = ("views.py", "jobs.py")
 
 
 def _import_engine_calls(path: pathlib.Path) -> set[str]:
-    """Return methods called directly on `ImportEngine` in one module."""
+    """Return attributes referenced directly on `ImportEngine` in one module."""
     tree = ast.parse(path.read_text())
     return {
-        node.func.attr
+        node.attr
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "ImportEngine"
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "ImportEngine"
     }
 
 
@@ -58,6 +55,14 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
         self.assertEqual(calls, {"views.py": {"plan", "execute"}, "jobs.py": {"execute"}})
 
+    def test_private_coordinator_attribute_references_are_detected(self):
+        """The boundary rejects private access even when it is not a call."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text("ImportEngine.plan()\nImportEngine.execute()\ncallback = ImportEngine._private_helper\n")
+
+            self.assertIn("_private_helper", _import_engine_calls(path))
+
     def test_views_and_jobs_do_not_import_target_modules(self):
         self.assertEqual([name for name in CALLERS if _imports_target_modules(PACKAGE / name)], [])
 
@@ -75,6 +80,17 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
         self.assertNotIn("\n", _apply_one_resolution.__doc__ or "")
         self.assertNotIn("\n", derive_effective_rows.__doc__ or "")
+
+    def test_netbox_reader_has_one_line_purpose_docstrings(self):
+        """The reader keeps architecture rationale outside implementation docstrings."""
+        from netbox_data_import import netbox_reader
+
+        for docstring in (
+            netbox_reader.__doc__,
+            netbox_reader.NetBoxReader.for_target.__doc__,
+            netbox_reader.NetBoxReader.for_planning_context.__doc__,
+        ):
+            self.assertNotIn("\n", docstring or "")
 
     def test_source_adapters_do_not_project_profile_policy(self):
         """A Source Adapter receives plain settings and never reads an Import Profile."""
