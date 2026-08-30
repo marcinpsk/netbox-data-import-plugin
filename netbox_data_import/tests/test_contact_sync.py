@@ -22,7 +22,6 @@ from netbox_data_import.adapters import FlatWorkbookAdapter
 from netbox_data_import.contact_resolution import (
     ContactResolutionRequired,
     ContactReview,
-    ContactSelection,
     PrimaryContactResolver,
 )
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, stored_import_source
@@ -311,6 +310,15 @@ class NativeContactResolverTest(TestCase):
         row.update(values)
         return row
 
+    def _resolved_row(self, contact_id=None, **field_values):
+        """Return one source row carrying a saved Contact decision."""
+        return self._row(
+            contact_resolution_applied=True,
+            contact_field_sources={},
+            contact_field_values=field_values,
+            contact_id=contact_id,
+        )
+
     def _assignment(self, contact, priority="primary"):
         """Create one assignment for this Device and configured role."""
         return ContactAssignment.objects.create(
@@ -440,50 +448,67 @@ class NativeContactResolverTest(TestCase):
         missing_id = contact.pk
         contact.delete()
         with self.assertRaisesMessage(ValidationError, "no longer exists"):
-            PrimaryContactResolver._plan(self.device, self.profile, ContactSelection({}, missing_id))
+            PrimaryContactResolver.review(self.device, self._resolved_row(contact_id=missing_id), self.profile)
 
         replacement = Contact.objects.create(name="Selected Person", email="selected@example.invalid")
-        changed = ContactSelection({"email": "changed@example.invalid"}, replacement.pk)
         with self.assertRaisesMessage(ValidationError, "no longer has the chosen email"):
-            PrimaryContactResolver._plan(self.device, self.profile, changed)
+            PrimaryContactResolver.review(
+                self.device,
+                self._resolved_row(
+                    contact_id=replacement.pk,
+                    name=replacement.name,
+                    email="changed@example.invalid",
+                ),
+                self.profile,
+            )
 
         actor = get_user_model().objects.create_user(username="resolver-contact-reader")
         with self.assertRaisesMessage(ObjectPermissionDenied, "tenancy.view_contact"):
-            PrimaryContactResolver._plan(self.device, self.profile, ContactSelection({}, replacement.pk), actor)
+            PrimaryContactResolver.review(
+                self.device,
+                self._resolved_row(contact_id=replacement.pk),
+                self.profile,
+                actor,
+            )
 
     def test_contact_creation_requires_lookup_contact_and_assignment_permissions(self):
         """Planning refuses each missing permission before any related row is written."""
-        selection = ContactSelection({"name": "New Person", "email": "new@example.invalid"})
+        row = self._resolved_row(name="New Person", email="new@example.invalid")
         actor = get_user_model().objects.create_user(username="resolver-contact-writer")
 
         with self.assertRaisesMessage(ObjectPermissionDenied, "tenancy.add_contact"):
-            PrimaryContactResolver._plan(self.device, self.profile, selection, actor)
+            PrimaryContactResolver.review(self.device, row, self.profile, actor)
 
         actor = user_with_object_permission("resolver-assignment-writer", [(Contact, ("add",), {})])
         with self.assertRaisesMessage(ObjectPermissionDenied, "tenancy.add_contactassignment"):
-            PrimaryContactResolver._plan(self.device, self.profile, selection, actor)
+            PrimaryContactResolver.review(self.device, row, self.profile, actor)
 
     def test_contact_role_and_lookup_value_are_required(self):
         """Contact planning fails fast when profile policy cannot identify an assignment."""
         self.profile.adapter_config["primary_contact_role"] = None
         self.profile.save(update_fields=["adapter_config"])
         with self.assertRaisesMessage(ValidationError, "Select a primary contact role"):
-            PrimaryContactResolver._plan(
+            PrimaryContactResolver.review(
                 self.device,
+                self._resolved_row(name="Incomplete Person", email="incomplete@example.invalid"),
                 self.profile,
-                ContactSelection({"name": "Incomplete Person", "email": "incomplete@example.invalid"}),
             )
 
         self.profile.adapter_config["primary_contact_role"] = self.contact_role.name
         self.profile.save(update_fields=["adapter_config"])
         with self.assertRaisesMessage(ValidationError, "Contact email lookup field"):
-            PrimaryContactResolver._plan(self.device, self.profile, ContactSelection({"name": "Incomplete Person"}))
+            PrimaryContactResolver.review(
+                self.device,
+                self._resolved_row(name="Incomplete Person"),
+                self.profile,
+            )
 
     def test_deleted_role_is_refused_when_apply_rechecks_the_review(self):
         """Apply does not trust the role cached during review."""
-        selection = ContactSelection({"name": "Late Person", "email": "late@example.invalid"})
-        review = ContactReview(
-            selection, {}, PrimaryContactResolver._plan(self.device, self.profile, selection), {}, None
+        review = PrimaryContactResolver.review(
+            self.device,
+            self._resolved_row(name="Late Person", email="late@example.invalid"),
+            self.profile,
         )
         self.contact_role.delete()
 
@@ -543,10 +568,10 @@ class NativeContactResolverTest(TestCase):
         first = Contact.objects.create(name="First Person", email="shared@example.invalid")
         Contact.objects.create(name="Second Person", email="SHARED@example.invalid")
         with self.assertRaisesMessage(ValidationError, "More than one contact"):
-            PrimaryContactResolver._plan(
+            PrimaryContactResolver.review(
                 self.device,
+                self._resolved_row(name="New Person", email=first.email),
                 self.profile,
-                ContactSelection({"name": "New Person", "email": first.email}),
             )
 
         Contact.objects.all().delete()
@@ -557,8 +582,8 @@ class NativeContactResolverTest(TestCase):
             )
             self._assignment(contact)
         with self.assertRaisesMessage(ValidationError, "More than one primary assignment"):
-            PrimaryContactResolver._plan(
+            PrimaryContactResolver.review(
                 self.device,
+                self._resolved_row(name="New Person", email="new-primary@example.invalid"),
                 self.profile,
-                ContactSelection({"name": "New Person", "email": "new-primary@example.invalid"}),
             )

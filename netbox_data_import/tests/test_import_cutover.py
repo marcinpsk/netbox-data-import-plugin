@@ -507,7 +507,40 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             )
         retry_job.refresh_from_db()
         self.assertEqual(retry_job.data["import_execution_id"], failed.pk)
-        self.assertIn("already failed", retry_job.data["message"])
+        self.assertIn("planning", retry_job.data["message"])
+
+    def test_job_runner_reports_a_pending_duplicate_as_failure(self):
+        """A duplicate delivery cannot report a still-running execution as complete."""
+        self._upload()
+        document = SourceDocument.objects.get(profile=self.profile)
+        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        selected = accepted.units[0].identity
+        job = self._job()
+        pending, created = ImportExecution.reserve(
+            profile=self.profile,
+            source_document=document,
+            actor=self.actor,
+            idempotency_key="pending-retry",
+            plan_schema_version=accepted.schema_version,
+            accepted_plan_fingerprint=accepted.fingerprint,
+            selected_units=[selected],
+        )
+        self.assertTrue(created)
+        pending.link_job(job)
+
+        with self.assertRaises(JobFailed):
+            ImportJobRunner(job).run(
+                self.profile.pk,
+                document.pk,
+                accepted.to_dict(),
+                [selected],
+                "pending-retry",
+            )
+
+        job.refresh_from_db()
+        self.assertEqual(job.data["phase"], "failed")
+        self.assertEqual(job.data["import_execution_id"], pending.pk)
+        self.assertIn("pending", job.data["message"])
 
     def test_job_runner_reports_a_profile_deleted_before_the_policy_lock(self):
         """A profile removed after the worker reads it still becomes a recoverable Job failure."""

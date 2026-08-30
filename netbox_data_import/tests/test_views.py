@@ -3133,6 +3133,7 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         self.profile = _make_profile("AmbATProfile")
 
     def test_ambiguous_asset_tag_creates_no_binding(self):
+        from django.contrib.messages import get_messages
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
         from netbox_data_import.models import DeviceExistingMatch
 
@@ -3154,6 +3155,7 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
                     "_row_number": 1,
                     "source_id": "AMB-ASSET-1",
                     "device_name": "amb-at-1",
+                    "device_class": "Server",
                     "serial": "",
                     "asset_tag": "SHARED-TAG",
                 },
@@ -3166,6 +3168,8 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertFalse(DeviceExistingMatch.objects.filter(source_id="AMB-ASSET-1").exists())
+        summary = " ".join(str(message) for message in get_messages(response.wsgi_request))
+        self.assertIn("1 ambiguous", summary)
 
 
 class ImportProfileBulkImportViewTest(BaseViewTestCase):

@@ -115,9 +115,9 @@ class ImportJobRunner(JobRunner):
             ValidationError,
         ) as exc:
             self._fail(str(exc))
-        if execution.outcome == ExecutionOutcome.FAILED:
-            reason = (execution.failure_detail or {}).get("reason", "failed")
-            self._fail(f"The accepted import execution already failed ({reason}).")
+        if execution.outcome != ExecutionOutcome.SUCCEEDED:
+            reason = (execution.failure_detail or {}).get("reason") or execution.outcome or "unknown"
+            self._fail(f"The accepted import execution did not succeed ({reason}).")
         self._save_data(
             phase="completed",
             processed=progress["processed"],

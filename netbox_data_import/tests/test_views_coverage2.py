@@ -214,9 +214,11 @@ class ImportPreviewViewExistingResolutionsTest(TestCase):
         )
         import openpyxl
         from django.core.files.uploadedfile import SimpleUploadedFile
+        from openpyxl.worksheet.worksheet import Worksheet
 
         workbook = openpyxl.Workbook()
-        worksheet = workbook.active
+        active = workbook.active
+        worksheet = active if isinstance(active, Worksheet) else workbook.create_sheet()
         worksheet.title = "Data"
         worksheet.append(["Id", "Name", "Class", "Make", "Model"])
         worksheet.append(["RES2-001", "old-name", "Server", "TestMake", "TestModel"])
