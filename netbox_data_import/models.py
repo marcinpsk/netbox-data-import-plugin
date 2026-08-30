@@ -29,6 +29,12 @@ CONTACT_RESOLUTION_KEYS = CONTACT_RESOLUTION_REQUIRED_KEYS | frozenset({"contact
 SOURCE_RESOLUTION_RESERVED_FIELDS = frozenset({"source_id", "_conflicts"})
 
 
+def _invalid_contact_resolution_key_message(key):
+    """Describe one unknown Contact resolution key using the Contact-policy vocabulary."""
+    allowed = ", ".join(f"'{field}'" for field in sorted(CONTACT_RESOLUTION_KEYS))
+    return f"'{key}' is not a Contact resolution field. Use one of {allowed}."
+
+
 def validate_adapter_target_module(adapter_key):
     """Reject a Source Adapter whose Target Module this release does not implement yet."""
     if not has_implemented_module(output_kinds_for(adapter_key)):
@@ -78,12 +84,11 @@ def validate_contact_candidate_resolution(
     available_source_columns,
 ) -> dict:
     """Validate and normalize one saved Contact candidate resolution."""
-    if (
-        not isinstance(resolved_fields, dict)
-        or not CONTACT_RESOLUTION_REQUIRED_KEYS <= set(resolved_fields)
-        or set(resolved_fields) - CONTACT_RESOLUTION_KEYS
-    ):
+    if not isinstance(resolved_fields, dict) or not CONTACT_RESOLUTION_REQUIRED_KEYS <= set(resolved_fields):
         raise ValidationError("The Contact candidate resolution has an invalid structure.")
+    invalid = sorted(set(resolved_fields) - CONTACT_RESOLUTION_KEYS)
+    if invalid:
+        raise ValidationError(_invalid_contact_resolution_key_message(invalid[0]))
     if resolved_fields.get("contact_resolution_applied") is not True:
         raise ValidationError("The Contact candidate resolution is not marked as applied.")
 
@@ -135,13 +140,13 @@ def validate_source_resolution_fields(profile, source_column, resolved_fields):
 
     if source_column == "candidate:contact":
         invalid = sorted(set(resolved_fields) - CONTACT_RESOLUTION_KEYS)
-    else:
-        output_kinds = profile.output_kinds if profile is not None else None
-        invalid = sorted(
-            key
-            for key in resolved_fields
-            if not CATALOG.is_valid(key, output_kinds=output_kinds, allow_candidates=False)
-        )
+        if invalid:
+            raise ValidationError({"resolved_fields": _invalid_contact_resolution_key_message(invalid[0])})
+        return
+    output_kinds = profile.output_kinds if profile is not None else None
+    invalid = sorted(
+        key for key in resolved_fields if not CATALOG.is_valid(key, output_kinds=output_kinds, allow_candidates=False)
+    )
     if invalid:
         raise ValidationError({"resolved_fields": CATALOG.invalid_key_message(invalid[0])})
 

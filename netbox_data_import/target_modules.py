@@ -189,7 +189,7 @@ def rack_duplicate_keys(rows) -> tuple[frozenset[str], frozenset[str]]:
 
 
 def rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) -> tuple[str, dict] | None:
-    """Share one rack rejection result so both modules agree which rack changes exist."""
+    """Keep the rack-pass rejection order, including its empty-ID ignore match, for cutover parity."""
     name = rack_row_name(row)
     source_id = _source_text(row.get("source_id"))
     if not name:

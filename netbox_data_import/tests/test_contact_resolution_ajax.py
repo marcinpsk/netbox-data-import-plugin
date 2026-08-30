@@ -6,6 +6,7 @@ import json
 
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.urls import reverse
 
@@ -205,6 +206,39 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertIs(body["ok"], False)
         self.assertTrue(body["error"])
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
+    def test_an_unknown_contact_resolution_key_uses_contact_vocabulary(self):
+        """The modal must describe a Contact-policy error without naming Target Fields."""
+        response = self._post(
+            resolved_fields=json.dumps(
+                {
+                    "contact_resolution_applied": True,
+                    "contact_field_sources": {"name": "Contact", "email": "Contact"},
+                    "contact_field_values": {},
+                    "contact_id": None,
+                    "unexpected_contact_field": True,
+                }
+            )
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        error = response.json()["error"]
+        self.assertIn("not a Contact resolution field", error)
+        self.assertNotIn("Target Field", error)
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
+    def test_model_validation_uses_contact_vocabulary_for_an_unknown_key(self):
+        """Every SourceResolution writer must report the same Contact-policy vocabulary."""
+        resolution = SourceResolution(
+            profile=self.profile,
+            source_id="AJAX-001",
+            source_column="candidate:contact",
+            original_value="{}",
+            resolved_fields={"unexpected_contact_field": True},
+        )
+
+        with self.assertRaisesMessage(ValidationError, "not a Contact resolution field"):
+            resolution.full_clean()
 
     def test_malformed_candidate_values_answer_json_not_an_internal_error(self):
         """A serialized plan can be stale or corrupt, so its display data is untrusted input."""

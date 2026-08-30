@@ -112,7 +112,7 @@ class RackModulePlanTest(RackModulePlanTestBase):
         self.assertEqual(units[0].changes, ())
 
     def test_a_null_like_ignored_source_id_is_still_excluded(self):
-        """Stored source identities use the same null-marker rules as source cells."""
+        """Cutover parity keeps the rack pass's empty-ID ignore match after null normalization."""
         IgnoredDevice.objects.create(profile=self.profile, source_id="#N/A")
 
         unit = self._plan(self._row(2, "#N/A", "cab-01"))[0]
