@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
-from .device_identity import resolve_strong_device_identity
 from .plan import Disposition, ImportPlan, SynchronizationUnit
 from .values import (
     effective_device_name,
@@ -33,7 +32,6 @@ _DIAGNOSTIC_MESSAGES = {
     "device.contact_resolution_required": "Choose the primary contact values before importing.",
     "device.class_ignored": "Ignored source class",
     "device.class_unmapped": "No class-to-role mapping exists for this source class.",
-    "device.conflicting_identity": "Serial and asset tag identify different devices.",
     "device.cross_site_match": "A strong identity matches a device at another site.",
     "device.device_type_missing": "The device type does not exist. Map or create it before importing.",
     "device.derived_slug_collision": "Different source identities derive the same dependency slug.",
@@ -72,7 +70,6 @@ _IDENTITY_CONFLICTS = {
     "device.ambiguous_name": "ambiguous_name",
     "device.ambiguous_serial": "ambiguous_serial",
     "device.ambiguous_stored_source_id": "ambiguous_source_id",
-    "device.conflicting_identity": "conflicting_identity",
     "device.cross_site_match": "cross_site_match",
     "device.derived_slug_collision": "derived_slug_collision",
     "device.duplicate_asset_tag": "duplicate_asset_tag",
@@ -236,12 +233,28 @@ class AutoMatchSummary:
         return f"Auto-match: {', '.join(parts) or 'nothing found'}."
 
 
+def _resolve_strong_identity(devices, serial: str, asset_tag: str):
+    """Resolve serial and asset tag to one device, or report ambiguity."""
+    serial_matches = list(devices.filter(serial=serial)[:2]) if serial else []
+    asset_matches = list(devices.filter(asset_tag__iexact=asset_tag)[:2]) if asset_tag else []
+    if len(serial_matches) > 1 or len(asset_matches) > 1:
+        return None, None, True
+    serial_device = serial_matches[0] if serial_matches else None
+    asset_device = asset_matches[0] if asset_matches else None
+    if serial_device is not None and asset_device is not None and serial_device.pk != asset_device.pk:
+        return None, None, True
+    if serial_device is not None:
+        return serial_device, "serial", False
+    if asset_device is not None:
+        return asset_device, "asset tag", False
+    return None, None, False
+
+
 def _match_existing_device(device_model, visible_devices, name, serial, asset_tag, site, tenant_id):
     """Return one exact device match and its method, or report ambiguity."""
-    strong_match = resolve_strong_device_identity(device_model.objects, serial, asset_tag)
-    if strong_match.conflict:
+    device, method, ambiguous = _resolve_strong_identity(device_model.objects, serial, asset_tag)
+    if ambiguous:
         return None, None, True
-    device, method = strong_match.device, strong_match.method
     if device is None and name:
         tenant_filter = {"tenant_id": tenant_id} if tenant_id is not None else {"tenant__isnull": True}
         matches = list(device_model.objects.filter(site=site, name__iexact=name, **tenant_filter)[:2])

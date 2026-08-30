@@ -26,7 +26,7 @@ from . import ip_assignment
 from .catalog import OutputKind
 from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
-from .device_identity import DeviceTypeIdentityResolver, normalize_mapping_text, resolve_strong_device_identity
+from .device_identity import DeviceTypeIdentityResolver, normalize_mapping_text
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
@@ -1199,15 +1199,18 @@ class _DeviceBatch:
             if reviewed is not None:
                 return self._visible_match(reviewed, "field review", visible_devices)
 
-        strong_match = resolve_strong_device_identity(
-            devices,
-            _text(row.get("serial")),
-            _text(row.get("asset_tag"))[:50],
-        )
-        if strong_match.conflict:
-            return _Match(ambiguous=strong_match.conflict, value=strong_match.value)
-        if strong_match.device is not None:
-            return self._visible_match(strong_match.device, strong_match.method, visible_devices)
+        for field, lookup, code in (
+            ("serial", "serial", "device.ambiguous_serial"),
+            ("asset_tag", "asset_tag__iexact", "device.ambiguous_asset_tag"),
+        ):
+            value = _text(row.get(field))[:50] if field == "asset_tag" else _text(row.get(field))
+            if not value:
+                continue
+            found = list(devices.filter(**{lookup: value})[:2])
+            if len(found) > 1:
+                return _Match(ambiguous=code, value=value)
+            if found:
+                return self._visible_match(found[0], field.replace("_", " "), visible_devices)
 
         if identity_text(name) in self._duplicate_names or self.reader.site is None:
             return _Match()
