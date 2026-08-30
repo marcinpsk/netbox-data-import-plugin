@@ -30,7 +30,14 @@ from .device_identity import DeviceTypeIdentityResolver, normalize_mapping_text
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
-from .values import effective_device_name, identity_text, normalize_for_compare, source_position, translation_maps
+from .values import (
+    effective_device_name,
+    identity_text,
+    normalize_for_compare,
+    source_position,
+    source_text,
+    translation_maps,
+)
 
 DEFAULT_RACK_HEIGHT = 42
 
@@ -64,8 +71,8 @@ class TargetModuleRuntime(Protocol):
 
 
 def _text(value) -> str:
-    """Return the trimmed text of a source value, empty for None."""
-    return "" if value is None else str(value).strip()
+    """Return normalized source text, including an empty value for null markers."""
+    return source_text(value)
 
 
 def _duplicate_value_detail(label: str, value: str, other_rows: list[int]) -> str:

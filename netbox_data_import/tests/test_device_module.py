@@ -232,6 +232,26 @@ class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):
         self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
         self.assertEqual(units[0].diagnostics[0].code, "device.duplicate_asset_tag")
 
+    def test_null_like_serials_are_empty_instead_of_duplicates(self):
+        """Spreadsheet null markers do not become Device serial identities."""
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", serial="N/A"),
+            self._row(3, "D-2", "srv-02", serial="N/A"),
+        )
+
+        self.assertEqual([unit.disposition for unit in units], [Disposition.ACTIONABLE] * 2)
+        self.assertTrue(all(unit.changes[-1].payload["serial"] == "" for unit in units))
+
+    def test_null_like_asset_tags_are_empty_instead_of_duplicates(self):
+        """Spreadsheet null markers do not become Device asset tag identities."""
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", asset_tag="#N/A"),
+            self._row(3, "D-2", "srv-02", asset_tag="#N/A"),
+        )
+
+        self.assertEqual([unit.disposition for unit in units], [Disposition.ACTIONABLE] * 2)
+        self.assertTrue(all(unit.changes[-1].payload["asset_tag"] == "" for unit in units))
+
     def test_a_duplicate_name_refuses_both_unmatched_rows(self):
         """Two creates with one target name cannot both succeed, so neither is executable."""
         self._device("srv-01")
