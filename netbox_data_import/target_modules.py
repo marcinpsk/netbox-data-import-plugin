@@ -132,7 +132,7 @@ def _unit_display(row, object_type: str, name: str, rack_name: str = "") -> dict
 
 def _ignored_source_ids(profile) -> frozenset[str]:
     """Return the source identities the operator has chosen to skip."""
-    return frozenset(_text(value) for value in profile.ignored_devices.values_list("source_id", flat=True))
+    return frozenset(_source_text(value) for value in profile.ignored_devices.values_list("source_id", flat=True))
 
 
 def _repeated(values) -> frozenset[str]:
@@ -194,7 +194,7 @@ def rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) -> t
     source_id = _source_text(row.get("source_id"))
     if not name:
         return "rack.missing_name", {"source_id": source_id}
-    if source_id and source_id in ignored:
+    if source_id in ignored:
         return "rack.ignored", {"rack_name": name, "source_id": source_id}
     if identity_text(name) in duplicate_names:
         return "rack.duplicate_name", {"rack_name": name, "source_id": source_id}
@@ -1441,7 +1441,7 @@ class DeviceModule:
 
         if not name:
             return _refused(identity, "device.missing_name", display)
-        if source_id and source_id in batch.ignored:
+        if source_id in batch.ignored:
             ignored_display = {
                 **display,
                 "extra_data": {**display["extra_data"], "ignore_kind": "individual"},

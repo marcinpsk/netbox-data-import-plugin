@@ -111,6 +111,15 @@ class RackModulePlanTest(RackModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.EXCLUDED)
         self.assertEqual(units[0].changes, ())
 
+    def test_a_null_like_ignored_source_id_is_still_excluded(self):
+        """Stored source identities use the same null-marker rules as source cells."""
+        IgnoredDevice.objects.create(profile=self.profile, source_id="#N/A")
+
+        unit = self._plan(self._row(2, "#N/A", "cab-01"))[0]
+
+        self.assertEqual(unit.disposition, Disposition.EXCLUDED)
+        self.assertEqual(unit.diagnostics[0].code, "rack.ignored")
+
     def test_a_row_with_no_rack_name_is_invalid(self):
         """An unsupported source construct is invalid, never excluded."""
         units = self._plan(self._row(2, "RACK-1", ""))
