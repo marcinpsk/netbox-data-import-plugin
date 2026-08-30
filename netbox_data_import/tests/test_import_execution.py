@@ -59,6 +59,9 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         self.assertEqual(execution.plan_schema_version, accepted.schema_version)
         self.assertEqual(execution.accepted_plan_fingerprint, accepted.fingerprint)
         self.assertEqual(execution.selected_units, [unit.identity])
+        self.assertEqual(execution.input_filename, self.document.filename)
+        self.assertEqual(execution.site_name, self.site.name)
+        self.assertEqual(execution.result_counts, {"created": {"device": 1}, "errors": 0})
 
     def test_execution_permission_overrides_constrain_the_saved_device(self):
         """Execution grants use the same model-to-constraint override contract as planning grants."""
@@ -191,6 +194,9 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
                 "reason": "precondition",
             },
         )
+        self.assertEqual(execution.input_filename, "rollback.xlsx")
+        self.assertEqual(execution.site_name, self.site.name)
+        self.assertEqual(execution.result_counts, {"created": {}, "errors": 1})
 
     def test_a_finished_idempotency_key_returns_the_same_row_without_writing_again(self):
         """A duplicate delivery returns its succeeded audit row before it replans or writes."""

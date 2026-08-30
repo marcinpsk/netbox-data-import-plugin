@@ -67,14 +67,16 @@ class UploadStoresPristineSourceTest(TestCase):
             original = handle.read()
         batch = FlatWorkbookAdapter.interpret(original, interpreter_config_for(self.profile))
         first_source_id = str(batch.rows[0].get("source_id", ""))
+        original_name = str(batch.rows[0].get("device_name", ""))
         self.assertTrue(first_source_id)
+        self.assertTrue(original_name)
 
         SourceResolution.objects.create(
             profile=self.profile,
             source_id=first_source_id,
             source_column="device_name",
-            original_value="whatever",
-            resolved_fields={"device_name": "baked-by-parse-file"},
+            original_value=original_name,
+            resolved_fields={"device_name": "resolved-device-name"},
         )
 
         with open(fixture, "rb") as handle:
@@ -83,9 +85,19 @@ class UploadStoresPristineSourceTest(TestCase):
                 {"profile": self.profile.pk, "site": self.site.pk, "excel_file": handle},
             )
 
+        from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument
 
         stored = SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"])
+        replanned = ImportEngine.plan(
+            self.profile,
+            stored,
+            self.user,
+            {"site_id": self.site.pk, "location_id": None, "tenant_id": None},
+        )
+        resolved = next(unit for unit in replanned.units if unit.display.get("source_id") == first_source_id)
+
+        self.assertEqual(resolved.display["device_name"], "resolved-device-name")
         self.assertEqual(bytes(stored.content), original)
 
 

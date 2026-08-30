@@ -716,15 +716,21 @@ class ImportExecution(models.Model):
             setattr(self, name, value)
         return self
 
-    def mark_succeeded(self, *, applied_changes):
+    def mark_succeeded(self, *, applied_changes, result_counts=None):
         """Record the applied identities and the deleted-object snapshot."""
-        return self._finish(outcome=ExecutionOutcome.SUCCEEDED, applied_changes=applied_changes, failure_detail=None)
+        return self._finish(
+            outcome=ExecutionOutcome.SUCCEEDED,
+            applied_changes=applied_changes,
+            failure_detail=None,
+            result_counts=result_counts or {},
+        )
 
     def mark_failed(self, *, reason, failed_change=None, rolled_back=(), not_attempted=()):
         """Record what failed, what rolled back, and what was never attempted."""
         return self._finish(
             outcome=ExecutionOutcome.FAILED,
             applied_changes=None,
+            result_counts={"created": {}, "errors": 1},
             failure_detail={
                 "failed_change": failed_change,
                 "rolled_back": list(rolled_back),

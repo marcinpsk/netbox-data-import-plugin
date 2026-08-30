@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Resolve the NetBox Device Type identity a source make and model name.
-
-The engine's device pass and the Device Target Module both have to answer this, and answering it
-twice is how the two drift. Section 2.2 lets a Target Module read Import Profile policy models, so
-the resolver reads the two mapping tables itself and needs nothing from the engine.
-"""
+"""Resolve the NetBox Device Type identity from source make and model names."""
 
 from __future__ import annotations
 

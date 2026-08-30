@@ -29,7 +29,8 @@ def _imports_target_modules(path: pathlib.Path) -> bool:
         if isinstance(node, ast.ImportFrom):
             if node.module in {"target_modules", "netbox_data_import.target_modules"}:
                 return True
-            if node.level and node.module is None and any(name.name == "target_modules" for name in node.names):
+            package_import = node.module == "netbox_data_import" or node.level and node.module is None
+            if package_import and any(name.name == "target_modules" for name in node.names):
                 return True
         if isinstance(node, ast.Import) and any(name.name.endswith("target_modules") for name in node.names):
             return True
@@ -74,6 +75,14 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
             self.assertTrue(_imports_target_modules(path))
 
+    def test_absolute_package_imports_of_target_modules_are_detected(self):
+        """The boundary guard recognizes imports from the absolute package."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text("from netbox_data_import import target_modules\n")
+
+            self.assertTrue(_imports_target_modules(path))
+
     def test_source_resolution_helpers_have_one_line_purpose_docstrings(self):
         """Implementation helpers keep their explanation at the module boundary."""
         from netbox_data_import.source_resolution import _apply_one_resolution, derive_effective_rows
@@ -91,6 +100,12 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             netbox_reader.NetBoxReader.for_planning_context.__doc__,
         ):
             self.assertNotIn("\n", docstring or "")
+
+    def test_device_identity_has_a_one_line_purpose_docstring(self):
+        """The shared resolver keeps design rationale outside its module docstring."""
+        from netbox_data_import import device_identity
+
+        self.assertNotIn("\n", device_identity.__doc__ or "")
 
     def test_source_adapters_do_not_project_profile_policy(self):
         """A Source Adapter receives plain settings and never reads an Import Profile."""

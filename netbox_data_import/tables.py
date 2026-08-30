@@ -193,11 +193,15 @@ class ImportExecutionTable(NetBoxTable):
     def render_racks_created(self, value):
         """Extract racks_created count from the JSON result_counts dict."""
         value = value or {}
+        if isinstance(value.get("created"), dict):
+            return value["created"].get("rack", 0)
         return value.get("racks_created", 0)
 
     def render_devices_created(self, value):
         """Extract devices_created count from the JSON result_counts dict."""
         value = value or {}
+        if isinstance(value.get("created"), dict):
+            return value["created"].get("device", 0)
         return value.get("devices_created", 0)
 
 

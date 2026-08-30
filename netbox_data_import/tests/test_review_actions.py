@@ -5,7 +5,6 @@
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -284,16 +283,26 @@ class TargetNeutralFieldReviewTest(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
 
-    def test_ignore_sanitizes_validation_and_integrity_failures(self):
-        """Coordinator validation and concurrent integrity failures remain bounded."""
+    def test_ignore_sanitizes_a_real_validation_failure(self):
+        """An overlong source identity is rejected through the real policy write."""
+        DeviceExistingMatch.objects.filter(profile=self.profile).delete()
+        self.rows[0]["source_id"] = "X" * 201
+        self._materialize()
+
+        response = self._post("ignore_field_difference")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cannot exceed 200 characters", response.json()["error"])
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
+        self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+
+    def test_ignore_sanitizes_a_concurrent_integrity_failure(self):
+        """The nondeterministic concurrent insert failure remains bounded."""
         endpoint = "netbox_data_import.views.save_permission_scoped_object"
-        for failure, status in (
-            (ValidationError("invalid review"), 400),
-            (IntegrityError("duplicate"), 409),
-        ):
-            with self.subTest(failure=type(failure).__name__), patch(endpoint, side_effect=failure):
-                response = self._post("ignore_field_difference")
-                self.assertEqual(response.status_code, status)
+        with patch(endpoint, side_effect=IntegrityError("duplicate")):
+            response = self._post("ignore_field_difference")
+
+        self.assertEqual(response.status_code, 409)
 
     def test_unignore_rejects_absent_stale_and_conflicting_records(self):
         """Unignore deletes only the exact review and binding shown in its plan."""

@@ -135,11 +135,15 @@ class ImportEngine:
             plan_schema_version=accepted.schema_version,
             accepted_plan_fingerprint=accepted.fingerprint,
             selected_units=list(selected_identities),
+            input_filename=source_document.filename,
         )
         if not created:
             return execution
 
         try:
+            target = NetBoxReader.for_actor(actor).for_planning_context(accepted.planning_context)
+            execution.site_name = str(target.site)
+            execution.save(update_fields=["site_name"])
             if job is not None:
                 execution.link_job(job)
             # One lock over the replan, the comparison and the writes: policy cannot move between them.
@@ -218,7 +222,19 @@ class ImportEngine:
             completed.append(change.identity)
             if progress_callback is not None:
                 progress_callback(len(units) + index + 1, total)
-        execution.mark_succeeded(applied_changes={"changes": completed, "deleted": []})
+        execution.mark_succeeded(
+            applied_changes={"changes": completed, "deleted": []},
+            result_counts=cls._result_counts(changes),
+        )
+
+    @staticmethod
+    def _result_counts(changes) -> dict:
+        """Count successful primary creates by Target Module for audit display."""
+        created: dict[str, int] = {}
+        for change in changes:
+            if change.operation == "create":
+                created[change.target_module] = created.get(change.target_module, 0) + 1
+        return {"created": created, "errors": 0}
 
     @staticmethod
     def _failure_reason(exc) -> str:

@@ -311,7 +311,7 @@ class CoordinatorDefensiveContractTest(TestCase):
             actor=str(actor.pk),
             planning_context={"site_id": site.pk, "location_id": None, "tenant_id": None},
         )
-        execution = SimpleNamespace(mark_succeeded=lambda **_detail: None)
+        execution = ImportExecution.objects.create(profile=profile, outcome=ExecutionOutcome.PENDING)
         with (
             patch.object(ImportEngine, "plan", return_value=plan),
             self.assertRaises(LookupError),
@@ -325,6 +325,9 @@ class CoordinatorDefensiveContractTest(TestCase):
                 actor,
                 None,
             )
+        execution.refresh_from_db()
+        self.assertEqual(execution.outcome, ExecutionOutcome.PENDING)
+        self.assertIsNone(execution.applied_changes)
 
     def test_invalid_current_ip_state_is_not_treated_as_settled(self):
         """Malformed target data cannot make an address precondition look satisfied."""

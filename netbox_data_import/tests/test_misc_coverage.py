@@ -149,6 +149,10 @@ class ImportExecutionTableRenderTest(TestCase):
         table = ImportExecutionTable([])
         self.assertEqual(table.render_racks_created({"racks_created": 3, "devices_created": 7}), 3)
 
+    def test_render_racks_created_with_current_counts(self):
+        table = ImportExecutionTable([])
+        self.assertEqual(table.render_racks_created({"created": {"rack": 3, "device": 7}}), 3)
+
     def test_render_racks_created_with_none(self):
         """Rows from before aggregate tracking have no stored counts."""
         table = ImportExecutionTable([])
@@ -158,6 +162,10 @@ class ImportExecutionTableRenderTest(TestCase):
         """Stored aggregate counts remain available after source data expires."""
         table = ImportExecutionTable([])
         self.assertEqual(table.render_devices_created({"racks_created": 2, "devices_created": 12}), 12)
+
+    def test_render_devices_created_with_current_counts(self):
+        table = ImportExecutionTable([])
+        self.assertEqual(table.render_devices_created({"created": {"rack": 2, "device": 12}}), 12)
 
     def test_render_devices_created_with_none(self):
         """Rows from before aggregate tracking have no stored counts."""
