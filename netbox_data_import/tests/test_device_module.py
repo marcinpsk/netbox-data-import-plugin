@@ -175,6 +175,13 @@ class DeviceModuleIdentityTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.NO_OP)
         self.assertEqual(units[0].diagnostics[0].code, "device.below_rack")
 
+    def test_a_below_rack_position_wins_over_missing_name_and_class_mapping(self):
+        """A non-device source position is skipped before Device fields are validated."""
+        unit = self._plan(self._row(2, "D-1", "", device_class="Unmapped", u_position="0"))[0]
+
+        self.assertEqual(unit.disposition, Disposition.NO_OP)
+        self.assertEqual(unit.diagnostics[0].code, "device.below_rack")
+
     def test_a_row_with_no_device_name_is_invalid(self):
         """A device without a name is not something this can create or match."""
         units = self._plan(self._row(2, "D-1", ""))
@@ -221,6 +228,24 @@ class DeviceModuleIdentityTest(DeviceModulePlanTestBase):
 
         self.assertEqual(unit.disposition, Disposition.EXCLUDED)
         self.assertEqual(unit.diagnostics[0].code, "device.ignored")
+
+    def test_an_ignored_source_id_wins_over_a_missing_class_mapping(self):
+        """Individual ignore policy does not depend on the current class configuration."""
+        IgnoredDevice.objects.create(profile=self.profile, source_id="D-1")
+
+        unit = self._plan(self._row(2, "D-1", "srv-01", device_class="Unmapped"))[0]
+
+        self.assertEqual(unit.disposition, Disposition.EXCLUDED)
+        self.assertEqual(unit.diagnostics[0].code, "device.ignored")
+
+    def test_a_missing_name_wins_over_ignored_class_policy(self):
+        """The source row stays invalid when class policy would otherwise exclude it."""
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="Spare", creates_rack=False, ignore=True)
+
+        unit = self._plan(self._row(2, "D-1", "", device_class="Spare"))[0]
+
+        self.assertEqual(unit.disposition, Disposition.INVALID)
+        self.assertEqual(unit.diagnostics[0].code, "device.missing_name")
 
 
 class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):

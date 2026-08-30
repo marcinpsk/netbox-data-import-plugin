@@ -1414,6 +1414,43 @@ class DeviceModule:
                 conflict_display["duplicate_serial"] = value
             return _refused(identity, code, conflict_display)
 
+        if source_id and source_id in batch.ignored:
+            ignored_display = {
+                **display,
+                "extra_data": {**display["extra_data"], "ignore_kind": "individual"},
+            }
+            return SynchronizationUnit(
+                identity=identity,
+                disposition=Disposition.EXCLUDED,
+                diagnostics=(
+                    Diagnostic(
+                        code="device.ignored",
+                        severity=Severity.INFO,
+                        identities=(identity,),
+                        display=ignored_display,
+                    ),
+                ),
+                display=ignored_display,
+            )
+
+        position = source_position(row.get("u_position"))
+        if position is not None and position < 1:
+            return SynchronizationUnit(
+                identity=identity,
+                disposition=Disposition.NO_OP,
+                diagnostics=(
+                    Diagnostic(
+                        code="device.below_rack",
+                        severity=Severity.INFO,
+                        identities=(identity,),
+                        display={**display, "u_position": position},
+                    ),
+                ),
+                display=display,
+            )
+        if not name:
+            return _refused(identity, "device.missing_name", display)
+
         mapping = batch._mappings.get(_source_text(row.get("device_class")))
         if mapping is None:
             return _refused(
@@ -1437,43 +1474,6 @@ class DeviceModule:
                     ),
                 ),
                 display={**display, "extra_data": {**display["extra_data"], "ignore_kind": "class"}},
-            )
-
-        if source_id and source_id in batch.ignored:
-            ignored_display = {
-                **display,
-                "extra_data": {**display["extra_data"], "ignore_kind": "individual"},
-            }
-            return SynchronizationUnit(
-                identity=identity,
-                disposition=Disposition.EXCLUDED,
-                diagnostics=(
-                    Diagnostic(
-                        code="device.ignored",
-                        severity=Severity.INFO,
-                        identities=(identity,),
-                        display=ignored_display,
-                    ),
-                ),
-                display=ignored_display,
-            )
-        if not name:
-            return _refused(identity, "device.missing_name", display)
-
-        position = source_position(row.get("u_position"))
-        if position is not None and position < 1:
-            return SynchronizationUnit(
-                identity=identity,
-                disposition=Disposition.NO_OP,
-                diagnostics=(
-                    Diagnostic(
-                        code="device.below_rack",
-                        severity=Severity.INFO,
-                        identities=(identity,),
-                        display={**display, "u_position": position},
-                    ),
-                ),
-                display=display,
             )
 
         if slug_conflict := batch._slug_conflicts.get(row.get("_row_number")):
