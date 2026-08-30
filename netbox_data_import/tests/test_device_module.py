@@ -462,6 +462,24 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
 
+    def test_serial_and_asset_tag_matching_different_devices_refuse_the_row(self):
+        """Two strong identifiers disagree, so planning cannot choose either Device."""
+        self._device("serial-target", rack=self.rack, serial="SN-CONFLICT")
+        self._device("asset-target", rack=self.rack, asset_tag="AT-CONFLICT")
+
+        units = self._plan(
+            self._row(
+                2,
+                "D-1",
+                "source-name",
+                serial="SN-CONFLICT",
+                asset_tag="AT-CONFLICT",
+            )
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.conflicting_identity")
+
     def test_a_name_in_another_tenant_does_not_match(self):
         """Name identity is scoped by both site and tenant."""
         from tenancy.models import Tenant

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Resolve the NetBox Device Type identity from source make and model names."""
+"""Resolve NetBox Device and Device Type identities from source values."""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from typing import Any
 
 from django.utils.text import slugify
 
@@ -13,6 +15,39 @@ def normalize_mapping_text(value: str) -> str:
     r"""Normalize whitespace and decode JavaScript-style \uXXXX escapes."""
     value = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), value)
     return " ".join(value.split())
+
+
+@dataclass(frozen=True)
+class DeviceIdentityMatch:
+    """One strong Device identity match, or the reason no match is safe."""
+
+    device: Any = None
+    method: str = ""
+    conflict: str = ""
+    value: str = ""
+
+
+def resolve_strong_device_identity(devices, serial: str, asset_tag: str) -> DeviceIdentityMatch:
+    """Resolve serial and asset tag to one Device, or report their conflict."""
+    serial_matches = list(devices.filter(serial=serial)[:2]) if serial else []
+    asset_matches = list(devices.filter(asset_tag__iexact=asset_tag)[:2]) if asset_tag else []
+    if len(serial_matches) > 1:
+        return DeviceIdentityMatch(conflict="device.ambiguous_serial", value=serial)
+    if len(asset_matches) > 1:
+        return DeviceIdentityMatch(conflict="device.ambiguous_asset_tag", value=asset_tag)
+
+    serial_device = serial_matches[0] if serial_matches else None
+    asset_device = asset_matches[0] if asset_matches else None
+    if serial_device is not None and asset_device is not None and serial_device.pk != asset_device.pk:
+        return DeviceIdentityMatch(
+            conflict="device.conflicting_identity",
+            value=f"{serial} / {asset_tag}",
+        )
+    if serial_device is not None:
+        return DeviceIdentityMatch(device=serial_device, method="serial")
+    if asset_device is not None:
+        return DeviceIdentityMatch(device=asset_device, method="asset tag")
+    return DeviceIdentityMatch()
 
 
 class DeviceTypeIdentityResolver:
@@ -67,4 +102,9 @@ class DeviceTypeIdentityResolver:
         return manufacturer_slug, slugify(f"{normalized_make}-{normalized_model}")[:50], False
 
 
-__all__ = ("DeviceTypeIdentityResolver", "normalize_mapping_text")
+__all__ = (
+    "DeviceIdentityMatch",
+    "DeviceTypeIdentityResolver",
+    "normalize_mapping_text",
+    "resolve_strong_device_identity",
+)
