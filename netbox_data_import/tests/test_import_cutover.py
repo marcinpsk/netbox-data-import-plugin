@@ -2,16 +2,13 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The HTTP import workflow uses the target-neutral Import Engine contract."""
 
-from io import BytesIO
 import uuid
 from unittest.mock import patch
 
-import openpyxl
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TransactionTestCase
 from django.urls import reverse
-from openpyxl.worksheet.worksheet import Worksheet
 
 from core.exceptions import JobFailed
 from core.models import Job
@@ -29,23 +26,19 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.plan import ImportPlan
 from netbox_data_import.preview_row_actions import retire_preview_revision
-from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission
+from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission, workbook_bytes
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 
 def _workbook() -> bytes:
     """Return one small flat workbook for the HTTP boundary."""
-    book = openpyxl.Workbook()
-    sheet = book.active
-    if not isinstance(sheet, Worksheet):
-        sheet = book.create_sheet()
-    sheet.title = "Data"
-    sheet.append(["Source ID", "Class", "Name", "Rack", "Make", "Model"])
-    sheet.append(["R-1", "Cabinet", "", "rack-a", "", ""])
-    sheet.append(["D-1", "Server", "server-a", "rack-a", "Example", "Model"])
-    buffer = BytesIO()
-    book.save(buffer)
-    return buffer.getvalue()
+    return workbook_bytes(
+        ["Source ID", "Class", "Name", "Rack", "Make", "Model"],
+        [
+            ["R-1", "Cabinet", "", "rack-a", "", ""],
+            ["D-1", "Server", "server-a", "rack-a", "Example", "Model"],
+        ],
+    )
 
 
 class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
@@ -551,6 +544,113 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(deleted, [True], "the policy lock was never reached")
         job.refresh_from_db()
         self.assertIn("profile", job.data["message"].lower())
+
+    def test_job_runner_reports_an_adapter_retired_before_the_policy_lock(self):
+        """A profile changed after worker validation still leaves an operator-facing Job failure."""
+        from django.db import connection
+
+        self._upload()
+        document = SourceDocument.objects.get(profile=self.profile)
+        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        selected = accepted.units[0].identity
+        job = self._job()
+        retired = []
+
+        def retire_the_adapter_when_the_lock_runs(execute, sql, params, many, context):
+            if not retired and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
+                retired.append(True)
+
+                def retire_it():
+                    ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
+
+                with run_on_separate_connection(retire_it):
+                    pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(retire_the_adapter_when_the_lock_runs):
+            with self.assertRaises(JobFailed):
+                ImportJobRunner(job).run(
+                    self.profile.pk,
+                    document.pk,
+                    accepted.to_dict(),
+                    [selected],
+                    "retired-before-lock",
+                )
+
+        self.assertEqual(retired, [True], "the policy lock was never reached")
+        job.refresh_from_db()
+        self.assertEqual(job.data["phase"], "failed")
+        self.assertIn("retired_adapter", job.data["message"])
+
+    def test_job_runner_reports_a_missing_engine_policy_section(self):
+        """A release with an incomplete catalog leaves a failed Job instead of a validating one."""
+        from netbox_data_import import catalog
+
+        self._upload()
+        document = SourceDocument.objects.get(profile=self.profile)
+        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        selected = accepted.units[0].identity
+        job = self._job()
+        section = catalog._SECTIONS_BY_KEY.pop("source_resolutions")
+        self.addCleanup(catalog._SECTIONS_BY_KEY.__setitem__, "source_resolutions", section)
+
+        with self.assertRaises(JobFailed):
+            ImportJobRunner(job).run(
+                self.profile.pk,
+                document.pk,
+                accepted.to_dict(),
+                [selected],
+                "missing-policy-section",
+            )
+
+        job.refresh_from_db()
+        self.assertEqual(job.data["phase"], "failed")
+        self.assertIn("source_resolutions", job.data["message"])
+
+    def test_job_runner_reports_source_policy_that_changed_before_the_lock(self):
+        """A source that the locked policy can no longer read leaves an operator-facing failure."""
+        self._upload()
+        document = SourceDocument.objects.get(profile=self.profile)
+        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        selected = accepted.units[0].identity
+        job = self._job()
+        ImportProfile.objects.filter(pk=self.profile.pk).update(
+            adapter_config={**self.profile.adapter_config, "sheet_name": "Missing"}
+        )
+
+        with self.assertRaises(JobFailed):
+            ImportJobRunner(job).run(
+                self.profile.pk,
+                document.pk,
+                accepted.to_dict(),
+                [selected],
+                "source-policy-changed",
+            )
+
+        job.refresh_from_db()
+        self.assertEqual(job.data["phase"], "failed")
+        self.assertIn("Missing", job.data["message"])
+
+    def test_job_runner_does_not_classify_an_unexpected_lookup_failure(self):
+        """A programming defect remains visible instead of looking like an operator repair."""
+        self._upload()
+        document = SourceDocument.objects.get(profile=self.profile)
+        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        selected = accepted.units[0].identity
+        job = self._job()
+
+        with patch("netbox_data_import.jobs.ImportEngine.execute", side_effect=KeyError("unexpected")):
+            with self.assertRaises(KeyError):
+                ImportJobRunner(job).run(
+                    self.profile.pk,
+                    document.pk,
+                    accepted.to_dict(),
+                    [selected],
+                    "unexpected-lookup",
+                )
+
+        job.refresh_from_db()
+        self.assertEqual(job.data["phase"], "validating")
 
     def test_progress_publication_is_throttled_and_tolerates_no_rq_context(self):
         """Large imports bound Redis writes, and synchronous calls have no RQ metadata."""

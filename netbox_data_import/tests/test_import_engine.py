@@ -474,6 +474,33 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
         with self.assertRaises(PlanningTargetUnavailable):
             self._plan(planning_context={"site_id": None, "location_id": None, "tenant_id": None})
 
+    def test_a_location_outside_the_target_site_is_refused(self):
+        """A visible location from another site cannot form an import target with this site."""
+        from dcim.models import Location, Site
+        from django.contrib.auth import get_user_model
+
+        other_site = Site.objects.create(name="Other Coordinator Site", slug="other-coordinator-site")
+        other_location = Location.objects.create(
+            name="Other Coordinator Location",
+            slug="other-coordinator-location",
+            site=other_site,
+        )
+        actor = get_user_model().objects.create_superuser(
+            username="coordinator-cross-site",
+            email="coordinator-cross-site@example.invalid",
+            password="testpass",
+        )
+
+        with self.assertRaisesMessage(PlanningTargetUnavailable, "does not belong"):
+            self._plan(
+                actor=actor,
+                planning_context={
+                    "site_id": self.site.pk,
+                    "location_id": other_location.pk,
+                    "tenant_id": None,
+                },
+            )
+
     def test_two_profiles_holding_one_policy_do_not_share_a_fingerprint(self):
         """Section 4.5 invalidates every selection when the Import Profile changes."""
         twin = ImportProfile.objects.create(

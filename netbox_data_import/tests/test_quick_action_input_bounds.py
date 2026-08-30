@@ -15,6 +15,7 @@ from django.urls import reverse
 
 from netbox_data_import.models import ImportProfile, ManufacturerMapping
 from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
+from netbox_data_import.tests.helpers import store_workbook_document
 
 LONG = "L" * 300
 LONG_SLUG = "l" * 300
@@ -328,32 +329,17 @@ class QuickActionInputBoundsTest(TransactionTestCase):
 
     def _store_active_import(self, rows):
         """Store a real source document and accepted plan for deferred row actions."""
-        import io
-
-        import openpyxl
-        from openpyxl.worksheet.worksheet import Worksheet
-
         from netbox_data_import.import_engine import ImportEngine
-        from netbox_data_import.models import SourceDocument
         from netbox_data_import.preview_row_actions import record_recalculated_preview
         from netbox_data_import.review_workspace import ReviewWorkspace
 
         headers = [key for key in rows[0] if not key.startswith("_")]
-        workbook = openpyxl.Workbook()
-        worksheet = workbook.active
-        if not isinstance(worksheet, Worksheet):
-            worksheet = workbook.create_sheet()
-        worksheet.title = "Data"
-        worksheet.append(headers)
-        for row in rows:
-            worksheet.append([row.get(header) for header in headers])
-        content = io.BytesIO()
-        workbook.save(content)
-        document = SourceDocument.store(
-            profile=self.profile,
-            content=content.getvalue(),
-            filename="quick-bounds.xlsx",
-            uploaded_by=self.user,
+        document = store_workbook_document(
+            self.profile,
+            headers,
+            [[row.get(header) for header in headers] for row in rows],
+            self.user,
+            "quick-bounds.xlsx",
         )
         planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
         plan = ImportEngine.plan(self.profile, document, self.user, planning_context)

@@ -13,6 +13,38 @@ from django.db import connections
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
 
 
+def workbook_bytes(headers, rows, *, sheet_name="Data") -> bytes:
+    """Return one in-memory workbook containing *headers* and *rows*."""
+    from io import BytesIO
+
+    import openpyxl
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    if not isinstance(worksheet, Worksheet):
+        worksheet = workbook.create_sheet()
+    worksheet.title = sheet_name
+    worksheet.append(list(headers))
+    for row in rows:
+        worksheet.append(list(row))
+    content = BytesIO()
+    workbook.save(content)
+    return content.getvalue()
+
+
+def store_workbook_document(profile, headers, rows, uploaded_by, filename, *, sheet_name="Data"):
+    """Store one generated workbook and return its Source Document."""
+    from netbox_data_import.models import SourceDocument
+
+    return SourceDocument.store(
+        profile=profile,
+        content=workbook_bytes(headers, rows, sheet_name=sheet_name),
+        filename=filename,
+        uploaded_by=uploaded_by,
+    )
+
+
 def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=None):
     """Plan canonical flat-source rows through the registered Target Module interfaces."""
     from netbox_data_import import catalog, target_modules

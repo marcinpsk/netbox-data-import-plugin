@@ -167,6 +167,16 @@ class PlanStructureTest(SimpleTestCase):
         with self.assertRaises(PlanInvalid):
             Diagnostic(code="device.name_conflict", severity="fatal")
 
+    def test_non_text_vocabularies_raise_plan_invalid(self):
+        """Target Modules can construct plan values, so malformed vocabularies stay inside PlanError."""
+        for build in (
+            lambda: Diagnostic(code="device.name_conflict", severity=[Severity.ERROR]),
+            lambda: _unit(disposition={}),
+        ):
+            with self.subTest(build=build):
+                with self.assertRaises(PlanInvalid):
+                    build()
+
 
 class PlanFingerprintTest(SimpleTestCase):
     """Section 4.3: planning is deterministic and the fingerprint covers the decision inputs."""

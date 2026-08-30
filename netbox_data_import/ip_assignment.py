@@ -123,7 +123,9 @@ def already_assigned(device, field, address) -> bool:
             return False
     except ValueError:
         return False
-    same_address = list(IPAddress.objects.filter(address=str(current.address)).values_list("pk", flat=True)[:2])
+    same_address = list(
+        IPAddress.objects.filter(address=str(current.address), vrf_id=current.vrf_id).values_list("pk", flat=True)[:2]
+    )
     if same_address != [current.pk]:
         return False
     interface = current.assigned_object

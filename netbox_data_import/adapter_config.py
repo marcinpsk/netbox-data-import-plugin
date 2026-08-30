@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Project stored Import Profile policy into plain Source Adapter configuration."""
 
-from .adapters import FlatWorkbookAdapter
+from .adapters import FlatWorkbookAdapter, UnknownSourceAdapter
 from .flat_workbook import FlatWorkbookConfig, TransformRule
 
 
@@ -31,7 +31,9 @@ def interpreter_config_for(profile):
     """Return the detached interpreter configuration for an Import Profile."""
     projector = _CONFIG_PROJECTORS.get(profile.source_adapter)
     if projector is None:
-        raise LookupError(f"No interpreter configuration projector is registered for '{profile.source_adapter}'.")
+        raise UnknownSourceAdapter(
+            f"No interpreter configuration projector is registered for '{profile.source_adapter}'."
+        )
     return projector(profile)
 
 

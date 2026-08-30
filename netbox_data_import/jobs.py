@@ -11,7 +11,15 @@ from rq import get_current_job
 from core.exceptions import JobFailed
 from netbox.jobs import JobRunner, system_job
 
-from .import_engine import ImportEngine, PreconditionFailed, SelectionError, StalePlan, StaleSourceDocument
+from .adapters import SourceUnreadable, UnknownSourceAdapter
+from .import_engine import (
+    EngineConfigurationError,
+    ImportEngine,
+    PreconditionFailed,
+    SelectionError,
+    StalePlan,
+    StaleSourceDocument,
+)
 from .models import ExecutionOutcome, ImportExecution, ImportProfile, SourceDocument, validate_registered_adapter
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
@@ -94,13 +102,16 @@ class ImportJobRunner(JobRunner):
             self._fail("The import profile is no longer available.")
         except (
             DatabaseError,
+            EngineConfigurationError,
             ObjectPermissionDenied,
             PlanError,
             PlanningTargetUnavailable,
             PreconditionFailed,
             SelectionError,
+            SourceUnreadable,
             StalePlan,
             StaleSourceDocument,
+            UnknownSourceAdapter,
             ValidationError,
         ) as exc:
             self._fail(str(exc))

@@ -13,7 +13,7 @@ from django.test import SimpleTestCase, TestCase
 
 from netbox_data_import.device_field_review import DeviceFieldReviewer
 from netbox_data_import.device_identity import DeviceTypeIdentityResolver
-from netbox_data_import.import_engine import ImportEngine, SelectionError, _resolution_section
+from netbox_data_import.import_engine import EngineConfigurationError, ImportEngine, SelectionError, _resolution_section
 from netbox_data_import.ip_assignment import IPAssignmentError, IPTarget, already_assigned, parse_address
 from netbox_data_import.models import (
     ColumnMapping,
@@ -244,7 +244,7 @@ class CoordinatorDefensiveContractTest(TestCase):
     def test_missing_resolution_policy_fails_fast(self):
         """The engine cannot apply saved policy without its catalog declaration."""
         with patch("netbox_data_import.import_engine.catalog.policy_section", return_value=None):
-            with self.assertRaises(LookupError):
+            with self.assertRaises(EngineConfigurationError):
                 _resolution_section()
 
     def test_every_expected_failure_has_an_audit_reason(self):
@@ -314,7 +314,7 @@ class CoordinatorDefensiveContractTest(TestCase):
         execution = ImportExecution.objects.create(profile=profile, outcome=ExecutionOutcome.PENDING)
         with (
             patch.object(ImportEngine, "plan", return_value=plan),
-            self.assertRaises(LookupError),
+            self.assertRaises(EngineConfigurationError),
         ):
             ImportEngine._write_selection(
                 execution,

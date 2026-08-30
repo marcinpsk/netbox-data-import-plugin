@@ -9,13 +9,13 @@ from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceDocument, SourceResolution
+from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_REVISION_SESSION_KEY,
     record_recalculated_preview,
 )
-from netbox_data_import.tests.helpers import make_dcim_objects
+from netbox_data_import.tests.helpers import make_dcim_objects, store_workbook_document
 
 JSON = "application/json"
 
@@ -65,38 +65,26 @@ class ContactResolutionSessionMixin:
         )
         self.user = user
         self.client.force_login(user)
-        import io
-
-        import openpyxl
-        from openpyxl.worksheet.worksheet import Worksheet
 
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.review_workspace import ReviewWorkspace
 
-        workbook = openpyxl.Workbook()
-        worksheet = workbook.active
-        if not isinstance(worksheet, Worksheet):
-            worksheet = workbook.create_sheet()
-        worksheet.title = "Data"
-        worksheet.append(["Id", "Name", "Class", "Make", "Model", "Contact", "Contact Number"])
-        worksheet.append(
+        self.document = store_workbook_document(
+            self.profile,
+            ["Id", "Name", "Class", "Make", "Model", "Contact", "Contact Number"],
             [
-                self.row["source_id"],
-                self.row["device_name"],
-                self.row["device_class"],
-                self.row["make"],
-                self.row["model"],
-                self.row["_candidate_values"]["contact"]["Contact"],
-                self.row["_candidate_values"]["contact"]["Contact Number"],
-            ]
-        )
-        content = io.BytesIO()
-        workbook.save(content)
-        self.document = SourceDocument.store(
-            profile=self.profile,
-            content=content.getvalue(),
-            filename="contact-ajax.xlsx",
-            uploaded_by=user,
+                [
+                    self.row["source_id"],
+                    self.row["device_name"],
+                    self.row["device_class"],
+                    self.row["make"],
+                    self.row["model"],
+                    self.row["_candidate_values"]["contact"]["Contact"],
+                    self.row["_candidate_values"]["contact"]["Contact Number"],
+                ]
+            ],
+            user,
+            "contact-ajax.xlsx",
         )
         self.planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
         plan = ImportEngine.plan(self.profile, self.document, user, self.planning_context)

@@ -80,10 +80,11 @@ class UploadStoresPristineSourceTest(TestCase):
         )
 
         with open(fixture, "rb") as handle:
-            self.client.post(
+            setup = self.client.post(
                 reverse("plugins:netbox_data_import:import_setup"),
                 {"profile": self.profile.pk, "site": self.site.pk, "excel_file": handle},
             )
+        self.assertEqual(setup.status_code, 302, setup.content[:300])
 
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument

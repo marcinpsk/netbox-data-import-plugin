@@ -24,11 +24,15 @@ from .target_modules import ExecutionContext, PreconditionFailed
 _RESOLUTION_SECTION = "source_resolutions"
 
 
+class EngineConfigurationError(Exception):
+    """The release lacks a catalog or Target Module runtime needed by an accepted plan."""
+
+
 def _resolution_section():
     """Return the policy section that declares where a saved Source Resolution applies."""
     section = catalog.policy_section(_RESOLUTION_SECTION)
     if section is None:
-        raise LookupError(f"The catalog declares no '{_RESOLUTION_SECTION}' policy section.")
+        raise EngineConfigurationError(f"The catalog declares no '{_RESOLUTION_SECTION}' policy section.")
     return section
 
 
@@ -208,7 +212,7 @@ class ImportEngine:
         for index, change in enumerate(changes):
             runtime = target_modules.runtime_for(change.target_module)
             if runtime is None:
-                raise LookupError(f"No Target Module runtime is registered for '{change.target_module}'.")
+                raise EngineConfigurationError(f"No Target Module runtime is registered for '{change.target_module}'.")
             try:
                 runtime.apply(change, context)
             except (PreconditionFailed, ObjectPermissionDenied, ValidationError, DatabaseError) as exc:
@@ -334,4 +338,11 @@ class ImportEngine:
         )
 
 
-__all__ = ("ImportEngine", "PreconditionFailed", "SelectionError", "StalePlan", "StaleSourceDocument")
+__all__ = (
+    "EngineConfigurationError",
+    "ImportEngine",
+    "PreconditionFailed",
+    "SelectionError",
+    "StalePlan",
+    "StaleSourceDocument",
+)

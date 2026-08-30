@@ -158,7 +158,7 @@ class Diagnostic:
         """Validate the code namespace and the severity vocabulary."""
         if not _DIAGNOSTIC_CODE.match(_plan_text(self.code, "Diagnostic code")):
             raise PlanInvalid(f"Diagnostic code '{self.code}' must use the '<domain>.<condition>' form.")
-        if self.severity not in Severity.ALL:
+        if _plan_text(self.severity, "Diagnostic severity") not in Severity.ALL:
             raise PlanInvalid(f"Unknown diagnostic severity '{self.severity}'.")
         object.__setattr__(self, "identities", _identities(self.identities, "Diagnostic identities"))
         object.__setattr__(self, "display", _frozen_json(self.display, "Diagnostic display"))
@@ -266,7 +266,7 @@ class SynchronizationUnit:
         """Validate the disposition and detach the display data."""
         if not _plan_text(self.identity, "Synchronization Unit identity"):
             raise PlanInvalid("A Synchronization Unit needs a stable identity.")
-        if self.disposition not in Disposition.ALL:
+        if _plan_text(self.disposition, "Synchronization Unit disposition") not in Disposition.ALL:
             raise PlanInvalid(f"Unknown disposition '{self.disposition}'.")
         object.__setattr__(self, "changes", _elements(self.changes, PlannedChange, "Synchronization Unit changes"))
         object.__setattr__(

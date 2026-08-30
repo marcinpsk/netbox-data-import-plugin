@@ -29,9 +29,13 @@ class NetBoxReader:
 
         if planning_context.get("site_id") is None:
             raise PlanningTargetUnavailable("A planning context names the site the import writes into.")
+        site = self._required(Site, planning_context["site_id"])
+        location = self._optional(Location, planning_context.get("location_id"))
+        if location is not None and location.site_id != site.pk:
+            raise PlanningTargetUnavailable("The selected location does not belong to the selected site.")
         return self.for_target(
-            site=self._required(Site, planning_context["site_id"]),
-            location=self._optional(Location, planning_context.get("location_id")),
+            site=site,
+            location=location,
             tenant=self._optional(Tenant, planning_context.get("tenant_id")),
         )
 

@@ -983,6 +983,33 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
         self.assertEqual(moved[0].disposition, Disposition.ACTIONABLE, moved[0].diagnostics)
         self.assertEqual(dict(moved[0].changes[0].payload["ip_fields"]), {"primary_ip4": "198.18.0.13/32"})
 
+    def test_the_same_address_in_another_vrf_does_not_make_the_current_address_work(self):
+        """An address is unique inside its VRF, so another VRF cannot invalidate a settled field."""
+        from ipam.models import VRF, IPAddress
+
+        self._interface_template()
+        current_vrf = VRF.objects.create(name="Device Module VRF A")
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        interface = device.interfaces.get(name="mgmt0")
+        interface.vrf = current_vrf
+        interface.save(update_fields=["vrf"])
+        current = IPAddress.objects.create(
+            address="198.18.0.14/32",
+            vrf=current_vrf,
+            assigned_object=interface,
+        )
+        device.primary_ip4 = current
+        device.save(update_fields=["primary_ip4"])
+        IPAddress.objects.create(
+            address="198.18.0.14/32",
+            vrf=VRF.objects.create(name="Device Module VRF B"),
+        )
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.14"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+        self.assertEqual(units[0].changes, ())
+
     def test_a_matched_device_that_lacks_the_address_is_actionable(self):
         """An address absent from the matched device is update work."""
         self._interface_template()
