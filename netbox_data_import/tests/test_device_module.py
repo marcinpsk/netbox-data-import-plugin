@@ -296,6 +296,20 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
         self.assertEqual([change.operation for change in units[0].changes], ["create_role", "create"])
 
+    def test_a_stored_role_slug_that_looks_null_remains_valid(self):
+        """Null-marker rules apply to source cells, not stored NetBox identities."""
+        from dcim.models import DeviceRole
+
+        role = DeviceRole.objects.create(name="None Role", slug="none")
+        mapping = self.profile.class_role_mappings.get(source_class="Server")
+        mapping.role_slug = role.slug
+        mapping.save(update_fields=["role_slug"])
+
+        unit = self._plan(self._row(2, "D-1", "srv-01"))[0]
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        self.assertEqual(unit.changes[-1].payload["role_id"], role.pk)
+
     def test_disabled_device_type_creation_leaves_the_unit_blocked(self):
         """The explicit profile policy can require the operator to create or map the type."""
         self.profile.adapter_config = {**self.profile.adapter_config, "create_missing_device_types": False}
