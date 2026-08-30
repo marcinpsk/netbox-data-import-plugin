@@ -204,11 +204,20 @@ class DeviceModuleIdentityTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.EXCLUDED)
         self.assertEqual(units[0].diagnostics[0].code, "device.ignored")
 
-    def test_a_null_like_ignored_source_id_is_still_excluded(self):
-        """Stored source identities use the same null-marker rules as source cells."""
+    def test_a_null_like_ignored_source_id_does_not_ignore_an_unidentified_row(self):
+        """An empty normalized source identity cannot select one Device to ignore."""
         IgnoredDevice.objects.create(profile=self.profile, source_id="N/A")
 
         unit = self._plan(self._row(2, "N/A", "srv-01"))[0]
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        self.assertEqual(unit.changes[-1].payload["source_id"], "")
+
+    def test_an_ignored_source_id_wins_over_a_missing_name(self):
+        """Operator policy excludes the identified row before its source fields are validated."""
+        IgnoredDevice.objects.create(profile=self.profile, source_id="D-1")
+
+        unit = self._plan(self._row(2, "D-1", ""))[0]
 
         self.assertEqual(unit.disposition, Disposition.EXCLUDED)
         self.assertEqual(unit.diagnostics[0].code, "device.ignored")

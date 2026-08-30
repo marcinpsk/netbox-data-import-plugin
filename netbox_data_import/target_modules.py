@@ -1439,9 +1439,7 @@ class DeviceModule:
                 display={**display, "extra_data": {**display["extra_data"], "ignore_kind": "class"}},
             )
 
-        if not name:
-            return _refused(identity, "device.missing_name", display)
-        if source_id in batch.ignored:
+        if source_id and source_id in batch.ignored:
             ignored_display = {
                 **display,
                 "extra_data": {**display["extra_data"], "ignore_kind": "individual"},
@@ -1459,6 +1457,8 @@ class DeviceModule:
                 ),
                 display=ignored_display,
             )
+        if not name:
+            return _refused(identity, "device.missing_name", display)
 
         position = source_position(row.get("u_position"))
         if position is not None and position < 1:
