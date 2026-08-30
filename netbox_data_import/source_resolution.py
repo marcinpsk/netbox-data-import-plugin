@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from .models import ImportProfile
@@ -18,7 +19,7 @@ def _build_source_to_targets_map(profile: ImportProfile) -> dict[str, list[str]]
     return source_to_targets
 
 
-def _clear_resolved_conflicts(row_dict: dict[str, Any], resolved_fields: dict) -> None:
+def _clear_resolved_conflicts(row_dict: dict[str, Any], resolved_fields: Mapping) -> None:
     """Remove conflicts for fields overridden by saved resolutions."""
     for resolved_field in resolved_fields:
         row_dict.get("_conflicts", {}).pop(resolved_field, None)
@@ -28,14 +29,17 @@ def _clear_resolved_conflicts(row_dict: dict[str, Any], resolved_fields: dict) -
 
 def _apply_one_resolution(row_dict: dict, resolution, source_to_targets: dict[str, list[str]]) -> None:
     """Apply one saved Source Resolution and clear its ignored mapped values."""
-    row_dict.update(resolution.resolved_fields)
-    _clear_resolved_conflicts(row_dict, resolution.resolved_fields)
+    resolved_fields = resolution.resolved_fields
+    if not isinstance(resolved_fields, Mapping):
+        return
+    row_dict.update(resolved_fields)
+    _clear_resolved_conflicts(row_dict, resolved_fields)
 
     candidate_targets = list(source_to_targets.get(resolution.source_column, []))
     if resolution.source_column not in candidate_targets:
         candidate_targets.append(resolution.source_column)
     for target_field in candidate_targets:
-        if target_field in resolution.resolved_fields:
+        if target_field in resolved_fields:
             continue
         current = row_dict.get(target_field)
         if current is None:

@@ -61,3 +61,4 @@ class ReviewNormalizationTest(SimpleTestCase):
         from netbox_data_import.device_field_review import _ip_normalize
 
         self.assertEqual(_ip_normalize("192.0.2.1/24"), "192.0.2.1/24")
+        self.assertEqual(_ip_normalize(" 192.0.2.1/24 "), "192.0.2.1/24")

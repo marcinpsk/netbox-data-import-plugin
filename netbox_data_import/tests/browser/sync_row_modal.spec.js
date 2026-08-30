@@ -117,6 +117,10 @@ test("a pending sync cannot be reopened for the same row", async ({ page }) => {
   await expect.poll(() => page.evaluate(() => window.pendingSyncs.length)).toBe(1);
 
   await expect(page.locator("#sync-row-1")).toBeDisabled();
+  await openRow(page, "sync-row-1");
+  await expect(page.locator("#syncRowConfirm")).toBeDisabled();
+  await page.locator("#syncRowConfirm").dispatchEvent("click");
+  await expect.poll(() => page.evaluate(() => window.pendingSyncs.length)).toBe(1);
 
   await page.evaluate(() => {
     window.pendingSyncs[0].rejectRequest(new Error("Sync failed."));

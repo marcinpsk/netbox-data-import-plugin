@@ -93,6 +93,17 @@
 
     var form = document.getElementById('conflictForm');
     if (resolutionState.activeToken || form.dataset.ndiSubmitting === 'true') return;
+
+    var resolved = {};
+    resolved[btn.dataset.fieldName] = btn.dataset.value;
+    document.getElementById('conf_source_column').value = '_merge_' + btn.dataset.fieldName;
+    document.getElementById('conf_original_value').value = '';
+    document.getElementById('conf_resolved_fields').value = JSON.stringify(resolved);
+    if (typeof window.ndiPostPreviewAction !== 'function') {
+      form.submit();
+      return;
+    }
+
     resolutionState.nextToken += 1;
     var requestToken = String(resolutionState.nextToken);
     resolutionState.activeToken = requestToken;
@@ -115,11 +126,6 @@
     });
     btn.textContent = 'Saving…';
 
-    var resolved = {};
-    resolved[btn.dataset.fieldName] = btn.dataset.value;
-    document.getElementById('conf_source_column').value = '_merge_' + btn.dataset.fieldName;
-    document.getElementById('conf_original_value').value = '';
-    document.getElementById('conf_resolved_fields').value = JSON.stringify(resolved);
     window.ndiPostPreviewAction(form.action, new FormData(form))
       .then(function (payload) {
         window.ndiMarkPreviewStale();

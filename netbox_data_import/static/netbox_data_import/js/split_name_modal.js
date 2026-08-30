@@ -341,6 +341,7 @@
       updateSaveButton();
       return;
     }
+    if (typeof window.ndiPostPreviewAction !== 'function') return;
     event.preventDefault();
     var form = event.target;
     var saveBtn = form.querySelector('button[type="submit"]');

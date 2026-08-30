@@ -2826,6 +2826,13 @@ class SaveResolutionView(_AjaxPermissionView):
             resolved_fields = json.loads(resolved_fields_json)
         except (json.JSONDecodeError, TypeError):
             resolved_fields = {}
+        if not isinstance(resolved_fields, Mapping):
+            return _preview_action_error(
+                request,
+                next_url,
+                "Resolved fields must be a JSON object.",
+                status=400,
+            )
 
         if profile_id and source_id and source_column:
             profile = get_object_or_404(

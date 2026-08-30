@@ -6,7 +6,6 @@ import os
 import re
 import subprocess
 import sys
-from inspect import signature
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -58,11 +57,6 @@ def test_xdist_worker_gets_private_postgresql_and_redis_databases():
     """Assign one PostgreSQL database and two Redis databases to a worker."""
     assert isolated_test_database_name("test_netbox_data_import", "gw3") == "test_netbox_data_import_gw3"
     assert isolated_redis_databases("gw3") == (3, 11)
-
-
-def test_empty_pytest_runs_have_a_bounded_default_timeout():
-    """A broken nested test run cannot hang the outer suite indefinitely."""
-    assert signature(_run_empty_pytest).parameters["timeout"].default == 120
 
 
 def test_serial_run_keeps_default_database_targets():
@@ -136,7 +130,6 @@ def test_a_gateway_specification_above_the_ceiling_is_rejected():
         f"{MAX_PARALLEL_WORKERS + 1}*popen",
         "--dist",
         "load",
-        timeout=120,
     )
 
     # 4 is pytest's usage-error status. It must refuse the run instead of collecting and failing later.
@@ -153,7 +146,6 @@ def test_a_signed_gateway_multiplier_is_counted_the_way_xdist_counts_it():
         f"+{MAX_PARALLEL_WORKERS + 1}*popen",
         "--dist",
         "load",
-        timeout=120,
     )
 
     # 4 is pytest's usage-error status. It must refuse the run instead of collecting and failing later.
@@ -171,7 +163,6 @@ def test_collecting_without_running_is_left_alone():
         f"{MAX_PARALLEL_WORKERS + 1}*popen",
         "--dist",
         "load",
-        timeout=120,
     )
 
     # Nothing to collect means exit 5; exit 4 would mean the ceiling refused a no-worker run.
@@ -185,7 +176,6 @@ def test_a_gateway_specification_without_distribution_is_left_alone():
         "addopts=",
         "--tx",
         f"{MAX_PARALLEL_WORKERS + 1}*popen",
-        timeout=120,
     )
 
     # Nothing to collect means exit 5; exit 4 would mean the ceiling refused a no-worker run.

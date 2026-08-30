@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Value comparison and translation shared by source interpretation and target planning.
-
-Two source columns agreeing, and a source value matching what NetBox already holds, are the same
-question asked twice. Keeping one implementation is what stops the two answers drifting. The same
-holds for what a source word means: `Back` and `Rear` are one NetBox face, wherever they are read.
-"""
+"""Share source-value normalization between interpretation and target planning."""
 
 from __future__ import annotations
 

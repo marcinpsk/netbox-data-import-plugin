@@ -560,6 +560,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
                 def delete_it():
                     ImportProfile.objects.get(pk=self.profile.pk).delete()
 
+                # Finish the concurrent change before execute can take the profile row lock.
                 with run_on_separate_connection(delete_it):
                     pass
             return execute(sql, params, many, context)
@@ -596,6 +597,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
                 def retire_it():
                     ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
 
+                # Finish the concurrent change before execute can take the profile row lock.
                 with run_on_separate_connection(retire_it):
                     pass
             return execute(sql, params, many, context)
@@ -815,10 +817,25 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
     def test_single_row_sync_classifies_an_unexpected_engine_failure(self):
         """Inline execution returns a bounded response for an unexpected coordinator failure."""
+        from netbox_data_import import target_modules
+
         self._upload()
 
-        with patch("netbox_data_import.views.ImportEngine.execute", side_effect=RuntimeError("unexpected")):
-            response = self._sync_single_row({"row_number": 2})
+        runtime = target_modules.MODULE_RUNTIMES["rack"]
+
+        class BrokenRackRuntime:
+            @staticmethod
+            def plan(*args):
+                return runtime.plan(*args)
+
+            @staticmethod
+            def apply(*args):
+                raise RuntimeError("unexpected")
+
+        target_modules.MODULE_RUNTIMES["rack"] = BrokenRackRuntime()
+        self.addCleanup(target_modules.MODULE_RUNTIMES.__setitem__, "rack", runtime)
+
+        response = self._sync_single_row({"row_number": 2})
 
         self.assertEqual(response.status_code, 500)
 

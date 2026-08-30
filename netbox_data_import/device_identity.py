@@ -25,16 +25,13 @@ class DeviceTypeIdentityResolver:
         self._device_types_by_make = {}
         for mapping in self.device_type_mappings:
             self._device_types_exact.setdefault((mapping.source_make, mapping.source_model), mapping)
-            normalized_make = normalize_mapping_text(mapping.source_make).lower()
+            normalized_make = normalize_mapping_text(mapping.source_make).casefold()
             self._device_types_by_make.setdefault(normalized_make, []).append(mapping)
         self._manufacturers_exact = {}
         for mapping in self.manufacturer_mappings:
-            self._manufacturers_exact.setdefault(mapping.source_make, mapping)
-        self.mapped_source_makes = frozenset(
-            value
-            for source_make in self._manufacturers_exact
-            for value in (source_make, normalize_mapping_text(source_make))
-        )
+            normalized_make = normalize_mapping_text(mapping.source_make).casefold()
+            self._manufacturers_exact.setdefault(normalized_make, mapping)
+        self.mapped_source_makes = frozenset(self._manufacturers_exact)
 
     @classmethod
     def for_profile(cls, profile):
@@ -53,24 +50,15 @@ class DeviceTypeIdentityResolver:
             mapping = next(
                 (
                     candidate
-                    for candidate in self._device_types_by_make.get(normalized_make.lower(), ())
-                    if normalize_mapping_text(candidate.source_model) == normalized_model
+                    for candidate in self._device_types_by_make.get(normalized_make.casefold(), ())
+                    if normalize_mapping_text(candidate.source_model).casefold() == normalized_model.casefold()
                 ),
                 None,
             )
         if mapping is not None:
             return mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug, True
 
-        manufacturer_mapping = self._manufacturers_exact.get(make)
-        if manufacturer_mapping is None:
-            manufacturer_mapping = next(
-                (
-                    candidate
-                    for candidate in self.manufacturer_mappings
-                    if normalize_mapping_text(candidate.source_make) == normalized_make
-                ),
-                None,
-            )
+        manufacturer_mapping = self._manufacturers_exact.get(normalized_make.casefold())
         manufacturer_slug = (
             manufacturer_mapping.netbox_manufacturer_slug
             if manufacturer_mapping is not None

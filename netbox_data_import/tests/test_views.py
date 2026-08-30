@@ -19,6 +19,7 @@ from netbox_data_import.models import (
     SourceResolution,
     stored_import_source,
 )
+from netbox_data_import.preview_row_actions import PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY
 from netbox_data_import.tests.helpers import (
     run_on_separate_connection,
     set_import_source,
@@ -505,7 +506,6 @@ class PreviewSessionMixin:
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument
         from netbox_data_import.preview_row_actions import (
-            PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
             record_recalculated_preview,
         )
         from netbox_data_import.review_workspace import ReviewWorkspace
@@ -577,14 +577,14 @@ class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
         self._setup_session()
         session = self.client.session
         stored_plan = session["import_plan"]
-        session["import_preview_use_materialized_once"] = True
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         session.save()
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["result"].plan.to_dict(), stored_plan)
-        self.assertNotIn("import_preview_use_materialized_once", self.client.session)
+        self.assertNotIn(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, self.client.session)
         self.assertContains(response, 'id="ndi-preview-revision"')
         self.assertContains(response, "Recalculate Preview")
 
@@ -1069,6 +1069,23 @@ class SaveResolutionViewTest(BaseViewTestCase):
         )
         res = SourceResolution.objects.get(profile=self.profile, source_id="SRC-Y", source_column="Name")
         self.assertEqual(res.resolved_fields["device_name"], "new-name")
+
+    def test_save_resolution_rejects_a_non_mapping_json_value(self):
+        """A saved resolution must be a target-field mapping."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SRC-LIST",
+                "source_column": "Name",
+                "original_value": "some-device",
+                "resolved_fields": '["device_name"]',
+            },
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile, source_id="SRC-LIST").exists())
 
 
 class ExportProfileYamlViewTest(BaseViewTestCase):
@@ -2134,16 +2151,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         from netbox_data_import.models import DeviceExistingMatch
 
         self._store_rows(
-            *[
-                {
-                    "_row_number": 1,
-                    "source_id": "AM-001",
-                    "device_name": "",
-                    "device_class": "Server",
-                    "serial": "SERIAL-AM-01",
-                    "asset_tag": "",
-                }
-            ]
+            {
+                "_row_number": 1,
+                "source_id": "AM-001",
+                "device_name": "",
+                "device_class": "Server",
+                "serial": "SERIAL-AM-01",
+                "asset_tag": "",
+            }
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
@@ -2226,16 +2241,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         self._store_rows(
-            *[
-                {
-                    "_row_number": 1,
-                    "source_id": "TAG-001",
-                    "device_name": "",
-                    "device_class": "Server",
-                    "serial": "",
-                    "asset_tag": "ASSET-TAG-01",
-                }
-            ]
+            {
+                "_row_number": 1,
+                "source_id": "TAG-001",
+                "device_name": "",
+                "device_class": "Server",
+                "serial": "",
+                "asset_tag": "ASSET-TAG-01",
+            }
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
@@ -2258,16 +2271,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         device = Device.objects.create(name="name-device-01", device_type=dt, role=role, site=self.site)
 
         self._store_rows(
-            *[
-                {
-                    "_row_number": 1,
-                    "source_id": "NAME-001",
-                    "device_name": "name-device-01",
-                    "device_class": "Server",
-                    "serial": "",
-                    "asset_tag": "",
-                }
-            ]
+            {
+                "_row_number": 1,
+                "source_id": "NAME-001",
+                "device_name": "name-device-01",
+                "device_class": "Server",
+                "serial": "",
+                "asset_tag": "",
+            }
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
@@ -2292,16 +2303,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         Device.objects.create(name="amb-device-02", serial="AMBSERIAL-01", device_type=dt, role=role, site=self.site)
 
         self._store_rows(
-            *[
-                {
-                    "_row_number": 1,
-                    "source_id": "AMB-001",
-                    "device_name": "amb-device-01",
-                    "device_class": "Server",
-                    "serial": "AMBSERIAL-01",
-                    "asset_tag": "",
-                }
-            ]
+            {
+                "_row_number": 1,
+                "source_id": "AMB-001",
+                "device_name": "amb-device-01",
+                "device_class": "Server",
+                "serial": "AMBSERIAL-01",
+                "asset_tag": "",
+            }
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
@@ -2321,16 +2330,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         )
 
         self._store_rows(
-            *[
-                {
-                    "_row_number": 1,
-                    "source_id": "ALREADY-001",
-                    "device_name": "automatch-device-01",
-                    "device_class": "Server",
-                    "serial": "SERIAL-AM-01",
-                    "asset_tag": "",
-                }
-            ]
+            {
+                "_row_number": 1,
+                "source_id": "ALREADY-001",
+                "device_name": "automatch-device-01",
+                "device_class": "Server",
+                "serial": "SERIAL-AM-01",
+                "asset_tag": "",
+            }
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
@@ -2344,16 +2351,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         from netbox_data_import.models import DeviceExistingMatch
 
         self._store_rows(
-            *[
-                {
-                    "_row_number": 1,
-                    "source_id": "",
-                    "device_name": "automatch-device-01",
-                    "device_class": "Server",
-                    "serial": "SERIAL-AM-01",
-                    "asset_tag": "",
-                }
-            ]
+            {
+                "_row_number": 1,
+                "source_id": "",
+                "device_name": "automatch-device-01",
+                "device_class": "Server",
+                "serial": "SERIAL-AM-01",
+                "asset_tag": "",
+            }
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
@@ -2372,16 +2377,14 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         Device.objects.create(name="probable-device", device_type=dt, role=role, site=self.site)
 
         self._store_rows(
-            *[
-                {
-                    "_row_number": 1,
-                    "source_id": "PROB-001",
-                    "device_name": "prefix - probable-device",
-                    "device_class": "Server",
-                    "serial": "",
-                    "asset_tag": "",
-                }
-            ]
+            {
+                "_row_number": 1,
+                "source_id": "PROB-001",
+                "device_name": "prefix - probable-device",
+                "device_class": "Server",
+                "serial": "",
+                "asset_tag": "",
+            }
         )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")

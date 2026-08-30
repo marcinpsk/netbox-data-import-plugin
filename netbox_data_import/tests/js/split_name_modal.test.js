@@ -153,6 +153,15 @@ describe("split modal parts", () => {
     expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
   });
 
+  it("leaves native submission available when the preview-action helper is unavailable", () => {
+    window.ndiPostPreviewAction = undefined;
+
+    submitForm();
+
+    expect(saveButton().disabled).toBe(false);
+    expect(saveButton().textContent).toBe("Save resolution");
+  });
+
   it("restores the unsaved button state when the modal opens again", async () => {
     submitForm();
     await vi.waitFor(() => expect(saveButton().textContent).toBe("Saved"));

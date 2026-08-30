@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "openpyxl>=3.1",
     "pyyaml>=6",
+    "regex>=2024.11.6",
 ]
 
 [project.urls]
@@ -51,6 +52,7 @@ dev = [
     # openpyxl and PyYAML ship no py.typed. strawberry-django and django-rq do, so they need none.
     "types-PyYAML",
     "types-openpyxl",
+    "types-regex>=2026.7.19.20260720",
 ]
 docs = [
     "mkdocs>=1,<2",

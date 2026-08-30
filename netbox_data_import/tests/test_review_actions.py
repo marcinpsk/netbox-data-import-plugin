@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Preview row actions consume target-neutral Import Plans."""
 
-from unittest.mock import patch
-
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
-from django.test import Client, TestCase
+from django.test import Client, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
@@ -16,10 +13,10 @@ from netbox_data_import.models import (
     ImportProfile,
 )
 from netbox_data_import.preview_row_actions import record_recalculated_preview
-from netbox_data_import.tests.helpers import plan_source_rows, user_with_object_permission
+from netbox_data_import.tests.helpers import plan_source_rows, run_on_separate_connection, user_with_object_permission
 
 
-class TargetNeutralFieldReviewTest(TestCase):
+class TargetNeutralFieldReviewTest(TransactionTestCase):
     """Field-review actions validate the exact unit stored in the Import Plan."""
 
     def setUp(self):
@@ -296,14 +293,6 @@ class TargetNeutralFieldReviewTest(TestCase):
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
         self.assertFalse(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
 
-    def test_ignore_sanitizes_a_concurrent_integrity_failure(self):
-        """The nondeterministic concurrent insert failure remains bounded."""
-        endpoint = "netbox_data_import.views.save_permission_scoped_object"
-        with patch(endpoint, side_effect=IntegrityError("duplicate")):
-            response = self._post("ignore_field_difference")
-
-        self.assertEqual(response.status_code, 409)
-
     def test_unignore_rejects_absent_stale_and_conflicting_records(self):
         """Unignore deletes only the exact review and binding shown in its plan."""
         self.assertEqual(self._post("unignore_field_difference").status_code, 409)
@@ -319,8 +308,9 @@ class TargetNeutralFieldReviewTest(TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("no longer available", response.json()["error"])
 
-    def test_unignore_rejects_a_binding_changed_after_the_plan(self):
-        """Unignore preserves its record if the source binding moves concurrently."""
+    def test_unignore_rejects_a_real_concurrent_binding_change(self):
+        """Unignore preserves its record if the source binding moves before its locked read."""
+        from django.db import connection
         from dcim.models import Device
 
         self._ignore_and_replan()
@@ -330,24 +320,28 @@ class TargetNeutralFieldReviewTest(TestCase):
             device_type=self.device_type,
             role=self.role,
         )
-        DeviceExistingMatch.objects.filter(profile=self.profile, source_id="REVIEW-ACTION-ROW").update(
-            netbox_device_id=replacement.pk,
-            device_name=replacement.name,
-        )
+        binding_moved = []
 
-        response = self._post("unignore_field_difference")
+        def move_binding_before_read(execute, sql, params, many, context):
+            if not binding_moved and "SELECT" in sql and DeviceExistingMatch._meta.db_table in sql:
+                binding_moved.append(True)
 
-        self.assertEqual(response.status_code, 409)
-        self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+                def move_binding():
+                    DeviceExistingMatch.objects.filter(
+                        profile=self.profile,
+                        source_id="REVIEW-ACTION-ROW",
+                    ).update(netbox_device_id=replacement.pk, device_name=replacement.name)
 
-    def test_unignore_sanitizes_a_concurrent_integrity_failure(self):
-        """A concurrent binding change leaves the review and returns a stable error."""
-        self._ignore_and_replan()
-        with patch("netbox_data_import.views._ensure_field_review_device_match", side_effect=IntegrityError):
+                with run_on_separate_connection(move_binding):
+                    pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(move_binding_before_read):
             response = self._post("unignore_field_difference")
 
+        self.assertEqual(binding_moved, [True])
         self.assertEqual(response.status_code, 409)
-        self.assertIn("changed while", response.json()["error"])
+        self.assertIn("linked elsewhere", response.json()["error"])
         self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
 
     def test_inline_field_sync_uses_the_plan_value_and_marks_it_stale(self):

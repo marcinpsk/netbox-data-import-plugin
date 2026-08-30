@@ -857,7 +857,7 @@ class AdapterRuntimeSupportTest(TestCase):
         actor = _superuser()
         with open(FIXTURE_PATH, "rb") as handle:
             document = SourceDocument.store(profile=self.trace, content=handle.read())
-        with self.assertRaises(UnknownSourceAdapter):
+        with self.assertRaisesMessage(UnknownSourceAdapter, "Target Module"):
             ImportEngine.plan(
                 self.trace,
                 document,

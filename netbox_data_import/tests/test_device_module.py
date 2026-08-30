@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Verify Device Target Module planning and execution behavior."""
 
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 
 from netbox_data_import.adapters import SourceBatch
-from netbox_data_import.catalog import OutputKind
+from netbox_data_import.catalog import CATALOG, OutputKind
 from netbox_data_import.device_identity import DeviceTypeIdentityResolver
 from netbox_data_import.models import (
     ClassRoleMapping,
@@ -19,7 +21,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from netbox_data_import.plan import Disposition, Severity
-from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed
+from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed, _DeviceBatch
 
 
 class DeviceModulePlanTestBase(TestCase):
@@ -66,7 +68,7 @@ class DeviceModulePlanTestBase(TestCase):
         return row
 
     def _plan(self, *rows):
-        return DeviceModule().plan(self._batch(*rows), self.profile, None, self.reader)
+        return DeviceModule().plan(self._batch(*rows), self.profile, CATALOG, self.reader)
 
     def _with_provenance(self, device, source_id="D-1", asset_tag="", extra_columns=None):
         """Record the provenance a previous import of this row would have left behind."""
@@ -95,6 +97,31 @@ class DeviceModulePlanTestBase(TestCase):
         }
         values.update(fields)
         return Device.objects.create(**values)
+
+
+class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
+    """Batch planning loads review targets without one query per source row."""
+
+    def test_reviewed_devices_are_loaded_once_for_the_batch(self):
+        """Two review-aware passes share one permission-scoped Device index."""
+        rows = []
+        for number in (1, 2):
+            source_id = f"D-{number}"
+            device = self._with_provenance(self._device(f"srv-{number:02d}"), source_id=source_id)
+            IgnoredFieldDifference.objects.create(
+                profile=self.profile,
+                source_id=source_id,
+                netbox_device_id=device.pk,
+                target_field="serial",
+            )
+            rows.append(self._row(number, source_id, device.name))
+
+        with CaptureQueriesContext(connection) as captured:
+            _DeviceBatch(self._batch(*rows), rows, self.profile, self.reader)
+
+        table = connection.ops.quote_name(device._meta.db_table)
+        device_queries = [query["sql"] for query in captured.captured_queries if f"FROM {table}" in query["sql"]]
+        self.assertEqual(len(device_queries), 2, device_queries)
 
 
 class DeviceModuleSelectionTest(DeviceModulePlanTestBase):
@@ -858,6 +885,31 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         with self.assertRaises(PreconditionFailed):
             DeviceModule().apply(change, self.context)
 
+    def test_an_unrelated_custom_field_change_does_not_invalidate_the_precondition(self):
+        """The guard compares only the custom field this import can overwrite."""
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Device
+        from extras.models import CustomField
+
+        device_type = ContentType.objects.get_for_model(Device)
+        for name in ("source_id", "other"):
+            custom_field = CustomField.objects.create(name=name, type="text")
+            custom_field.object_types.add(device_type)
+        self.profile.adapter_config = {**self.profile.adapter_config, "custom_field_name": "source_id"}
+        self.profile.save(update_fields=["adapter_config"])
+        stored = self._with_provenance(
+            self._device("srv-01", rack=self.rack, serial="OLD", custom_field_data={"other": "before"})
+        )
+        change = self._only_change(self._row(2, "D-1", "srv-01", serial="NEW"))
+        stored.custom_field_data["other"] = "after"
+        stored.save(update_fields=["custom_field_data"])
+
+        DeviceModule().apply(change, self.context)
+
+        stored.refresh_from_db()
+        self.assertEqual(stored.serial, "NEW")
+        self.assertEqual(stored.custom_field_data["other"], "after")
+
     def test_an_actor_without_the_add_permission_is_refused(self):
         """An ObjectPermission constraint is only decided against the saved row."""
         from dcim.models import Device
@@ -1409,6 +1461,41 @@ class DeviceModuleProvenanceTest(DeviceModulePlanTestBase):
         units = self._plan(self._row(2, "D-1", "srv-01", status="Offline"))
 
         self.assertEqual(units[0].changes[0].preconditions["device_id"], device.pk)
+
+    def test_a_hidden_review_still_removes_its_ignored_identity_from_batch_clashes(self):
+        """Permission filtering cannot change the reviewed values used by duplicate checks."""
+        from dcim.models import Device, Rack
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        device = self._device("hidden-reviewed-device", rack=self.rack, serial="OLD-SERIAL")
+        IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id="D-1",
+            netbox_device_id=device.pk,
+            target_field="serial",
+            file_snapshot={"canonical": "NEW-SERIAL", "display": "NEW-SERIAL"},
+            netbox_snapshot={"canonical": "OLD-SERIAL", "display": "OLD-SERIAL"},
+        )
+        actor = user_with_object_permission(
+            "device-module-review-blind",
+            [(Device, ("view", "add"), {"name": "nothing-matches-this"}), (Rack, ("view",), {})],
+        )
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+
+        units = DeviceModule().plan(
+            self._batch(
+                self._row(2, "D-1", "srv-01", serial="NEW-SERIAL"),
+                self._row(3, "D-2", "srv-02", serial="NEW-SERIAL"),
+            ),
+            self.profile,
+            CATALOG,
+            reader,
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.inaccessible_match")
+        self.assertEqual(units[1].disposition, Disposition.ACTIONABLE)
 
     def test_applying_a_create_stores_the_source_the_row_carried(self):
         """Without the record the next import cannot find the device this one just made."""

@@ -90,12 +90,7 @@ class ProfileAdapterConfigMigrationStructureTest(SimpleTestCase):
 
 
 def _restore_every_leaf():
-    """Migrate the plugin app forward to every leaf of its migration graph.
-
-    tearDown restores these rather than AFTER: a later migration would otherwise leave the worker
-    database short of its newest tables for every test that follows. A merge can leave two leaves,
-    so the executor gets all of them instead of one name picked by sort order.
-    """
+    """Restore every current plugin migration after a cutover test."""
     executor = MigrationExecutor(connection)
     executor.loader.build_graph()
     executor.migrate(list(executor.loader.graph.leaf_nodes(APP)))

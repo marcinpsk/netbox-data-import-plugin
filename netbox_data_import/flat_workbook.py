@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import re
 from dataclasses import dataclass, field
 from io import BytesIO
 
 import openpyxl
+import regex
 
 from .adapters import SourceUnreadable
 from .catalog import CANDIDATE_TARGET_PREFIX
@@ -18,6 +18,7 @@ from .values import comparison_key
 
 EXTRA_JSON_PREFIX = "extra_json:"
 _MAX_UNUSED_SAMPLES = 5
+_TRANSFORM_REGEX_TIMEOUT_SECONDS = 0.01
 
 
 @dataclass(frozen=True)
@@ -107,8 +108,12 @@ def _apply_transform_rules(row: dict, raw_row, headers: dict[str, int], rules) -
             continue
         text = str(raw_value).strip()
         try:
-            match = re.fullmatch(rule.pattern, text)
-        except re.error as exc:
+            match = regex.fullmatch(rule.pattern, text, timeout=_TRANSFORM_REGEX_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            raise SourceUnreadable(
+                f"Regex pattern in transform rule for column '{rule.source_column}' timed out."
+            ) from exc
+        except regex.error as exc:
             raise SourceUnreadable(
                 f"Invalid regex pattern '{rule.pattern}' in transform rule for column "
                 f"'{rule.source_column}' (value: {text!r}): {exc}"

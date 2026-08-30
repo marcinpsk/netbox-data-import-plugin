@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import openpyxl
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.test import Client, TransactionTestCase
 from django.urls import reverse
@@ -22,9 +21,9 @@ from netbox_data_import.models import (
     SourceDocument,
     SourceResolution,
 )
-from netbox_data_import.object_permissions import ObjectPermissionDenied
 from netbox_data_import.preview_row_actions import record_recalculated_preview
 from netbox_data_import.review_workspace import ReviewWorkspace
+from netbox_data_import.tests.helpers import user_with_object_permission
 
 
 class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
@@ -76,7 +75,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
             )
         self._materialize(duplicate="name")
 
-    def _workbook(self, duplicate):
+    def _workbook(self, duplicate, *, first_source_id="RESOLUTION-A"):
         """Return a workbook with either one duplicate name or one duplicate serial."""
         book = openpyxl.Workbook()
         active = book.active
@@ -88,7 +87,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         first_serial = "DUPLICATE-SERIAL" if duplicate == "serial" else "SERIAL-A"
         second_serial = "DUPLICATE-SERIAL" if duplicate == "serial" else "SERIAL-B"
         sheet.append(
-            ["RESOLUTION-A", "Server", first_name, self.rack.name, "Resolution Make", "Resolution Model", first_serial]
+            [first_source_id, "Server", first_name, self.rack.name, "Resolution Make", "Resolution Model", first_serial]
         )
         sheet.append(
             [
@@ -105,9 +104,9 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         book.save(buffer)
         return buffer.getvalue()
 
-    def _materialize(self, *, duplicate):
+    def _materialize(self, *, duplicate, first_source_id="RESOLUTION-A"):
         """Plan a real stored workbook and put that plan in the browser session."""
-        content = self._workbook(duplicate)
+        content = self._workbook(duplicate, first_source_id=first_source_id)
         document = SourceDocument.store(
             profile=self.profile,
             content=content,
@@ -128,6 +127,23 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         session["import_preview_pending"] = True
         session.save()
         return document
+
+    def _restricted_actor(self, username):
+        """Return a preview-capable actor without policy-row write grants."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        return user_with_object_permission(
+            username,
+            [
+                (ImportProfile, ("change",), {"pk": self.profile.pk}),
+                (Site, ("view",), None),
+                (Rack, ("view",), None),
+                (Manufacturer, ("view",), None),
+                (DeviceType, ("view",), None),
+                (DeviceRole, ("view",), None),
+                (Device, ("view",), None),
+            ],
+        )
 
     def _post_name(self, **values):
         """Resolve the first duplicate name with valid request identity defaults."""
@@ -204,20 +220,39 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         self.assertEqual(self._post_name(new_name="claimed-in-netbox").status_code, 302)
         self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
 
-    def test_duplicate_name_rejects_a_stale_target_and_expected_write_failures(self):
-        """Target loss and bounded persistence failures do not leave a resolution."""
+    def test_duplicate_name_rejects_a_stale_target(self):
+        """Target loss does not leave a resolution."""
         context = self.client.session["import_context"]
         context["site_id"] = 999999
         session = self.client.session
         session["import_context"] = context
         session.save()
         self.assertEqual(self._post_name().status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
 
+    def test_duplicate_name_sanitizes_a_real_permission_failure(self):
+        """An actor without a Source Resolution grant cannot save a name decision."""
+        self.client.force_login(self._restricted_actor("name-resolution-denied"))
         self._materialize(duplicate="name")
+
+        self.assertEqual(self._post_name().status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
+
+    def test_duplicate_name_sanitizes_a_real_validation_failure(self):
+        """A source identity that exceeds the policy model limit is rejected."""
+        source_id = "N" * 201
+        self._materialize(duplicate="name", first_source_id=source_id)
+
+        self.assertEqual(self._post_name(source_id=source_id).status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
+
+    def test_duplicate_name_sanitizes_a_concurrent_integrity_failure(self):
+        """A concurrent commit returns to the current preview without a partial decision."""
         endpoint = "netbox_data_import.views.save_permission_scoped_object"
-        for failure in (ObjectPermissionDenied("denied"), ValidationError("invalid"), IntegrityError("duplicate")):
-            with self.subTest(failure=type(failure).__name__), patch(endpoint, side_effect=failure):
-                self.assertEqual(self._post_name().status_code, 302)
+        # The commit between validation and this save is nondeterministic in an endpoint test.
+        with patch(endpoint, side_effect=IntegrityError("duplicate")):
+            self.assertEqual(self._post_name().status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
 
     def test_duplicate_serial_resolution_replans_the_stored_source(self):
         """Giving up a serial is saved only while another current row still claims it."""
@@ -254,14 +289,30 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         self.assertEqual(self._post_serial().status_code, 302)
         self.assertFalse(SourceResolution.objects.filter(profile=self.profile, source_id="RESOLUTION-A").exists())
 
-    def test_duplicate_serial_sanitizes_expected_write_failures(self):
-        """Permission, validation, and concurrency failures return to the current preview."""
+    def test_duplicate_serial_sanitizes_a_real_permission_failure(self):
+        """An actor without a Source Resolution grant cannot discard a serial."""
+        self.client.force_login(self._restricted_actor("serial-resolution-denied"))
+        self._materialize(duplicate="serial")
+
+        self.assertEqual(self._post_serial().status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
+
+    def test_duplicate_serial_sanitizes_a_real_validation_failure(self):
+        """An overlong source identity cannot become a serial policy row."""
+        source_id = "S" * 201
+        self._materialize(duplicate="serial", first_source_id=source_id)
+
+        self.assertEqual(self._post_serial(source_id=source_id).status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
+
+    def test_duplicate_serial_sanitizes_a_concurrent_integrity_failure(self):
+        """A concurrent commit returns to the current preview without a partial decision."""
         endpoint = "netbox_data_import.views.save_permission_scoped_object"
-        for failure in (ObjectPermissionDenied("denied"), ValidationError("invalid"), IntegrityError("duplicate")):
-            with self.subTest(failure=type(failure).__name__):
-                self._materialize(duplicate="serial")
-                with patch(endpoint, side_effect=failure):
-                    self.assertEqual(self._post_serial().status_code, 302)
+        self._materialize(duplicate="serial")
+        # The commit between validation and this save is nondeterministic in an endpoint test.
+        with patch(endpoint, side_effect=IntegrityError("duplicate")):
+            self.assertEqual(self._post_serial().status_code, 302)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
 
     def test_manual_device_match_rechecks_row_device_scope_and_existing_bindings(self):
         """A manual link names one active row and one unclaimed Device at the import site."""
@@ -313,8 +364,8 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         self.assertEqual(response.status_code, 302)
         self.assertFalse(DeviceExistingMatch.objects.filter(source_id="RESOLUTION-A").exists())
 
-    def test_manual_device_match_sanitizes_expected_write_failures(self):
-        """Permission, validation, and concurrency failures never leave a partial link."""
+    def test_manual_device_match_sanitizes_a_real_permission_failure(self):
+        """An actor without a Device Existing Match grant cannot create a link."""
         from dcim.models import Device, DeviceType
 
         target = Device.objects.create(
@@ -324,18 +375,69 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
             role=self.role,
         )
         endpoint = reverse("plugins:netbox_data_import:match_existing_device")
+        self.client.force_login(self._restricted_actor("manual-match-denied"))
+
+        response = self.client.post(
+            endpoint,
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "RESOLUTION-A",
+                "netbox_device_id": target.pk,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(source_id="RESOLUTION-A").exists())
+
+    def test_manual_device_match_sanitizes_a_real_validation_failure(self):
+        """An overlong source identity cannot become a device link."""
+        from dcim.models import Device, DeviceType
+
+        source_id = "M" * 201
+        self._materialize(duplicate="name", first_source_id=source_id)
+        target = Device.objects.create(
+            name="manual-match-invalid-target",
+            site=self.site,
+            device_type=DeviceType.objects.get(slug="resolution-make-resolution-model"),
+            role=self.role,
+        )
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:match_existing_device"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": source_id,
+                "netbox_device_id": target.pk,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(source_id=source_id).exists())
+
+    def test_manual_device_match_sanitizes_a_concurrent_integrity_failure(self):
+        """A concurrent commit never leaves a partial link."""
+        from dcim.models import Device, DeviceType
+
+        target = Device.objects.create(
+            name="manual-match-concurrent-target",
+            site=self.site,
+            device_type=DeviceType.objects.get(slug="resolution-make-resolution-model"),
+            role=self.role,
+        )
+        endpoint = reverse("plugins:netbox_data_import:match_existing_device")
         writer = "netbox_data_import.views.save_permission_scoped_object"
-        for failure in (ObjectPermissionDenied("denied"), ValidationError("invalid"), IntegrityError("duplicate")):
-            with self.subTest(failure=type(failure).__name__), patch(writer, side_effect=failure):
-                response = self.client.post(
-                    endpoint,
-                    {
-                        "profile_id": self.profile.pk,
-                        "source_id": "RESOLUTION-A",
-                        "netbox_device_id": target.pk,
-                    },
-                )
-                self.assertEqual(response.status_code, 302)
+        # The commit between validation and this save is nondeterministic in an endpoint test.
+        with patch(writer, side_effect=IntegrityError("duplicate")):
+            response = self.client.post(
+                endpoint,
+                {
+                    "profile_id": self.profile.pk,
+                    "source_id": "RESOLUTION-A",
+                    "netbox_device_id": target.pk,
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(source_id="RESOLUTION-A").exists())
 
     def test_auto_match_rejects_an_inactive_preview_and_a_stale_target(self):
         """Auto-match uses only the active plan and its still-visible target."""

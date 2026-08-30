@@ -122,7 +122,7 @@ class MigrationGraphDescribesTheModelsTest(SimpleTestCase):
         autodetector = MigrationAutodetector(
             loader.project_state(),
             ProjectState.from_apps(apps),
-            NonInteractiveMigrationQuestioner(specified_apps={APP}, dry_run=True),
+            NonInteractiveMigrationQuestioner(specified_apps={APP}, dry_run=True, verbosity=0),
         )
         changes = autodetector.changes(graph=loader.graph, trim_to_apps={APP}, convert_apps={APP})
         described = [

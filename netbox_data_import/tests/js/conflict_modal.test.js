@@ -98,6 +98,14 @@ describe("conflict modal", () => {
     expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
   });
 
+  it("uses the native form when the preview-action helper is unavailable", () => {
+    window.ndiPostPreviewAction = undefined;
+
+    buttons()[1].click();
+
+    expect(submitted).toBe(1);
+  });
+
   it("reports that the choice is being saved", () => {
     const picked = buttons()[1];
 

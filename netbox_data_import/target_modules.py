@@ -26,7 +26,7 @@ from . import ip_assignment
 from .catalog import OutputKind
 from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
-from .device_identity import DeviceTypeIdentityResolver
+from .device_identity import DeviceTypeIdentityResolver, normalize_mapping_text
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
@@ -753,6 +753,8 @@ class _DeviceBatch:
     )
 
     def __init__(self, source_batch, rows, profile, netbox_reader):
+        from dcim.models import Device
+
         self.profile = profile
         self.reader = netbox_reader
         self.ignored = _ignored_source_ids(profile)
@@ -764,6 +766,32 @@ class _DeviceBatch:
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
         self._bound_sources = {match.netbox_device_id: _text(match.source_id) for match in profile.device_matches.all()}
         identity_rows = [row for row in rows if self._is_identity_writing_row(row)]
+        identity_source_ids = {_text(row.get("source_id")) for row in identity_rows if _text(row.get("source_id"))}
+        self._review_device_ids = {
+            source_id: self._reviewer.review_device_ids(source_id) for source_id in identity_source_ids
+        }
+        reviewed_device_ids = {
+            self._bindings[source_id] for source_id in identity_source_ids if source_id in self._bindings
+        }
+        reviewed_device_ids.update(
+            next(iter(device_ids)) for device_ids in self._review_device_ids.values() if len(device_ids) == 1
+        )
+        self._reviewed_devices = {
+            device.pk: device
+            for device in Device.objects.select_related(
+                "device_type__manufacturer",
+                "rack__location",
+                "role",
+                "tenant",
+                "location",
+                "site",
+            ).filter(pk__in=reviewed_device_ids)
+        }
+        self._visible_reviewed_device_ids = (
+            frozenset(reviewed_device_ids)
+            if self.reader.actor is None
+            else frozenset(self.reader.devices().filter(pk__in=reviewed_device_ids).values_list("pk", flat=True))
+        )
         self._duplicate_names = _repeated(identity_text(effective_device_name(row)) for row in identity_rows)
         self._reserved_names = {
             identity_text(name)
@@ -795,11 +823,12 @@ class _DeviceBatch:
         ignored = set()
         for row in rows:
             source_id = _text(row.get("source_id"))
-            reviewed_ids = self._reviewer.review_device_ids(source_id) if source_id else frozenset()
+            reviewed_ids = self._review_device_ids.get(source_id, frozenset())
             if len(reviewed_ids) != 1:
                 continue
-            device = self.reader.devices().filter(pk=next(iter(reviewed_ids))).first()
-            if device is None:
+            device_id = next(iter(reviewed_ids))
+            device = self._reviewed_devices.get(device_id)
+            if device is None or device_id not in self._visible_reviewed_device_ids:
                 continue
             make = " ".join((_text(row.get("make")) or "Unknown").split())
             model = " ".join((_text(row.get("model")) or "Unknown").split())
@@ -829,7 +858,10 @@ class _DeviceBatch:
                 "make": make,
                 "model": model,
                 "explicit_device_type": explicit_device_type,
-                "explicit_manufacturer": explicit_device_type or make in self._identity.mapped_source_makes,
+                "explicit_manufacturer": (
+                    explicit_device_type
+                    or normalize_mapping_text(make).casefold() in self._identity.mapped_source_makes
+                ),
             }
             manufacturer_groups.setdefault(mfg_slug, []).append(record)
             device_type_groups.setdefault((mfg_slug, dt_slug), []).append(record)
@@ -893,8 +925,6 @@ class _DeviceBatch:
 
     def _effective_identity_values(self, rows) -> dict[int, dict[str, str]]:
         """Return review-aware serial and asset-tag writes for duplicate checks."""
-        from dcim.models import Device
-
         values = {}
         for row in rows:
             row_number = row.get("_row_number")
@@ -905,10 +935,10 @@ class _DeviceBatch:
             }
             device_id = self._bindings.get(source_id)
             if device_id is None and source_id:
-                reviewed_ids = self._reviewer.review_device_ids(source_id)
+                reviewed_ids = self._review_device_ids.get(source_id, frozenset())
                 if len(reviewed_ids) == 1:
                     device_id = next(iter(reviewed_ids))
-            device = Device.objects.filter(pk=device_id).first() if device_id is not None else None
+            device = self._reviewed_devices.get(device_id)
             if device is not None:
                 review = self._reviewer.review(source_id, device, proposal)
                 effective = review.effective_proposal
@@ -1142,7 +1172,7 @@ class _DeviceBatch:
 
         bound_id = self._bindings.get(source_id) if source_id else None
         if bound_id is not None:
-            bound = devices.filter(pk=bound_id).first()
+            bound = self._reviewed_devices.get(bound_id)
             if bound is not None:
                 return self._visible_match(bound, "source ID link", visible_devices)
 
@@ -1161,11 +1191,11 @@ class _DeviceBatch:
         if stored:
             return self._visible_match(stored[0], "stored source ID", visible_devices)
 
-        reviewed_ids = self._reviewer.review_device_ids(source_id) if source_id else frozenset()
+        reviewed_ids = self._review_device_ids.get(source_id, frozenset())
         if len(reviewed_ids) > 1:
             return _Match(ambiguous="device.ambiguous_field_review", value=source_id)
         if reviewed_ids:
-            reviewed = devices.filter(pk=next(iter(reviewed_ids))).first()
+            reviewed = self._reviewed_devices.get(next(iter(reviewed_ids)))
             if reviewed is not None:
                 return self._visible_match(reviewed, "field review", visible_devices)
 
@@ -1192,7 +1222,11 @@ class _DeviceBatch:
 
     def _visible_match(self, device, method, visible_devices) -> _Match:
         """Return a global match with its scope and site safety attached."""
-        inaccessible = not visible_devices.filter(pk=device.pk).exists()
+        inaccessible = (
+            device.pk not in self._visible_reviewed_device_ids
+            if device.pk in self._reviewed_devices
+            else not visible_devices.filter(pk=device.pk).exists()
+        )
         return _Match(device=device, method=method, inaccessible=inaccessible)
 
     def binding_conflict(self, row, match) -> str:
@@ -1994,10 +2028,14 @@ class DeviceModule:
             "primary_ip4_id": device.primary_ip4_id,
             "primary_ip6_id": device.primary_ip6_id,
             "oob_ip_id": device.oob_ip_id,
-            "custom_field_data": dict(device.custom_field_data),
         }
         if profile is None:
             return state
+        custom_field = profile.adapter_settings.custom_field_name
+        state["source_id_custom_field"] = (
+            custom_field,
+            device.custom_field_data.get(custom_field) if custom_field else None,
+        )
         from .models import DeviceImportSource
 
         stored = DeviceImportSource.objects.filter(device_id=device.pk).first()

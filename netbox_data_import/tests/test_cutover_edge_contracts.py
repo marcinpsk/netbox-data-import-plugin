@@ -4,7 +4,6 @@
 
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -34,6 +33,7 @@ from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, Sync
 from netbox_data_import.preview_row_actions import current_preview_revision
 from netbox_data_import.source_resolution import derive_effective_rows
 from netbox_data_import.target_modules import PreconditionFailed
+from netbox_data_import.tests.helpers import workbook_bytes
 from netbox_data_import.values import comparison_key, normalize_for_compare, source_position
 
 
@@ -131,6 +131,23 @@ class IdentityAndResolutionBoundaryTest(TestCase):
 
         self.assertEqual(resolver.resolve("Make", "Model"), ("first-make", "first-model", True))
 
+    def test_mapping_identity_is_case_insensitive_on_both_sides(self):
+        """Source casing cannot bypass an explicit Device Type or manufacturer mapping."""
+        device_type = SimpleNamespace(
+            source_make="Dell",
+            source_model="R660",
+            netbox_manufacturer_slug="mapped-make",
+            netbox_device_type_slug="mapped-type",
+        )
+        manufacturer = SimpleNamespace(source_make="ACME", netbox_manufacturer_slug="mapped-manufacturer")
+        resolver = DeviceTypeIdentityResolver([device_type], [manufacturer])
+
+        self.assertEqual(resolver.resolve("dell", "r660"), ("mapped-make", "mapped-type", True))
+        self.assertEqual(
+            resolver.resolve("acme", "widget"),
+            ("mapped-manufacturer", "acme-widget", False),
+        )
+
     def test_resolution_copies_conflicts_and_clears_an_omitted_mapped_value(self):
         """A resolution changes a detached row and clears its superseded target value."""
         profile = ImportProfile.objects.create(name="Resolution Boundary Profile")
@@ -157,6 +174,20 @@ class IdentityAndResolutionBoundaryTest(TestCase):
         self.assertIsNone(effective[0]["serial"])
         self.assertEqual(effective[0]["_conflicts"], {"serial": ["OLD"]})
         self.assertNotIn("device_name", rows[0])
+
+    def test_a_legacy_non_mapping_resolution_does_not_break_planning(self):
+        """A malformed stored JSON value is ignored instead of reaching dict operations."""
+        profile = ImportProfile.objects.create(name="Malformed Resolution Boundary Profile")
+        SourceResolution.objects.create(
+            profile=profile,
+            source_id="BOUNDARY-2",
+            source_column="Raw",
+            original_value="OLD",
+            resolved_fields=["not", "a", "mapping"],
+        )
+        rows = [{"source_id": "BOUNDARY-2", "device_name": "unchanged"}]
+
+        self.assertEqual(derive_effective_rows(rows, profile), rows)
 
     def test_contact_id_validation_rejects_values_integer_coercion_would_reshape(self):
         """Only positive integral Contact IDs cross the saved-resolution boundary."""
@@ -243,9 +274,13 @@ class CoordinatorDefensiveContractTest(TestCase):
 
     def test_missing_resolution_policy_fails_fast(self):
         """The engine cannot apply saved policy without its catalog declaration."""
-        with patch("netbox_data_import.import_engine.catalog.policy_section", return_value=None):
-            with self.assertRaises(EngineConfigurationError):
-                _resolution_section()
+        from netbox_data_import import catalog
+
+        section = catalog._SECTIONS_BY_KEY.pop("source_resolutions")
+        self.addCleanup(catalog._SECTIONS_BY_KEY.__setitem__, "source_resolutions", section)
+
+        with self.assertRaises(EngineConfigurationError):
+            _resolution_section()
 
     def test_every_expected_failure_has_an_audit_reason(self):
         """Typed target and database failures map to stable audit reasons."""
@@ -283,6 +318,7 @@ class CoordinatorDefensiveContractTest(TestCase):
 
     def test_an_unregistered_runtime_is_refused_before_any_write(self):
         """The coordinator cannot silently skip an executable change without a runtime."""
+        from netbox_data_import import target_modules
         from dcim.models import Site
 
         site = Site.objects.create(name="Runtime Boundary Site", slug="runtime-boundary-site")
@@ -291,35 +327,47 @@ class CoordinatorDefensiveContractTest(TestCase):
             email="runtime-boundary@example.invalid",
             password="testpass",
         )
-        profile = ImportProfile.objects.create(name="Runtime Boundary Profile")
+        profile = ImportProfile.objects.create(
+            name="Runtime Boundary Profile",
+            adapter_config={"sheet_name": "Data"},
+        )
+        document = SourceDocument.store(
+            profile=profile,
+            content=workbook_bytes(["Source ID"], [["GHOST-1"]]),
+            uploaded_by=actor,
+        )
         change = PlannedChange(
             identity="ghost:one:create",
             target_module="ghost",
             operation="create",
             payload={},
         )
-        plan = ImportPlan(
-            units=(
-                SynchronizationUnit(
-                    identity="ghost:one",
-                    disposition=Disposition.ACTIONABLE,
-                    changes=(change,),
-                ),
-            ),
-            source_fingerprint="0" * 64,
-            profile_fingerprint=profile.planning_fingerprint,
-            actor=str(actor.pk),
-            planning_context={"site_id": site.pk, "location_id": None, "tenant_id": None},
+        unit = SynchronizationUnit(
+            identity="ghost:one",
+            disposition=Disposition.ACTIONABLE,
+            changes=(change,),
         )
+
+        class GhostPlanningRuntime:
+            @staticmethod
+            def plan(*args):
+                return [unit]
+
+            @staticmethod
+            def apply(*args):
+                raise AssertionError("the unregistered ghost runtime cannot be applied")
+
+        runtime = target_modules.MODULE_RUNTIMES["rack"]
+        target_modules.MODULE_RUNTIMES["rack"] = GhostPlanningRuntime()
+        self.addCleanup(target_modules.MODULE_RUNTIMES.__setitem__, "rack", runtime)
+        planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+        plan = ImportEngine.plan(profile, document, actor, planning_context)
         execution = ImportExecution.objects.create(profile=profile, outcome=ExecutionOutcome.PENDING)
-        with (
-            patch.object(ImportEngine, "plan", return_value=plan),
-            self.assertRaises(EngineConfigurationError),
-        ):
+        with self.assertRaises(EngineConfigurationError):
             ImportEngine._write_selection(
                 execution,
                 profile,
-                SimpleNamespace(),
+                document,
                 plan,
                 ["ghost:one"],
                 actor,

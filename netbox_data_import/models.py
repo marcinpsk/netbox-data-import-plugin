@@ -882,15 +882,15 @@ class ColumnTransformRule(PolicySectionModel):
 
     def clean(self):
         """Validate the regex pattern, group counts, and group target field names."""
-        import re
+        import regex
 
         from django.core.exceptions import ValidationError
 
         super().clean()
 
         try:
-            compiled = re.compile(self.pattern)
-        except re.error as exc:
+            compiled = regex.compile(self.pattern)
+        except regex.error as exc:
             raise ValidationError({"pattern": f"Invalid regex pattern: {exc}"})
 
         required_groups = 0
@@ -965,6 +965,12 @@ class SourceResolution(PolicySectionModel):
         ]
         verbose_name = "Source Resolution"
         verbose_name_plural = "Source Resolutions"
+
+    def clean(self):
+        """Require the target-field decisions to use a JSON object."""
+        super().clean()
+        if not isinstance(self.resolved_fields, dict):
+            raise ValidationError({"resolved_fields": "Enter the resolved fields as a JSON object."})
 
     def __str__(self):
         return f"{self.source_id}/{self.source_column}: {self.original_value!r}"
