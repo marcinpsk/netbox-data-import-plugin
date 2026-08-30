@@ -145,11 +145,11 @@ class ImportEngine:
             return execution
 
         try:
+            if job is not None:
+                execution.link_job(job)
             target = NetBoxReader.for_actor(actor).for_planning_context(accepted.planning_context)
             execution.site_name = str(target.site)
             execution.save(update_fields=["site_name"])
-            if job is not None:
-                execution.link_job(job)
             # One lock over the replan, the comparison and the writes: policy cannot move between them.
             with locked_profile_policy(profile.pk):
                 profile.refresh_from_db()

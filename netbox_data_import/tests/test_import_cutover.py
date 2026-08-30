@@ -631,23 +631,74 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(job.data["phase"], "failed")
         self.assertIn("Missing", job.data["message"])
 
-    def test_job_runner_does_not_classify_an_unexpected_lookup_failure(self):
-        """A programming defect remains visible instead of looking like an operator repair."""
+    def test_job_runner_keeps_the_execution_id_when_the_target_disappears(self):
+        """A target failure after reservation still links the failed audit row to its Job."""
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
         accepted = ImportPlan.from_dict(self.client.session["import_plan"])
         selected = accepted.units[0].identity
         job = self._job()
+        self.site.delete()
 
-        with patch("netbox_data_import.jobs.ImportEngine.execute", side_effect=KeyError("unexpected")):
-            with self.assertRaises(KeyError):
-                ImportJobRunner(job).run(
-                    self.profile.pk,
-                    document.pk,
-                    accepted.to_dict(),
-                    [selected],
-                    "unexpected-lookup",
+        with self.assertRaises(JobFailed):
+            ImportJobRunner(job).run(
+                self.profile.pk,
+                document.pk,
+                accepted.to_dict(),
+                [selected],
+                "target-disappeared",
+            )
+
+        execution = ImportExecution.objects.get(idempotency_key="target-disappeared")
+        job.refresh_from_db()
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
+        self.assertEqual(job.data["phase"], "failed")
+        self.assertEqual(job.data["import_execution_id"], execution.pk)
+
+    def test_job_runner_does_not_classify_an_unexpected_lookup_failure(self):
+        """A programming defect remains visible instead of looking like an operator repair."""
+        from netbox_data_import import target_modules
+        from netbox_data_import.plan import Disposition, PlannedChange, SynchronizationUnit
+
+        class BrokenDeviceRuntime:
+            @staticmethod
+            def plan(*args):
+                return (
+                    SynchronizationUnit(
+                        identity="test:unexpected-lookup",
+                        disposition=Disposition.ACTIONABLE,
+                        changes=(
+                            PlannedChange(
+                                identity="test:unexpected-lookup:apply",
+                                target_module="device",
+                                operation="update",
+                                payload={},
+                            ),
+                        ),
+                    ),
                 )
+
+            @staticmethod
+            def apply(change, execution_context):
+                del execution_context
+                return change.payload["missing"]
+
+        runtime = target_modules.MODULE_RUNTIMES["device"]
+        target_modules.MODULE_RUNTIMES["device"] = BrokenDeviceRuntime
+        self.addCleanup(target_modules.MODULE_RUNTIMES.__setitem__, "device", runtime)
+        self._upload()
+        document = SourceDocument.objects.get(profile=self.profile)
+        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        job = self._job()
+
+        with self.assertRaises(KeyError):
+            ImportJobRunner(job).run(
+                self.profile.pk,
+                document.pk,
+                accepted.to_dict(),
+                ["test:unexpected-lookup"],
+                "unexpected-lookup",
+            )
 
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "validating")
