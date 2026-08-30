@@ -10,7 +10,7 @@ NetBox plugin for importing device inventory and rack layouts from external DCIM
 It configures import profiles (source format, column mappings, class/role mappings),
 previews imports, and executes them with full result tracking.
 
-Requires NetBox >= 4.2.0 and Python >= 3.12. Licensed under Apache-2.0 (REUSE-compliant).
+Requires NetBox >= 4.6.0 and Python >= 3.12. Licensed under Apache-2.0 (REUSE-compliant).
 
 ## Architecture
 
