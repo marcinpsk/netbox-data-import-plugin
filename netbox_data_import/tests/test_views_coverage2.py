@@ -18,7 +18,7 @@ from netbox_data_import.models import (
     ImportProfile,
     SourceResolution,
 )
-from netbox_data_import.tests.helpers import set_import_source
+from netbox_data_import.tests.helpers import set_import_source, workbook_bytes
 from netbox_data_import.views import _save_or_refetch, _validate_model_instance
 
 User = get_user_model()
@@ -212,19 +212,13 @@ class ImportPreviewViewExistingResolutionsTest(TestCase):
             original_value="old-name",
             resolved_fields={"device_name": "new-name"},
         )
-        import openpyxl
         from django.core.files.uploadedfile import SimpleUploadedFile
-        from openpyxl.worksheet.worksheet import Worksheet
 
-        workbook = openpyxl.Workbook()
-        active = workbook.active
-        worksheet = active if isinstance(active, Worksheet) else workbook.create_sheet()
-        worksheet.title = "Data"
-        worksheet.append(["Id", "Name", "Class", "Make", "Model"])
-        worksheet.append(["RES2-001", "old-name", "Server", "TestMake", "TestModel"])
-        content = BytesIO()
-        workbook.save(content)
-        upload = SimpleUploadedFile("test.xlsx", content.getvalue())
+        content = workbook_bytes(
+            ["Id", "Name", "Class", "Make", "Model"],
+            [["RES2-001", "old-name", "Server", "TestMake", "TestModel"]],
+        )
+        upload = SimpleUploadedFile("test.xlsx", content)
         setup = self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
