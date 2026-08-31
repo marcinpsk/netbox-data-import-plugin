@@ -2500,6 +2500,53 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
         resp = self.client.post(url, {"profile": self.profile.pk})
         self.assertEqual(resp.status_code, 200)
 
+    def test_post_add_rejects_a_target_used_by_another_rule(self):
+        """Two transform rules in one profile cannot write the same target."""
+        self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="Primary Name",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+
+        resp = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": "Fallback Name",
+                "pattern": r"^(.+)$",
+                "group_1_target": "device_name",
+                "group_2_target": "",
+            },
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "already assigned by the transform rule for source column &#x27;Primary Name&#x27;")
+        self.assertFalse(
+            self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="Fallback Name").exists()
+        )
+
+    def test_post_add_rejects_one_target_for_both_capture_groups(self):
+        """One transform rule cannot overwrite its first capture with its second capture."""
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+
+        resp = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": "Combined Name",
+                "pattern": r"^(.+) - (.+)$",
+                "group_1_target": "device_name",
+                "group_2_target": "device_name",
+            },
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(
+            self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="Combined Name").exists()
+        )
+
     def test_get_edit_view(self):
         """GET edit view returns 200."""
         rule = self.ColumnTransformRule.objects.create(
@@ -2547,6 +2594,37 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:columntransformrule_edit", kwargs={"pk": rule.pk})
         resp = self.client.post(url, {"profile": self.profile.pk})
         self.assertEqual(resp.status_code, 200)
+
+    def test_post_edit_rejects_a_target_used_by_another_rule(self):
+        """Editing a saved rule cannot make its target overlap another saved rule."""
+        self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="Primary Name",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+        rule = self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="Inventory Tag",
+            pattern=r"^(.+)$",
+            group_1_target="asset_tag",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_edit", kwargs={"pk": rule.pk})
+
+        resp = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": rule.source_column,
+                "pattern": rule.pattern,
+                "group_1_target": "device_name",
+                "group_2_target": "",
+            },
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        rule.refresh_from_db()
+        self.assertEqual(rule.group_1_target, "asset_tag")
 
     def test_get_delete_view(self):
         """GET delete view returns 200."""

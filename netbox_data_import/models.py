@@ -913,7 +913,7 @@ class ColumnTransformRule(PolicySectionModel):
         verbose_name_plural = "Column Transform Rules"
 
     def clean(self):
-        """Validate the regex pattern, group counts, and group target field names."""
+        """Validate the regex, capture groups, and exclusive ownership of group targets."""
         import regex
 
         from django.core.exceptions import ValidationError
@@ -941,6 +941,7 @@ class ColumnTransformRule(PolicySectionModel):
             )
 
         output_kinds = self.profile.output_kinds if self.profile_id else None
+        target_attrs = {}
         for attr in ("group_1_target", "group_2_target"):
             value = getattr(self, attr) or ""
             if not value:
@@ -948,6 +949,34 @@ class ColumnTransformRule(PolicySectionModel):
             # A capture group yields text, so a candidate target is not a valid group target.
             if not CATALOG.is_valid(value, output_kinds=output_kinds, allow_candidates=False):
                 raise ValidationError({attr: CATALOG.invalid_key_message(value)})
+            previous_attr = target_attrs.get(value)
+            if previous_attr is not None:
+                previous_group = previous_attr.removeprefix("group_").removesuffix("_target")
+                raise ValidationError(
+                    {attr: f"Target field '{value}' is already assigned to capture group {previous_group}."}
+                )
+            target_attrs[value] = attr
+
+        if not self.profile_id or not target_attrs:
+            return
+        conflicts = (
+            type(self)
+            .objects.filter(profile_id=self.profile_id)
+            .exclude(pk=self.pk)
+            .filter(models.Q(group_1_target__in=target_attrs) | models.Q(group_2_target__in=target_attrs))
+            .only("source_column", "group_1_target", "group_2_target")
+        )
+        errors = {}
+        for conflict in conflicts:
+            for target in (conflict.group_1_target, conflict.group_2_target):
+                attr = target_attrs.get(target)
+                if attr is not None:
+                    errors[attr] = (
+                        f"Target field '{target}' is already assigned by the transform rule "
+                        f"for source column '{conflict.source_column}'."
+                    )
+        if errors:
+            raise ValidationError(errors)
 
     def __str__(self):
         return f"{self.source_column}: {self.pattern}"

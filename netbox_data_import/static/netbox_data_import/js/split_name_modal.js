@@ -357,7 +357,7 @@
         saveBtn.disabled = false;
         saveBtn.textContent = 'Save resolution';
         var saveError = document.getElementById('res_save_error');
-        saveError.textContent = error.message;
+        saveError.textContent = error.message || 'Could not save the resolution.';
         saveError.classList.remove('d-none');
       });
   });

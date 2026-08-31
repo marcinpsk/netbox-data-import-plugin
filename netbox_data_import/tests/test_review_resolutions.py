@@ -21,7 +21,7 @@ from netbox_data_import.models import (
     SourceDocument,
     SourceResolution,
 )
-from netbox_data_import.preview_row_actions import record_recalculated_preview
+from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY, record_recalculated_preview
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.tests.helpers import user_with_object_permission
 
@@ -152,7 +152,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
             "row_number": 2,
             "source_id": "RESOLUTION-A",
             "new_name": "resolved-device-a",
-            "preview_revision": self.client.session["import_preview_revision"],
+            "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             **values,
         }
         return self.client.post(reverse("plugins:netbox_data_import:resolve_duplicate_name"), data)
@@ -163,7 +163,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
             "profile_id": self.profile.pk,
             "row_number": 2,
             "source_id": "RESOLUTION-A",
-            "preview_revision": self.client.session["import_preview_revision"],
+            "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             **values,
         }
         return self.client.post(reverse("plugins:netbox_data_import:ignore_duplicate_serial"), data)
@@ -177,7 +177,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
                 "row_number": 2,
                 "source_id": "RESOLUTION-A",
                 "new_name": "resolved-device-a",
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
             HTTP_HX_REQUEST="true",
         )

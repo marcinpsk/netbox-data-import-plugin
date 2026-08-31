@@ -198,6 +198,16 @@ describe("split modal parts", () => {
     expect(alertBox.textContent).toBe("");
     expect(alertBox.classList.contains("d-none")).toBe(true);
   });
+
+  it("explains a save rejection that has no message", async () => {
+    window.ndiPostPreviewAction = vi.fn().mockRejectedValueOnce({});
+
+    submitForm();
+
+    const alertBox = document.getElementById("res_save_error");
+    await vi.waitFor(() => expect(alertBox.textContent).toBe("Could not save the resolution."));
+    expect(alertBox.classList.contains("d-none")).toBe(false);
+  });
 });
 
 describe("the device that a part would name", () => {
