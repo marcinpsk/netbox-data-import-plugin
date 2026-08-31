@@ -18,7 +18,7 @@ from ..models import (
     IgnoredDevice,
     ColumnTransformRule,
     SourceResolution,
-    ImportJob,
+    ImportExecution,
     validate_adapter_target_module,
     validate_contact_candidate_resolution,
     validate_section_applicability,
@@ -246,18 +246,23 @@ class SourceResolutionSerializer(PolicySectionSerializer):
         ]
 
 
-class ImportJobSerializer(serializers.ModelSerializer):
-    """Read-only serializer for ImportJob (plain model)."""
+class ImportExecutionSerializer(serializers.ModelSerializer):
+    """Read-only serializer for the Import Execution audit record."""
 
     class Meta:
-        model = ImportJob
+        model = ImportExecution
         fields = [
             "id",
             "profile",
             "created",
             "input_filename",
-            "dry_run",
             "site_name",
             "result_counts",
+            "outcome",
+            "idempotency_key",
+            "accepted_plan_fingerprint",
+            "selected_units",
+            "applied_changes",
+            "failure_detail",
         ]
         read_only_fields = fields

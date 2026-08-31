@@ -51,23 +51,12 @@ class SearchDeviceSerialDisplayTest(TestCase):
 
     def _setup_preview_session(self, profile):
         """Populate session so ImportPreviewView renders instead of redirecting."""
-        from netbox_data_import.engine import parse_file, run_import
-        from netbox_data_import.views import _serialize_rows
-
         with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-        result = run_import(rows, profile, {"site": self.site}, dry_run=True)
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": self.site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_cans.xlsx",
-        }
-        session.save()
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:import_setup"),
+                {"profile": profile.pk, "site": self.site.pk, "excel_file": f},
+            )
+        self.assertEqual(response.status_code, 302, response.content[:300])
 
     def test_search_objects_includes_serial_in_response(self):
         """search_objects API returns device serial in results."""

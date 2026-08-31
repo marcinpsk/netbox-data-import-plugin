@@ -45,8 +45,8 @@ def _migrate(target, *, fake=False):
 
 
 def _rewind_to_before_the_cutover():
-    """Reverse schema operations and fake only the two irreversible data operations."""
-    _migrate(DROP_MOVED_COLUMNS, fake=True)
+    """Reverse schema operations and fake only the irreversible data operation."""
+    _migrate(DROP_MOVED_COLUMNS)
     _migrate(MOVE_CONFIG_DATA)
     _migrate(ADD_CONFIG_FIELDS, fake=True)
     return _migrate(BEFORE)
@@ -89,14 +89,20 @@ class ProfileAdapterConfigMigrationStructureTest(SimpleTestCase):
         self.assertIn((APP, MOVE_CONFIG_DATA), _migration(DROP_MOVED_COLUMNS).dependencies)
 
 
+def _restore_every_leaf():
+    """Restore every leaf because a migration merge can leave later worker tests incomplete."""
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    executor.migrate(list(executor.loader.graph.leaf_nodes(APP)))
+
+
 class ProfileAdapterConfigMigrationTest(TransactionTestCase):
     """The migration chain moves legacy settings, repairs them, and drops their columns."""
 
     def setUp(self):
         super().setUp()
-        # A TransactionTestCase does not roll back schema changes, and a failure inside setUp
-        # skips tearDown. Register before walking down, so a rewound worker always recovers.
-        self.addCleanup(_migrate, LEAF)
+        # Register cleanup before rewinding because setUp failures skip tearDown.
+        self.addCleanup(_restore_every_leaf)
         _rewind_to_before_the_cutover()
 
     def test_it_moves_every_column_and_repairs_blank_required_settings(self):

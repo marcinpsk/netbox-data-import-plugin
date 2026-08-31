@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Reject a new multi-line comment block, and a recorded one that no longer exists.
+"""Reject a multi-line comment block that `comment_blocks.json` does not already record.
 
-A run of two or more whole-line `#` comments is a block, checked against `comment_blocks.json`. A
-block missing from that record fails as new, and a recorded block whose first line changed fails as
-stale, so neither the debt nor the record grows quietly.
+A run of two or more whole-line `#` comments is a block. The record is a permit list of the debt that
+already existed, so adding a block fails until it is one line or deliberately recorded.
+
+Removing a block needs no edit here. A record entry with nothing left to permit grants nothing, and
+requiring its removal would make every comment fix a two-file change and collide between branches.
+Regenerate the file with `_blocks_in_package()` when trimming it is worth a commit of its own.
 
 Banners, blank `#` lines and pragmas separate rather than explain, so they neither count nor join
 two blocks. Migrations are excluded, matching the ruff `per-file-ignores` carve-out.
@@ -94,16 +97,3 @@ class CommentBlocksStayOnOneLineTest(SimpleTestCase):
             [],
             "Give each of these its reason in one line. Record it in comment_blocks.json only if it cannot be.",
         )
-
-    def test_the_recorded_blocks_all_still_exist(self):
-        """A fixed block has to leave the record, or the record stops meaning anything."""
-        recorded = {path: Counter(texts) for path, texts in json.loads(BASELINE.read_text()).items()}
-        found = _blocks_in_package()
-
-        stale = [
-            f"{path}: {text}"
-            for path in sorted(recorded)
-            for text in sorted((recorded[path] - found.get(path, Counter())).elements())
-        ]
-
-        self.assertEqual(stale, [], "These are fixed or moved. Delete them from comment_blocks.json.")

@@ -13,7 +13,6 @@
     ['make', 'Make (manufacturer)'],
     ['model', 'Model (device type)'],
     ['rack_name', 'Rack name'],
-    ['source_id', 'Source ID'],
   ];
 
   /* The values this row already carries, so a part can say whether it overwrites one. */
@@ -294,6 +293,12 @@
     return true;
   }
 
+  function clearSaveError() {
+    var saveError = document.getElementById('res_save_error');
+    saveError.textContent = '';
+    saveError.classList.add('d-none');
+  }
+
   // Bound once: an HTMX swap re-runs this script, and a second listener would render twice.
   if (window.ndiSplitNameModalBound) return;
   window.ndiSplitNameModalBound = true;
@@ -317,6 +322,10 @@
       document.getElementById('res_existing_display').textContent = JSON.stringify(existing.resolved_fields);
     }
     renderParts(btn.dataset.originalValue, existing ? existing.resolved_fields : null);
+    var saveBtn = document.querySelector('#splitForm button[type="submit"]');
+    saveBtn.textContent = 'Save resolution';
+    saveBtn.removeAttribute('title');
+    clearSaveError();
   });
 
   document.addEventListener('input', function (event) {
@@ -329,6 +338,29 @@
     if (!buildResolvedFields()) {
       event.preventDefault();
       updateSaveButton();
+      return;
     }
+    if (typeof window.ndiPostPreviewAction !== 'function') return;
+    event.preventDefault();
+    var form = event.target;
+    var saveBtn = form.querySelector('button[type="submit"]');
+    clearSaveError();
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    window.ndiPostPreviewAction(form.action, new FormData(form))
+      .then(function (payload) {
+        saveBtn.textContent = 'Saved';
+        saveBtn.title = payload.message || 'Resolution saved.';
+        if (typeof window.ndiMarkPreviewStale === 'function') {
+          window.ndiMarkPreviewStale();
+        }
+      })
+      .catch(function (error) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save resolution';
+        var saveError = document.getElementById('res_save_error');
+        saveError.textContent = error.message || 'Could not save the resolution.';
+        saveError.classList.remove('d-none');
+      });
   });
 })();

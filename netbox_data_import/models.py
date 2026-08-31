@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
+import hashlib
 from contextlib import contextmanager
+from datetime import timedelta
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.urls import reverse
+from django.utils import timezone
+from core.choices import JobStatusChoices
+from core.models import Job
 from netbox.models import NetBoxModel
 
 from .adapters import (
@@ -14,11 +20,19 @@ from .adapters import (
     get_adapter,
     output_kinds_for,
 )
-from .catalog import CATALOG, has_implemented_module, policy_section
+from . import plan
+from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
 CONTACT_RESOLUTION_KEYS = CONTACT_RESOLUTION_REQUIRED_KEYS | frozenset({"contact_field_values", "contact_id"})
+SOURCE_RESOLUTION_RESERVED_FIELDS = frozenset({"source_id", "_conflicts"})
+
+
+def _invalid_contact_resolution_key_message(key):
+    """Describe one unknown Contact resolution key using the Contact-policy vocabulary."""
+    allowed = ", ".join(f"'{field}'" for field in sorted(CONTACT_RESOLUTION_KEYS))
+    return f"'{key}' is not a Contact resolution field. Use one of {allowed}."
 
 
 def validate_adapter_target_module(adapter_key):
@@ -70,12 +84,11 @@ def validate_contact_candidate_resolution(
     available_source_columns,
 ) -> dict:
     """Validate and normalize one saved Contact candidate resolution."""
-    if (
-        not isinstance(resolved_fields, dict)
-        or not CONTACT_RESOLUTION_REQUIRED_KEYS <= set(resolved_fields)
-        or set(resolved_fields) - CONTACT_RESOLUTION_KEYS
-    ):
+    if not isinstance(resolved_fields, dict) or not CONTACT_RESOLUTION_REQUIRED_KEYS <= set(resolved_fields):
         raise ValidationError("The Contact candidate resolution has an invalid structure.")
+    invalid = sorted(set(resolved_fields) - CONTACT_RESOLUTION_KEYS)
+    if invalid:
+        raise ValidationError(_invalid_contact_resolution_key_message(invalid[0]))
     if resolved_fields.get("contact_resolution_applied") is not True:
         raise ValidationError("The Contact candidate resolution is not marked as applied.")
 
@@ -110,6 +123,32 @@ def validate_contact_candidate_resolution(
         "field_values": {field: value.strip() for field, value in field_values.items()},
         "contact_id": contact_id,
     }
+
+
+def validate_source_resolution_fields(profile, source_column, resolved_fields):
+    """Reject resolved fields that cannot safely merge into one source row."""
+    if not isinstance(resolved_fields, dict):
+        raise ValidationError({"resolved_fields": "Enter the resolved fields as a JSON object."})
+    if any(not isinstance(key, str) for key in resolved_fields):
+        raise ValidationError({"resolved_fields": "Each resolved field name must be text."})
+
+    reserved = sorted(set(resolved_fields) & SOURCE_RESOLUTION_RESERVED_FIELDS)
+    if reserved:
+        raise ValidationError(
+            {"resolved_fields": f"The resolved field '{reserved[0]}' is reserved for import planning."}
+        )
+
+    if source_column == "candidate:contact":
+        invalid = sorted(set(resolved_fields) - CONTACT_RESOLUTION_KEYS)
+        if invalid:
+            raise ValidationError({"resolved_fields": _invalid_contact_resolution_key_message(invalid[0])})
+        return
+    output_kinds = profile.output_kinds if profile is not None else None
+    invalid = sorted(
+        key for key in resolved_fields if not CATALOG.is_valid(key, output_kinds=output_kinds, allow_candidates=False)
+    )
+    if invalid:
+        raise ValidationError({"resolved_fields": CATALOG.invalid_key_message(invalid[0])})
 
 
 @contextmanager
@@ -263,6 +302,44 @@ class ImportProfile(NetBoxModel):
             rows.append((field.label or pretty_name(name), value))
         return rows
 
+    def grouped_column_map(self) -> dict[str, list[str]]:
+        """Return this profile's mapped source columns, keyed by Target Field."""
+        grouped: dict[str, list[str]] = {}
+        # Two columns can feed one Target Field, and which one wins must not be a query-order accident.
+        for mapping in self.column_mappings.order_by("target_field", "pk"):
+            grouped.setdefault(mapping.target_field, []).append(mapping.source_column)
+        return grouped
+
+    @property
+    def planning_fingerprint(self) -> str:
+        """Return the fingerprint of every profile value planning depends on."""
+        related_sections = {
+            getattr(relation.related_model, "POLICY_SECTION", ""): relation.get_accessor_name()
+            for relation in self._meta.related_objects
+        }
+        sections = []
+        for section in POLICY_SECTIONS:
+            accessor = related_sections[section.key]
+            serialized_rows = []
+            for row in getattr(self, accessor).all():
+                serialized_rows.append(
+                    {
+                        field.name: field.value_from_object(row)
+                        for field in row._meta.concrete_fields
+                        if field.name not in {"id", "profile"}
+                    }
+                )
+            serialized_rows.sort(key=plan.canonical_json)
+            sections.append({"key": section.key, "rows": serialized_rows})
+        return plan.fingerprint_of(
+            {
+                "profile_id": self.pk,
+                "source_adapter": self.source_adapter,
+                "adapter_config": self.adapter_config,
+                "policy_sections": sections,
+            }
+        )
+
     @property
     def resolved_primary_contact_role(self):
         """Return the referenced Contact Role object, or None when unset or dangling.
@@ -290,8 +367,7 @@ class ImportProfile(NetBoxModel):
             raise ValidationError({"source_adapter": f"Unknown source adapter '{self.source_adapter}'."})
         stored = self._validate_source_adapter_immutability()
         if stored is None:
-            # A creation rule only: the adapter is immutable, so a stored profile keeps validating
-            # once the release that implements its Target Module ships.
+            # A creation rule only: the adapter is immutable, so a stored profile keeps validating.
             validate_adapter_target_module(self.source_adapter)
         self.adapter_config = adapter.config_form_class().validate_config(self.adapter_config)
 
@@ -371,6 +447,23 @@ class ColumnMapping(PolicySectionModel):
         value = self.target_field or ""
         if not CATALOG.is_valid(value, output_kinds=self.profile.output_kinds if self.profile_id else None):
             raise ValidationError({"target_field": CATALOG.invalid_key_message(value)})
+        if not self.profile_id or not value:
+            return
+        conflict = (
+            ColumnTransformRule.objects.filter(profile_id=self.profile_id)
+            .filter(models.Q(group_1_target=value) | models.Q(group_2_target=value))
+            .only("source_column")
+            .first()
+        )
+        if conflict is not None:
+            raise ValidationError(
+                {
+                    "target_field": (
+                        f"Target field '{value}' is already assigned by the transform rule "
+                        f"for source column '{conflict.source_column}'."
+                    )
+                }
+            )
 
     def get_target_field_display(self):
         """Return the human-readable name for the target_field value."""
@@ -439,36 +532,264 @@ class ClassRoleMapping(PolicySectionModel):
         return reverse("plugins:netbox_data_import:classrolemapping_edit", args=[self.pk])
 
 
-class ImportJob(models.Model):
-    """Records a completed import run with its results."""
+class SourceDocument(models.Model):
+    """The stored uploaded workbook that a plan and its executions read.
+
+    Preview, replanning, a background execution, and an audit read all resolve the same bytes, so the
+    plan carries a reference instead of the content.
+    """
+
+    RETENTION = timedelta(days=30)
+
+    # Audit input outlives its profile, so a delete orphans the row and retention reclaims it.
+    profile = models.ForeignKey(
+        ImportProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name="source_documents"
+    )
+    content = models.BinaryField()
+    content_fingerprint = models.CharField(max_length=64)
+    filename = models.CharField(max_length=255, blank=True)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created"]
+        indexes = [models.Index(fields=["profile", "content_fingerprint"])]
+        verbose_name = "Source Document"
+        verbose_name_plural = "Source Documents"
+
+    def __str__(self):
+        return f"{self.filename or 'upload'} ({self.content_fingerprint[:12]})"
+
+    @staticmethod
+    def fingerprint(content: bytes) -> str:
+        """Return the content fingerprint, which is what a plan compares against."""
+        return hashlib.sha256(bytes(content)).hexdigest()
+
+    @classmethod
+    def store(cls, *, profile, content, filename="", uploaded_by=None):
+        """Store one upload. A newer upload never removes an older one."""
+        return cls.objects.create(
+            profile=profile,
+            content=bytes(content),
+            content_fingerprint=cls.fingerprint(content),
+            filename=filename,
+            uploaded_by=uploaded_by,
+        )
+
+    @classmethod
+    def purge_unreferenced(cls, *, now=None) -> int:
+        """Delete unreferenced uploads past the retention window and return the count.
+
+        A document an Import Execution references is permanent audit input, so the queryset excludes
+        it and the protecting foreign key backs that up.
+        """
+        reference_time = now or timezone.now()
+        if timezone.is_naive(reference_time):
+            raise ValueError("now must be timezone-aware")
+        cutoff = reference_time - cls.RETENTION
+        # The protecting relation forces a row-by-row collect, so defer the bytes one purge would load.
+        stale = cls.objects.filter(import_executions__isnull=True, created__lt=cutoff).defer("content")
+        return stale.delete()[0]
+
+
+class ExecutionOutcome:
+    """The outcome vocabulary of an Import Execution (section 9.2)."""
+
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+    CHOICES = ((PENDING, "Pending"), (SUCCEEDED, "Succeeded"), (FAILED, "Failed"))
+
+
+class FailureReason:
+    """Typed failure reasons an Import Execution records."""
+
+    ABANDONED = "abandoned"
+    DATABASE = "database"
+    PERMISSION = "permission"
+    PRECONDITION = "precondition"
+    PLANNING = "planning"
+    SELECTION = "selection"
+    STALE_PLAN = "stale_plan"
+    VALIDATION = "validation"
+
+
+class ImportExecution(models.Model):
+    """The audit record of one selective or final execution.
+
+    Rows created before the plan cutover keep their historical columns, have null new fields, and are
+    display-only: they never satisfy an idempotency lookup and never take part in plan comparison.
+    """
+
+    #: A synchronous attempt cannot outlive the web request bound, so an older pending row is gone.
+    SYNCHRONOUS_BOUND = timedelta(minutes=10)
 
     profile = models.ForeignKey(
         ImportProfile,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="import_jobs",
+        related_name="import_executions",
     )
     created = models.DateTimeField(auto_now_add=True)
     input_filename = models.CharField(max_length=255, blank=True)
-    dry_run = models.BooleanField(default=False)
     site_name = models.CharField(max_length=100, blank=True)
     result_counts = models.JSONField(default=dict)
-    result_rows = models.JSONField(default=list)
+
+    source_document = models.ForeignKey(
+        SourceDocument,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="import_executions",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    idempotency_key = models.CharField(max_length=64, null=True, blank=True)
+    plan_schema_version = models.PositiveIntegerField(null=True, blank=True)
+    accepted_plan_fingerprint = models.CharField(max_length=64, null=True, blank=True)
+    selected_units = models.JSONField(null=True, blank=True)
+    outcome = models.CharField(max_length=16, choices=ExecutionOutcome.CHOICES, null=True, blank=True)
+    applied_changes = models.JSONField(null=True, blank=True)
+    failure_detail = models.JSONField(null=True, blank=True)
+    # Set by link_job: the reservation commits before the Job exists, and outlives a deleted Job.
+    job_backed = models.BooleanField(default=False)
+    job = models.OneToOneField(
+        "core.Job", on_delete=models.SET_NULL, null=True, blank=True, related_name="import_execution"
+    )
 
     class Meta:
         ordering = ["-created"]
-        verbose_name = "Import Job"
-        verbose_name_plural = "Import Jobs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="ndi_execution_profile_idempotency_key",
+            ),
+        ]
+        verbose_name = "Import Execution"
+        verbose_name_plural = "Import Executions"
 
     def __str__(self):
         return f"Import {self.pk} — {self.created:%Y-%m-%d %H:%M} ({self.input_filename})"
 
     def get_absolute_url(self):
-        """Return the associated profile's URL (no per-job detail view exists)."""
+        """Return the associated profile's URL (no per-execution detail view exists)."""
         if not self.profile_id:
             return reverse("plugins:netbox_data_import:importprofile_list")
         return reverse("plugins:netbox_data_import:importprofile", args=[self.profile_id])
+
+    @classmethod
+    def reserve(cls, **fields):
+        """Insert and commit the pending row, or return the row already holding this key.
+
+        The insert reserves the unique (Import Profile, idempotency key), so a duplicate submission
+        or job delivery loses the race and returns the existing row in any outcome.
+        """
+        if transaction.get_connection().in_atomic_block:
+            raise RuntimeError("The Import Execution reservation must commit before the target transaction opens.")
+        if not fields.get("idempotency_key"):
+            raise ValueError("An Import Execution reservation requires an idempotency key.")
+        # PostgreSQL treats two NULL profiles as distinct, so the partial unique index cannot hold.
+        if not fields.get("profile"):
+            raise ValueError("An Import Execution reservation requires an Import Profile.")
+        required_audit_fields = {
+            "source_document": "a Source Document",
+            "actor": "an actor",
+            "plan_schema_version": "a plan schema version",
+            "accepted_plan_fingerprint": "an accepted plan fingerprint",
+            "selected_units": "selected Synchronization Unit identities",
+        }
+        for field_name, label in required_audit_fields.items():
+            if fields.get(field_name) is None:
+                raise ValueError(f"An Import Execution reservation requires {label}.")
+        existing = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
+        if existing is not None:
+            return existing, False
+        try:
+            return cls.objects.create(outcome=ExecutionOutcome.PENDING, **fields), True
+        except IntegrityError:
+            # Only a lost race for this key is recoverable; any other constraint failure must surface.
+            winner = cls.for_idempotency(fields["profile"], fields["idempotency_key"])
+            if winner is None:
+                raise
+            return winner, False
+
+    def link_job(self, job):
+        """Record the native Job that runs this execution, after the reservation has committed."""
+        self.job = job
+        self.job_backed = True
+        self.save(update_fields=["job", "job_backed"])
+        return self
+
+    @classmethod
+    def for_idempotency(cls, profile, idempotency_key):
+        """Return the reserved row for this key, reconciled, or None. A legacy row never matches."""
+        if not idempotency_key:
+            return None
+        found = cls.objects.filter(profile=profile, idempotency_key=idempotency_key).first()
+        return found.reconcile_pending() if found is not None else None
+
+    def reconcile_pending(self, *, now=None):
+        """Transition an abandoned pending row to failed, so no sweeper is needed."""
+        if self.outcome != ExecutionOutcome.PENDING:
+            return self
+        if self.job_backed:
+            # The Job decides once it exists; a deleted Job leaves no way to finish the attempt.
+            job = Job.objects.filter(pk=self.job_id).first() if self.job_id else None
+            live = job is not None and job.status in JobStatusChoices.ENQUEUED_STATE_CHOICES
+        else:
+            # Either a synchronous attempt or a background one still between reserving and enqueuing.
+            live = self.created > (now or timezone.now()) - self.SYNCHRONOUS_BOUND
+        if live:
+            return self
+        try:
+            self.mark_failed(reason=FailureReason.ABANDONED)
+        except ValueError:
+            # A worker finished the row between this read and the transition; its outcome wins.
+            pass
+        return self
+
+    def _finish(self, **values):
+        """Transition this row out of pending exactly once, with the database as the arbiter.
+
+        Two instances can both hold a pending copy, so an in-memory check would let the second
+        write overwrite a committed outcome and destroy the audit evidence.
+        """
+        updated = type(self).objects.filter(pk=self.pk, outcome=ExecutionOutcome.PENDING).update(**values)
+        if not updated:
+            self.refresh_from_db()
+            raise ValueError(f"Import Execution {self.pk} already finished as '{self.outcome}'.")
+        for name, value in values.items():
+            setattr(self, name, value)
+        return self
+
+    def mark_succeeded(self, *, applied_changes, result_counts=None):
+        """Record the applied identities and the deleted-object snapshot."""
+        return self._finish(
+            outcome=ExecutionOutcome.SUCCEEDED,
+            applied_changes=applied_changes,
+            failure_detail=None,
+            result_counts=result_counts or {},
+        )
+
+    def mark_failed(self, *, reason, failed_change=None, rolled_back=(), not_attempted=()):
+        """Record what failed, what rolled back, and what was never attempted."""
+        return self._finish(
+            outcome=ExecutionOutcome.FAILED,
+            applied_changes=None,
+            result_counts={"created": {}, "errors": 1},
+            failure_detail={
+                "failed_change": failed_change,
+                "rolled_back": list(rolled_back),
+                "not_attempted": list(not_attempted),
+                "reason": reason,
+            },
+        )
 
 
 class DeviceTypeMapping(PolicySectionModel):
@@ -590,7 +911,10 @@ class ColumnTransformRule(PolicySectionModel):
     )
     pattern = models.CharField(
         max_length=500,
-        help_text=r"Python regex with capture groups (re.fullmatch). E.g. ^(\w+) - (.+)$",
+        help_text=(
+            r"RE2 pattern with capture groups and full-match semantics. "
+            r"Backreferences and look-around are not supported. E.g. ^(\w+) - (.+)$"
+        ),
     )
     group_1_target = models.CharField(
         max_length=100,
@@ -612,34 +936,35 @@ class ColumnTransformRule(PolicySectionModel):
         verbose_name_plural = "Column Transform Rules"
 
     def clean(self):
-        """Validate the regex pattern, group counts, and group target field names."""
-        import re
-
+        """Validate the regex, capture groups, and exclusive ownership of group targets."""
         from django.core.exceptions import ValidationError
+
+        from .transform_regex import TransformPattern, TransformPatternError
 
         super().clean()
 
         try:
-            compiled = re.compile(self.pattern)
-        except re.error as exc:
-            raise ValidationError({"pattern": f"Invalid regex pattern: {exc}"})
+            compiled = TransformPattern.compile(self.pattern)
+        except TransformPatternError as exc:
+            raise ValidationError({"pattern": f"Regex pattern is not supported: {exc}"}) from exc
 
         required_groups = 0
         if self.group_1_target:
             required_groups = 1
         if self.group_2_target:
             required_groups = 2
-        if compiled.groups < required_groups:
+        if compiled.group_count < required_groups:
             raise ValidationError(
                 {
                     "pattern": (
                         f"Regex must contain at least {required_groups} capture group(s) "
-                        f"for the configured group target(s), but found {compiled.groups}."
+                        f"for the configured group target(s), but found {compiled.group_count}."
                     )
                 }
             )
 
         output_kinds = self.profile.output_kinds if self.profile_id else None
+        target_attrs = {}
         for attr in ("group_1_target", "group_2_target"):
             value = getattr(self, attr) or ""
             if not value:
@@ -647,6 +972,53 @@ class ColumnTransformRule(PolicySectionModel):
             # A capture group yields text, so a candidate target is not a valid group target.
             if not CATALOG.is_valid(value, output_kinds=output_kinds, allow_candidates=False):
                 raise ValidationError({attr: CATALOG.invalid_key_message(value)})
+            previous_attr = target_attrs.get(value)
+            if previous_attr is not None:
+                previous_group = previous_attr.removeprefix("group_").removesuffix("_target")
+                raise ValidationError(
+                    {attr: f"Target field '{value}' is already assigned to capture group {previous_group}."}
+                )
+            target_attrs[value] = attr
+
+        if not self.profile_id or not target_attrs:
+            return
+        conflicts = (
+            type(self)
+            .objects.filter(profile_id=self.profile_id)
+            .exclude(pk=self.pk)
+            .filter(models.Q(group_1_target__in=target_attrs) | models.Q(group_2_target__in=target_attrs))
+            .only("source_column", "group_1_target", "group_2_target")
+        )
+        errors = {}
+        for conflict in conflicts:
+            for target in (conflict.group_1_target, conflict.group_2_target):
+                attr = target_attrs.get(target)
+                if attr is not None:
+                    errors[attr] = (
+                        f"Target field '{target}' is already assigned by the transform rule "
+                        f"for source column '{conflict.source_column}'."
+                    )
+        errors.update(self._column_mapping_target_errors(target_attrs))
+        if errors:
+            raise ValidationError(errors)
+
+    def _column_mapping_target_errors(self, target_attrs):
+        """Return capture errors for targets already owned by direct mappings."""
+        mapped_targets = {
+            mapping.target_field: mapping.source_column
+            for mapping in ColumnMapping.objects.filter(
+                profile_id=self.profile_id,
+                target_field__in=target_attrs,
+            ).only("source_column", "target_field")
+        }
+        return {
+            attr: (
+                f"Target field '{target}' is already assigned by the column mapping "
+                f"for source column '{mapped_targets[target]}'."
+            )
+            for target, attr in target_attrs.items()
+            if target in mapped_targets
+        }
 
     def __str__(self):
         return f"{self.source_column}: {self.pattern}"
@@ -696,6 +1068,15 @@ class SourceResolution(PolicySectionModel):
         ]
         verbose_name = "Source Resolution"
         verbose_name_plural = "Source Resolutions"
+
+    def clean(self):
+        """Require target-field decisions that can safely merge into the profile's source rows."""
+        super().clean()
+        validate_source_resolution_fields(
+            self.profile if self.profile_id else None,
+            self.source_column,
+            self.resolved_fields,
+        )
 
     def __str__(self):
         return f"{self.source_id}/{self.source_column}: {self.original_value!r}"

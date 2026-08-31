@@ -20,8 +20,9 @@ menu = PluginMenu(
                     ),
                 ),
                 PluginMenuItem(
-                    link="plugins:netbox_data_import:importjob_list",
+                    link="plugins:netbox_data_import:importexecution_list",
                     link_text="Import History",
+                    permissions=("netbox_data_import.view_importexecution",),
                 ),
             ),
         ),

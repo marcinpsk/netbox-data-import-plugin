@@ -2,6 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Regression tests for repository CI configuration."""
 
+import tomllib
 from pathlib import Path
 from unittest import TestCase
 
@@ -57,8 +58,22 @@ class NetBoxMainWorkflowTest(TestCase):
         setup_script = Path(__file__).resolve().parents[2] / ".devcontainer" / "scripts" / "setup.sh"
         setup = setup_script.read_text()
 
-        self.assertIn("pytest-xdist ruff pre-commit playwright", setup)
+        self.assertIn("'pytest-xdist>=3.8,<4' ruff pre-commit playwright", setup)
         self.assertIn("python -m playwright install --with-deps chromium", setup)
+
+    def test_test_environments_constrain_xdist_to_the_supported_api(self):
+        """Keep every test runner on the xdist major version used by the worker guard."""
+        root = Path(__file__).resolve().parents[2]
+        project = tomllib.loads((root / "pyproject.toml").read_text())
+        dev_dependencies = project["dependency-groups"]["dev"]
+
+        self.assertIn("pytest-xdist>=3.8,<4", dev_dependencies)
+        for relative_path in (
+            ".devcontainer/scripts/setup.sh",
+            ".github/workflows/test.yaml",
+            ".github/workflows/test-netbox-main.yaml",
+        ):
+            self.assertIn("pytest-xdist>=3.8,<4", (root / relative_path).read_text(), relative_path)
 
     def test_javascript_workflow_does_not_persist_checkout_credentials(self):
         """Do not expose the workflow token to pull-request JavaScript."""
@@ -108,6 +123,14 @@ class ReleaseWorkflowTest(TestCase):
 
 class WorkflowAuditTest(TestCase):
     """Keep the GitHub Actions audit gating pull requests, not local commits alone."""
+
+    def test_the_lint_workflow_installs_the_locked_development_tools(self):
+        """The type checker and its stubs must come from the committed lock file."""
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "lint-format.yaml"
+        steps = yaml.safe_load(workflow.read_text())["jobs"]["format-and-lint"]["steps"]
+        install = next(step for step in steps if step.get("name") == "Install dependencies")
+
+        self.assertEqual(install["run"], "uv sync --locked --group dev")
 
     def test_the_lint_workflow_audits_the_workflows(self):
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "lint-format.yaml"

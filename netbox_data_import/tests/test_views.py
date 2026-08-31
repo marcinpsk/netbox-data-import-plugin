@@ -19,12 +19,15 @@ from netbox_data_import.models import (
     SourceResolution,
     stored_import_source,
 )
+from netbox_data_import.preview_row_actions import (
+    PREVIEW_PLAN_SESSION_KEY,
+    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+)
 from netbox_data_import.tests.helpers import (
     run_on_separate_connection,
     set_import_source,
     setup_preview_with_device_matches,
 )
-from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 User = get_user_model()
 
@@ -64,6 +67,46 @@ def _make_profile(name="ViewTest") -> ImportProfile:
         profile=profile, source_class="Switch", creates_rack=False, role_slug="network-switch"
     )
     return profile
+
+
+def _store_workspace_rows(client, user, profile, site, rows):
+    """Store a small target-neutral preview for tests of Review Workspace commands."""
+    from netbox_data_import.plan import Disposition, ImportPlan, SynchronizationUnit
+    from netbox_data_import.preview_row_actions import record_recalculated_preview
+
+    units = tuple(
+        SynchronizationUnit(
+            identity=f"device:source:{row.get('source_id') or index}",
+            disposition=Disposition.NO_OP,
+            display={
+                "row_number": row.get("_row_number"),
+                "source_id": row.get("source_id", ""),
+                "name": row.get("device_name", ""),
+                "object_type": "device",
+                "source_row": row,
+            },
+        )
+        for index, row in enumerate(rows, start=1)
+    )
+    plan = ImportPlan(
+        units=units,
+        source_fingerprint="0" * 64,
+        profile_fingerprint=profile.planning_fingerprint,
+        actor=str(user.pk),
+        planning_context={"site_id": site.pk, "location_id": None, "tenant_id": None},
+    )
+    session = client.session
+    record_recalculated_preview(session, plan)
+    session["import_rows"] = list(rows)
+    session["import_context"] = {
+        "profile_id": profile.pk,
+        "site_id": site.pk,
+        "location_id": None,
+        "tenant_id": None,
+        "filename": "workspace-test.xlsx",
+    }
+    session["import_preview_pending"] = True
+    session.save()
 
 
 class BaseViewTestCase(TestCase):
@@ -458,36 +501,52 @@ class ImportSetupViewTest(BaseViewTestCase):
 class PreviewSessionMixin:
     """Build the preview session state without dragging another class's test methods along."""
 
-    def _setup_session(self, *, mutate_rows=None):
-        """Populate session with a valid import state.
-
-        `mutate_rows` edits the parsed rows so a caller can preview a state the workbook lacks.
-        """
+    def _setup_session(self, *, mutate_workbook=None):
+        """Populate session with a valid import state."""
         from dcim.models import Site
-        from netbox_data_import.engine import parse_file, run_import
+        from openpyxl import load_workbook
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import SourceDocument
+        from netbox_data_import.preview_row_actions import (
+            record_recalculated_preview,
+        )
+        from netbox_data_import.review_workspace import ReviewWorkspace
 
         site = Site.objects.create(name="PreviewSite", slug="preview-site")
         profile = _make_profile("PreviewProfile")
         with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-        if mutate_rows is not None:
-            mutate_rows(rows)
-
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-
-        # Use the view helper to serialize rows
-        from netbox_data_import.views import _serialize_rows
+            content = f.read()
+        if mutate_workbook is not None:
+            workbook = load_workbook(BytesIO(content))
+            worksheet = workbook["Data"]
+            mutate_workbook(worksheet)
+            output = BytesIO()
+            workbook.save(output)
+            content = output.getvalue()
+        document = SourceDocument.store(
+            profile=profile,
+            content=content,
+            filename="sample_cans.xlsx",
+            uploaded_by=self.user,
+        )
+        planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+        plan = ImportEngine.plan(profile, document, self.user, planning_context)
+        workspace = ReviewWorkspace(plan)
 
         session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = workspace.source_rows
         session["import_context"] = {
             "profile_id": profile.pk,
             "site_id": site.pk,
             "location_id": None,
             "tenant_id": None,
             "filename": "sample_cans.xlsx",
+            "source_document_id": document.pk,
         }
+        session["import_preview_pending"] = True
+        session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
         session.save()
         return profile
 
@@ -508,6 +567,10 @@ class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
+        self.assertRegex(
+            resp.content.decode(),
+            r'<[^>]*(?=[^>]*\bid="syncRowError")(?=[^>]*\brole="alert")[^>]*>',
+        )
 
     def test_preview_shows_filename(self):
         """Preview page shows the uploaded filename."""
@@ -520,16 +583,15 @@ class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
         """The upload result is not calculated again on its redirect target."""
         self._setup_session()
         session = self.client.session
-        stored_result = session["import_result"]
-        session["import_rows"][0]["device_name"] = "changed-after-materialization"
-        session["import_preview_use_materialized_once"] = True
+        stored_plan = session[PREVIEW_PLAN_SESSION_KEY]
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         session.save()
 
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context["result"].to_session_dict(), stored_result)
-        self.assertNotIn("import_preview_use_materialized_once", self.client.session)
+        self.assertEqual(response.context["result"].plan.to_dict(), stored_plan)
+        self.assertNotIn(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, self.client.session)
         self.assertContains(response, 'id="ndi-preview-revision"')
         self.assertContains(response, "Recalculate Preview")
 
@@ -558,26 +620,15 @@ class ImportPreviewViewContextTest(BaseViewTestCase):
         profile = _make_profile("EmptyProfile")
 
         from dcim.models import Site
-        from netbox_data_import.engine import parse_file, run_import
-        from netbox_data_import.views import _serialize_rows
 
         site = Site.objects.create(name="EmptySite", slug="empty-site")
 
         with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_cans.xlsx",
-        }
-        session.save()
+            setup = self.client.post(
+                reverse("plugins:netbox_data_import:import_setup"),
+                {"profile": profile.pk, "site": site.pk, "excel_file": f},
+            )
+        self.assertEqual(setup.status_code, 302)
 
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
@@ -620,26 +671,15 @@ class ImportPreviewTemplateUnlinkButtonTest(BaseViewTestCase):
         profile = _make_profile("UnlinkTestProfile")
 
         from dcim.models import Site
-        from netbox_data_import.engine import parse_file, run_import
-        from netbox_data_import.views import _serialize_rows
 
         site = Site.objects.create(name="UnlinkSite", slug="unlink-site")
 
         with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_cans.xlsx",
-        }
-        session.save()
+            setup = self.client.post(
+                reverse("plugins:netbox_data_import:import_setup"),
+                {"profile": profile.pk, "site": site.pk, "excel_file": f},
+            )
+        self.assertEqual(setup.status_code, 302)
 
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
@@ -725,26 +765,15 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
         profile = _make_profile("ModalTestProfile1")
 
         from dcim.models import Site
-        from netbox_data_import.engine import parse_file, run_import
-        from netbox_data_import.views import _serialize_rows
 
         site = Site.objects.create(name="ModalSite", slug="modal-site")
 
         with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-
-        session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_cans.xlsx",
-        }
-        session.save()
+            setup = self.client.post(
+                reverse("plugins:netbox_data_import:import_setup"),
+                {"profile": profile.pk, "site": site.pk, "excel_file": f},
+            )
+        self.assertEqual(setup.status_code, 302)
 
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
@@ -907,14 +936,18 @@ class ImportResultsViewTest(BaseViewTestCase):
         self.assertIn(resp.status_code, [302])
 
     def test_results_with_session_returns_200(self):
-        """GET /import/results/ with result in session returns 200."""
-        from netbox_data_import.engine import ImportResult, RowResult
+        """GET /import/results/ with an execution audit in session returns 200."""
+        from netbox_data_import.models import ExecutionOutcome, ImportExecution
 
-        result = ImportResult()
-        result.rows = [RowResult(1, "1", "rack-01", "create", "rack", "Created")]
-        result._recompute_counts()
+        profile = _make_profile("Results Profile")
+        execution = ImportExecution.objects.create(
+            profile=profile,
+            actor=self.user,
+            outcome=ExecutionOutcome.SUCCEEDED,
+            applied_changes={"changes": ["rack:1:create"], "deleted": []},
+        )
         session = self.client.session
-        session["import_result"] = result.to_session_dict()
+        session["import_execution_id"] = execution.pk
         session.save()
 
         url = reverse("plugins:netbox_data_import:import_results")
@@ -922,12 +955,12 @@ class ImportResultsViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 200)
 
 
-class ImportJobListViewTest(BaseViewTestCase):
-    """Tests for ImportJobListView."""
+class ImportExecutionListViewTest(BaseViewTestCase):
+    """Tests for the Import Execution history list."""
 
-    def test_job_list_returns_200(self):
-        """Import job list page returns 200."""
-        url = reverse("plugins:netbox_data_import:importjob_list")
+    def test_execution_list_returns_200(self):
+        """GET the execution list returns 200 for a permitted actor."""
+        url = reverse("plugins:netbox_data_import:importexecution_list")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
@@ -1046,6 +1079,23 @@ class SaveResolutionViewTest(BaseViewTestCase):
         )
         res = SourceResolution.objects.get(profile=self.profile, source_id="SRC-Y", source_column="Name")
         self.assertEqual(res.resolved_fields["device_name"], "new-name")
+
+    def test_save_resolution_rejects_a_non_mapping_json_value(self):
+        """A saved resolution must be a target-field mapping."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "SRC-LIST",
+                "source_column": "Name",
+                "original_value": "some-device",
+                "resolved_fields": '["device_name"]',
+            },
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile, source_id="SRC-LIST").exists())
 
 
 class ExportProfileYamlViewTest(BaseViewTestCase):
@@ -1997,10 +2047,13 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         """POST links a source_id to an existing device."""
         from netbox_data_import.models import DeviceExistingMatch
 
-        session = self.client.session
-        session["import_rows"] = [{"_row_number": 1, "source_id": "SRC-MATCH-01", "asset_tag": "PLACEHOLDER-TAG"}]
-        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
-        session.save()
+        _store_workspace_rows(
+            self.client,
+            self.user,
+            self.profile,
+            self.site,
+            ({"_row_number": 1, "source_id": "SRC-MATCH-01", "asset_tag": "PLACEHOLDER-TAG"},),
+        )
         url = reverse("plugins:netbox_data_import:match_existing_device")
         resp = self.client.post(
             url,
@@ -2021,10 +2074,13 @@ class MatchExistingDeviceViewTest(BaseViewTestCase):
         """Manual links store the same bounded source asset tag as auto-match."""
         from netbox_data_import.models import DeviceExistingMatch
 
-        session = self.client.session
-        session["import_rows"] = [{"_row_number": 1, "source_id": "SRC-LONG-TAG", "asset_tag": f"  {'T' * 120}  "}]
-        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
-        session.save()
+        _store_workspace_rows(
+            self.client,
+            self.user,
+            self.profile,
+            self.site,
+            ({"_row_number": 1, "source_id": "SRC-LONG-TAG", "asset_tag": f"  {'T' * 120}  "},),
+        )
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:match_existing_device"),
@@ -2095,16 +2151,16 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             name="automatch-device-01", serial="SERIAL-AM-01", device_type=dt, role=role, site=self.site
         )
         self.profile = _make_profile("AutoMatchProfile")
-        session = self.client.session
-        session["import_context"] = {"profile_id": self.profile.pk, "site_id": self.site.pk}
-        session.save()
+        self._store_rows()
+
+    def _store_rows(self, *rows):
+        """Store source rows in the Review Workspace used by the command."""
+        _store_workspace_rows(self.client, self.user, self.profile, self.site, rows)
 
     def test_post_automatch_by_serial(self):
-        """POST with a row matching by serial creates a DeviceExistingMatch."""
         from netbox_data_import.models import DeviceExistingMatch
 
-        session = self.client.session
-        session["import_rows"] = [
+        self._store_rows(
             {
                 "_row_number": 1,
                 "source_id": "AM-001",
@@ -2113,8 +2169,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
-        ]
-        session.save()
+        )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
@@ -2195,8 +2250,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             name="tag-device-01", asset_tag="ASSET-TAG-01", device_type=dt, role=role, site=self.site
         )
 
-        session = self.client.session
-        session["import_rows"] = [
+        self._store_rows(
             {
                 "_row_number": 1,
                 "source_id": "TAG-001",
@@ -2205,8 +2259,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "serial": "",
                 "asset_tag": "ASSET-TAG-01",
             }
-        ]
-        session.save()
+        )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
@@ -2227,8 +2280,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         role = DeviceRole.objects.create(name="NameRole", slug="name-role")
         device = Device.objects.create(name="name-device-01", device_type=dt, role=role, site=self.site)
 
-        session = self.client.session
-        session["import_rows"] = [
+        self._store_rows(
             {
                 "_row_number": 1,
                 "source_id": "NAME-001",
@@ -2237,8 +2289,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "serial": "",
                 "asset_tag": "",
             }
-        ]
-        session.save()
+        )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
@@ -2261,8 +2312,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         Device.objects.create(name="amb-device-01", serial="AMBSERIAL-01", device_type=dt, role=role, site=self.site)
         Device.objects.create(name="amb-device-02", serial="AMBSERIAL-01", device_type=dt, role=role, site=self.site)
 
-        session = self.client.session
-        session["import_rows"] = [
+        self._store_rows(
             {
                 "_row_number": 1,
                 "source_id": "AMB-001",
@@ -2271,8 +2321,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "serial": "AMBSERIAL-01",
                 "asset_tag": "",
             }
-        ]
-        session.save()
+        )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
@@ -2290,8 +2339,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
             device_name=self.device.name,
         )
 
-        session = self.client.session
-        session["import_rows"] = [
+        self._store_rows(
             {
                 "_row_number": 1,
                 "source_id": "ALREADY-001",
@@ -2300,8 +2348,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
-        ]
-        session.save()
+        )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
@@ -2313,8 +2360,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         """Rows without source_id are silently skipped."""
         from netbox_data_import.models import DeviceExistingMatch
 
-        session = self.client.session
-        session["import_rows"] = [
+        self._store_rows(
             {
                 "_row_number": 1,
                 "source_id": "",
@@ -2323,8 +2369,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "serial": "SERIAL-AM-01",
                 "asset_tag": "",
             }
-        ]
-        session.save()
+        )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
@@ -2341,8 +2386,7 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
         role = DeviceRole.objects.create(name="ProbRole", slug="prob-role")
         Device.objects.create(name="probable-device", device_type=dt, role=role, site=self.site)
 
-        session = self.client.session
-        session["import_rows"] = [
+        self._store_rows(
             {
                 "_row_number": 1,
                 "source_id": "PROB-001",
@@ -2351,84 +2395,13 @@ class AutoMatchDevicesViewTest(BaseViewTestCase):
                 "serial": "",
                 "asset_tag": "",
             }
-        ]
-        session.save()
+        )
 
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
         self.assertEqual(resp.status_code, 302)
         # Probable match doesn't auto-link
         self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="PROB-001").exists())
-
-
-class ImportRunViewTest(IsolatedRQQueueTestMixin, BaseViewTestCase):
-    """Tests for ImportRunView and its queued import."""
-
-    def _setup_session(self):
-        """Populate session so ImportRunView has valid data."""
-        from dcim.models import Site
-        from netbox_data_import.engine import parse_file, run_import
-        from netbox_data_import.views import _serialize_rows
-
-        site = Site.objects.create(name="RunSite", slug="run-site")
-        profile = _make_profile("RunProfile")
-
-        with open(FIXTURE_PATH, "rb") as f:
-            rows = parse_file(f, profile)
-
-        result = run_import(rows, profile, {"site": site}, dry_run=True)
-
-        session = self.client.session
-        session["import_rows"] = _serialize_rows(rows)
-        session["import_context"] = {
-            "profile_id": profile.pk,
-            "site_id": site.pk,
-            "location_id": None,
-            "tenant_id": None,
-            "filename": "sample_cans.xlsx",
-        }
-        session["import_result"] = result.to_session_dict()
-        session.save()
-        return profile, site
-
-    def test_run_import_post_creates_objects(self):
-        """The native worker executes the submitted workbook import."""
-        from dcim.models import Rack, Device
-
-        self._setup_session()
-        url = reverse("plugins:netbox_data_import:import_run")
-        with self.captureOnCommitCallbacks(execute=True):
-            resp = self.client.post(url)
-        self.assertEqual(resp.status_code, 302)
-        self.assertEqual(Rack.objects.count(), 0)
-        self.assertEqual(Device.objects.count(), 0)
-
-        self.run_rq_jobs()
-
-        self.assertGreater(Rack.objects.count(), 0)
-        self.assertGreater(Device.objects.count(), 0)
-
-    def test_run_import_without_session_redirects(self):
-        """POST without session data redirects to setup."""
-        url = reverse("plugins:netbox_data_import:import_run")
-        resp = self.client.post(url)
-        self.assertEqual(resp.status_code, 302)
-
-    def test_run_import_rejects_a_stale_materialized_preview(self):
-        """A pending row action must be recalculated before import starts."""
-        self._setup_session()
-        session = self.client.session
-        session["import_preview_dirty"] = True
-        session.save()
-
-        response = self.client.post(reverse("plugins:netbox_data_import:import_run"))
-
-        self.assertRedirects(
-            response,
-            reverse("plugins:netbox_data_import:import_preview"),
-            fetch_redirect_response=False,
-        )
-        self.assertNotIn("import_background_job_id", self.client.session)
 
 
 class ImportProfileYamlWithTransformRuleTest(BaseViewTestCase):
@@ -2503,6 +2476,7 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
 
         self.ColumnTransformRule = ColumnTransformRule
         self.profile = _make_profile("CTRCRUDProfile")
+        self.profile.column_mappings.filter(target_field__in=("asset_tag", "device_name")).delete()
 
     def test_get_add_view(self):
         """GET column-transform-rule-add returns 200."""
@@ -2533,6 +2507,79 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
         resp = self.client.post(url, {"profile": self.profile.pk})
         self.assertEqual(resp.status_code, 200)
+
+    def test_post_add_rejects_a_target_used_by_another_rule(self):
+        """Two transform rules in one profile cannot write the same target."""
+        self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="Primary Name",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+
+        resp = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": "Fallback Name",
+                "pattern": r"^(.+)$",
+                "group_1_target": "device_name",
+                "group_2_target": "",
+            },
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "already assigned by the transform rule for source column &#x27;Primary Name&#x27;")
+        self.assertFalse(
+            self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="Fallback Name").exists()
+        )
+
+    def test_post_add_rejects_a_target_used_by_a_column_mapping(self):
+        """A transform cannot replace a direct column mapping through the HTTP write path."""
+        ColumnMapping.objects.create(profile=self.profile, source_column="Name", target_field="device_name")
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+
+        response = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": "Fallback Name",
+                "pattern": r"^(.+)$",
+                "group_1_target": "device_name",
+                "group_2_target": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "already assigned by the column mapping for source column &#x27;Name&#x27;")
+        self.assertFalse(
+            self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="Fallback Name").exists()
+        )
+
+    def test_post_add_rejects_one_target_for_both_capture_groups(self):
+        """One transform rule cannot overwrite its first capture with its second capture."""
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+
+        resp = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": "Combined Name",
+                "pattern": r"^(.+) - (.+)$",
+                "group_1_target": "device_name",
+                "group_2_target": "device_name",
+            },
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(
+            resp,
+            "Target field &#x27;device_name&#x27; is already assigned to capture group 1.",
+        )
+        self.assertFalse(
+            self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="Combined Name").exists()
+        )
 
     def test_get_edit_view(self):
         """GET edit view returns 200."""
@@ -2581,6 +2628,37 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:columntransformrule_edit", kwargs={"pk": rule.pk})
         resp = self.client.post(url, {"profile": self.profile.pk})
         self.assertEqual(resp.status_code, 200)
+
+    def test_post_edit_rejects_a_target_used_by_another_rule(self):
+        """Editing a saved rule cannot make its target overlap another saved rule."""
+        self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="Primary Name",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+        rule = self.ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="Inventory Tag",
+            pattern=r"^(.+)$",
+            group_1_target="asset_tag",
+        )
+        url = reverse("plugins:netbox_data_import:columntransformrule_edit", kwargs={"pk": rule.pk})
+
+        resp = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": rule.source_column,
+                "pattern": rule.pattern,
+                "group_1_target": "device_name",
+                "group_2_target": "",
+            },
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        rule.refresh_from_db()
+        self.assertEqual(rule.group_1_target, "asset_tag")
 
     def test_get_delete_view(self):
         """GET delete view returns 200."""
@@ -2691,21 +2769,19 @@ class ModelsStrTest(BaseViewTestCase):
         self.assertIn("Dell EMC Str", s)
         self.assertIn("dell-str", s)
 
-    def test_import_job_str(self):
-        """ImportJob.__str__ contains the pk."""
-        from netbox_data_import.models import ImportJob
+    def test_import_execution_str(self):
+        """ImportExecution.__str__ includes the execution identifier."""
+        from netbox_data_import.models import ImportExecution
 
-        job = ImportJob.objects.create(profile=self.profile, dry_run=True, input_filename="test.xlsx")
-        s = str(job)
-        self.assertIn(str(job.pk), s)
+        execution = ImportExecution.objects.create(profile=self.profile, input_filename="test.xlsx")
+        self.assertIn(str(execution.pk), str(execution))
 
-    def test_import_job_absolute_url(self):
-        """ImportJob.get_absolute_url returns the associated profile's URL."""
-        from netbox_data_import.models import ImportJob
+    def test_import_execution_absolute_url(self):
+        """It has no detail route of its own, so it points at the profile."""
+        from netbox_data_import.models import ImportExecution
 
-        job = ImportJob.objects.create(profile=self.profile, dry_run=True)
-        url = job.get_absolute_url()
-        self.assertIn(str(self.profile.pk), url)
+        execution = ImportExecution.objects.create(profile=self.profile)
+        self.assertIn(str(self.profile.pk), execution.get_absolute_url())
 
     def test_ignored_device_str(self):
         """IgnoredDevice.__str__ includes device_name."""
@@ -3089,8 +3165,8 @@ class QuickResolveDeviceTypeMissingFieldsTest(BaseViewTestCase):
         self.assertEqual(dt.u_height, 1)
 
 
-class AutoMatchAmbiguousNameTest(BaseViewTestCase):
-    """Cover _auto_match_single_device ambiguous name path (line 1387)."""
+class AutoMatchNameScopeTest(BaseViewTestCase):
+    """The Review Workspace scopes name matching to the active target site."""
 
     def setUp(self):
         """Set up profile and two devices with the same name (different sites)."""
@@ -3102,51 +3178,39 @@ class AutoMatchAmbiguousNameTest(BaseViewTestCase):
         mfg = Manufacturer.objects.create(name="AmbNameMfg", slug="amb-name-mfg")
         dt = DeviceType.objects.create(manufacturer=mfg, model="AmbNameModel", slug="amb-name-model")
         role = DeviceRole.objects.create(name="AmbNameRole", slug="amb-name-role")
-        Device.objects.create(name="ambname-shared", device_type=dt, role=role, site=self.site)
+        self.target_device = Device.objects.create(name="ambname-shared", device_type=dt, role=role, site=self.site)
         Device.objects.create(name="ambname-shared", device_type=dt, role=role, site=site2)
         self.profile = _make_profile("AmbNameProfile")
 
-    def test_ambiguous_name_match_no_link(self):
-        """Rows with ambiguous name match (multiple devices) do NOT create DeviceExistingMatch."""
+    def test_the_same_name_at_another_site_does_not_make_the_target_ambiguous(self):
         from netbox_data_import.models import DeviceExistingMatch
 
-        session = self.client.session
-        session["import_rows"] = [
-            {
-                "_row_number": 1,
-                "source_id": "AMBNAME-001",
-                "device_name": "ambname-shared",
-                "serial": "",
-                "asset_tag": "",
-            }
-        ]
-        session.save()
+        _store_workspace_rows(
+            self.client,
+            self.user,
+            self.profile,
+            self.site,
+            (
+                {
+                    "_row_number": 1,
+                    "source_id": "AMBNAME-001",
+                    "device_name": "ambname-shared",
+                    "device_class": "Server",
+                    "serial": "",
+                    "asset_tag": "",
+                },
+            ),
+        )
         url = reverse("plugins:netbox_data_import:auto_match_devices")
         resp = self.client.post(url, {"profile_id": self.profile.pk})
         self.assertEqual(resp.status_code, 302)
-        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile, source_id="AMBNAME-001").exists())
-
-
-class SerializeRowsTest(BaseViewTestCase):
-    """Cover _serialize_rows datetime handling (line 1470)."""
-
-    def test_serialize_rows_with_datetime(self):
-        """_serialize_rows converts datetime values to ISO format strings."""
-        import datetime
-        from netbox_data_import.views import _serialize_rows
-
-        rows = [{"_row_number": 1, "device_name": "test", "created_at": datetime.datetime(2025, 1, 1, 12, 0, 0)}]
-        result = _serialize_rows(rows)
-        self.assertEqual(result[0]["created_at"], "2025-01-01T12:00:00")
-
-    def test_serialize_rows_with_date(self):
-        """_serialize_rows converts date values to ISO format strings."""
-        import datetime
-        from netbox_data_import.views import _serialize_rows
-
-        rows = [{"_row_number": 1, "created_at": datetime.date(2025, 6, 1)}]
-        result = _serialize_rows(rows)
-        self.assertEqual(result[0]["created_at"], "2025-06-01")
+        self.assertTrue(
+            DeviceExistingMatch.objects.filter(
+                profile=self.profile,
+                source_id="AMBNAME-001",
+                netbox_device_id=self.target_device.pk,
+            ).exists()
+        )
 
 
 class SaveResolutionJsonErrorTest(BaseViewTestCase):
@@ -3180,18 +3244,17 @@ class SaveResolutionJsonErrorTest(BaseViewTestCase):
 
 
 class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
-    """Cover the ambiguous asset_tag path in _auto_match_single_device."""
+    """The Review Workspace never guesses between case-insensitive asset-tag matches."""
 
     def setUp(self):
         """Set up profile."""
         super().setUp()
         self.profile = _make_profile("AmbATProfile")
 
-    def test_ambiguous_asset_tag_returns_none_is_ambiguous(self):
-        """_auto_match_single_device is ambiguous when asset_tag matches two devices."""
+    def test_ambiguous_asset_tag_creates_no_binding(self):
+        from django.contrib.messages import get_messages
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-
-        from netbox_data_import.views import _auto_match_single_device
+        from netbox_data_import.models import DeviceExistingMatch
 
         site = Site.objects.create(name="AmbATSite", slug="amb-at-site")
         mfg = Manufacturer.objects.create(name="AmbATMfg", slug="amb-at-mfg")
@@ -3201,12 +3264,31 @@ class AutoMatchAmbiguousAssetTagTest(BaseViewTestCase):
         for name, asset_tag in (("amb-at-1", "SHARED-TAG"), ("amb-at-2", "shared-tag")):
             Device.objects.create(name=name, asset_tag=asset_tag, device_type=dt, role=role, site=site)
 
-        # The name matches a real device, so a fall-through to name matching would return that device.
-        device, is_ambiguous, method = _auto_match_single_device(Device, "amb-at-1", "", "SHARED-TAG")
+        _store_workspace_rows(
+            self.client,
+            self.user,
+            self.profile,
+            site,
+            (
+                {
+                    "_row_number": 1,
+                    "source_id": "AMB-ASSET-1",
+                    "device_name": "amb-at-1",
+                    "device_class": "Server",
+                    "serial": "",
+                    "asset_tag": "SHARED-TAG",
+                },
+            ),
+        )
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:auto_match_devices"),
+            {"profile_id": self.profile.pk},
+        )
 
-        self.assertIsNone(device)
-        self.assertTrue(is_ambiguous)
-        self.assertIsNone(method)
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(source_id="AMB-ASSET-1").exists())
+        summary = " ".join(str(message) for message in get_messages(response.wsgi_request))
+        self.assertIn("1 ambiguous", summary)
 
 
 class ImportProfileBulkImportViewTest(BaseViewTestCase):
@@ -3390,6 +3472,86 @@ column_mappings:
         self.assertTrue(
             ColumnTransformRule.objects.filter(profile=profile, source_column="HostName").exists(),
             "ColumnTransformRule must be created from hierarchical YAML",
+        )
+
+    def test_post_hierarchical_yaml_transfers_a_transform_target_to_a_mapping(self):
+        """A complete YAML policy can give a transform target to a direct mapping."""
+        from netbox_data_import.models import ColumnTransformRule
+
+        initial = """profile:
+  name: TransformToMappingProfile
+column_mappings: []
+column_transform_rules:
+  - source_column: Combined
+    pattern: '^(.+)$'
+    group_1_target: device_name
+    group_2_target: ''
+"""
+        replacement = """profile:
+  name: TransformToMappingProfile
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+column_transform_rules: []
+"""
+
+        initial_response = self.client.post(self._url(), {"data": initial})
+        self.assertIn(initial_response.status_code, (200, 302))
+        profile = ImportProfile.objects.get(name="TransformToMappingProfile")
+        self.assertTrue(
+            ColumnTransformRule.objects.filter(
+                profile=profile,
+                source_column="Combined",
+                group_1_target="device_name",
+            ).exists()
+        )
+        self.assertFalse(profile.column_mappings.exists())
+
+        response = self.client.post(self._url(), {"data": replacement})
+
+        profile.refresh_from_db()
+        self.assertIn(response.status_code, (200, 302))
+        self.assertTrue(profile.column_mappings.filter(source_column="Name", target_field="device_name").exists())
+        self.assertFalse(ColumnTransformRule.objects.filter(profile=profile).exists())
+
+    def test_post_hierarchical_yaml_transfers_a_mapping_target_to_a_transform(self):
+        """A complete YAML policy can give a direct-mapping target to a transform."""
+        from netbox_data_import.models import ColumnTransformRule
+
+        initial = """profile:
+  name: MappingToTransformProfile
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+column_transform_rules: []
+"""
+        replacement = """profile:
+  name: MappingToTransformProfile
+column_mappings: []
+column_transform_rules:
+  - source_column: Combined
+    pattern: '^(.+)$'
+    group_1_target: device_name
+    group_2_target: ''
+"""
+
+        initial_response = self.client.post(self._url(), {"data": initial})
+        self.assertIn(initial_response.status_code, (200, 302))
+        profile = ImportProfile.objects.get(name="MappingToTransformProfile")
+        self.assertTrue(profile.column_mappings.filter(source_column="Name", target_field="device_name").exists())
+        self.assertFalse(ColumnTransformRule.objects.filter(profile=profile).exists())
+
+        response = self.client.post(self._url(), {"data": replacement})
+
+        profile.refresh_from_db()
+        self.assertIn(response.status_code, (200, 302))
+        self.assertFalse(profile.column_mappings.exists())
+        self.assertTrue(
+            ColumnTransformRule.objects.filter(
+                profile=profile,
+                source_column="Combined",
+                group_1_target="device_name",
+            ).exists()
         )
 
     # --- Authentication ---
@@ -4075,6 +4237,16 @@ class SyncDeviceFieldViewTests(TestCase):
         self.assertTrue(data["ok"])
         self.device.refresh_from_db()
         self.assertEqual(self.device.status, "active")
+
+    def test_sync_status_translates_a_source_word(self):
+        """The view takes the same source-word table the import does, so an alias resolves."""
+        from dcim.choices import DeviceStatusChoices
+
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "status", "value": "live"})
+
+        self.assertTrue(response.json()["ok"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.status, DeviceStatusChoices.STATUS_ACTIVE)
 
     def test_sync_u_height(self):
         """u_height is not in _ALLOWED_FIELDS → ok=False with 'not syncable' error."""

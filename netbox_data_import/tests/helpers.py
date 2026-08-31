@@ -13,6 +13,97 @@ from django.db import connections
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
 
 
+def workbook_bytes(headers, rows, *, sheet_name="Data") -> bytes:
+    """Return one in-memory workbook containing *headers* and *rows*."""
+    from io import BytesIO
+
+    import openpyxl
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    if not isinstance(worksheet, Worksheet):
+        worksheet = workbook.create_sheet()
+    worksheet.title = sheet_name
+    worksheet.append(list(headers))
+    for row in rows:
+        worksheet.append(list(row))
+    content = BytesIO()
+    workbook.save(content)
+    return content.getvalue()
+
+
+def store_workbook_document(profile, headers, rows, uploaded_by, filename, *, sheet_name="Data"):
+    """Store one generated workbook and return its Source Document."""
+    from netbox_data_import.models import SourceDocument
+
+    return SourceDocument.store(
+        profile=profile,
+        content=workbook_bytes(headers, rows, sheet_name=sheet_name),
+        filename=filename,
+        uploaded_by=uploaded_by,
+    )
+
+
+def plan_source_rows(rows, profile, site, *, actor=None, location=None, tenant=None):
+    """Plan canonical flat-source rows through the registered Target Module interfaces."""
+    from netbox_data_import import catalog, target_modules
+    from netbox_data_import.adapters import FlatWorkbookAdapter, SourceBatch
+    from netbox_data_import.netbox_reader import NetBoxReader
+    from netbox_data_import.plan import ImportPlan
+    from netbox_data_import.review_workspace import ReviewWorkspace
+    from netbox_data_import.source_resolution import derive_effective_rows
+
+    reader = NetBoxReader.for_actor(actor) if actor is not None else NetBoxReader.unrestricted()
+    reader = reader.for_target(site=site, location=location, tenant=tenant)
+    batch = SourceBatch(
+        output_kinds=FlatWorkbookAdapter.output_kinds,
+        rows=tuple(derive_effective_rows(list(rows), profile)),
+    )
+    units = []
+    for declaration in catalog.TARGET_MODULES:
+        if declaration.consumes & batch.output_kinds:
+            units.extend(target_modules.runtime_for(declaration.key).plan(batch, profile, catalog.CATALOG, reader))
+    plan = ImportPlan(
+        units=tuple(units),
+        source_fingerprint="0" * 64,
+        profile_fingerprint=profile.planning_fingerprint,
+        actor=str(actor.pk) if actor is not None else "test-unrestricted",
+        planning_context={
+            "site_id": site.pk,
+            "location_id": location.pk if location is not None else None,
+            "tenant_id": tenant.pk if tenant is not None else None,
+        },
+    )
+    return ReviewWorkspace(plan)
+
+
+def apply_source_rows(rows, profile, site, *, actor=None, location=None, tenant=None):
+    """Apply canonical rows through Target Module runtimes and return their accepted workspace."""
+    from django.db import transaction
+
+    from netbox_data_import import target_modules
+    from netbox_data_import.netbox_reader import NetBoxReader
+    from netbox_data_import.plan import executable_units, merge_changes
+    from netbox_data_import.target_modules import ExecutionContext
+
+    workspace = plan_source_rows(
+        rows,
+        profile,
+        site,
+        actor=actor,
+        location=location,
+        tenant=tenant,
+    )
+    reader = NetBoxReader.for_actor(actor) if actor is not None else NetBoxReader.unrestricted()
+    reader = reader.for_target(site=site, location=location, tenant=tenant)
+    context = ExecutionContext(actor=actor, reader=reader, profile=profile)
+    with transaction.atomic():
+        for change in merge_changes(executable_units(workspace.plan.units)):
+            target_modules.runtime_for(change.target_module).apply(change, context)
+    return workspace
+
+
 @contextmanager
 def run_on_separate_connection(target):
     """Run *target* in a thread with a fresh database connection."""
@@ -58,16 +149,7 @@ def user_with_object_permission(username, grants):
 
 
 def make_dcim_objects(name_prefix=""):
-    """Create and return (site, manufacturer, device_type, role) with the given prefix.
-
-    Useful for test setUp methods that need basic DCIM infrastructure.
-    All objects receive ``name_prefix`` prepended so tests that run in the same
-    database transaction can use unique names.
-
-    Example::
-
-        site, mfg, dt, role = make_dcim_objects("Test")
-    """
+    """Create a Site, Manufacturer, Device Type, and Device Role with one prefix."""
     from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
 
     slug_prefix = name_prefix.lower()
@@ -84,20 +166,16 @@ def make_dcim_objects(name_prefix=""):
 
 
 def setup_preview_with_device_matches(client, profile):
-    """Populate *client*'s session with import state and DeviceExistingMatch records.
-
-    Runs a dry import against a freshly-created site, links the first two
-    device result rows to two newly-created Device objects, and writes the
-    resulting state into the test client's session.
-
-    Returns ``(site, device1, device2, device_rows)`` so callers can make
-    assertions against the created objects.
-    """
+    """Populate a preview with two persisted device matches."""
     from dcim.models import Device
 
-    from netbox_data_import.engine import parse_file, run_import
-    from netbox_data_import.models import DeviceExistingMatch
-    from netbox_data_import.views import _serialize_rows
+    from netbox_data_import.import_engine import ImportEngine
+    from netbox_data_import.models import DeviceExistingMatch, SourceDocument
+    from netbox_data_import.preview_row_actions import (
+        PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+        record_recalculated_preview,
+    )
+    from netbox_data_import.review_workspace import ReviewWorkspace
 
     site, _manufacturer, device_type, role = make_dcim_objects("Match")
 
@@ -105,10 +183,21 @@ def setup_preview_with_device_matches(client, profile):
     device2 = Device.objects.create(name="device-b", site=site, device_type=device_type, role=role)
 
     with open(FIXTURE_PATH, "rb") as f:
-        rows = parse_file(f, profile)
-    result = run_import(rows, profile, {"site": site}, dry_run=True)
+        content = f.read()
+    user = client.session.get("_auth_user_id")
+    from django.contrib.auth import get_user_model
 
-    device_rows = [r for r in result.rows if r.object_type == "device" and r.source_id]
+    actor = get_user_model().objects.get(pk=user)
+    document = SourceDocument.store(
+        profile=profile,
+        content=content,
+        filename="sample_cans.xlsx",
+        uploaded_by=actor,
+    )
+    planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+    result = ReviewWorkspace(ImportEngine.plan(profile, document, actor, planning_context))
+
+    device_rows = [row for row in result.units if row.object_type == "device" and row.source_id]
     if len(device_rows) > 0:
         DeviceExistingMatch.objects.create(
             profile=profile,
@@ -126,16 +215,21 @@ def setup_preview_with_device_matches(client, profile):
             device_name=device2.name,
         )
 
+    plan = ImportEngine.plan(profile, document, actor, planning_context)
+    result = ReviewWorkspace(plan)
     session = client.session
-    session["import_result"] = result.to_session_dict()
-    session["import_rows"] = _serialize_rows(rows)
+    record_recalculated_preview(session, plan)
+    session["import_rows"] = result.source_rows
     session["import_context"] = {
         "profile_id": profile.pk,
         "site_id": site.pk,
         "location_id": None,
         "tenant_id": None,
         "filename": "sample_cans.xlsx",
+        "source_document_id": document.pk,
     }
+    session["import_preview_pending"] = True
+    session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
     session.save()
     return site, device1, device2, device_rows
 
@@ -154,6 +248,19 @@ def set_import_source(device, profile, source_id="", extra_columns=None, unassig
         },
     )
     return record
+
+
+def client_with_object_permission(username, model, *, granted, actions=("view",)):
+    """Return a logged-in client, failing here so no test can pass on a login redirect."""
+    from django.test import Client
+
+    password = "testpass"
+    grants = [(model, actions, None)] if granted else []
+    user_with_object_permission(username, grants)
+    client = Client()
+    if not client.login(username=username, password=password):
+        raise AssertionError(f"the test client could not log in as '{username}'")
+    return client
 
 
 def wait_until_a_lock_is_blocked(test, timeout=10):

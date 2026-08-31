@@ -6,16 +6,17 @@ import json
 
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.urls import reverse
 
-from netbox_data_import.engine import derive_effective_rows, run_import
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, SourceResolution
 from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_REVISION_SESSION_KEY,
+    record_recalculated_preview,
 )
-from netbox_data_import.tests.helpers import make_dcim_objects
+from netbox_data_import.tests.helpers import make_dcim_objects, store_workbook_document
 
 JSON = "application/json"
 
@@ -45,7 +46,7 @@ class ContactResolutionSessionMixin:
         )
 
         self.row = {
-            "_row_number": 1,
+            "_row_number": 2,
             "source_id": "AJAX-001",
             "device_name": "ajax-contact-device",
             "device_class": "Server",
@@ -58,23 +59,47 @@ class ContactResolutionSessionMixin:
                 }
             },
         }
-        result = run_import([self.row], self.profile, {"site": self.site}, dry_run=True)
-
         user = get_user_model().objects.create_superuser(
             username="contact-ajax-user",
             email="contact-ajax@example.invalid",
             password="testpass",
         )
+        self.user = user
         self.client.force_login(user)
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        self.document = store_workbook_document(
+            self.profile,
+            ["Id", "Name", "Class", "Make", "Model", "Contact", "Contact Number"],
+            [
+                [
+                    self.row["source_id"],
+                    self.row["device_name"],
+                    self.row["device_class"],
+                    self.row["make"],
+                    self.row["model"],
+                    self.row["_candidate_values"]["contact"]["Contact"],
+                    self.row["_candidate_values"]["contact"]["Contact Number"],
+                ]
+            ],
+            user,
+            "contact-ajax.xlsx",
+        )
+        self.planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
+        plan = ImportEngine.plan(self.profile, self.document, user, self.planning_context)
+        workspace = ReviewWorkspace(plan)
         session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = [self.row]
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = workspace.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,
             "site_id": self.site.pk,
             "location_id": None,
             "tenant_id": None,
             "filename": "contact-ajax.xlsx",
+            "source_document_id": self.document.pk,
         }
         session["import_preview_pending"] = True
         session[PREVIEW_REVISION_SESSION_KEY] = "revision-one"
@@ -182,11 +207,60 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertTrue(body["error"])
         self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
+    def test_an_unknown_contact_resolution_key_uses_contact_vocabulary(self):
+        """The modal must describe a Contact-policy error without naming Target Fields."""
+        response = self._post(
+            resolved_fields=json.dumps(
+                {
+                    "contact_resolution_applied": True,
+                    "contact_field_sources": {"name": "Contact", "email": "Contact"},
+                    "contact_field_values": {},
+                    "contact_id": None,
+                    "unexpected_contact_field": True,
+                }
+            )
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        error = response.json()["error"]
+        self.assertIn("not a Contact resolution field", error)
+        self.assertNotIn("Target Field", error)
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
+    def test_model_validation_uses_contact_vocabulary_for_an_unknown_key(self):
+        """Every SourceResolution writer must report the same Contact-policy vocabulary."""
+        resolution = SourceResolution(
+            profile=self.profile,
+            source_id="AJAX-001",
+            source_column="candidate:contact",
+            original_value="{}",
+            resolved_fields={"unexpected_contact_field": True},
+        )
+
+        with self.assertRaisesMessage(ValidationError, "not a Contact resolution field"):
+            resolution.full_clean()
+
+    def test_malformed_candidate_values_answer_json_not_an_internal_error(self):
+        """A serialized plan can be stale or corrupt, so its display data is untrusted input."""
+        session = self.client.session
+        device_unit = next(
+            unit for unit in session["import_plan"]["units"] if unit["display"].get("source_id") == "AJAX-001"
+        )
+        device_unit["display"].setdefault("extra_data", {})["candidate_values"] = ["invalid"]
+        session.save()
+
+        response = self._post()
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response["Content-Type"].split(";")[0], JSON)
+        self.assertIs(json.loads(response.content)["ok"], False)
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
     def test_the_envelope_names_the_row(self):
         """The row action contract carries the row number, so the caller can address the row."""
         body = json.loads(self._post().content)
 
-        self.assertEqual(body["row_number"], 1)
+        self.assertEqual(body["row_number"], 2)
 
     def test_a_json_caller_never_gets_a_redirect(self):
         """`fetch` follows a redirect, which would recalculate the preview and rotate its revision."""
@@ -219,7 +293,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
 
         from core.models import Job
 
-        from netbox_data_import.views import _IMPORT_SOURCE_ROWS_JOB_SESSION_KEY, _restore_import_session
+        from netbox_data_import.views import _restore_import_session
 
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         session = self.client.session
@@ -232,11 +306,11 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
             queue_name="default",
             data={
                 "job_type": "netbox_data_import.import",
-                "preview_result": session["import_result"],
+                "accepted_plan": session["import_plan"],
                 "context_data": session["import_context"],
+                "source_document_id": self.document.pk,
             },
         )
-        session[_IMPORT_SOURCE_ROWS_JOB_SESSION_KEY] = job.pk
         session.save()
 
         request = self.client.request().wsgi_request
@@ -306,7 +380,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
     def test_a_resolution_with_no_preview_in_the_session_is_still_saved(self):
         """A decision saved outside a preview is standalone and must not need one."""
         session = self.client.session
-        for key in ("import_rows", "import_context", "import_result", "import_preview_pending"):
+        for key in ("import_rows", "import_context", "import_plan", "import_preview_pending"):
             session.pop(key, None)
         session.save()
 
@@ -323,6 +397,17 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         )
 
         self.assertTrue(SourceResolution.objects.filter(source_id="STANDALONE-1").exists())
+
+    def test_an_ordinary_resolution_cannot_replace_the_source_identity(self):
+        """The resolution endpoint rejects a target-neutral planning key."""
+        response = self._post(
+            source_column="device_name",
+            resolved_fields=json.dumps({"source_id": "REPLACED"}),
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("reserved", response.json()["error"])
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
 
     def test_the_native_contact_form_carries_the_preview_revision(self):
         """Without scripts the form is the only thing that can present a token to check."""
@@ -375,6 +460,9 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         from dcim.models import Device
         from tenancy.models import ContactRole
 
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
         role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
         self.profile.adapter_config["primary_contact_role"] = role.name
         self.profile.save()
@@ -386,14 +474,19 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         )
         # The first decision unblocks the row, so the second one meets a matched device.
         self._post()
-        rows = derive_effective_rows([self.row], self.profile)
-        result = run_import(rows, self.profile, {"site": self.site}, dry_run=True)
-        device_row = next(r for r in result.rows if r.object_type == "device")
+        plan = ImportEngine.plan(
+            self.profile,
+            self.document,
+            self.user,
+            self.planning_context,
+        )
+        result = ReviewWorkspace(plan)
+        device_row = next(row for row in result.units if row.object_type == "device")
         self.assertEqual(device_row.extra_data.get("netbox_device_id"), device.pk)
 
         session = self.client.session
-        session["import_result"] = result.to_session_dict()
-        session["import_rows"] = rows
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = result.source_rows
         session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
         session.save()
 
@@ -476,6 +569,15 @@ class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
 
         self.assertEqual(response.status_code, 400, response.content)
         self.assertIn("one active preview row", json.loads(response.content)["error"])
+
+    def test_a_retired_adapter_is_refused_instead_of_raising(self):
+        """The open picker outlives an upgrade, so the row can name a profile the release dropped."""
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired_adapter")
+
+        response = self._suggest()
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("retired_adapter", json.loads(response.content)["error"])
 
     def test_a_missing_profile_is_refused(self):
         """A request that names no profile cannot be tied to a preview."""

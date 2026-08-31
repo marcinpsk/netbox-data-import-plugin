@@ -244,7 +244,7 @@ class ManufacturerMappingAPITest(BaseAPITestCase):
 
 # ---------------------------------------------------------------------------
 # New API tests: profile_id filter for IgnoredDevice, ColumnTransformRule,
-# SourceResolution, and ImportJob viewsets.
+# SourceResolution, and ImportExecution viewsets.
 # ---------------------------------------------------------------------------
 
 
@@ -464,50 +464,60 @@ class SourceResolutionAPITest(BaseAPITestCase):
         self.assertFalse(SourceResolution.objects.filter(source_id="SR-CONTACT-003").exists())
 
 
-class ImportJobAPITest(BaseAPITestCase):
-    """Tests for ImportJobViewSet ?profile_id filtering (lines 147-151 in api/views.py)."""
-
+class ImportExecutionAPITest(BaseAPITestCase):
     def setUp(self):
-        """Create two profiles each with one ImportJob."""
         super().setUp()
-        from netbox_data_import.models import ImportJob
+        from netbox_data_import.models import ImportExecution
 
         self.p1 = _make_profile("APIJobProfile1")
         self.p2 = _make_profile("APIJobProfile2")
-        ImportJob.objects.create(
-            profile=self.p1,
-            input_filename="file-p1.xlsx",
-            dry_run=True,
-            site_name="site-p1",
-        )
-        ImportJob.objects.create(
-            profile=self.p2,
-            input_filename="file-p2.xlsx",
-            dry_run=False,
-            site_name="site-p2",
-        )
+        ImportExecution.objects.create(profile=self.p1, input_filename="file-p1.xlsx", site_name="site-p1")
+        ImportExecution.objects.create(profile=self.p2, input_filename="file-p2.xlsx", site_name="site-p2")
 
-    def test_list_all_import_jobs(self):
-        """GET /api/plugins/data-import/jobs/ returns 200 and at least 2 jobs."""
+    def test_list_all_import_executions(self):
         import json
 
-        resp = self.client.get("/api/plugins/data-import/jobs/", HTTP_ACCEPT="application/json")
+        resp = self.client.get("/api/plugins/data-import/executions/", HTTP_ACCEPT="application/json")
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
         self.assertGreaterEqual(data["count"], 2)
 
     def test_filter_by_profile_id(self):
-        """GET ?profile_id=<p1.pk> returns only p1's ImportJobs."""
         import json
 
         resp = self.client.get(
-            f"/api/plugins/data-import/jobs/?profile_id={self.p1.pk}",
+            f"/api/plugins/data-import/executions/?profile_id={self.p1.pk}",
             HTTP_ACCEPT="application/json",
         )
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content)
         self.assertEqual(data["count"], 1)
         self.assertEqual(data["results"][0]["input_filename"], "file-p1.xlsx")
+
+    def _regular_client(self, username, *, granted):
+        from rest_framework.test import APIClient
+
+        from netbox_data_import.models import ImportExecution
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        client = APIClient()
+        grants = [(ImportExecution, ["view"], None)] if granted else []
+        client.force_authenticate(user=user_with_object_permission(username, grants))
+        return client
+
+    def test_a_regular_user_holding_the_view_permission_is_allowed(self):
+        """A superuser bypasses the check, so the permission needs a non-superuser to prove it."""
+        resp = self._regular_client("api_exec_granted", granted=True).get(
+            "/api/plugins/data-import/executions/", HTTP_ACCEPT="application/json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_a_regular_user_without_the_view_permission_is_denied(self):
+        """A user holding no ObjectPermission must be refused the endpoint, not served an empty list."""
+        resp = self._regular_client("api_exec_denied", granted=False).get(
+            "/api/plugins/data-import/executions/", HTTP_ACCEPT="application/json"
+        )
+        self.assertEqual(resp.status_code, 403, resp.content)
 
 
 class PolicySerializerNetBoxBaseTest(BaseAPITestCase):

@@ -21,6 +21,8 @@ classifiers = [
     "Framework :: Django",
 ]
 dependencies = [
+    "defusedxml>=0.7.1",
+    "google-re2>=1.1.20251105",
     "openpyxl>=3.1",
     "pyyaml>=6",
 ]
@@ -39,14 +41,18 @@ netbox_data_import = ["templates/**/*.html", "tests/fixtures/*.xlsx", "static/**
 [dependency-groups]
 dev = [
     "build",
+    "mypy",
     "reuse",
     "ruff",
     "pre-commit",
     "pytest",
     "pytest-cov>=7.1.0",
     "pytest-django",
-    "pytest-xdist>=3.8",
+    "pytest-xdist>=3.8,<4",
     "python-semantic-release",
+    # openpyxl and PyYAML ship no py.typed. strawberry-django and django-rq do, so they need none.
+    "types-PyYAML",
+    "types-openpyxl",
 ]
 docs = [
     "mkdocs>=1,<2",
@@ -87,6 +93,39 @@ max-complexity = 15
 ".devcontainer/scripts/test-e2e.py" = ["C901"]
 ".devcontainer/scripts/test-e2e-preview.py" = ["C901"]
 ".devcontainer/scripts/load-sample-data.py" = ["C901"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["netbox_data_import"]
+exclude = "^netbox_data_import/migrations/"
+# Every unresolved import is listed below by name. A blanket ignore would hide a real one.
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+# NetBox and its stack ship no type information, and the plugin is checked against an installed
+# NetBox that is not a declared dependency, so mypy runs without them on the path.
+module = [
+    "circuits.*",
+    "core.*",
+    "dcim.*",
+    "django.*",
+    "django_filters.*",
+    "django_rq.*",
+    "django_tables2.*",
+    "extras.*",
+    "ipam.*",
+    "netbox.*",
+    "pytest",
+    "rest_framework.*",
+    "rq",
+    "strawberry.*",
+    "strawberry_django.*",
+    "tenancy.*",
+    "users.*",
+    "utilities.*",
+    "virtualization.*",
+]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["netbox_data_import"]

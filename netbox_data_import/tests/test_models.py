@@ -9,7 +9,7 @@ from netbox_data_import.models import (
     ColumnMapping,
     ColumnTransformRule,
     DeviceTypeMapping,
-    ImportJob,
+    ImportExecution,
     ImportProfile,
 )
 
@@ -43,10 +43,9 @@ class ImportProfileModelTest(TestCase):
         self.assertIn(str(profile.pk), url)
 
     def test_get_absolute_url_without_profile(self):
-        """get_absolute_url returns the list URL when profile_id is None."""
-        job = ImportJob.__new__(ImportJob)
-        job.profile_id = None
-        url = job.get_absolute_url()
+        """A retained execution with a deleted profile falls back to the profile list."""
+        execution = ImportExecution.objects.create(profile=None)
+        url = execution.get_absolute_url()
         self.assertIn("/plugins/data-import/profiles/", url)
 
 
@@ -69,6 +68,22 @@ class ColumnTransformRuleModelTest(TestCase):
         with self.assertRaises(ValidationError) as cm:
             rule.clean()
         self.assertIn("pattern", cm.exception.message_dict)
+
+    def test_clean_rejects_a_backtracking_only_pattern(self):
+        """A transform rule must use syntax the safe execution engine supports."""
+        from django.core.exceptions import ValidationError
+
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Name",
+            pattern=r"^(a+)\1$",
+            group_1_target="device_name",
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            rule.full_clean()
+
+        self.assertIn("not supported", error.exception.message_dict["pattern"][0].lower())
 
     def test_clean_too_few_groups_for_group2_target(self):
         """clean() raises ValidationError when group_2_target needs 2 groups but pattern has none."""
@@ -131,12 +146,54 @@ class ColumnTransformRuleModelTest(TestCase):
 
         self.assertIn("group_1_target", error.exception.message_dict)
 
+    def test_clean_rejects_a_target_owned_by_a_column_mapping(self):
+        """A transform cannot overwrite a value supplied by a direct column mapping."""
+        from django.core.exceptions import ValidationError
+
+        ColumnMapping.objects.create(
+            profile=self.profile,
+            source_column="Device Name",
+            target_field="device_name",
+        )
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Placement",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            rule.full_clean()
+
+        self.assertIn("group_1_target", error.exception.message_dict)
+
 
 class ColumnMappingModelTest(TestCase):
     """Tests for the ColumnMapping model."""
 
     def setUp(self):
         self.profile = ImportProfile.objects.create(name="CM Profile")
+
+    def test_clean_rejects_a_target_owned_by_a_transform_rule(self):
+        """A mapping cannot overwrite a value supplied by a transform capture."""
+        from django.core.exceptions import ValidationError
+
+        ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="Placement",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+        mapping = ColumnMapping(
+            profile=self.profile,
+            source_column="Device Name",
+            target_field="device_name",
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            mapping.full_clean()
+
+        self.assertIn("target_field", error.exception.message_dict)
 
     def test_create_column_mapping(self):
         """A column mapping can be created and stringified."""

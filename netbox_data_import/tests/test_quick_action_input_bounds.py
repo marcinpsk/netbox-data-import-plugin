@@ -10,11 +10,12 @@ import ast
 import pathlib
 
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase
+from django.test import Client, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ImportProfile, ManufacturerMapping
 from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY
+from netbox_data_import.tests.helpers import store_workbook_document
 
 LONG = "L" * 300
 LONG_SLUG = "l" * 300
@@ -67,19 +68,19 @@ ROW_ACTION_PAYLOADS = {
         {"source_id": "SRC-1", "source_column": "_merge_" + LONG, "resolved_fields": "{}"},
     ],
     "resolve_duplicate_name": [
-        {"source_id": LONG, "row_number": "1", "new_name": "replacement"},
+        {"source_id": LONG, "row_number": "2", "new_name": "replacement"},
     ],
     "ignore_field_difference": [
-        {"source_id": LONG, "row_number": "1", "target_field": "serial"},
+        {"source_id": LONG, "row_number": "2", "target_field": "serial"},
     ],
     "ignore_duplicate_serial": [
-        {"source_id": LONG, "row_number": "1"},
+        {"source_id": LONG, "row_number": "2"},
     ],
     "match_existing_device": [
-        {"source_id": LONG, "row_number": "1"},
+        {"source_id": LONG, "row_number": "2"},
     ],
     "sync_single_row": [
-        {"row_number": "1"},
+        {"row_number": "2"},
     ],
     # This one reads its source IDs from the stored preview rows, not from the request.
     "auto_match_devices": [
@@ -92,17 +93,17 @@ ROW_ACTION_CONTROL_PAYLOADS = {
     "save_resolution": {"source_id": "CONTROL-SAVE", "source_column": "serial", "resolved_fields": "{}"},
     "resolve_duplicate_name": {
         "source_id": "CONTROL-NAME",
-        "row_number": "1",
+        "row_number": "2",
         "new_name": "replacement-control",
     },
     "ignore_field_difference": {
         "source_id": "CONTROL-FIELD",
-        "row_number": "1",
+        "row_number": "2",
         "target_field": "serial",
     },
-    "ignore_duplicate_serial": {"source_id": "CONTROL-SERIAL", "row_number": "1"},
-    "match_existing_device": {"source_id": "CONTROL-MATCH", "row_number": "1"},
-    "sync_single_row": {"row_number": "1"},
+    "ignore_duplicate_serial": {"source_id": "CONTROL-SERIAL", "row_number": "2"},
+    "match_existing_device": {"source_id": "CONTROL-MATCH", "row_number": "2"},
+    "sync_single_row": {"row_number": "2"},
     "auto_match_devices": {},
 }
 
@@ -248,31 +249,30 @@ def _quick_action_write_seam_errors(source, routes):
     return errors
 
 
-class QuickActionInputBoundsTest(TestCase):
+class QuickActionInputBoundsTest(TransactionTestCase):
     """Each quick action writes request values straight to a column with a fixed width."""
 
-    @classmethod
-    def setUpTestData(cls):
+    def setUp(self):
         from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
 
-        from netbox_data_import.models import ClassRoleMapping
+        from netbox_data_import.models import ClassRoleMapping, ColumnMapping
 
-        cls.user = get_user_model().objects.create_superuser(
+        self.user = get_user_model().objects.create_superuser(
             username="quick-bounds-user", email="bounds@example.invalid", password="testpass"
         )
-        cls.site = Site.objects.create(name="Quick Bounds Site", slug="quick-bounds-site")
-        cls.manufacturer = Manufacturer.objects.create(
+        self.site = Site.objects.create(name="Quick Bounds Site", slug="quick-bounds-site")
+        self.manufacturer = Manufacturer.objects.create(
             name="Quick Bounds Vendor",
             slug="quick-bounds-vendor",
         )
-        cls.device_type = DeviceType.objects.create(
-            manufacturer=cls.manufacturer,
+        self.device_type = DeviceType.objects.create(
+            manufacturer=self.manufacturer,
             model="Quick Bounds Model",
             slug="quick-bounds-vendor-quick-bounds-model",
             u_height=1,
         )
-        cls.role = DeviceRole.objects.create(name="Quick Bounds Role", slug="quick-bounds-role")
-        cls.profile = ImportProfile.objects.create(
+        self.role = DeviceRole.objects.create(name="Quick Bounds Role", slug="quick-bounds-role")
+        self.profile = ImportProfile.objects.create(
             name="Quick Bounds Profile",
             adapter_config={
                 "sheet_name": "Data",
@@ -282,24 +282,37 @@ class QuickActionInputBoundsTest(TestCase):
             },
         )
         ClassRoleMapping.objects.create(
-            profile=cls.profile,
+            profile=self.profile,
             source_class="Server",
-            role_slug=cls.role.slug,
+            role_slug=self.role.slug,
         )
-        cls.existing_mapping = ManufacturerMapping.objects.create(
-            profile=cls.profile,
+        for field in (
+            "source_id",
+            "device_name",
+            "device_class",
+            "make",
+            "model",
+            "u_height",
+            "rack_name",
+            "u_position",
+            "face",
+            "serial",
+            "asset_tag",
+            "status",
+        ):
+            ColumnMapping.objects.create(profile=self.profile, source_column=field, target_field=field)
+        self.existing_mapping = ManufacturerMapping.objects.create(
+            profile=self.profile,
             source_make="Acme",
             netbox_manufacturer_slug="before",
         )
-
-    def setUp(self):
         self.client = Client()
         self.client.force_login(self.user)
 
     def _device_row(self, source_id, device_name):
         """Return one complete canonical source row."""
         return {
-            "_row_number": 1,
+            "_row_number": 2,
             "source_id": source_id,
             "device_name": device_name,
             "device_class": "Server",
@@ -314,32 +327,42 @@ class QuickActionInputBoundsTest(TestCase):
             "status": "active",
         }
 
-    def _store_active_import(self, rows, result=None):
-        """Store the source rows and active preview state used by row actions."""
-        from netbox_data_import.views import _serialize_rows
+    def _store_active_import(self, rows):
+        """Store a real source document and accepted plan for deferred row actions."""
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.preview_row_actions import record_recalculated_preview
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        headers = [key for key in rows[0] if not key.startswith("_")]
+        document = store_workbook_document(
+            self.profile,
+            headers,
+            [[row.get(header) for header in headers] for row in rows],
+            self.user,
+            "quick-bounds.xlsx",
+        )
+        planning_context = {"site_id": self.site.pk, "location_id": None, "tenant_id": None}
+        plan = ImportEngine.plan(self.profile, document, self.user, planning_context)
+        result = ReviewWorkspace(plan)
 
         session = self.client.session
-        session["import_rows"] = _serialize_rows(rows)
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = result.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,
             "site_id": self.site.pk,
             "location_id": None,
             "tenant_id": None,
             "filename": "quick-bounds.xlsx",
+            "source_document_id": document.pk,
         }
-        if result is not None:
-            session["import_result"] = result.to_session_dict()
-        else:
-            session.pop("import_result", None)
         session["import_preview_pending"] = True
-        session[PREVIEW_REVISION_SESSION_KEY] = "quick-bounds-preview"
         session.save()
+        return result
 
     def _prepare_row_action(self, url_name, payload, source_id, case_name):
         """Create the real active-import state one deferred action requires."""
         from dcim.models import Device
-
-        from netbox_data_import.engine import run_import
 
         payload = dict(payload)
         device_name = f"bounds-{case_name}"
@@ -349,16 +372,15 @@ class QuickActionInputBoundsTest(TestCase):
             # The view refuses a serial the preview does not report as claimed by a second row.
             row["serial"] = f"SERIAL-{case_name}"
             twin = self._device_row(f"{source_id}-TWIN", f"{device_name}-twin")
-            twin["_row_number"] = 2
+            twin["_row_number"] = 3
             twin["serial"] = row["serial"]
-            result = run_import([row, twin], self.profile, {"site": self.site}, dry_run=True, user=self.user)
-            preview_row = next(item for item in result.rows if item.object_type == "device" and item.row_number == 1)
+            result = self._store_active_import([row, twin])
+            preview_row = next(item for item in result.units if item.object_type == "device" and item.row_number == 2)
             self.assertEqual(
                 preview_row.extra_data.get("identity_conflict"),
                 "duplicate_serial",
-                preview_row.to_dict(),
+                preview_row,
             )
-            self._store_active_import([row, twin], result)
         elif url_name in {"save_resolution", "resolve_duplicate_name"}:
             self._store_active_import([row])
         elif url_name == "match_existing_device":
@@ -389,16 +411,14 @@ class QuickActionInputBoundsTest(TestCase):
                 device_type=self.device_type,
                 role=self.role,
             )
-            result = run_import([row], self.profile, {"site": self.site}, dry_run=True, user=self.user)
-            preview_row = next(item for item in result.rows if item.object_type == "device")
-            self.assertEqual(preview_row.action, "update", preview_row.to_dict())
+            result = self._store_active_import([row])
+            preview_row = next(item for item in result.units if item.object_type == "device")
+            self.assertEqual(preview_row.action, "update", preview_row)
             self.assertIn("serial", preview_row.extra_data.get("field_diff", {}))
-            self._store_active_import([row], result)
         elif url_name == "sync_single_row":
-            result = run_import([row], self.profile, {"site": self.site}, dry_run=True, user=self.user)
-            preview_row = next(item for item in result.rows if item.object_type == "device")
-            self.assertEqual(preview_row.action, "create", preview_row.to_dict())
-            self._store_active_import([row], result)
+            result = self._store_active_import([row])
+            preview_row = next(item for item in result.units if item.object_type == "device")
+            self.assertEqual(preview_row.action, "create", preview_row)
         else:  # pragma: no cover - the coverage ratchet keeps this branch unreachable
             self.fail(f"No active-import fixture for {url_name}")
         payload["preview_revision"] = self.client.session[PREVIEW_REVISION_SESSION_KEY]

@@ -99,11 +99,11 @@
   }
 
   document.addEventListener('submit', function (event) {
-    var form = event.target.closest('.ndi-field-review-form');
+    var form = event.target.closest('.ndi-field-review-form, .ndi-deferred-preview-form');
     if (!form) return;
     event.preventDefault();
     event.stopPropagation();
-    var button = form.querySelector('button[type=submit]');
+    var button = event.submitter || form.querySelector('button[type=submit]');
     postAction(form.action, new FormData(form), button, 'Updating...', false);
   }, true);
 

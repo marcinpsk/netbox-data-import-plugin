@@ -19,15 +19,23 @@ def pytest_xdist_auto_num_workers(config):
     return min(detected_num_workers(config), MAX_PARALLEL_WORKERS)
 
 
-def pytest_configure(config):
-    """Refuse an explicit worker count above the ceiling before any worker starts.
+def _requested_worker_count(config):
+    """Use xdist's resolved specs so the isolation cap matches its worker count."""
+    from xdist.workermanage import parse_tx_spec_config
 
-    xdist calls the hook above only for `auto` and `logical`, and it keeps those two as strings. An
-    explicit count arrives as an int and skips the cap, so every worker crashes during collection.
-    """
-    requested = config.option.numprocesses
-    if isinstance(requested, int) and requested > MAX_PARALLEL_WORKERS:
+    return len(parse_tx_spec_config(config))
+
+
+def pytest_configure(config):
+    """Validate the resolved worker count before isolated databases are created."""
+    # The two conditions xdist itself starts workers on, and the list it reads them from.
+    if config.getoption("dist", "no") == "no" or config.getoption("collectonly", False):
+        return
+    if not config.getoption("tx", []):
+        return
+    requested = _requested_worker_count(config)
+    if requested > MAX_PARALLEL_WORKERS:
         raise pytest.UsageError(
-            f"-n {requested} exceeds the isolation limit: at most {MAX_PARALLEL_WORKERS} pytest "
-            "workers get private test databases."
+            f"{requested} workers exceed the isolation limit: at most {MAX_PARALLEL_WORKERS} "
+            "pytest workers get private test databases."
         )
