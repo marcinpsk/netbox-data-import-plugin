@@ -14,25 +14,17 @@ from typing import Iterable, Mapping, Sequence
 import openpyxl
 
 from .adapters import SourceDiagnostic, SourceUnreadable
+from .field_keys import (
+    FRONT_PORT_CLASSES,
+    INTERFACE_PORT_CLASSES,
+    PORT_CLASS_CLAIMED_KINDS,
+    PORT_CLASSES,
+    REAR_PORT_CLASSES,
+)
 from .values import identity_text, source_text
 
 TRACE_PATH_SHEET = "Trace From To"
 TRACE_LIST_SHEET = "Trace List"
-
-INTERFACE_PORT_CLASSES = frozenset({"NIC", "Switch Port", "Port"})
-FRONT_PORT_CLASSES = frozenset({"Position Front", "Fiber Pair Front"})
-REAR_PORT_CLASSES = frozenset({"Punch-Down", "Fiber Pair Back"})
-PORT_CLASSES = INTERFACE_PORT_CLASSES | FRONT_PORT_CLASSES | REAR_PORT_CLASSES
-
-INTERFACE_KIND = "interface"
-FRONT_PORT_KIND = "front_port"
-REAR_PORT_KIND = "rear_port"
-
-PORT_CLASS_CLAIMED_KINDS = {
-    **dict.fromkeys(INTERFACE_PORT_CLASSES, INTERFACE_KIND),
-    **dict.fromkeys(FRONT_PORT_CLASSES, FRONT_PORT_KIND),
-    **dict.fromkeys(REAR_PORT_CLASSES, REAR_PORT_KIND),
-}
 
 IdentityKey = tuple[str, str, str, str]
 

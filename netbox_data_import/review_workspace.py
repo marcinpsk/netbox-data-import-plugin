@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Present an Import Plan and resolve explicit review commands."""
+"""Present an Import Plan, resolve explicit review commands, and persist review decisions."""
 
 from __future__ import annotations
 
@@ -8,6 +8,9 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
+from .import_engine import ImportEngine
+from .models import TerminationResolution, locked_profile_policy
+from .object_permissions import save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
@@ -18,6 +21,41 @@ from .values import (
     source_text,
     translation_maps,
 )
+
+
+def save_termination_resolution_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    task_type,
+    field_key,
+    selected_object_type,
+    selected_object_id,
+    selected_display_name,
+):
+    """Persist one manual termination selection, then request a fresh Import Plan."""
+    lookup = {
+        "profile": profile,
+        "task_type": task_type,
+        "field_key": field_key,
+    }
+    values = {
+        "selected_object_type": selected_object_type,
+        "selected_object_id": selected_object_id,
+        "selected_display_name": selected_display_name,
+    }
+    candidate = TerminationResolution(**lookup, **values)
+    candidate.full_clean(validate_unique=False, validate_constraints=False)
+    with locked_profile_policy(profile.pk):
+        save_permission_scoped_object(
+            actor,
+            TerminationResolution,
+            lookup,
+            values,
+        )
+    return ImportEngine.plan(profile, source_document, actor, planning_context)
 
 
 _DIAGNOSTIC_MESSAGES = {

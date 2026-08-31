@@ -3,6 +3,7 @@
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 from .models import (
+    CableClassMapping,
     ImportProfile,
     ColumnMapping,
     ClassRoleMapping,
@@ -102,6 +103,30 @@ class ClassRoleMappingTable(tables.Table):
     class Meta:
         model = ClassRoleMapping
         fields = ("source_class", "creates_rack", "rack_type", "role_slug", "ignore", "actions")
+
+
+class CableClassMappingTable(tables.Table):
+    """Display CableClass target decisions inline on the profile detail page."""
+
+    cable_class = tables.Column(verbose_name="CableClass")
+    cable_type = tables.Column(accessor="cable_type_display", verbose_name="Cable Type")
+    cable_profile = tables.Column(accessor="cable_profile_display", verbose_name="Cable Profile")
+    actions = tables.TemplateColumn(
+        template_code="""
+        <a href="{% url 'plugins:netbox_data_import:cableclassmapping_edit' record.pk %}" class="btn btn-sm btn-warning">
+            <i class="mdi mdi-pencil"></i>
+        </a>
+        <a href="{% url 'plugins:netbox_data_import:cableclassmapping_delete' record.pk %}" class="btn btn-sm btn-danger">
+            <i class="mdi mdi-trash-can-outline"></i>
+        </a>
+        """,
+        verbose_name="",
+        orderable=False,
+    )
+
+    class Meta:
+        model = CableClassMapping
+        fields = ("cable_class", "cable_type", "cable_profile", "actions")
 
 
 class DeviceTypeMappingTable(tables.Table):

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import hashlib
+import json
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -23,6 +24,7 @@ from .adapters import (
 )
 from . import plan
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
+from .field_keys import SELECT_TERMINATION_TASK, termination_field_key
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -534,6 +536,209 @@ class ClassRoleMapping(PolicySectionModel):
     def get_absolute_url(self):
         """Return the edit URL for this class→role mapping."""
         return reverse("plugins:netbox_data_import:classrolemapping_edit", args=[self.pk])
+
+
+def _flatten_choice_groups(choices):
+    """Return value and label pairs from flat or grouped NetBox choices."""
+    flattened = []
+    for value, label in choices:
+        if isinstance(label, (tuple, list)):
+            flattened.extend(label)
+        else:
+            flattened.append((value, label))
+    return tuple(flattened)
+
+
+def cable_type_choices():
+    """Return the Cable Type values offered by the running NetBox instance."""
+    from dcim.choices import CableTypeChoices
+
+    return _flatten_choice_groups(CableTypeChoices.CHOICES)
+
+
+def cable_profile_choices():
+    """Return the Cable Profile values offered by the running NetBox instance."""
+    from dcim.choices import CableProfileChoices
+
+    return _flatten_choice_groups(CableProfileChoices.CHOICES)
+
+
+def cable_profile_accepts_one_termination_per_side(value) -> bool:
+    """Return whether NetBox reports one connector on each side of the Cable Profile."""
+    from dcim.models import Cable
+
+    profile_class = Cable(profile=value).profile_class
+    return profile_class is not None and len(profile_class.a_connectors) == 1 and len(profile_class.b_connectors) == 1
+
+
+def compatible_cable_profile_choices():
+    """Return running Cable Profiles that permit one termination on each side."""
+    return tuple(
+        (value, label)
+        for value, label in cable_profile_choices()
+        if cable_profile_accepts_one_termination_per_side(value)
+    )
+
+
+def cable_class_mapping_choice_errors(cable_type, cable_profile):
+    """Return runtime-choice and profile-cardinality errors by model field."""
+    errors = {}
+    type_values = {value for value, _label in cable_type_choices()}
+    profile_values = {value for value, _label in cable_profile_choices()}
+    if cable_type is not None and cable_type not in type_values:
+        errors["cable_type"] = ValidationError(
+            "The selected Cable Type is no longer offered by this NetBox instance.",
+            code="cable.cableclass_stale_mapping",
+        )
+    if cable_profile is not None and cable_profile not in profile_values:
+        errors["cable_profile"] = ValidationError(
+            "The selected Cable Profile is no longer offered by this NetBox instance.",
+            code="cable.cableclass_stale_mapping",
+        )
+    elif cable_profile is not None and not cable_profile_accepts_one_termination_per_side(cable_profile):
+        errors["cable_profile"] = ValidationError(
+            "The selected Cable Profile does not permit one termination on each side.",
+            code="cable.profile_incompatible",
+        )
+    return errors
+
+
+class CableClassMapping(PolicySectionModel):
+    """Map one source CableClass to independent Cable Type and Cable Profile decisions."""
+
+    POLICY_SECTION = "cable_class_mappings"
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="cable_class_mappings",
+    )
+    cable_class = models.CharField(max_length=200)
+    cable_type_resolved = models.BooleanField(default=False)
+    cable_type = models.CharField(max_length=50, null=True, blank=True)
+    cable_profile_resolved = models.BooleanField(default=False)
+    cable_profile = models.CharField(max_length=50, null=True, blank=True)
+
+    class Meta:
+        ordering = ["profile", "cable_class"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "cable_class"],
+                name="ndi_cableclassmapping_profile_class",
+            ),
+        ]
+        verbose_name = "CableClass Mapping"
+        verbose_name_plural = "CableClass Mappings"
+
+    def clean(self):
+        """Reject inapplicable, inconsistent, stale, or incompatible mapping values."""
+        super().clean()
+        self.cable_type = self.cable_type or None
+        self.cable_profile = self.cable_profile or None
+        errors = cable_class_mapping_choice_errors(self.cable_type, self.cable_profile)
+        if not self.cable_type_resolved and self.cable_type is not None:
+            errors["cable_type"] = ValidationError(
+                "An unresolved Cable Type cannot store a selected value.",
+                code="invalid",
+            )
+        if not self.cable_profile_resolved and self.cable_profile is not None:
+            errors["cable_profile"] = ValidationError(
+                "An unresolved Cable Profile cannot store a selected value.",
+                code="invalid",
+            )
+        if errors:
+            raise ValidationError(errors)
+
+    def cable_type_display(self):
+        """Return the operator-facing Cable Type decision."""
+        if not self.cable_type_resolved:
+            return "Unresolved"
+        if self.cable_type is None:
+            return "None"
+        return str(dict(cable_type_choices()).get(self.cable_type, self.cable_type))
+
+    def cable_profile_display(self):
+        """Return the operator-facing Cable Profile decision."""
+        if not self.cable_profile_resolved:
+            return "Unresolved"
+        if self.cable_profile is None:
+            return "None"
+        return str(dict(cable_profile_choices()).get(self.cable_profile, self.cable_profile))
+
+    def __str__(self):
+        return self.cable_class
+
+    def get_absolute_url(self):
+        """Return the edit URL for this CableClass mapping."""
+        return reverse("plugins:netbox_data_import:cableclassmapping_edit", args=[self.pk])
+
+
+def _canonical_termination_field_key(value):
+    """Return *value* when it is an exact canonical termination field key."""
+    try:
+        data = json.loads(value)
+        if not isinstance(data, dict) or set(data) != {"cards", "device", "kind", "port", "role"}:
+            raise ValueError
+        if not all(isinstance(data[name], str) for name in data):
+            raise ValueError
+        canonical = termination_field_key(**data)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValidationError(
+            "Enter the canonical JSON termination field key.",
+            code="invalid",
+        ) from exc
+    if canonical != value:
+        raise ValidationError(
+            "Enter the canonical JSON termination field key.",
+            code="invalid",
+        )
+    return value
+
+
+class TerminationResolution(PolicySectionModel):
+    """Store one selected NetBox termination for a trace field-key role."""
+
+    POLICY_SECTION = "termination_resolutions"
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="termination_resolutions",
+    )
+    task_type = models.CharField(
+        max_length=50,
+        choices=((SELECT_TERMINATION_TASK, "Select termination"),),
+    )
+    field_key = models.TextField()
+    selected_object_type = models.ForeignKey(
+        to="core.ObjectType",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    selected_object_id = models.PositiveBigIntegerField()
+    selected_display_name = models.CharField(max_length=200)
+
+    class Meta:
+        ordering = ["profile", "task_type", "field_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "task_type", "field_key"],
+                name="ndi_termresolution_profile_task_key",
+            ),
+        ]
+        verbose_name = "Termination Resolution"
+        verbose_name_plural = "Termination Resolutions"
+
+    def clean(self):
+        """Reject an inapplicable row or a noncanonical field key."""
+        super().clean()
+        try:
+            _canonical_termination_field_key(self.field_key)
+        except ValidationError as exc:
+            raise ValidationError({"field_key": exc}) from exc
+
+    def __str__(self):
+        return f"{self.task_type}: {self.selected_display_name}"
 
 
 class SourceDocument(models.Model):

@@ -10,6 +10,7 @@ from utilities.forms.fields import DynamicModelChoiceField
 from .adapters import get_adapter, selectable_adapter_choices
 from .catalog import CATALOG
 from .models import (
+    CableClassMapping,
     ImportProfile,
     ColumnMapping,
     ClassRoleMapping,
@@ -17,7 +18,43 @@ from .models import (
     ColumnTransformRule,
     _require_adapter_config_mapping,
     validate_registered_adapter,
+    cable_class_mapping_choice_errors,
+    cable_type_choices,
+    compatible_cable_profile_choices,
 )
+
+_EXPLICIT_NONE = "__explicit_none__"
+
+
+class _RuntimeCableChoiceField(forms.ChoiceField):
+    """Render only current choices while letting shared validation classify submitted values."""
+
+    def validate(self, value):
+        """Apply required-field validation without duplicating the runtime choice rule."""
+        forms.Field.validate(self, value)
+
+
+def _decision_choices(runtime_choices):
+    """Add unresolved and explicit-none form states to current NetBox choices."""
+    if _EXPLICIT_NONE in {value for value, _label in runtime_choices}:
+        raise RuntimeError("A NetBox Cable choice conflicts with the form's explicit-none control value.")
+    return [("", "Unresolved"), (_EXPLICIT_NONE, "Explicitly none"), *runtime_choices]
+
+
+def _decision_initial(resolved, value):
+    """Return the form value for one stored tri-state decision."""
+    if not resolved:
+        return ""
+    return _EXPLICIT_NONE if value is None else value
+
+
+def _decode_decision(value):
+    """Return the resolved flag and nullable stored value for one form selection."""
+    if value in (None, ""):
+        return False, None
+    if value == _EXPLICIT_NONE:
+        return True, None
+    return True, value
 
 
 def _profile_output_kinds(form):
@@ -156,6 +193,46 @@ class ClassRoleMappingForm(forms.ModelForm):
                 "role_slug",
                 "A device role slug is required unless 'creates rack' or 'ignore' is checked.",
             )
+        return cleaned
+
+
+class CableClassMappingForm(forms.ModelForm):
+    """Form for one source CableClass and its two independent target decisions."""
+
+    cable_type = _RuntimeCableChoiceField(required=False)
+    cable_profile = _RuntimeCableChoiceField(required=False)
+
+    class Meta:
+        model = CableClassMapping
+        fields = ["profile", "cable_class", "cable_type", "cable_profile"]
+        widgets = {"profile": forms.HiddenInput()}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["cable_type"].choices = _decision_choices(cable_type_choices())
+        self.fields["cable_profile"].choices = _decision_choices(compatible_cable_profile_choices())
+        self.initial["cable_type"] = _decision_initial(
+            self.instance.cable_type_resolved,
+            self.instance.cable_type,
+        )
+        self.initial["cable_profile"] = _decision_initial(
+            self.instance.cable_profile_resolved,
+            self.instance.cable_profile,
+        )
+
+    def clean(self):
+        """Decode each tri-state value and apply the shared runtime-choice validation."""
+        cleaned = super().clean()
+        type_resolved, cable_type = _decode_decision(cleaned.get("cable_type"))
+        profile_resolved, cable_profile = _decode_decision(cleaned.get("cable_profile"))
+        self.instance.cable_type_resolved = type_resolved
+        self.instance.cable_type = cable_type
+        self.instance.cable_profile_resolved = profile_resolved
+        self.instance.cable_profile = cable_profile
+        cleaned["cable_type"] = cable_type
+        cleaned["cable_profile"] = cable_profile
+        for field_name, error in cable_class_mapping_choice_errors(cable_type, cable_profile).items():
+            self.add_error(field_name, error)
         return cleaned
 
 
