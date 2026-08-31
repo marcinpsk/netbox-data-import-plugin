@@ -51,14 +51,18 @@ PY
 Replace or delete each `UNSUPPORTED` rule before you install the new plugin version. The rule form
 rejects these patterns after the upgrade.
 
-RE2 accepts the constructs in each `REVIEW` rule, but gives them ASCII semantics. Python regexes give
-these constructs Unicode semantics. If a rule must match non-ASCII text, use a Unicode property or
-an explicit source-specific character class. For example:
+RE2 accepts the constructs in each `REVIEW` rule. The `\w`, `\d`, `\s`, and `\b` families use ASCII
+semantics, while Python regexes give these constructs Unicode semantics. If a rule must match
+non-ASCII text, use a Unicode property or an explicit source-specific character class. For example:
 
 - Replace `\w` with `[\p{L}\p{N}_]`.
 - Replace `\d` with `\p{Nd}`.
 - Replace `\s` with a suitable class such as `[\p{Z}\t\r\n\f]`.
-- Test word boundaries and case-insensitive matches with representative non-ASCII values.
+- Test word boundaries with representative non-ASCII values.
+
+RE2's `(?i)` flag uses Unicode simple case folding. It matches one-code-point case pairs, but does
+not match expansions such as `ß` to `SS`. Test case-insensitive rules with representative non-ASCII
+values.
 
 Use a negated class or property for the uppercase forms. The command prints nothing when it finds no
 unsupported syntax or common Unicode-sensitive constructs. Test every rule with representative
