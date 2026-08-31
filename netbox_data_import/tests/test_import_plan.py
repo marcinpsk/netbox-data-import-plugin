@@ -74,15 +74,18 @@ class PlanStructureTest(SimpleTestCase):
     def test_mapping_fields_reject_json_values_that_are_not_objects(self):
         """Declared mappings must fail at the plan boundary, not at a later consumer."""
         builders = (
-            lambda value: Diagnostic(code="device.name_conflict", severity=Severity.ERROR, display=value),
-            lambda value: _change(payload=value),
-            lambda value: _change(preconditions=value),
-            lambda value: _unit(display=value),
-            lambda value: _plan(planning_context=value),
+            (
+                "diagnostic display",
+                lambda value: Diagnostic(code="device.name_conflict", severity=Severity.ERROR, display=value),
+            ),
+            ("change payload", lambda value: _change(payload=value)),
+            ("change preconditions", lambda value: _change(preconditions=value)),
+            ("unit display", lambda value: _unit(display=value)),
+            ("planning context", lambda value: _plan(planning_context=value)),
         )
-        for build in builders:
+        for field, build in builders:
             for value in ([], "not-an-object", 7):
-                with self.subTest(build=build, value=value):
+                with self.subTest(field=field, value=value):
                     with self.assertRaises(PlanInvalid):
                         build(value)
 
@@ -184,11 +187,11 @@ class PlanStructureTest(SimpleTestCase):
 
     def test_non_text_vocabularies_raise_plan_invalid(self):
         """Target Modules can construct plan values, so malformed vocabularies stay inside PlanError."""
-        for build in (
-            lambda: Diagnostic(code="device.name_conflict", severity=[Severity.ERROR]),
-            lambda: _unit(disposition={}),
+        for field, build in (
+            ("diagnostic severity", lambda: Diagnostic(code="device.name_conflict", severity=[Severity.ERROR])),
+            ("unit disposition", lambda: _unit(disposition={})),
         ):
-            with self.subTest(build=build):
+            with self.subTest(field=field):
                 with self.assertRaises(PlanInvalid):
                     build()
 
@@ -274,14 +277,14 @@ class PlanFingerprintTest(SimpleTestCase):
         """Source, profile, actor, and context changes invalidate every accepted selection."""
         baseline = _plan().unit_fingerprint("unit:1")
         variants = (
-            _plan(schema_version=SCHEMA_VERSION + 1),
-            _plan(source_fingerprint="src-zzz"),
-            _plan(profile_fingerprint="prof-zzz"),
-            _plan(actor="operator-2"),
-            _plan(planning_context={"site_id": 4}),
+            ("schema version", _plan(schema_version=SCHEMA_VERSION + 1)),
+            ("source fingerprint", _plan(source_fingerprint="src-zzz")),
+            ("profile fingerprint", _plan(profile_fingerprint="prof-zzz")),
+            ("actor", _plan(actor="operator-2")),
+            ("planning context", _plan(planning_context={"site_id": 4})),
         )
-        for variant in variants:
-            with self.subTest(plan=variant):
+        for input_name, variant in variants:
+            with self.subTest(input=input_name):
                 self.assertNotEqual(baseline, variant.unit_fingerprint("unit:1"))
 
 

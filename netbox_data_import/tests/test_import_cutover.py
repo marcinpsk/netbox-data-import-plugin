@@ -139,7 +139,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         document = SourceDocument.objects.get(profile=self.profile)
         session = self.client.session
         self.assertEqual(session["import_context"]["source_document_id"], document.pk)
-        plan = ImportPlan.from_dict(session["import_plan"])
+        plan = ImportPlan.from_dict(session[PREVIEW_PLAN_SESSION_KEY])
         self.assertEqual(plan.source_fingerprint, document.content_fingerprint)
         self.assertEqual(plan.actor, str(self.actor.pk))
         self.assertEqual(plan.planning_context["site_id"], self.site.pk)
@@ -240,7 +240,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         session = self.client.session
-        session["import_plan"]["schema_version"] = 999
+        session[PREVIEW_PLAN_SESSION_KEY]["schema_version"] = 999
         session.save()
 
         response = self.client.post(run_url)
@@ -253,7 +253,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         run_url = reverse("plugins:netbox_data_import:import_run")
         self._upload()
         session = self.client.session
-        first = session["import_plan"]["units"][0]
+        first = session[PREVIEW_PLAN_SESSION_KEY]["units"][0]
         first["disposition"] = "invalid"
         first["changes"] = []
         first["diagnostics"] = [
@@ -267,7 +267,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertFalse(Job.objects.filter(data__job_type=ImportJobRunner.job_type).exists())
 
         session = self.client.session
-        for unit in session["import_plan"]["units"]:
+        for unit in session[PREVIEW_PLAN_SESSION_KEY]["units"]:
             unit["disposition"] = "no-op"
             unit["changes"] = []
             unit["diagnostics"] = []
@@ -307,7 +307,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
     def test_failed_job_restores_its_plan_without_replacing_a_newer_preview(self):
         """A failed accepted plan is resumable only when another preview is not pending."""
         self._upload()
-        accepted_plan = self.client.session["import_plan"]
+        accepted_plan = self.client.session[PREVIEW_PLAN_SESSION_KEY]
         context_data = self.client.session["import_context"]
         document_id = context_data["source_document_id"]
         failed = self._job(
@@ -331,7 +331,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertContains(restored, "Review preview")
         self.assertEqual(self.client.session["import_preview_source_job_id"], failed.pk)
-        self.assertEqual(self.client.session["import_plan"], accepted_plan)
+        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], accepted_plan)
 
     def test_progress_restores_an_execution_beside_a_newer_preview(self):
         """An older result remains available without destroying an unsubmitted preview."""
@@ -500,7 +500,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         corrupt.refresh_from_db()
         self.assertEqual(corrupt.data["phase"], "failed")
 
-        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
         selected = accepted.units[0].identity
         retry_job = self._job()
         failed, created = ImportExecution.reserve(
@@ -531,7 +531,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         """A duplicate delivery cannot report a still-running execution as complete."""
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
         selected = accepted.units[0].identity
         job = self._job()
         pending, created = ImportExecution.reserve(
@@ -566,7 +566,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
         selected = accepted.units[0].identity
         job = self._job()
         deleted = []
@@ -603,7 +603,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
         selected = accepted.units[0].identity
         job = self._job()
         retired = []
@@ -641,7 +641,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
         selected = accepted.units[0].identity
         job = self._job()
         section = catalog._SECTIONS_BY_KEY.pop("source_resolutions")
@@ -664,7 +664,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         """A source that the locked policy can no longer read leaves an operator-facing failure."""
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
         selected = accepted.units[0].identity
         job = self._job()
         ImportProfile.objects.filter(pk=self.profile.pk).update(
@@ -688,7 +688,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         """A target failure after reservation still links the failed audit row to its Job."""
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
         selected = accepted.units[0].identity
         job = self._job()
         self.site.delete()
@@ -741,7 +741,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.addCleanup(target_modules.MODULE_RUNTIMES.__setitem__, "device", runtime)
         self._upload()
         document = SourceDocument.objects.get(profile=self.profile)
-        accepted = ImportPlan.from_dict(self.client.session["import_plan"])
+        accepted = ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY])
         job = self._job()
 
         with self.assertRaises(KeyError):
@@ -792,7 +792,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         session = self.client.session
-        session["import_plan"]["schema_version"] = 999
+        session[PREVIEW_PLAN_SESSION_KEY]["schema_version"] = 999
         session.save()
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 409)
 
@@ -906,13 +906,13 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         from dcim.models import Rack
 
         self._upload()
-        accepted_plan = self.client.session["import_plan"]
+        accepted_plan = self.client.session[PREVIEW_PLAN_SESSION_KEY]
 
         response = self._sync_single_row({"row_number": 2})
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json()["preview_state"], "recalculation_required")
-        self.assertEqual(self.client.session["import_plan"], accepted_plan)
+        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], accepted_plan)
         self.assertTrue(self.client.session["import_preview_dirty"])
         self.assertTrue(Rack.objects.filter(site=self.site, name="rack-a").exists())
 
@@ -930,7 +930,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
     def test_device_type_mapping_leaves_the_materialized_preview_stale(self):
         """A quick mapping saves without rebuilding the active preview."""
         self._upload()
-        accepted_plan = self.client.session["import_plan"]
+        accepted_plan = self.client.session[PREVIEW_PLAN_SESSION_KEY]
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:quick_resolve_device_type"),
@@ -947,7 +947,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(response.json()["preview_state"], "recalculation_required")
-        self.assertEqual(self.client.session["import_plan"], accepted_plan)
+        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], accepted_plan)
         self.assertTrue(self.client.session["import_preview_dirty"])
         self.assertTrue(
             DeviceTypeMapping.objects.filter(
@@ -971,7 +971,9 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self._upload()
         session = self.client.session
         device_unit = next(
-            unit for unit in session["import_plan"]["units"] if unit["display"].get("object_type") == "device"
+            unit
+            for unit in session[PREVIEW_PLAN_SESSION_KEY]["units"]
+            if unit["display"].get("object_type") == "device"
         )
         device_unit["display"].setdefault("extra_data", {})["candidate_values"] = ["invalid"]
         session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
@@ -988,7 +990,9 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self._upload()
         session = self.client.session
         device_unit = next(
-            unit for unit in session["import_plan"]["units"] if unit["display"].get("object_type") == "device"
+            unit
+            for unit in session[PREVIEW_PLAN_SESSION_KEY]["units"]
+            if unit["display"].get("object_type") == "device"
         )
         device_unit["display"].setdefault("extra_data", {})["candidate_values"] = {"contact": ["invalid"]}
         session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
@@ -1004,7 +1008,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         preview_url = reverse("plugins:netbox_data_import:import_preview")
         self._upload()
         session = self.client.session
-        session["import_plan"]["schema_version"] = 999
+        session[PREVIEW_PLAN_SESSION_KEY]["schema_version"] = 999
         session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         session.save()
         response = self.client.get(preview_url)

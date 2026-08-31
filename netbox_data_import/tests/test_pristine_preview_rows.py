@@ -96,7 +96,11 @@ class UploadStoresPristineSourceTest(TestCase):
             self.user,
             {"site_id": self.site.pk, "location_id": None, "tenant_id": None},
         )
-        resolved = next(unit for unit in replanned.units if unit.display.get("source_id") == first_source_id)
+        resolved = next(
+            (unit for unit in replanned.units if unit.display.get("source_id") == first_source_id),
+            None,
+        )
+        self.assertIsNotNone(resolved, [unit.identity for unit in replanned.units])
 
         self.assertEqual(resolved.display["device_name"], "resolved-device-name")
         self.assertEqual(bytes(stored.content), original)

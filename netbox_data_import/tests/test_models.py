@@ -69,6 +69,22 @@ class ColumnTransformRuleModelTest(TestCase):
             rule.clean()
         self.assertIn("pattern", cm.exception.message_dict)
 
+    def test_clean_rejects_a_backtracking_only_pattern(self):
+        """A transform rule must use syntax the safe execution engine supports."""
+        from django.core.exceptions import ValidationError
+
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Name",
+            pattern=r"^(a+)\1$",
+            group_1_target="device_name",
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            rule.full_clean()
+
+        self.assertIn("not supported", error.exception.message_dict["pattern"][0].lower())
+
     def test_clean_too_few_groups_for_group2_target(self):
         """clean() raises ValidationError when group_2_target needs 2 groups but pattern has none."""
         from django.core.exceptions import ValidationError

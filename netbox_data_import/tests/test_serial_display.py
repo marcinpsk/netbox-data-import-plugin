@@ -56,7 +56,7 @@ class SearchDeviceSerialDisplayTest(TestCase):
                 reverse("plugins:netbox_data_import:import_setup"),
                 {"profile": profile.pk, "site": self.site.pk, "excel_file": f},
             )
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.status_code, 302, response.content[:300])
 
     def test_search_objects_includes_serial_in_response(self):
         """search_objects API returns device serial in results."""

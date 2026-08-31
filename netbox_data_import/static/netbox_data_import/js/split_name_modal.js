@@ -350,8 +350,10 @@
     window.ndiPostPreviewAction(form.action, new FormData(form))
       .then(function (payload) {
         saveBtn.textContent = 'Saved';
-        saveBtn.title = payload.message;
-        window.ndiMarkPreviewStale();
+        saveBtn.title = payload.message || 'Resolution saved.';
+        if (typeof window.ndiMarkPreviewStale === 'function') {
+          window.ndiMarkPreviewStale();
+        }
       })
       .catch(function (error) {
         saveBtn.disabled = false;

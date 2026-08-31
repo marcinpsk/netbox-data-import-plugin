@@ -357,7 +357,6 @@ class QuickActionInputBoundsTest(TransactionTestCase):
             "source_document_id": document.pk,
         }
         session["import_preview_pending"] = True
-        session[PREVIEW_REVISION_SESSION_KEY] = "quick-bounds-preview"
         session.save()
         return result
 

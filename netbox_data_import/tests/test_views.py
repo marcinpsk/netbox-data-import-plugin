@@ -19,7 +19,10 @@ from netbox_data_import.models import (
     SourceResolution,
     stored_import_source,
 )
-from netbox_data_import.preview_row_actions import PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY
+from netbox_data_import.preview_row_actions import (
+    PREVIEW_PLAN_SESSION_KEY,
+    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+)
 from netbox_data_import.tests.helpers import (
     run_on_separate_connection,
     set_import_source,
@@ -564,6 +567,7 @@ class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="syncRowError" class="alert alert-danger mt-2 d-none" role="alert"')
 
     def test_preview_shows_filename(self):
         """Preview page shows the uploaded filename."""
@@ -576,7 +580,7 @@ class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
         """The upload result is not calculated again on its redirect target."""
         self._setup_session()
         session = self.client.session
-        stored_plan = session["import_plan"]
+        stored_plan = session[PREVIEW_PLAN_SESSION_KEY]
         session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         session.save()
 

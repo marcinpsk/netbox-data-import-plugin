@@ -445,7 +445,7 @@ class MappingValidationTest(TestCase):
             [key for key, _label in CATALOG.choices(output_kinds=self.profile.output_kinds)],
         )
         transform = ColumnTransformRuleForm(initial={"profile": self.profile})
-        self.assertIn("regex.fullmatch", transform.fields["pattern"].help_text)
+        self.assertIn("RE2", transform.fields["pattern"].help_text)
         self.assertNotIn(
             "candidate:contact",
             [key for key, _label in transform.fields["group_1_target"].choices],

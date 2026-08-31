@@ -150,6 +150,17 @@ describe("split modal parts", () => {
     expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
   });
 
+  it("keeps a successful save successful without optional response details", async () => {
+    window.ndiPostPreviewAction = vi.fn().mockResolvedValueOnce({ ok: true });
+    window.ndiMarkPreviewStale = undefined;
+
+    submitForm();
+
+    await vi.waitFor(() => expect(saveButton().textContent).toBe("Saved"));
+    expect(saveButton().title).toBe("Resolution saved.");
+    expect(document.getElementById("res_save_error").classList.contains("d-none")).toBe(true);
+  });
+
   it("leaves native submission available when the preview-action helper is unavailable", () => {
     window.ndiPostPreviewAction = undefined;
 

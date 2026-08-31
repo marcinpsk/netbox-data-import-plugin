@@ -8,19 +8,16 @@ from typing import Any
 
 from dataclasses import dataclass, field
 from io import BytesIO
-from time import thread_time
 
 import openpyxl
-import regex
 
 from .adapters import SourceUnreadable
 from .catalog import CANDIDATE_TARGET_PREFIX
+from .transform_regex import TransformPattern, TransformPatternError
 from .values import comparison_key
 
 EXTRA_JSON_PREFIX = "extra_json:"
 _MAX_UNUSED_SAMPLES = 5
-_TRANSFORM_REGEX_MATCH_TIMEOUT_SECONDS = 0.5
-_TRANSFORM_REGEX_WORKBOOK_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -43,25 +40,35 @@ class FlatWorkbookConfig:
     capture_extra_data: bool = False
 
 
-@dataclass
-class _TransformRegexBudget:
-    """Bound cumulative regex execution across one workbook."""
+@dataclass(frozen=True)
+class _CompiledTransformRule:
+    """One transform rule whose pattern is ready for every source row."""
 
-    remaining_seconds: float = _TRANSFORM_REGEX_WORKBOOK_TIMEOUT_SECONDS
+    source_column: str
+    pattern: TransformPattern
+    group_1_target: str
+    group_2_target: str
 
-    def fullmatch(self, pattern: str, text: str):
-        """Match with the smaller of the per-match and remaining workbook budgets."""
-        if self.remaining_seconds <= 0:
-            raise TimeoutError
-        started_at = thread_time()
+
+def _compile_transform_rules(rules: tuple[TransformRule, ...]) -> tuple[_CompiledTransformRule, ...]:
+    """Compile all configured patterns once and name invalid source columns."""
+    compiled_rules = []
+    for rule in rules:
         try:
-            return regex.fullmatch(
-                pattern,
-                text,
-                timeout=min(_TRANSFORM_REGEX_MATCH_TIMEOUT_SECONDS, self.remaining_seconds),
+            pattern = TransformPattern.compile(rule.pattern)
+        except TransformPatternError as exc:
+            raise SourceUnreadable(
+                f"Invalid regex pattern '{rule.pattern}' in transform rule for column '{rule.source_column}': {exc}"
+            ) from exc
+        compiled_rules.append(
+            _CompiledTransformRule(
+                source_column=rule.source_column,
+                pattern=pattern,
+                group_1_target=rule.group_1_target,
+                group_2_target=rule.group_2_target,
             )
-        finally:
-            self.remaining_seconds -= thread_time() - started_at
+        )
+    return tuple(compiled_rules)
 
 
 def _text(value) -> str:
@@ -127,32 +134,21 @@ def _apply_transform_rules(
     row: dict,
     raw_row,
     headers: dict[str, int],
-    rules,
-    budget: _TransformRegexBudget,
+    rules: tuple[_CompiledTransformRule, ...],
 ) -> None:
-    """Apply each transform rule in place, refusing invalid or over-budget patterns."""
+    """Apply each safe transform rule in place."""
     for rule in rules:
         raw_value = _cell(raw_row, headers.get(rule.source_column))
         if raw_value is None:
             continue
         text = str(raw_value).strip()
-        try:
-            match = budget.fullmatch(rule.pattern, text)
-        except TimeoutError as exc:
-            raise SourceUnreadable(
-                f"Regex pattern in transform rule for column '{rule.source_column}' timed out."
-            ) from exc
-        except regex.error as exc:
-            raise SourceUnreadable(
-                f"Invalid regex pattern '{rule.pattern}' in transform rule for column "
-                f"'{rule.source_column}' (value: {text!r}): {exc}"
-            ) from exc
-        if match is None:
+        captures = rule.pattern.capture_groups(text)
+        if captures is None:
             continue
-        if rule.group_1_target and len(match.groups()) >= 1:
-            row[rule.group_1_target] = match.group(1)
-        if rule.group_2_target and len(match.groups()) >= 2:
-            row[rule.group_2_target] = match.group(2)
+        if rule.group_1_target and len(captures) >= 1:
+            row[rule.group_1_target] = captures[0]
+        if rule.group_2_target and len(captures) >= 2:
+            row[rule.group_2_target] = captures[1]
 
 
 def _collect_unmapped_values(raw_row, headers, unmapped_columns, unused_stats, keep_stats, capture) -> dict[str, str]:
@@ -193,14 +189,14 @@ def interpret(content: bytes, config: FlatWorkbookConfig, *, collect_unused: boo
     consumed_columns = mapped | transformed
     unmapped_columns = [column for column in headers if column not in consumed_columns]
     unused_stats: dict[str, dict] = {}
-    transform_budget = _TransformRegexBudget()
+    transform_rules = _compile_transform_rules(config.transform_rules)
 
     rows = []
     for row_number, raw_row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
         if all(value is None for value in raw_row):
             continue
         row = _merge_row_values(row_number, raw_row, headers, config.column_map)
-        _apply_transform_rules(row, raw_row, headers, config.transform_rules, transform_budget)
+        _apply_transform_rules(row, raw_row, headers, transform_rules)
         promote_extra_json_fields(row)
         if collect_unused or config.capture_extra_data:
             extra = _collect_unmapped_values(

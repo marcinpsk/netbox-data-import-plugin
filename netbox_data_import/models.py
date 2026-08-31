@@ -891,7 +891,10 @@ class ColumnTransformRule(PolicySectionModel):
     )
     pattern = models.CharField(
         max_length=500,
-        help_text=r"Python regex with capture groups (regex.fullmatch). E.g. ^(\w+) - (.+)$",
+        help_text=(
+            r"RE2 pattern with capture groups and full-match semantics. "
+            r"Backreferences and look-around are not supported. E.g. ^(\w+) - (.+)$"
+        ),
     )
     group_1_target = models.CharField(
         max_length=100,
@@ -914,28 +917,28 @@ class ColumnTransformRule(PolicySectionModel):
 
     def clean(self):
         """Validate the regex, capture groups, and exclusive ownership of group targets."""
-        import regex
-
         from django.core.exceptions import ValidationError
+
+        from .transform_regex import TransformPattern, TransformPatternError
 
         super().clean()
 
         try:
-            compiled = regex.compile(self.pattern)
-        except regex.error as exc:
-            raise ValidationError({"pattern": f"Invalid regex pattern: {exc}"})
+            compiled = TransformPattern.compile(self.pattern)
+        except TransformPatternError as exc:
+            raise ValidationError({"pattern": f"Regex pattern is not supported: {exc}"}) from exc
 
         required_groups = 0
         if self.group_1_target:
             required_groups = 1
         if self.group_2_target:
             required_groups = 2
-        if compiled.groups < required_groups:
+        if compiled.group_count < required_groups:
             raise ValidationError(
                 {
                     "pattern": (
                         f"Regex must contain at least {required_groups} capture group(s) "
-                        f"for the configured group target(s), but found {compiled.groups}."
+                        f"for the configured group target(s), but found {compiled.group_count}."
                     )
                 }
             )

@@ -9,7 +9,7 @@ from django.test import SimpleTestCase
 from openpyxl.worksheet.worksheet import Worksheet
 
 from netbox_data_import.adapters import FlatWorkbookAdapter, SourceBatch, SourceUnreadable
-from netbox_data_import.flat_workbook import FlatWorkbookConfig, TransformRule, _TransformRegexBudget
+from netbox_data_import.flat_workbook import FlatWorkbookConfig, TransformRule
 
 
 def _workbook(sheet_name, header, *rows):
@@ -164,25 +164,9 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
 
         self.assertIn("Combined", str(caught.exception))
 
-    def test_a_pathological_transform_pattern_is_time_bounded(self):
-        """One configured regex cannot hold the import worker indefinitely."""
+    def test_a_backtracking_shape_is_safe_for_a_large_cell(self):
+        """A pattern that is pathological in Python matches safely through the Source Adapter."""
         content = _workbook("Data", ("Combined",), ("a" * 64 + "!",))
-        config = FlatWorkbookConfig(
-            sheet_name="Data",
-            column_map={},
-            transform_rules=(
-                TransformRule(source_column="Combined", pattern=r"^(a|aa)+$", group_1_target="rack_name"),
-            ),
-        )
-
-        with self.assertRaises(SourceUnreadable) as caught:
-            FlatWorkbookAdapter.interpret(content, config)
-
-        self.assertIn("timed out", str(caught.exception).lower())
-
-    def test_a_nontrivial_transform_has_a_practical_time_budget(self):
-        """A valid workbook must not fail because its regex needs more than a scheduler tick."""
-        content = _workbook("Data", ("Combined",), ("a" * 26 + "!",))
         config = FlatWorkbookConfig(
             sheet_name="Data",
             column_map={},
@@ -194,32 +178,6 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
         batch = FlatWorkbookAdapter.interpret(content, config)
 
         self.assertNotIn("rack_name", batch.rows[0])
-
-    def test_transform_time_budget_is_shared_by_the_workbook(self):
-        """Many individually bounded matches must not hold one import worker indefinitely."""
-        content = _workbook("Data", ("Combined",), *(("a" * 26 + "!",) for _index in range(96)))
-        config = FlatWorkbookConfig(
-            sheet_name="Data",
-            column_map={},
-            transform_rules=(
-                TransformRule(source_column="Combined", pattern=r"^(a|aa)+$", group_1_target="rack_name"),
-            ),
-        )
-
-        with self.assertRaises(SourceUnreadable) as caught:
-            FlatWorkbookAdapter.interpret(content, config)
-
-        self.assertIn("timed out", str(caught.exception).lower())
-
-    def test_safe_bulk_matches_fit_the_workbook_budget(self):
-        """A large workbook of cheap matches must not exhaust its regex allowance."""
-        budget = _TransformRegexBudget()
-        match = None
-
-        for _index in range(150_000):
-            match = budget.fullmatch(r"^a+$", "a")
-
-        self.assertIsNotNone(match)
 
     def test_a_candidate_column_is_kept_for_review_rather_than_written(self):
         """A candidate target offers review choices, so its values stay grouped by source column."""
