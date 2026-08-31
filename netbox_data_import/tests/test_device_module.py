@@ -1222,6 +1222,24 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
         self.assertEqual(moved[0].disposition, Disposition.ACTIONABLE, moved[0].diagnostics)
         self.assertEqual(dict(moved[0].changes[0].payload["ip_fields"]), {"primary_ip4": "198.18.0.13/32"})
 
+    def test_a_duplicate_address_on_another_device_does_not_repeat_a_settled_write(self):
+        """Another object holding the same address does not change the row this device holds."""
+        from ipam.models import IPAddress
+
+        self._interface_template()
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        self._assigned_address(device, "198.18.0.16/32")
+        other = self._device("srv-02", rack=self.rack)
+        IPAddress.objects.create(
+            address="198.18.0.16/32",
+            assigned_object=other.interfaces.get(name="mgmt0"),
+        )
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.16"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+        self.assertEqual(units[0].changes, ())
+
     def test_the_same_address_in_another_vrf_does_not_make_the_current_address_work(self):
         """An address is unique inside its VRF, so another VRF cannot invalidate a settled field."""
         from ipam.models import VRF, IPAddress

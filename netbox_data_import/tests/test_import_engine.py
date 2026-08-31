@@ -7,6 +7,7 @@ from io import BytesIO
 import openpyxl
 from django.test import TestCase
 
+import netbox_data_import.adapter_config as adapter_config_registry
 import netbox_data_import.adapters as adapter_registry
 from netbox_data_import.adapters import (
     FlatWorkbookAdapter,
@@ -60,6 +61,12 @@ class _DiagnosticFlatWorkbookAdapter(FlatWorkbookAdapter):
             ),
             unused_columns=batch.unused_columns,
         )
+
+
+class _AlternateFlatWorkbookAdapter(FlatWorkbookAdapter):
+    """Interpret a flat workbook under a distinct adapter namespace."""
+
+    key = "alternate_workbook"
 
 
 class ImportEngineTestDataMixin:
@@ -443,6 +450,24 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
             {"message": "Check this source value.", "row_number": 2},
         )
         self.assertTrue(all(plan.diagnostics[0] not in unit.diagnostics for unit in plan.units))
+
+    def test_an_unused_column_uses_its_source_adapter_namespace(self):
+        """The coordinator does not label another adapter's diagnostics as flat-workbook data."""
+        adapter_registry._ADAPTERS_BY_KEY[_AlternateFlatWorkbookAdapter.key] = _AlternateFlatWorkbookAdapter
+        self.addCleanup(adapter_registry._ADAPTERS_BY_KEY.pop, _AlternateFlatWorkbookAdapter.key)
+        adapter_config_registry._CONFIG_PROJECTORS[_AlternateFlatWorkbookAdapter.key] = (
+            adapter_config_registry._CONFIG_PROJECTORS[FlatWorkbookAdapter.key]
+        )
+        self.addCleanup(adapter_config_registry._CONFIG_PROJECTORS.pop, _AlternateFlatWorkbookAdapter.key)
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter=_AlternateFlatWorkbookAdapter.key)
+        self.profile.refresh_from_db()
+        self.profile.column_mappings.filter(source_column="Height").delete()
+
+        plan = self._plan()
+
+        unused = [diagnostic for diagnostic in plan.diagnostics if diagnostic.code.endswith(".unused_column")]
+        self.assertEqual([diagnostic.code for diagnostic in unused], ["alternate_workbook.unused_column"])
+        self.assertEqual(unused[0].display["name"], "Height")
 
     def test_a_document_another_profile_owns_is_refused(self):
         """A stored source belongs to the profile it was uploaded for."""

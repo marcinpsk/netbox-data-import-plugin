@@ -112,28 +112,19 @@ def normalized_address(field: str, value) -> str:
 def already_assigned(device, field, address) -> bool:
     """Return whether the device already carries exactly this address on *field*.
 
-    The writer only assigns after finding an interface of this device that already carries the
-    address. The IPAddress and interface can use independent VRFs, so only address identity and
-    Device ownership decide whether the state is settled.
+    The writer selects the address that this device holds. The primary field must point to that
+    same row, while duplicate rows held by other objects do not affect the settled state.
     """
-    from ipam.models import IPAddress
-
     current = getattr(device, field, None)
     if current is None:
         return False
     try:
-        # `held_by_device` matches on the host, so a stored mask that differs is still settled.
         if _host(current.address) != _host(address):
             return False
+        held = held_by_device(device, address)
     except ValueError:
         return False
-    same_address = list(
-        IPAddress.objects.filter(address=str(current.address), vrf_id=current.vrf_id).values_list("pk", flat=True)[:2]
-    )
-    if same_address != [current.pk]:
-        return False
-    interface = current.assigned_object
-    return interface is not None and getattr(interface, "device_id", None) == device.pk
+    return held is not None and held.pk == current.pk
 
 
 def _host(address) -> str:

@@ -106,6 +106,25 @@ class ReviewWorkspacePresentationTest(TestCase):
                 )
                 self.assertEqual(_workspace(unit).units[0].detail, message)
 
+    def test_unused_columns_accept_each_source_adapter_namespace(self):
+        """The workspace presents unused columns from any registered source adapter."""
+        plan = ImportPlan(
+            units=(),
+            diagnostics=(
+                Diagnostic(
+                    code="alternate_workbook.unused_column",
+                    severity=Severity.INFO,
+                    display={"name": "Notes", "count": 2, "samples": ["first"]},
+                ),
+            ),
+            source_fingerprint="0" * 64,
+            profile_fingerprint="1" * 64,
+            actor="1",
+            planning_context={"site_id": 1, "location_id": None, "tenant_id": None},
+        )
+
+        self.assertEqual(ReviewWorkspace(plan).unused_columns, [{"name": "Notes", "count": 2, "samples": ("first",)}])
+
     def test_rack_groups_sort_devices_and_source_rows_are_deduplicated(self):
         """One source row can yield dependencies, but it appears once and devices sort by position."""
         shared = {"_row_number": 2, "source_id": "D-1", "device_name": "device-a", "rack_name": "rack-a"}

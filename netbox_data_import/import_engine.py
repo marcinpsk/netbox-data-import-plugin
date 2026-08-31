@@ -105,7 +105,10 @@ class ImportEngine:
             units=tuple(units),
             diagnostics=(
                 *(cls._source_diagnostic(item) for item in source_batch.diagnostics),
-                *(cls._unused_column_diagnostic(name, stats) for name, stats in source_batch.unused_columns.items()),
+                *(
+                    cls._unused_column_diagnostic(adapter.key, name, stats)
+                    for name, stats in source_batch.unused_columns.items()
+                ),
             ),
             source_fingerprint=document.content_fingerprint,
             profile_fingerprint=profile.planning_fingerprint,
@@ -325,10 +328,10 @@ class ImportEngine:
         return Diagnostic(code=diagnostic.code, severity=Severity.WARNING, display=display)
 
     @staticmethod
-    def _unused_column_diagnostic(name, stats) -> Diagnostic:
+    def _unused_column_diagnostic(adapter_key, name, stats) -> Diagnostic:
         """Carry one unmapped source column as display-only review information."""
         return Diagnostic(
-            code="flat_workbook.unused_column",
+            code=f"{adapter_key}.unused_column",
             severity=Severity.INFO,
             display={
                 "name": str(name),

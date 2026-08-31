@@ -352,7 +352,7 @@ class ReviewWorkspace:
         columns = [
             dict(diagnostic.display)
             for diagnostic in self.plan.diagnostics
-            if diagnostic.code == "flat_workbook.unused_column"
+            if diagnostic.code.endswith(".unused_column")
         ]
         columns.sort(key=lambda column: -int(column.get("count") or 0))
         return columns

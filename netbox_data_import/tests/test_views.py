@@ -3495,10 +3495,21 @@ column_mappings:
 column_transform_rules: []
 """
 
-        self.client.post(self._url(), {"data": initial})
+        initial_response = self.client.post(self._url(), {"data": initial})
+        self.assertIn(initial_response.status_code, (200, 302))
+        profile = ImportProfile.objects.get(name="TransformToMappingProfile")
+        self.assertTrue(
+            ColumnTransformRule.objects.filter(
+                profile=profile,
+                source_column="Combined",
+                group_1_target="device_name",
+            ).exists()
+        )
+        self.assertFalse(profile.column_mappings.exists())
+
         response = self.client.post(self._url(), {"data": replacement})
 
-        profile = ImportProfile.objects.get(name="TransformToMappingProfile")
+        profile.refresh_from_db()
         self.assertIn(response.status_code, (200, 302))
         self.assertTrue(profile.column_mappings.filter(source_column="Name", target_field="device_name").exists())
         self.assertFalse(ColumnTransformRule.objects.filter(profile=profile).exists())
@@ -3524,10 +3535,15 @@ column_transform_rules:
     group_2_target: ''
 """
 
-        self.client.post(self._url(), {"data": initial})
+        initial_response = self.client.post(self._url(), {"data": initial})
+        self.assertIn(initial_response.status_code, (200, 302))
+        profile = ImportProfile.objects.get(name="MappingToTransformProfile")
+        self.assertTrue(profile.column_mappings.filter(source_column="Name", target_field="device_name").exists())
+        self.assertFalse(ColumnTransformRule.objects.filter(profile=profile).exists())
+
         response = self.client.post(self._url(), {"data": replacement})
 
-        profile = ImportProfile.objects.get(name="MappingToTransformProfile")
+        profile.refresh_from_db()
         self.assertIn(response.status_code, (200, 302))
         self.assertFalse(profile.column_mappings.exists())
         self.assertTrue(
