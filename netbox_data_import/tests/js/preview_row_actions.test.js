@@ -109,9 +109,10 @@ describe("preview row actions", () => {
     });
     const form = document.getElementById("mapping-form");
 
-    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    const notCanceled = form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await new Promise((resolveTick) => setTimeout(resolveTick, 0));
 
+    expect(notCanceled).toBe(false);
     expect(form.querySelector("button").textContent).toContain("Saved");
     expect(document.getElementById("ndi-preview-stale").hidden).toBe(false);
     expect(document.getElementById("ndi-run-import").disabled).toBe(true);

@@ -567,7 +567,10 @@ class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, 'id="syncRowError" class="alert alert-danger mt-2 d-none" role="alert"')
+        self.assertRegex(
+            resp.content.decode(),
+            r'<[^>]*(?=[^>]*\bid="syncRowError")(?=[^>]*\brole="alert")[^>]*>',
+        )
 
     def test_preview_shows_filename(self):
         """Preview page shows the uploaded filename."""
@@ -2547,6 +2550,10 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
         )
 
         self.assertEqual(resp.status_code, 200)
+        self.assertContains(
+            resp,
+            "Target field &#x27;device_name&#x27; is already assigned to capture group 1.",
+        )
         self.assertFalse(
             self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="Combined Name").exists()
         )

@@ -128,8 +128,10 @@
 
     window.ndiPostPreviewAction(form.action, new FormData(form))
       .then(function (payload) {
-        window.ndiMarkPreviewStale();
         var currentForm = releaseSubmission();
+        if (typeof window.ndiMarkPreviewStale === 'function') {
+          window.ndiMarkPreviewStale();
+        }
         if (!currentForm) return;
         if (currentForm.dataset.ndiConflictModalGeneration !== submissionGeneration) {
           document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
@@ -138,7 +140,7 @@
           return;
         }
         btn.textContent = 'Saved';
-        btn.title = payload.message;
+        btn.title = payload.message || 'Resolution saved.';
         document.querySelectorAll('.ndi-conflict-resolve-btn').forEach(function (other) {
           other.disabled = other.dataset.fieldName === btn.dataset.fieldName;
         });

@@ -912,9 +912,11 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         from netbox_data_import.review_workspace import ReviewWorkspace
 
         workspace = ReviewWorkspace.from_dict(self.client.session["import_plan"])
-        for row in workspace.units:
-            if row.action == "create" and row.object_type in ("device", "rack"):
-                return row.row_number
+        for unit in workspace.units:
+            if unit.row_number is None:
+                continue
+            if unit.action == "create" and unit.object_type in ("device", "rack"):
+                return unit.row_number
         self.fail("the sample workbook must offer one syncable create row")
 
     def test_the_single_row_sync_refuses_a_stale_adapter(self):

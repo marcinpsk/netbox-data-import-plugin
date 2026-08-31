@@ -251,6 +251,23 @@ class DeviceModuleIdentityTest(DeviceModulePlanTestBase):
 class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):
     """Two rows claiming one identity is a source defect, so both are refused."""
 
+    def test_a_null_like_ignored_source_id_does_not_hide_duplicate_identity_fields(self):
+        """An empty source identity still participates in serial and asset-tag duplicate checks."""
+        IgnoredDevice.objects.create(profile=self.profile, source_id="N/A")
+
+        for field, value, code in (
+            ("serial", "SN-1", "device.duplicate_serial"),
+            ("asset_tag", "AT-1", "device.duplicate_asset_tag"),
+        ):
+            with self.subTest(field=field):
+                units = self._plan(
+                    self._row(2, "N/A", "srv-01", **{field: value}),
+                    self._row(3, "N/A", "srv-02", **{field: value}),
+                )
+
+                self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
+                self.assertEqual(units[0].diagnostics[0].code, code)
+
     def test_a_duplicate_source_id_in_one_file_is_invalid(self):
         units = self._plan(self._row(2, "D-1", "srv-01"), self._row(3, "D-1", "srv-02"))
 

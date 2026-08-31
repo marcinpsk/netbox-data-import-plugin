@@ -934,7 +934,7 @@ class _DeviceBatch:
             and not mapping.creates_rack
             and not mapping.ignore
             and mapping.role_slug
-            and source_id not in self.ignored
+            and not (source_id and source_id in self.ignored)
             and not (position is not None and position < 1)
         )
 

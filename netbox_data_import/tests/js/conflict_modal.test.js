@@ -98,6 +98,26 @@ describe("conflict modal", () => {
     expect(window.ndiMarkPreviewStale).toHaveBeenCalledOnce();
   });
 
+  it("keeps a successful save successful when the stale helper is unavailable", async () => {
+    window.ndiMarkPreviewStale = undefined;
+    const picked = buttons()[1];
+
+    picked.click();
+
+    await vi.waitFor(() => expect(picked.textContent).toBe("Saved"));
+    expect(window.ndiConflictResolutionState.activeToken).toBeNull();
+  });
+
+  it("uses a fallback tooltip when a successful response has no message", async () => {
+    window.ndiPostPreviewAction.mockResolvedValueOnce({ ok: true });
+    const picked = buttons()[1];
+
+    picked.click();
+
+    await vi.waitFor(() => expect(picked.textContent).toBe("Saved"));
+    expect(picked.title).toBe("Resolution saved.");
+  });
+
   it("uses the native form when the preview-action helper is unavailable", () => {
     window.ndiPostPreviewAction = undefined;
 
