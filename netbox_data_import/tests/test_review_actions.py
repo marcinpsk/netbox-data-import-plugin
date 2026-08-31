@@ -379,6 +379,40 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.device.save(update_fields=["position"])
         self.assertIn("value changed", self._sync_field().json()["error"])
 
+    def test_inline_position_sync_rejects_a_stale_rack(self):
+        """Position sync refuses a Device that moved racks after the preview."""
+        from dcim.models import Rack
+
+        replacement = Rack.objects.create(name="Review Action Rack B", site=self.site, u_height=42)
+        self.device.rack = replacement
+        self.device.save(update_fields=["rack"])
+
+        response = self._sync_field()
+
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertIn("placement changed", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.rack, replacement)
+        self.assertEqual(self.device.position, 5)
+
+    def test_inline_face_sync_rejects_a_stale_rack(self):
+        """Face sync refuses a Device that moved racks after the preview."""
+        from dcim.models import Rack
+
+        self.rows[0]["face"] = "rear"
+        self._materialize()
+        replacement = Rack.objects.create(name="Review Action Rack C", site=self.site, u_height=42)
+        self.device.rack = replacement
+        self.device.save(update_fields=["rack"])
+
+        response = self._sync_field("face")
+
+        self.assertEqual(response.status_code, 409, response.json())
+        self.assertIn("placement changed", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.rack, replacement)
+        self.assertEqual(self.device.face, "front")
+
     def test_inline_placement_sync_uses_the_plan_and_rechecks_its_baseline(self):
         """Placement writes the accepted unit only while its NetBox snapshot is current."""
         response = self._sync_placement()

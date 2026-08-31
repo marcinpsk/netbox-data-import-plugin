@@ -113,8 +113,8 @@ def already_assigned(device, field, address) -> bool:
     """Return whether the device already carries exactly this address on *field*.
 
     The writer only assigns after finding an interface of this device that already carries the
-    address, and it resolves the IPAddress by that interface's VRF. Anything else it would either
-    create or record as unassigned, so only that exact state counts as settled.
+    address. The IPAddress and interface can use independent VRFs, so only address identity and
+    Device ownership decide whether the state is settled.
     """
     from ipam.models import IPAddress
 
@@ -133,11 +133,7 @@ def already_assigned(device, field, address) -> bool:
     if same_address != [current.pk]:
         return False
     interface = current.assigned_object
-    return (
-        interface is not None
-        and getattr(interface, "device_id", None) == device.pk
-        and getattr(interface, "vrf_id", None) == current.vrf_id
-    )
+    return interface is not None and getattr(interface, "device_id", None) == device.pk
 
 
 def _host(address) -> str:

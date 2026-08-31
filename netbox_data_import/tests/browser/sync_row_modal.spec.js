@@ -104,6 +104,36 @@ test("a sync response for the open row hides its modal", async ({ page }) => {
   await expect.poll(() => page.evaluate(() => window.syncModalHideCount)).toBe(1);
 });
 
+test("a missing row-action helper restores the controls and explains the failure", async ({ page }) => {
+  await setUp(page);
+  await page.evaluate(() => { window.ndiPostPreviewAction = undefined; });
+  await openRow(page, "sync-row-1");
+
+  await page.locator("#syncRowConfirm").click();
+
+  await expect(page.locator("#sync-row-1")).toBeEnabled();
+  await expect(page.locator("#syncRowConfirm")).toBeEnabled();
+  await expect(page.locator("#syncRowError")).toContainText("Reload the page");
+  await expect(page.locator("#syncRowError")).toBeVisible();
+});
+
+test("a missing stale helper does not turn a successful sync into a failure", async ({ page }) => {
+  await setUp(page);
+  await page.evaluate(() => { window.ndiMarkPreviewStale = undefined; });
+  await openRow(page, "sync-row-1");
+  await page.locator("#syncRowConfirm").click();
+  await expect.poll(() => page.evaluate(() => window.pendingSyncs.length)).toBe(1);
+
+  await page.evaluate(() => {
+    window.pendingSyncs[0].resolveRequest({ message: "Row synchronized." });
+  });
+
+  await expect(page.locator("#sync-row-1")).toBeDisabled();
+  await expect(page.locator("#sync-row-1")).toContainText("Synced");
+  await expect(page.locator("#syncRowError")).toBeHidden();
+  await expect.poll(() => page.evaluate(() => window.syncModalHideCount)).toBe(1);
+});
+
 test("a late failure leaves a newer sync request in progress", async ({ page }) => {
   await setUp(page);
 

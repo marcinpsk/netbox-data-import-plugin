@@ -118,12 +118,14 @@ class ReviewWorkspacePresentationTest(TestCase):
                 operation="create",
             ),
             _unit("device:later", Disposition.NO_OP, row={**shared, "u_position": None}),
+            _unit("device:string-position", Disposition.NO_OP, row={**shared, "u_position": "10"}),
             _unit("device:first", Disposition.NO_OP, row={**shared, "u_position": 2}),
             _unit("device:unracked", Disposition.NO_OP, row={"_row_number": 4, "device_name": "loose"}),
         )
 
         self.assertEqual(
-            [unit.identity for unit in workspace.rack_groups["rack-a"]["devices"]], ["device:first", "device:later"]
+            [unit.identity for unit in workspace.rack_groups["rack-a"]["devices"]],
+            ["device:first", "device:string-position", "device:later"],
         )
         self.assertIn("(No rack)", workspace.rack_groups)
         self.assertEqual([row["_row_number"] for row in workspace.source_rows], [1, 2, 3, 4])

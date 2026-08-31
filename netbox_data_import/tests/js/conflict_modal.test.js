@@ -118,6 +118,16 @@ describe("conflict modal", () => {
     expect(picked.title).toBe("Resolution saved.");
   });
 
+  it("uses a fallback tooltip when a failed response has no message", async () => {
+    window.ndiPostPreviewAction.mockRejectedValueOnce({});
+    const picked = buttons()[1];
+
+    picked.click();
+
+    await vi.waitFor(() => expect(picked.textContent).toBe("Use this"));
+    expect(picked.title).toBe("The resolution could not be saved.");
+  });
+
   it("uses the native form when the preview-action helper is unavailable", () => {
     window.ndiPostPreviewAction = undefined;
 

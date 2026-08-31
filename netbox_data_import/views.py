@@ -1867,6 +1867,8 @@ def _preview_field_intent(request, target_field):
     current = DeviceFieldReviewer.current_snapshot(device, target_field)
     if current is None or current.get("canonical") != snapshots.get("netbox", {}).get("canonical"):
         return None, "The matched NetBox value changed. Recalculate the preview and try again."
+    if target_field in {"u_position", "face"} and not _placement_matches_preview(device, row):
+        return None, "The matched NetBox placement changed. Recalculate the preview and try again."
     return (row, device, snapshots.get("file", {}).get("canonical", "")), None
 
 

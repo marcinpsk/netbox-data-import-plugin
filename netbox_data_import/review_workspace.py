@@ -328,13 +328,13 @@ class ReviewWorkspace:
                 groups.setdefault(unit.rack_name or "(No rack)", {"rack_row": None, "devices": []})["devices"].append(
                     unit
                 )
+
+        def placement_sort_key(unit):
+            position = source_position(unit.extra_data.get("u_position"))
+            return position is None, position or 0
+
         for group in groups.values():
-            group["devices"].sort(
-                key=lambda unit: (
-                    unit.extra_data.get("u_position") is None,
-                    unit.extra_data.get("u_position") or 0,
-                )
-            )
+            group["devices"].sort(key=placement_sort_key)
         return groups
 
     @property

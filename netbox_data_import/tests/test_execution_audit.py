@@ -3,7 +3,7 @@
 """The stored source document and the Import Execution audit record."""
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from core.choices import JobStatusChoices
 from core.models import Job
@@ -108,6 +108,11 @@ class SourceDocumentRetentionTest(TestCase):
         self._age(recent, 29)
         self.assertEqual(SourceDocument.purge_unreferenced(), 0)
         self.assertTrue(SourceDocument.objects.filter(pk=recent.pk).exists())
+
+    def test_retention_rejects_a_naive_reference_time(self):
+        """An injected reference time cannot shift the cutoff through implicit localization."""
+        with self.assertRaisesMessage(ValueError, "timezone-aware"):
+            SourceDocument.purge_unreferenced(now=datetime(2026, 1, 1))
 
     def test_a_referenced_document_is_permanent_audit_input(self):
         """An execution's input is never reclaimed, however old it is."""

@@ -568,7 +568,10 @@ class SourceDocument(models.Model):
         A document an Import Execution references is permanent audit input, so the queryset excludes
         it and the protecting foreign key backs that up.
         """
-        cutoff = (now or timezone.now()) - cls.RETENTION
+        reference_time = now or timezone.now()
+        if timezone.is_naive(reference_time):
+            raise ValueError("now must be timezone-aware")
+        cutoff = reference_time - cls.RETENTION
         # The protecting relation forces a row-by-row collect, so defer the bytes one purge would load.
         stale = cls.objects.filter(import_executions__isnull=True, created__lt=cutoff).defer("content")
         return stale.delete()[0]

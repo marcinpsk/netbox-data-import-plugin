@@ -23,6 +23,7 @@ from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
 from netbox_data_import.catalog import CATALOG, POLICY_SECTIONS, OutputKind, TargetModuleKey
 from netbox_data_import.forms import ColumnMappingForm, ColumnTransformRuleForm, ImportProfileForm
 from netbox_data_import.models import ColumnMapping, ColumnTransformRule, ImportProfile
+from netbox_data_import.plan import Disposition
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
 
@@ -966,7 +967,7 @@ class StaleAdapterRuntimeGuardTest(TestCase):
         self._retire_the_adapter()
         session = self.client.session
         plan = session["import_plan"]
-        selection = [unit["identity"] for unit in plan["units"] if unit["disposition"] == "actionable"]
+        selection = [unit["identity"] for unit in plan["units"] if unit["disposition"] == Disposition.ACTIONABLE]
         job = Job.objects.create(
             name="Data Import",
             user=self.user,

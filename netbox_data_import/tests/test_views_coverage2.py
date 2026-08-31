@@ -223,7 +223,7 @@ class ImportPreviewViewExistingResolutionsTest(TestCase):
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
         )
-        self.assertEqual(setup.status_code, 302)
+        self.assertEqual(setup.status_code, 302, setup.content[:300])
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)

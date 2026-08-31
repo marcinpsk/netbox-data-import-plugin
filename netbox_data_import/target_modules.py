@@ -787,6 +787,7 @@ class _DeviceBatch:
         self._candidate_columns = PrimaryContactResolver.candidate_source_columns(profile)
         self._mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         self._roles = {source_class: _text(mapping.role_slug) for source_class, mapping in self._mappings.items()}
+        self._device_types, self._manufacturers, self._role_objects = self._load_dependency_objects(rows)
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
         self._bound_sources = {match.netbox_device_id: _text(match.source_id) for match in profile.device_matches.all()}
         identity_rows = [row for row in rows if self._is_identity_writing_row(row)]
@@ -843,6 +844,34 @@ class _DeviceBatch:
         # Row order decides who keeps a slot two rows claim, so the first row planned wins it.
         self._claimed: dict[tuple[int | str, str | None, Any], int] = {}
         self._claimed_devices: dict[int, tuple[int | None, str]] = {}
+
+    def _load_dependency_objects(
+        self, rows: list[dict[str, Any]]
+    ) -> tuple[dict[tuple[str, str], Any], dict[str, Any], dict[str, Any]]:
+        """Load each Device Type, Manufacturer, and Device Role this batch can reference."""
+        from dcim.models import DeviceRole, DeviceType, Manufacturer
+
+        type_keys = set()
+        for row in rows:
+            make = " ".join((_source_text(row.get("make")) or "Unknown").split())
+            model = " ".join((_source_text(row.get("model")) or "Unknown").split())
+            type_keys.add(self._identity.resolve(make, model)[:2])
+
+        device_types = {
+            (device_type.manufacturer.slug, device_type.slug): device_type
+            for device_type in DeviceType.objects.select_related("manufacturer").filter(
+                manufacturer__slug__in={mfg_slug for mfg_slug, _dt_slug in type_keys},
+                slug__in={dt_slug for _mfg_slug, dt_slug in type_keys},
+            )
+        }
+        missing_manufacturers = {mfg_slug for mfg_slug, dt_slug in type_keys if (mfg_slug, dt_slug) not in device_types}
+        manufacturers = {
+            manufacturer.slug: manufacturer
+            for manufacturer in Manufacturer.objects.filter(slug__in=missing_manufacturers)
+        }
+        role_slugs = {role_slug for role_slug in self._roles.values() if role_slug}
+        roles = {role.slug: role for role in DeviceRole.objects.filter(slug__in=role_slugs)}
+        return device_types, manufacturers, roles
 
     def _active_ignored_device_type_rows(self, rows) -> frozenset[int]:
         """Return rows whose saved review keeps the matched Device Type."""
@@ -1020,18 +1049,18 @@ class _DeviceBatch:
 
     def dependencies(self, row) -> _Dependencies:
         """Return existing or planned relation objects, or the first unmet dependency."""
-        from dcim.models import DeviceRole, DeviceType, Manufacturer
+        from dcim.models import DeviceType
 
         make = " ".join((_source_text(row.get("make")) or "Unknown").split())
         model = " ".join((_source_text(row.get("model")) or "Unknown").split())
         mfg_slug, dt_slug, explicit = self._identity.resolve(make, model)
         changes = []
         actor = self.reader.actor
-        device_type = DeviceType.objects.filter(manufacturer__slug=mfg_slug, slug=dt_slug).first()
+        device_type = self._device_types.get((mfg_slug, dt_slug))
         if device_type is None:
             if not self.profile.adapter_settings.create_missing_device_types:
                 return _Dependencies(missing=("device.device_type_missing", {"mfg_slug": mfg_slug, "dt_slug": dt_slug}))
-            manufacturer = Manufacturer.objects.filter(slug=mfg_slug).first()
+            manufacturer = self._manufacturers.get(mfg_slug)
             if manufacturer is not None and not explicit and identity_text(manufacturer.name) != identity_text(make):
                 return _Dependencies(
                     missing=(
@@ -1069,7 +1098,7 @@ class _DeviceBatch:
         role_slug = self._roles.get(_source_text(row.get("device_class")), "")
         if not role_slug:
             return _Dependencies(missing=("device.role_unconfigured", {"source_class": row.get("device_class")}))
-        role = DeviceRole.objects.filter(slug=role_slug).first() if role_slug else None
+        role = self._role_objects.get(role_slug)
         if role is None:
             if actor is not None and not actor.has_perm("dcim.add_devicerole"):
                 return _Dependencies(missing=("device.role_permission", {"role_slug": role_slug}))

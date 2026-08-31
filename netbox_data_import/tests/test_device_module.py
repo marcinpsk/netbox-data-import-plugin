@@ -123,6 +123,25 @@ class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
         device_queries = [query["sql"] for query in captured.captured_queries if f"FROM {table}" in query["sql"]]
         self.assertEqual(len(device_queries), 2, device_queries)
 
+    def test_dependencies_are_loaded_once_for_the_batch(self):
+        """Repeated dependency identities do not issue one ORM query per Device row."""
+        from dcim.models import DeviceRole, DeviceType, Manufacturer
+
+        rows = [
+            self._row(number, f"D-{number}", f"srv-{number:02d}", make="Example Make", model="Example Model")
+            for number in (1, 2)
+        ]
+
+        with CaptureQueriesContext(connection) as captured:
+            batch = _DeviceBatch(self._batch(*rows), rows, self.profile, self.reader)
+            dependencies = [batch.dependencies(row) for row in rows]
+
+        self.assertTrue(all(dependency.missing is None for dependency in dependencies))
+        for model in (DeviceType, Manufacturer, DeviceRole):
+            table = connection.ops.quote_name(model._meta.db_table)
+            queries = [query["sql"] for query in captured.captured_queries if f"FROM {table}" in query["sql"]]
+            self.assertEqual(len(queries), 1, queries)
+
 
 class DeviceModuleSelectionTest(DeviceModulePlanTestBase):
     """Class policy decides which rows belong to this module."""
@@ -1181,6 +1200,28 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
         )
 
         units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.14"))
+
+        self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+        self.assertEqual(units[0].changes, ())
+
+    def test_an_interface_vrf_difference_does_not_repeat_a_settled_address_write(self):
+        """NetBox permits an interface and its assigned address to use independent VRFs."""
+        from ipam.models import IPAddress, VRF
+
+        self._interface_template()
+        device = self._with_provenance(self._device("srv-01", rack=self.rack))
+        interface = device.interfaces.get(name="mgmt0")
+        interface.vrf = VRF.objects.create(name="Device Module Interface VRF")
+        interface.save(update_fields=["vrf"])
+        current = IPAddress.objects.create(
+            address="198.18.0.15/32",
+            vrf=VRF.objects.create(name="Device Module Address VRF"),
+            assigned_object=interface,
+        )
+        device.primary_ip4 = current
+        device.save(update_fields=["primary_ip4"])
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.15"))
 
         self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
         self.assertEqual(units[0].changes, ())

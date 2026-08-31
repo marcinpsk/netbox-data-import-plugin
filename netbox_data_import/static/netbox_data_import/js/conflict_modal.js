@@ -158,7 +158,7 @@
           other.disabled = false;
         });
         btn.textContent = 'Use this';
-        btn.title = error.message;
+        btn.title = (error && error.message) || 'The resolution could not be saved.';
       });
   });
 })();

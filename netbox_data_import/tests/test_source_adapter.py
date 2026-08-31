@@ -3,6 +3,7 @@
 """Use SimpleTestCase to enforce the Source Adapter's no-database boundary."""
 
 from io import BytesIO
+from zipfile import ZipFile
 
 import openpyxl
 from django.test import SimpleTestCase
@@ -25,6 +26,23 @@ def _workbook(sheet_name, header, *rows):
     buffer = BytesIO()
     book.save(buffer)
     return buffer.getvalue()
+
+
+def _workbook_with_xml_entity(content):
+    """Insert one harmless XML entity into a valid workbook archive."""
+    output = BytesIO()
+    with ZipFile(BytesIO(content)) as source, ZipFile(output, "w") as target:
+        for entry in source.infolist():
+            payload = source.read(entry.filename)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                assert b">SRC-1<" in payload
+                payload = payload.replace(
+                    b"<worksheet ",
+                    b'<!DOCTYPE worksheet [<!ENTITY cell_value "SRC-1">]><worksheet ',
+                    1,
+                ).replace(b">SRC-1<", b">&cell_value;<", 1)
+            target.writestr(entry, payload)
+    return output.getvalue()
 
 
 class FlatWorkbookInterpretTest(SimpleTestCase):
@@ -149,6 +167,16 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
 
         with self.assertRaises(SourceUnreadable):
             FlatWorkbookAdapter.interpret(b"not a workbook", config)
+
+    def test_workbook_xml_protection_is_active(self):
+        """The parser rejects XML expansion attacks in uploaded workbooks."""
+        self.assertTrue(openpyxl.DEFUSEDXML)
+
+        content = _workbook_with_xml_entity(_workbook("Data", ("Id",), ("SRC-1",)))
+        config = FlatWorkbookConfig(sheet_name="Data", column_map={"source_id": ("Id",)})
+
+        with self.assertRaises(SourceUnreadable):
+            FlatWorkbookAdapter.interpret(content, config)
 
     def test_an_invalid_transform_pattern_names_its_column(self):
         """A bad regex is configuration the operator has to find and fix."""

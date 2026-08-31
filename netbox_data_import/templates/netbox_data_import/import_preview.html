@@ -2447,6 +2447,15 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
     var errorDiv = document.getElementById('syncRowError');
     errorDiv.classList.add('d-none');
 
+    if (typeof window.ndiPostPreviewAction !== 'function') {
+      confirmBtn.disabled = false;
+      confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
+      confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
+      errorDiv.textContent = 'The preview action script is unavailable. Reload the page.';
+      errorDiv.classList.remove('d-none');
+      return;
+    }
+
     var submittedRowNumber = currentRowNumber;
     var submittedSyncButton = currentSyncButton;
     var submittedSyncRequest = {};
@@ -2463,7 +2472,9 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
       if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
         pendingSyncRequests.delete(submittedSyncButton);
       }
-      window.ndiMarkPreviewStale();
+      if (typeof window.ndiMarkPreviewStale === 'function') {
+        window.ndiMarkPreviewStale();
+      }
       var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
         && currentSyncButton === submittedSyncButton;
       if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
