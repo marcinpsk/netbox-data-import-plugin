@@ -51,7 +51,7 @@ def _endpoint_line(termination):
     return " > ".join(parts)
 
 
-def _segment(left, cable_class, right):
+def _segment(left, cable_class, right, corroboration=("", "", "")):
     """Render one Segment Evidence row in the source column order."""
     left_device, left_cards, left_port, left_class = left
     right_device, right_cards, right_port, right_class = right
@@ -60,17 +60,13 @@ def _segment(left, cable_class, right):
         left_class,
         left_cards,
         left_device,
-        "",
-        "",
-        "",
+        *corroboration,
         cable_class,
         right_port,
         right_class,
         right_cards,
         right_device,
-        "",
-        "",
-        "",
+        *corroboration,
     )
 
 
@@ -107,6 +103,29 @@ def _workbook(*, path_blocks=(), list_blocks=(), include_path=True, include_list
     buffer = BytesIO()
     book.save(buffer)
     return buffer.getvalue()
+
+
+def _two_traces_over_one_pair(first_class, second_class, *, shared_entry=False):
+    """Return two path blocks that cross one rear-port segment, each from its own endpoints."""
+    shared_left = _termination("PANEL-P", "CARD-P", "REAR", "Punch-Down")
+    shared_right = _termination("PANEL-Q", "CARD-Q", "REAR", "Punch-Down")
+    blocks = []
+    for index, cable_class in enumerate((first_class, second_class), start=1):
+        front = "FRONT" if shared_entry else f"FRONT-{index}"
+        endpoint = _termination(f"DEVICE-{index}", "", f"PORT-{index}", "Port")
+        far_endpoint = _termination(f"DEVICE-{index}0", "", f"PORT-{index}0", "NIC")
+        blocks.append(
+            (
+                _endpoint_line(endpoint),
+                _endpoint_line(far_endpoint),
+                (
+                    _segment(endpoint, "Lead", _termination("PANEL-P", "CARD-P", front, "Position Front")),
+                    _segment(shared_left, cable_class, shared_right),
+                    _segment(_termination("PANEL-Q", "CARD-Q", front, "Position Front"), "Tail", far_endpoint),
+                ),
+            )
+        )
+    return tuple(blocks)
 
 
 def _interpret(content):
@@ -240,6 +259,47 @@ class TraceWorkbookIdentityTest(SimpleTestCase):
         self.assertEqual({item.direction for item in combined.rows[0].provenance}, {"canonical", "reversed"})
         self.assertEqual(combined.diagnostics, ())
 
+    def test_a_device_move_leaves_both_canonical_forms_alone(self):
+        """Corroboration is display evidence, so a rack change must not churn the fingerprint."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        panel_in = _termination("PANEL-A", "CARD-A", "FRONT", "Position Front")
+        panel_out = _termination("PANEL-A", "CARD-A", "REAR", "Punch-Down")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        lines = _endpoint_line(endpoint_a), _endpoint_line(endpoint_b)
+        stated = (*lines, (_segment(endpoint_a, "Cable A", panel_in), _segment(panel_out, "Cable B", endpoint_b)))
+        moved = (
+            *lines,
+            (
+                _segment(endpoint_a, "Cable A", panel_in, ("9", "RACK-Z", "Site Z")),
+                _segment(panel_out, "Cable B", endpoint_b, ("9", "RACK-Z", "Site Z")),
+            ),
+        )
+
+        original = _interpret(_workbook(path_blocks=(stated,))).rows[0]
+        relocated = _interpret(_workbook(path_blocks=(moved,))).rows[0]
+
+        self.assertEqual(relocated.endpoint_summary.from_termination.rack, "RACK-Z")
+        self.assertEqual(original.identity, relocated.identity)
+        self.assertEqual(original.content_fingerprint, relocated.content_fingerprint)
+
+    def test_a_repatched_path_keeps_its_identity_and_moves_its_fingerprint(self):
+        """Endpoint identity is stable across patching, which is why the fingerprint exists."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        first_in = _termination("PANEL-A", "CARD-A", "FRONT", "Position Front")
+        first_out = _termination("PANEL-A", "CARD-A", "REAR", "Punch-Down")
+        second_in = _termination("PANEL-B", "CARD-B", "FRONT", "Position Front")
+        second_out = _termination("PANEL-B", "CARD-B", "REAR", "Punch-Down")
+        lines = _endpoint_line(endpoint_a), _endpoint_line(endpoint_b)
+        before = (*lines, (_segment(endpoint_a, "Cable A", first_in), _segment(first_out, "Cable B", endpoint_b)))
+        after = (*lines, (_segment(endpoint_a, "Cable A", second_in), _segment(second_out, "Cable B", endpoint_b)))
+
+        original = _interpret(_workbook(path_blocks=(before,))).rows[0]
+        repatched = _interpret(_workbook(path_blocks=(after,))).rows[0]
+
+        self.assertEqual(original.identity, repatched.identity)
+        self.assertNotEqual(original.content_fingerprint, repatched.content_fingerprint)
+
     def test_json_identity_does_not_collide_on_separator_characters(self):
         """JSON preserves field boundaries that a separator-joined identity would lose."""
         first_a = _termination("A|B", "C", "D", "Port")
@@ -358,40 +418,119 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertFalse(batch.rows[0].valid)
         self.assertEqual(_codes(batch), ["trace.unknown_port_class"])
 
-    def test_cross_trace_occupancy_and_cable_class_conflicts_invalidate_every_trace(self):
-        """Distinct traces cannot share terminations or disagree about one segment class."""
-        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
-        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
-        endpoint_c = _termination("DEVICE-C", "", "PORT-C", "Port")
-        endpoint_d = _termination("DEVICE-D", "", "PORT-D", "NIC")
-        panel_p_in = _termination("PANEL-P", "CARD-P", "FRONT", "Position Front")
-        panel_p_out = _termination("PANEL-P", "CARD-P", "REAR", "Punch-Down")
-        panel_q_in = _termination("PANEL-Q", "CARD-Q", "FRONT", "Position Front")
-        panel_q_out = _termination("PANEL-Q", "CARD-Q", "REAR", "Punch-Down")
-        first = (
-            _endpoint_line(endpoint_a),
-            _endpoint_line(endpoint_b),
-            (
-                _segment(endpoint_a, "Cable A", panel_p_in),
-                _segment(panel_p_out, "Shared A", panel_q_in),
-                _segment(panel_q_out, "Cable B", endpoint_b),
-            ),
-        )
-        second = (
-            _endpoint_line(endpoint_c),
-            _endpoint_line(endpoint_d),
-            (
-                _segment(endpoint_c, "Cable C", panel_p_in),
-                _segment(panel_p_out, "Shared B", panel_q_in),
-                _segment(panel_q_out, "Cable D", endpoint_d),
-            ),
-        )
+    def test_a_shared_termination_invalidates_every_involved_trace(self):
+        """Two traces landing different cables on one front port is an occupancy conflict alone."""
+        blocks = _two_traces_over_one_pair("Shared", "Shared", shared_entry=True)
 
-        batch = _interpret(_workbook(path_blocks=(first, second)))
+        batch = _interpret(_workbook(path_blocks=blocks))
 
         self.assertEqual(len(batch.rows), 2)
         self.assertTrue(all(not trace.valid for trace in batch.rows))
         self.assertEqual(_codes(batch), ["trace.cross_trace_conflict", "trace.cross_trace_conflict"])
+        self.assertIn("claimed by another Source Trace", batch.diagnostics[0].message)
+        self.assertNotIn("CableClass", batch.diagnostics[0].message)
+
+    def test_one_segment_claimed_with_two_cable_classes_invalidates_both_traces(self):
+        """A shared segment stated with two labels cannot become one Cable."""
+        blocks = _two_traces_over_one_pair("Shared A", "Shared B")
+
+        batch = _interpret(_workbook(path_blocks=blocks))
+
+        self.assertEqual(len(batch.rows), 2)
+        self.assertTrue(all(not trace.valid for trace in batch.rows))
+        self.assertEqual(_codes(batch), ["trace.cross_trace_conflict", "trace.cross_trace_conflict"])
+        self.assertIn("conflicting CableClass labels", batch.diagnostics[0].message)
+
+    def test_a_cable_class_that_differs_only_in_case_is_a_disagreement(self):
+        """A CableClass label keys its own mapping row, so it is not normalized like an identity."""
+        batch = _interpret(_workbook(path_blocks=_two_traces_over_one_pair("Shared", "shared")))
+
+        self.assertTrue(all(not trace.valid for trace in batch.rows))
+        self.assertIn("conflicting CableClass labels", batch.diagnostics[0].message)
+
+    def test_two_unreadable_rows_each_report_their_own_location(self):
+        """Issue #84 asks the diagnostics to name the malformed rows, not just the first."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        nameless = _termination("", "", "PORT-X", "Port")
+        block = (
+            _endpoint_line(endpoint_a),
+            _endpoint_line(endpoint_b),
+            (
+                _segment(nameless, "Cable", endpoint_b),
+                _segment(nameless, "Cable", endpoint_b),
+                _segment(endpoint_a, "Cable", endpoint_b),
+            ),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertEqual(_codes(batch), ["trace.incomplete_block", "trace.incomplete_block"])
+        self.assertEqual([diagnostic.row_number for diagnostic in batch.diagnostics], [6, 7])
+
+    def test_an_unpaired_block_without_a_to_line_is_incomplete(self):
+        """A From line with nothing under it is the section 5.6 incomplete block, not silence."""
+        book = openpyxl.Workbook()
+        sheet = book.active
+        if not isinstance(sheet, Worksheet):
+            sheet = book.create_sheet()
+        sheet.title = "Trace List"
+        sheet.append(("Executed", "2026-08-31 12:00:00"))
+        sheet.append(())
+        sheet.append(("From", _endpoint_line(_termination("DEVICE-A", "", "PORT-A", "Port"))))
+        buffer = BytesIO()
+        book.save(buffer)
+
+        batch = _interpret(buffer.getvalue())
+
+        self.assertEqual(batch.rows, ())
+        self.assertIn("trace.incomplete_block", _codes(batch))
+
+    def test_fallback_occurrences_with_different_endpoint_evidence_conflict(self):
+        """An Endpoint Summary fallback states no segment, so its endpoints carry all its evidence."""
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        blocks = tuple(
+            (
+                _endpoint_line(endpoint_a),
+                _endpoint_line(endpoint_b),
+                (_visit(endpoint_a), _visit(endpoint_b)),
+            )
+            for endpoint_a in (
+                _termination("DEVICE-A", "", "PORT-A", "Port"),
+                _termination("DEVICE-A", "", "PORT-A", "Switch Port"),
+            )
+        )
+
+        batch = _interpret(_workbook(list_blocks=blocks, include_path=False, include_list=True))
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(_codes(batch), ["trace.duplicate_conflict"])
+
+    def test_a_same_rear_port_continuation_is_legal_evidence(self):
+        """A trunk and a patch recorded on one rear port stay valid, unlike an interface hop."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        panel_front = _termination("PANEL-A", "CARD-A", "FRONT", "Position Front")
+        panel_rear = _termination("PANEL-A", "CARD-A", "REAR", "Punch-Down")
+        shared_rear = _termination("PANEL-B", "CARD-B", "REAR", "Punch-Down")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (
+            _endpoint_line(endpoint_a),
+            _endpoint_line(endpoint_b),
+            (
+                _segment(endpoint_a, "Cable A", panel_front),
+                _segment(panel_rear, "Trunk", shared_rear),
+                _segment(shared_rear, "Patch", endpoint_b),
+            ),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertTrue(batch.rows[0].valid)
+        self.assertEqual(batch.diagnostics, ())
+        self.assertIn(
+            ("PANEL-B", "REAR", "REAR"),
+            [(claim.device, claim.entry_port, claim.exit_port) for claim in batch.rows[0].pass_through_claims],
+        )
 
     def test_an_identical_shared_segment_is_allowed(self):
         """Two traces may contribute the same segment with the same CableClass."""
@@ -447,3 +586,91 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertEqual(batch.rows[0].segments, ())
         self.assertEqual(batch.rows[0].pass_through_claims, ())
         self.assertEqual(batch.rows[0].provenance[0].sheet, "Trace List")
+
+
+class TraceWorkbookExportArtifactTest(SimpleTestCase):
+    """The exporter overruns a block's separator row when the block fills it."""
+
+    endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+    panel_front = _termination("PANEL-A", "CARD-A", "FRONT", "Position Front")
+    panel_rear = _termination("PANEL-A", "CARD-A", "REAR", "Punch-Down")
+    endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+    endpoint_c = _termination("DEVICE-C", "", "PORT-C", "Port")
+    endpoint_d = _termination("DEVICE-D", "", "PORT-D", "NIC")
+
+    def _sheet(self, title, header):
+        """Return an empty trace sheet with its export timestamp row."""
+        book = openpyxl.Workbook()
+        sheet = book.active
+        if not isinstance(sheet, Worksheet):
+            sheet = book.create_sheet()
+        sheet.title = title
+        sheet.append(("Executed", "2026-08-31 12:00:00"))
+        sheet.append(())
+        return book, sheet
+
+    @staticmethod
+    def _overrun(line_marker, line_text, row):
+        """Return the next block's line with the previous block's trailing row still under it."""
+        return (line_marker, line_text, *row[2:])
+
+    def test_a_trace_list_visit_under_the_next_block_still_corroborates(self):
+        """The fiber corpus depends on this recovery, so an isolated case must prove it."""
+        path_block = (
+            _endpoint_line(self.endpoint_a),
+            _endpoint_line(self.endpoint_b),
+            (
+                _segment(self.endpoint_a, "Cable A", self.panel_front),
+                _segment(self.panel_rear, "Cable B", self.endpoint_b),
+            ),
+        )
+        book, sheet = self._sheet("Trace List", LIST_HEADER)
+        sheet.append(("From", _endpoint_line(self.endpoint_a)))
+        sheet.append(("To", _endpoint_line(self.endpoint_b)))
+        sheet.append(LIST_HEADER)
+        sheet.append(_visit(self.endpoint_a))
+        sheet.append(_visit(self.panel_front))
+        sheet.append(self._overrun("From", _endpoint_line(self.endpoint_c), _visit(self.endpoint_b)))
+        sheet.append(("To", _endpoint_line(self.endpoint_d)))
+        sheet.append(LIST_HEADER)
+        path = book.create_sheet("Trace From To")
+        path.append(("Executed", "2026-08-31 12:00:00"))
+        path.append(())
+        for from_line, to_line, rows in (path_block,):
+            path.append(("From", from_line))
+            path.append(("To", to_line))
+            path.append(PATH_HEADER)
+            for row in rows:
+                path.append(row)
+        buffer = BytesIO()
+        book.save(buffer)
+
+        batch = _interpret(buffer.getvalue())
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertTrue(batch.rows[0].valid)
+        self.assertEqual([visit.device for visit in batch.rows[0].corroboration], ["DEVICE-A", "PANEL-A", "DEVICE-B"])
+        self.assertEqual(batch.diagnostics, ())
+
+    def test_a_segment_row_under_the_next_block_is_reported_not_dropped(self):
+        """The overrun destroys the row's Port and PortClass cells, so it must fail loudly."""
+        book, sheet = self._sheet("Trace From To", PATH_HEADER)
+        sheet.append(("From", _endpoint_line(self.endpoint_a)))
+        sheet.append(("To", _endpoint_line(self.endpoint_b)))
+        sheet.append(PATH_HEADER)
+        sheet.append(_segment(self.endpoint_a, "Cable", self.endpoint_b))
+        sheet.append(
+            self._overrun("From", _endpoint_line(self.endpoint_c), _segment(self.endpoint_a, "Cable", self.endpoint_b))
+        )
+        sheet.append(("To", _endpoint_line(self.endpoint_d)))
+        sheet.append(PATH_HEADER)
+        sheet.append(_segment(self.endpoint_c, "Cable", self.endpoint_d))
+        buffer = BytesIO()
+        book.save(buffer)
+
+        batch = _interpret(buffer.getvalue())
+
+        overrun_trace, following_trace = batch.rows
+        self.assertFalse(overrun_trace.valid)
+        self.assertEqual([error.code for error in overrun_trace.errors], ["trace.incomplete_block"])
+        self.assertTrue(following_trace.valid, "the next block still reads normally")

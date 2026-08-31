@@ -539,7 +539,7 @@ blank-row layout, empty-string cells, and sheet dimensions.
 | Fixture | Expected result |
 | --- | --- |
 | Copper trace workbook | 20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, all 10 valid with 3 Segment Evidence entries each, empty `Trace List` corroborates nothing |
-| Fiber trace workbook | 20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, 8 valid with 4 to 9 segments, 4 ending at a rear port, every `Trace List` corroboration passing, 1 `trace.non_linear_path`, 1 `trace.pass_through_at_interface`, and one accepted legal same-rear-port continuation inside a valid trace |
+| Fiber trace workbook | 20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, 8 valid with 4 to 9 segments, 4 ending at a rear port, every `Trace List` corroboration passing, 1 `trace.non_linear_path`, 1 `trace.pass_through_at_interface`, and one accepted legal same-rear-port continuation |
 | Both | Zero shared terminations and zero CableClass conflicts between distinct traces |
 
 ## 6. Patched Path Replacement planning and transaction behavior

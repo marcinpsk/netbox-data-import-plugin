@@ -228,10 +228,13 @@ def content_fingerprint(
     to_termination: TerminationReference,
     segments: Sequence[SegmentEvidence],
 ) -> str:
-    """Hash canonical Segment Evidence and Pass-Through Claims."""
+    """Hash the canonical endpoints, Segment Evidence, and Pass-Through Claims."""
     oriented = canonical_orientation(from_termination, to_termination, segments)
     claims = _pass_through_claims(oriented)
+    endpoints = sorted((from_termination, to_termination), key=lambda termination: termination.identity_key)
     payload = {
+        # An Endpoint Summary fallback states no segment, so the endpoints carry its whole content.
+        "endpoints": [[termination.identity_key, termination.port_class] for termination in endpoints],
         "segments": [
             [
                 segment.left.identity_key,
@@ -310,14 +313,14 @@ def _extract_blocks(sheet, workbook_fingerprint: str) -> tuple[_Block, ...]:
             if _row_has_data(_row_values(sheet, row_number, width))
         ]
         row_end = _last_data_row(sheet, start, boundary - 1, width)
-        if sheet.title == TRACE_LIST_SHEET and boundary <= sheet.max_row:
-            for carry_row in (boundary, boundary + 1):
-                if carry_row > sheet.max_row:
-                    continue
-                values = _row_values(sheet, carry_row, width)
-                if _row_has_data(values[2:]):
-                    rows.append(_RawRow(carry_row, ("", "", *values[2:])))
-                    row_end = carry_row
+        # A block that fills its separator row keeps its last rows under the next block's lines.
+        for carry_row in (boundary, boundary + 1):
+            if carry_row > sheet.max_row:
+                continue
+            values = _row_values(sheet, carry_row, width)
+            if _row_has_data(values[2:]):
+                rows.append(_RawRow(carry_row, ("", "", *values[2:])))
+                row_end = carry_row
         blocks.append(
             _Block(
                 sheet=sheet.title,
@@ -658,11 +661,8 @@ def _provenance(block: _Block, summary: EndpointSummary) -> TraceProvenance:
 
 
 def _deduplicate_errors(errors: Iterable[SourceDiagnostic]) -> tuple[SourceDiagnostic, ...]:
-    """Keep the first diagnostic of each code, so one condition reports once."""
-    by_code: dict[str, SourceDiagnostic] = {}
-    for error in errors:
-        by_code.setdefault(error.code, error)
-    return tuple(by_code.values())
+    """Drop a repeated diagnostic, so every distinct finding keeps its own row."""
+    return tuple(dict.fromkeys(errors))
 
 
 def _path_trace(
@@ -772,7 +772,8 @@ def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ..
     for occurrences in by_identity.values():
         selected = occurrences[0]
         provenance = tuple(dict.fromkeys(item for trace in occurrences for item in trace.provenance))
-        errors = list(_deduplicate_errors(error for trace in occurrences for error in trace.errors))
+        # Identical occurrences repeat one finding, so the kept occurrence already reports it once.
+        errors = list(selected.errors)
         if len({trace.content_fingerprint for trace in occurrences}) > 1:
             locations = "; ".join(_location_from_provenance(trace.provenance[0]) for trace in occurrences)
             errors.append(
@@ -806,7 +807,8 @@ def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, 
         for segment in trace.segments:
             ordered_pair = sorted((segment.left.identity_key, segment.right.identity_key))
             segment_pair = ordered_pair[0], ordered_pair[1]
-            cable_class = identity_text(segment.cable_class)
+            # The CableClass label keys its own mapping row, so it compares as the source states it.
+            cable_class = segment.cable_class
             claim = segment_pair, cable_class
             claims[segment.left.identity_key].add(claim)
             claims[segment.right.identity_key].add(claim)
@@ -881,7 +883,7 @@ def interpret(content: bytes) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiag
         if trace is not None:
             traces.append(trace)
     for block in list_blocks:
-        if (block.sheet, block.ordinal) in paired_lists or not block.rows:
+        if (block.sheet, block.ordinal) in paired_lists:
             continue
         trace, block_diagnostics = _fallback_trace(block)
         diagnostics.extend(block_diagnostics)
