@@ -8,7 +8,7 @@ from typing import Any
 
 from dataclasses import dataclass, field
 from io import BytesIO
-from time import monotonic
+from time import thread_time
 
 import openpyxl
 import regex
@@ -20,7 +20,7 @@ from .values import comparison_key
 EXTRA_JSON_PREFIX = "extra_json:"
 _MAX_UNUSED_SAMPLES = 5
 _TRANSFORM_REGEX_MATCH_TIMEOUT_SECONDS = 0.5
-_TRANSFORM_REGEX_WORKBOOK_TIMEOUT_SECONDS = 1.0
+_TRANSFORM_REGEX_WORKBOOK_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ class _TransformRegexBudget:
         """Match with the smaller of the per-match and remaining workbook budgets."""
         if self.remaining_seconds <= 0:
             raise TimeoutError
-        started_at = monotonic()
+        started_at = thread_time()
         try:
             return regex.fullmatch(
                 pattern,
@@ -61,7 +61,7 @@ class _TransformRegexBudget:
                 timeout=min(_TRANSFORM_REGEX_MATCH_TIMEOUT_SECONDS, self.remaining_seconds),
             )
         finally:
-            self.remaining_seconds -= monotonic() - started_at
+            self.remaining_seconds -= thread_time() - started_at
 
 
 def _text(value) -> str:

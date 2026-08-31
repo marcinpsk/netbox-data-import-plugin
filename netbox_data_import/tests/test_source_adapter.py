@@ -9,7 +9,7 @@ from django.test import SimpleTestCase
 from openpyxl.worksheet.worksheet import Worksheet
 
 from netbox_data_import.adapters import FlatWorkbookAdapter, SourceBatch, SourceUnreadable
-from netbox_data_import.flat_workbook import FlatWorkbookConfig, TransformRule
+from netbox_data_import.flat_workbook import FlatWorkbookConfig, TransformRule, _TransformRegexBudget
 
 
 def _workbook(sheet_name, header, *rows):
@@ -197,7 +197,7 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
 
     def test_transform_time_budget_is_shared_by_the_workbook(self):
         """Many individually bounded matches must not hold one import worker indefinitely."""
-        content = _workbook("Data", ("Combined",), *(("a" * 26 + "!",) for _index in range(32)))
+        content = _workbook("Data", ("Combined",), *(("a" * 26 + "!",) for _index in range(96)))
         config = FlatWorkbookConfig(
             sheet_name="Data",
             column_map={},
@@ -210,6 +210,16 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
             FlatWorkbookAdapter.interpret(content, config)
 
         self.assertIn("timed out", str(caught.exception).lower())
+
+    def test_safe_bulk_matches_fit_the_workbook_budget(self):
+        """A large workbook of cheap matches must not exhaust its regex allowance."""
+        budget = _TransformRegexBudget()
+        match = None
+
+        for _index in range(150_000):
+            match = budget.fullmatch(r"^a+$", "a")
+
+        self.assertIsNotNone(match)
 
     def test_a_candidate_column_is_kept_for_review_rather_than_written(self):
         """A candidate target offers review choices, so its values stay grouped by source column."""
