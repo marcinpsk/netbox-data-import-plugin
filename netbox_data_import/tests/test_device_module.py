@@ -121,7 +121,7 @@ class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
 
         table = connection.ops.quote_name(device._meta.db_table)
         device_queries = [query["sql"] for query in captured.captured_queries if f"FROM {table}" in query["sql"]]
-        self.assertEqual(len(device_queries), 2, device_queries)
+        self.assertEqual(len(device_queries), 4, device_queries)
 
     def test_dependencies_are_loaded_once_for_the_batch(self):
         """Repeated dependency identities do not issue one ORM query per Device row."""
@@ -141,6 +141,32 @@ class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
             table = connection.ops.quote_name(model._meta.db_table)
             queries = [query["sql"] for query in captured.captured_queries if f"FROM {table}" in query["sql"]]
             self.assertEqual(len(queries), 1, queries)
+
+    def test_identity_matches_use_the_batch_indexes_without_row_queries(self):
+        """Every fallback match and its visibility check uses the batch-wide indexes."""
+        from dcim.models import Device
+
+        stored_source = self._device("stored-source")
+        DeviceImportSource.objects.create(device=stored_source, profile=self.profile, source_id="D-1")
+        serial = self._device("stored-serial", serial="SERIAL-2")
+        asset_tag = self._device("stored-asset", asset_tag="Asset-Three")
+        name = self._device("Stored-Name")
+        rows = [
+            self._row(1, "D-1", "source-one"),
+            self._row(2, "D-2", "source-two", serial="SERIAL-2"),
+            self._row(3, "D-3", "source-three", asset_tag="asset-three"),
+            self._row(4, "D-4", "stored-name"),
+        ]
+        batch = _DeviceBatch(self._batch(*rows), rows, self.profile, self.reader)
+
+        with CaptureQueriesContext(connection) as captured:
+            matches = [batch.match(row, row["device_name"]) for row in rows]
+
+        table = connection.ops.quote_name(Device._meta.db_table)
+        device_queries = [query["sql"] for query in captured.captured_queries if f"FROM {table}" in query["sql"]]
+        self.assertEqual(device_queries, [])
+        self.assertEqual([match.device.pk for match in matches], [stored_source.pk, serial.pk, asset_tag.pk, name.pk])
+        self.assertEqual([match.method for match in matches], ["stored source ID", "serial", "asset tag", "name"])
 
 
 class DeviceModuleSelectionTest(DeviceModulePlanTestBase):
@@ -1289,6 +1315,16 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
         device.refresh_from_db()
         self.assertIsNone(device.primary_ip4)
 
+    def test_an_address_from_the_wrong_family_warns_and_stays_out_of_the_plan(self):
+        """An IPv6 value cannot become a primary IPv4 write that fails only during execution."""
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_ip4="2001:db8::1"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual(len(units[0].diagnostics), 1)
+        self.assertEqual(units[0].diagnostics[0].code, "device.unparseable_ip")
+        self.assertEqual(units[0].diagnostics[0].display["field"], "primary_ip4")
+        self.assertEqual(dict(units[0].changes[0].payload["ip_fields"]), {})
+
     def test_an_address_held_by_another_device_is_stored_as_unassigned(self):
         """The write records an address conflict instead of taking the other device's row."""
         self._interface_template()
@@ -1528,12 +1564,7 @@ class DeviceModuleContactTest(DeviceModulePlanTestBase):
 
 
 class DeviceModuleDoesNotRenameTest(DeviceModulePlanTestBase):
-    """An import reconciles a device it matched; it does not rename it.
-
-    The name is how a row finds a device, so writing it back would let a source spelling silently
-    retitle a NetBox device an operator named deliberately. Renaming is an explicit action, not a
-    side effect of an import.
-    """
+    """An import does not rename a matched device because its name is a match key."""
 
     def setUp(self):
         """Give this test an actor allowed to write the device it plans."""
@@ -1578,11 +1609,7 @@ class DeviceModuleDoesNotRenameTest(DeviceModulePlanTestBase):
 
 
 class DeviceModuleProvenanceTest(DeviceModulePlanTestBase):
-    """A device the import wrote carries its source, and that is how the next run finds it again.
-
-    The stored source ID is the identifier that survives a renamed device, a changed serial and a
-    re-cut asset tag, so it is the one most rows reconcile on.
-    """
+    """A stored source ID survives changes to the other device identifiers."""
 
     def setUp(self):
         """Give this test an actor allowed to write the devices it plans."""

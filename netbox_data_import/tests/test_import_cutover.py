@@ -8,6 +8,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import DatabaseError
 from django.test import Client, SimpleTestCase, TransactionTestCase
 from django.urls import reverse
 
@@ -56,6 +57,15 @@ class ImportJobRunnerMessageTest(SimpleTestCase):
         self.assertEqual(
             _operator_failure_message(error),
             "First validation failure.; Second validation failure.",
+        )
+
+    def test_database_details_are_not_shown_to_the_operator(self):
+        """A database failure keeps statement and constraint details out of the Job record."""
+        error = DatabaseError("duplicate key value violates constraint private_constraint")
+
+        self.assertEqual(
+            _operator_failure_message(error),
+            "The import could not be written. Check the NetBox logs and try again.",
         )
 
 

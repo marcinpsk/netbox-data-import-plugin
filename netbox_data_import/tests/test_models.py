@@ -146,12 +146,54 @@ class ColumnTransformRuleModelTest(TestCase):
 
         self.assertIn("group_1_target", error.exception.message_dict)
 
+    def test_clean_rejects_a_target_owned_by_a_column_mapping(self):
+        """A transform cannot overwrite a value supplied by a direct column mapping."""
+        from django.core.exceptions import ValidationError
+
+        ColumnMapping.objects.create(
+            profile=self.profile,
+            source_column="Device Name",
+            target_field="device_name",
+        )
+        rule = ColumnTransformRule(
+            profile=self.profile,
+            source_column="Placement",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            rule.full_clean()
+
+        self.assertIn("group_1_target", error.exception.message_dict)
+
 
 class ColumnMappingModelTest(TestCase):
     """Tests for the ColumnMapping model."""
 
     def setUp(self):
         self.profile = ImportProfile.objects.create(name="CM Profile")
+
+    def test_clean_rejects_a_target_owned_by_a_transform_rule(self):
+        """A mapping cannot overwrite a value supplied by a transform capture."""
+        from django.core.exceptions import ValidationError
+
+        ColumnTransformRule.objects.create(
+            profile=self.profile,
+            source_column="Placement",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+        mapping = ColumnMapping(
+            profile=self.profile,
+            source_column="Device Name",
+            target_field="device_name",
+        )
+
+        with self.assertRaises(ValidationError) as error:
+            mapping.full_clean()
+
+        self.assertIn("target_field", error.exception.message_dict)
 
     def test_create_column_mapping(self):
         """A column mapping can be created and stringified."""

@@ -445,12 +445,14 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         other = ImportProfile.objects.create(name="Auto Match Other Profile")
         response = self.client.post(endpoint, {"profile_id": other.pk})
         self.assertEqual(response.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=other).exists())
 
         session = self.client.session
         session["import_context"]["site_id"] = 999999
         session.save()
         response = self.client.post(endpoint, {"profile_id": self.profile.pk})
         self.assertEqual(response.status_code, 302)
+        self.assertFalse(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
 
     def test_contact_lookup_returns_real_visible_contact_shapes(self):
         """The picker searches name, email, and phone and returns bounded Contact data."""

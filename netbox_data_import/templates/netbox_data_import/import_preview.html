@@ -2467,7 +2467,7 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
     .then(function (data) {
       submittedSyncButton.disabled = true;
       submittedSyncButton.removeAttribute('data-ndi-modal');
-      submittedSyncButton.title = data.message;
+      submittedSyncButton.title = data.message || 'Synced to NetBox.';
       submittedSyncButton.innerHTML = '<i class="mdi mdi-check"></i> Synced';
       if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
         pendingSyncRequests.delete(submittedSyncButton);

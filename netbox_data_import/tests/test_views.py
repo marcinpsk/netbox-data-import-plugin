@@ -2476,6 +2476,7 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
 
         self.ColumnTransformRule = ColumnTransformRule
         self.profile = _make_profile("CTRCRUDProfile")
+        self.profile.column_mappings.filter(target_field__in=("asset_tag", "device_name")).delete()
 
     def test_get_add_view(self):
         """GET column-transform-rule-add returns 200."""
@@ -2530,6 +2531,28 @@ class ColumnTransformRuleCRUDTest(BaseViewTestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "already assigned by the transform rule for source column &#x27;Primary Name&#x27;")
+        self.assertFalse(
+            self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="Fallback Name").exists()
+        )
+
+    def test_post_add_rejects_a_target_used_by_a_column_mapping(self):
+        """A transform cannot replace a direct column mapping through the HTTP write path."""
+        ColumnMapping.objects.create(profile=self.profile, source_column="Name", target_field="device_name")
+        url = reverse("plugins:netbox_data_import:columntransformrule_add", kwargs={"profile_pk": self.profile.pk})
+
+        response = self.client.post(
+            url,
+            {
+                "profile": self.profile.pk,
+                "source_column": "Fallback Name",
+                "pattern": r"^(.+)$",
+                "group_1_target": "device_name",
+                "group_2_target": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "already assigned by the column mapping for source column &#x27;Name&#x27;")
         self.assertFalse(
             self.ColumnTransformRule.objects.filter(profile=self.profile, source_column="Fallback Name").exists()
         )

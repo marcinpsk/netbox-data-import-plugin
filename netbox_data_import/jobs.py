@@ -2,6 +2,8 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Native NetBox background jobs for data imports."""
 
+import logging
+
 from typing import NoReturn
 
 from django.core.exceptions import ValidationError
@@ -27,10 +29,13 @@ from .plan import PlanError
 
 
 _PROGRESS_REPORT_INTERVAL = 25
+logger = logging.getLogger(__name__)
 
 
 def _operator_failure_message(exc) -> str:
     """Return one exception as readable text for the native Job record."""
+    if isinstance(exc, DatabaseError):
+        return "The import could not be written. Check the NetBox logs and try again."
     return "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
 
 
@@ -105,8 +110,10 @@ class ImportJobRunner(JobRunner):
             )
         except ImportProfile.DoesNotExist:
             self._fail("The import profile is no longer available.")
+        except DatabaseError as exc:
+            logger.exception("Import execution failed with a database error")
+            self._fail(_operator_failure_message(exc))
         except (
-            DatabaseError,
             EngineConfigurationError,
             ObjectPermissionDenied,
             PlanError,

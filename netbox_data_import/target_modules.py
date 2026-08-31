@@ -819,6 +819,13 @@ class _DeviceBatch:
             if self.reader.actor is None
             else frozenset(self.reader.devices().filter(pk__in=reviewed_device_ids).values_list("pk", flat=True))
         )
+        (
+            self._devices_by_source_id,
+            self._devices_by_serial,
+            self._devices_by_asset_tag,
+            self._devices_by_name,
+            self._visible_identity_device_ids,
+        ) = self._load_identity_objects(identity_rows)
         self._duplicate_names = _repeated(identity_text(effective_device_name(row)) for row in identity_rows)
         self._reserved_names = {
             identity_text(name)
@@ -872,6 +879,67 @@ class _DeviceBatch:
         role_slugs = {role_slug for role_slug in self._roles.values() if role_slug}
         roles = {role.slug: role for role in DeviceRole.objects.filter(slug__in=role_slugs)}
         return device_types, manufacturers, roles
+
+    def _load_identity_objects(self, rows):
+        """Load the global Device identity candidates and their visibility once."""
+        from dcim.models import Device
+        from django.db.models.functions import Lower
+
+        source_ids = {_source_text(row.get("source_id")) for row in rows} - {""}
+        serials = {_source_text(row.get("serial")) for row in rows} - {""}
+        asset_tags = {_source_text(row.get("asset_tag"))[:50].lower() for row in rows} - {""}
+        names = {_source_text(effective_device_name(row)).lower() for row in rows} - {""}
+        devices = Device.objects.select_related(
+            "device_type__manufacturer",
+            "rack__location",
+            "role",
+            "tenant",
+            "location",
+            "site",
+        )
+        stored_devices = list(
+            devices.select_related("data_import_source").filter(
+                data_import_source__profile=self.profile,
+                data_import_source__source_id__in=source_ids,
+            )
+        )
+        serial_devices = list(devices.filter(serial__in=serials))
+        asset_tag_devices = list(
+            devices.annotate(_identity_asset_tag=Lower("asset_tag")).filter(_identity_asset_tag__in=asset_tags)
+        )
+        tenant_filter = {"tenant": self.reader.tenant} if self.reader.tenant is not None else {"tenant__isnull": True}
+        name_devices = (
+            list(
+                devices.annotate(_identity_name=Lower("name")).filter(
+                    _identity_name__in=names,
+                    site=self.reader.site,
+                    **tenant_filter,
+                )
+            )
+            if self.reader.site is not None
+            else []
+        )
+
+        def index(items, key):
+            """Group already-loaded devices by one matching value."""
+            found = {}
+            for device in items:
+                found.setdefault(key(device), []).append(device)
+            return found
+
+        candidates = {device.pk for device in (*stored_devices, *serial_devices, *asset_tag_devices, *name_devices)}
+        visible_ids = (
+            frozenset(candidates)
+            if self.reader.actor is None
+            else frozenset(self.reader.devices().filter(pk__in=candidates).values_list("pk", flat=True))
+        )
+        return (
+            index(stored_devices, lambda device: _source_text(device.data_import_source.source_id)),
+            index(serial_devices, lambda device: _text(device.serial)),
+            index(asset_tag_devices, lambda device: _text(device.asset_tag).lower()),
+            index(name_devices, lambda device: _text(device.name).lower()),
+            visible_ids,
+        )
 
     def _active_ignored_device_type_rows(self, rows) -> frozenset[int]:
         """Return rows whose saved review keeps the matched Device Type."""
@@ -1226,32 +1294,19 @@ class _DeviceBatch:
 
     def match(self, row, name) -> _Match:
         """Return the stored device this row reconciles, strongest identifier first."""
-        from dcim.models import Device
-
-        devices = Device.objects.select_related("rack__location", "site", "tenant")
-        visible_devices = self.reader.devices()
         source_id = _source_text(row.get("source_id"))
 
         bound_id = self._bindings.get(source_id) if source_id else None
         if bound_id is not None:
             bound = self._reviewed_devices.get(bound_id)
             if bound is not None:
-                return self._visible_match(bound, "source ID link", visible_devices)
+                return self._visible_match(bound, "source ID link")
 
-        stored = (
-            list(
-                devices.filter(
-                    data_import_source__profile=self.profile,
-                    data_import_source__source_id=source_id,
-                )[:2]
-            )
-            if source_id
-            else ()
-        )
+        stored = self._devices_by_source_id.get(source_id, ()) if source_id else ()
         if len(stored) > 1:
             return _Match(ambiguous="device.ambiguous_stored_source_id", value=source_id)
         if stored:
-            return self._visible_match(stored[0], "stored source ID", visible_devices)
+            return self._visible_match(stored[0], "stored source ID")
 
         reviewed_ids = self._review_device_ids.get(source_id, frozenset())
         if len(reviewed_ids) > 1:
@@ -1259,35 +1314,35 @@ class _DeviceBatch:
         if reviewed_ids:
             reviewed = self._reviewed_devices.get(next(iter(reviewed_ids)))
             if reviewed is not None:
-                return self._visible_match(reviewed, "field review", visible_devices)
+                return self._visible_match(reviewed, "field review")
 
-        for field, lookup, code in (
-            ("serial", "serial", "device.ambiguous_serial"),
-            ("asset_tag", "asset_tag__iexact", "device.ambiguous_asset_tag"),
+        for field, matches, code in (
+            ("serial", self._devices_by_serial, "device.ambiguous_serial"),
+            ("asset_tag", self._devices_by_asset_tag, "device.ambiguous_asset_tag"),
         ):
             value = _source_text(row.get(field))[:50] if field == "asset_tag" else _source_text(row.get(field))
             if not value:
                 continue
-            found = list(devices.filter(**{lookup: value})[:2])
+            key = value.lower() if field == "asset_tag" else value
+            found = matches.get(key, ())
             if len(found) > 1:
                 return _Match(ambiguous=code, value=value)
             if found:
-                return self._visible_match(found[0], field.replace("_", " "), visible_devices)
+                return self._visible_match(found[0], field.replace("_", " "))
 
         if identity_text(name) in self._duplicate_names or self.reader.site is None:
             return _Match()
-        tenant_filter = {"tenant": self.reader.tenant} if self.reader.tenant is not None else {"tenant__isnull": True}
-        by_name = list(devices.filter(name__iexact=name, site=self.reader.site, **tenant_filter)[:2])
+        by_name = self._devices_by_name.get(_source_text(name).lower(), ())
         if len(by_name) > 1:
             return _Match(ambiguous="device.ambiguous_name", value=name)
-        return self._visible_match(by_name[0], "name", visible_devices) if by_name else _Match()
+        return self._visible_match(by_name[0], "name") if by_name else _Match()
 
-    def _visible_match(self, device, method, visible_devices) -> _Match:
+    def _visible_match(self, device, method) -> _Match:
         """Return a global match with its scope and site safety attached."""
         inaccessible = (
             device.pk not in self._visible_reviewed_device_ids
             if device.pk in self._reviewed_devices
-            else not visible_devices.filter(pk=device.pk).exists()
+            else device.pk not in self._visible_identity_device_ids
         )
         return _Match(device=device, method=method, inaccessible=inaccessible)
 
@@ -1962,15 +2017,18 @@ class DeviceModule:
 
     @staticmethod
     def _ip_fields(row, identity, display) -> tuple[dict, tuple[Diagnostic, ...]]:
-        """Return parsed address fields and warnings for non-empty values that do not parse."""
+        """Return addresses in their declared families and warn about invalid values."""
         fields = {}
         diagnostics = []
         for name in ip_assignment.IP_FIELD_FAMILY:
             raw = _source_text(row.get(name))
             if not raw:
                 continue
-            address = ip_assignment.parse_address(raw)
-            if address is not None:
+            try:
+                address = ip_assignment.normalized_address(name, raw)
+            except ip_assignment.IPAssignmentError:
+                pass
+            else:
                 fields[name] = address
                 continue
             diagnostics.append(

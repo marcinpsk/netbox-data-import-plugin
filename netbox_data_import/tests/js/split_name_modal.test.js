@@ -197,6 +197,8 @@ describe("split modal parts", () => {
     await vi.waitFor(() => expect(alertBox.textContent).toBe("Resolution was rejected."));
     expect(alertBox.classList.contains("d-none")).toBe(false);
     expect(saveButton().title).toBe("");
+    expect(saveButton().disabled).toBe(false);
+    expect(saveButton().textContent).toBe("Save resolution");
 
     submitForm();
 

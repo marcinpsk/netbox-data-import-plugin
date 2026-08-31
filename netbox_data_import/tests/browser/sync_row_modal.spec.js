@@ -104,6 +104,19 @@ test("a sync response for the open row hides its modal", async ({ page }) => {
   await expect.poll(() => page.evaluate(() => window.syncModalHideCount)).toBe(1);
 });
 
+test("a successful response without a message uses a useful tooltip", async ({ page }) => {
+  await setUp(page);
+  await openRow(page, "sync-row-1");
+  await page.locator("#syncRowConfirm").click();
+  await expect.poll(() => page.evaluate(() => window.pendingSyncs.length)).toBe(1);
+
+  await page.evaluate(() => {
+    window.pendingSyncs[0].resolveRequest({});
+  });
+
+  await expect(page.locator("#sync-row-1")).toHaveAttribute("title", "Synced to NetBox.");
+});
+
 test("a missing row-action helper restores the controls and explains the failure", async ({ page }) => {
   await setUp(page);
   await page.evaluate(() => { window.ndiPostPreviewAction = undefined; });

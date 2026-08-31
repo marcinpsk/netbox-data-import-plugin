@@ -447,6 +447,23 @@ class ColumnMapping(PolicySectionModel):
         value = self.target_field or ""
         if not CATALOG.is_valid(value, output_kinds=self.profile.output_kinds if self.profile_id else None):
             raise ValidationError({"target_field": CATALOG.invalid_key_message(value)})
+        if not self.profile_id or not value:
+            return
+        conflict = (
+            ColumnTransformRule.objects.filter(profile_id=self.profile_id)
+            .filter(models.Q(group_1_target=value) | models.Q(group_2_target=value))
+            .only("source_column")
+            .first()
+        )
+        if conflict is not None:
+            raise ValidationError(
+                {
+                    "target_field": (
+                        f"Target field '{value}' is already assigned by the transform rule "
+                        f"for source column '{conflict.source_column}'."
+                    )
+                }
+            )
 
     def get_target_field_display(self):
         """Return the human-readable name for the target_field value."""
@@ -981,8 +998,27 @@ class ColumnTransformRule(PolicySectionModel):
                         f"Target field '{target}' is already assigned by the transform rule "
                         f"for source column '{conflict.source_column}'."
                     )
+        errors.update(self._column_mapping_target_errors(target_attrs))
         if errors:
             raise ValidationError(errors)
+
+    def _column_mapping_target_errors(self, target_attrs):
+        """Return capture errors for targets already owned by direct mappings."""
+        mapped_targets = {
+            mapping.target_field: mapping.source_column
+            for mapping in ColumnMapping.objects.filter(
+                profile_id=self.profile_id,
+                target_field__in=target_attrs,
+            ).only("source_column", "target_field")
+        }
+        return {
+            attr: (
+                f"Target field '{target}' is already assigned by the column mapping "
+                f"for source column '{mapped_targets[target]}'."
+            )
+            for target, attr in target_attrs.items()
+            if target in mapped_targets
+        }
 
     def __str__(self):
         return f"{self.source_column}: {self.pattern}"
