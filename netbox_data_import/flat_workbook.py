@@ -8,6 +8,7 @@ from typing import Any
 
 from dataclasses import dataclass, field
 from io import BytesIO
+from time import monotonic
 
 import openpyxl
 import regex
@@ -18,7 +19,8 @@ from .values import comparison_key
 
 EXTRA_JSON_PREFIX = "extra_json:"
 _MAX_UNUSED_SAMPLES = 5
-_TRANSFORM_REGEX_TIMEOUT_SECONDS = 0.5
+_TRANSFORM_REGEX_MATCH_TIMEOUT_SECONDS = 0.5
+_TRANSFORM_REGEX_WORKBOOK_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,27 @@ class FlatWorkbookConfig:
     column_map: dict[str, tuple[str, ...]] = field(default_factory=dict)
     transform_rules: tuple[TransformRule, ...] = ()
     capture_extra_data: bool = False
+
+
+@dataclass
+class _TransformRegexBudget:
+    """Bound cumulative regex execution across one workbook."""
+
+    remaining_seconds: float = _TRANSFORM_REGEX_WORKBOOK_TIMEOUT_SECONDS
+
+    def fullmatch(self, pattern: str, text: str):
+        """Match with the smaller of the per-match and remaining workbook budgets."""
+        if self.remaining_seconds <= 0:
+            raise TimeoutError
+        started_at = monotonic()
+        try:
+            return regex.fullmatch(
+                pattern,
+                text,
+                timeout=min(_TRANSFORM_REGEX_MATCH_TIMEOUT_SECONDS, self.remaining_seconds),
+            )
+        finally:
+            self.remaining_seconds -= monotonic() - started_at
 
 
 def _text(value) -> str:
@@ -100,7 +123,13 @@ def promote_extra_json_fields(row: dict) -> None:
             row.setdefault("_extra_columns", {})[key[len(EXTRA_JSON_PREFIX) :]] = value
 
 
-def _apply_transform_rules(row: dict, raw_row, headers: dict[str, int], rules) -> None:
+def _apply_transform_rules(
+    row: dict,
+    raw_row,
+    headers: dict[str, int],
+    rules,
+    budget: _TransformRegexBudget,
+) -> None:
     """Apply each transform rule in place, refusing invalid or over-budget patterns."""
     for rule in rules:
         raw_value = _cell(raw_row, headers.get(rule.source_column))
@@ -108,7 +137,7 @@ def _apply_transform_rules(row: dict, raw_row, headers: dict[str, int], rules) -
             continue
         text = str(raw_value).strip()
         try:
-            match = regex.fullmatch(rule.pattern, text, timeout=_TRANSFORM_REGEX_TIMEOUT_SECONDS)
+            match = budget.fullmatch(rule.pattern, text)
         except TimeoutError as exc:
             raise SourceUnreadable(
                 f"Regex pattern in transform rule for column '{rule.source_column}' timed out."
@@ -164,13 +193,14 @@ def interpret(content: bytes, config: FlatWorkbookConfig, *, collect_unused: boo
     consumed_columns = mapped | transformed
     unmapped_columns = [column for column in headers if column not in consumed_columns]
     unused_stats: dict[str, dict] = {}
+    transform_budget = _TransformRegexBudget()
 
     rows = []
     for row_number, raw_row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
         if all(value is None for value in raw_row):
             continue
         row = _merge_row_values(row_number, raw_row, headers, config.column_map)
-        _apply_transform_rules(row, raw_row, headers, config.transform_rules)
+        _apply_transform_rules(row, raw_row, headers, config.transform_rules, transform_budget)
         promote_extra_json_fields(row)
         if collect_unused or config.capture_extra_data:
             extra = _collect_unmapped_values(
