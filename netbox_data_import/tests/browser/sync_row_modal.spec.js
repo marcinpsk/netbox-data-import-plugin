@@ -89,6 +89,21 @@ test("a late sync response updates the row that submitted it", async ({ page }) 
   expect(await page.evaluate(() => window.syncModalHideCount)).toBe(0);
 });
 
+test("a sync response for the open row hides its modal", async ({ page }) => {
+  await setUp(page);
+
+  await openRow(page, "sync-row-1");
+  await page.locator("#syncRowConfirm").click();
+  await expect.poll(() => page.evaluate(() => window.pendingSyncs.length)).toBe(1);
+
+  await page.evaluate(() => {
+    window.pendingSyncs[0].resolveRequest({ message: "Row synchronized." });
+  });
+
+  await expect(page.locator("#sync-row-1")).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => window.syncModalHideCount)).toBe(1);
+});
+
 test("a late failure leaves a newer sync request in progress", async ({ page }) => {
   await setUp(page);
 

@@ -124,10 +124,14 @@ class MigrationGraphDescribesTheModelsTest(SimpleTestCase):
             ProjectState.from_apps(apps),
             NonInteractiveMigrationQuestioner(specified_apps={APP}, dry_run=True, verbosity=0),
         )
-        changes = autodetector.changes(graph=loader.graph, trim_to_apps={APP}, convert_apps={APP})
+        guidance = "Run `netbox-manage makemigrations netbox_data_import` and commit the result."
+        try:
+            changes = autodetector.changes(graph=loader.graph, trim_to_apps={APP}, convert_apps={APP})
+        except SystemExit:
+            self.fail(guidance)
         described = [
             f"{migration.app_label}: {operation.describe()}"
             for migration in changes.get(APP, [])
             for operation in migration.operations
         ]
-        self.assertEqual(described, [], "Run `netbox-manage makemigrations netbox_data_import` and commit the result.")
+        self.assertEqual(described, [], guidance)

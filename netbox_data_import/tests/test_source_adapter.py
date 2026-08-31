@@ -166,7 +166,7 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
 
     def test_a_pathological_transform_pattern_is_time_bounded(self):
         """One configured regex cannot hold the import worker indefinitely."""
-        content = _workbook("Data", ("Combined",), ("a" * 32 + "!",))
+        content = _workbook("Data", ("Combined",), ("a" * 64 + "!",))
         config = FlatWorkbookConfig(
             sheet_name="Data",
             column_map={},
@@ -179,6 +179,21 @@ class FlatWorkbookInterpretTest(SimpleTestCase):
             FlatWorkbookAdapter.interpret(content, config)
 
         self.assertIn("timed out", str(caught.exception).lower())
+
+    def test_a_nontrivial_transform_has_a_practical_time_budget(self):
+        """A valid workbook must not fail because its regex needs more than a scheduler tick."""
+        content = _workbook("Data", ("Combined",), ("a" * 26 + "!",))
+        config = FlatWorkbookConfig(
+            sheet_name="Data",
+            column_map={},
+            transform_rules=(
+                TransformRule(source_column="Combined", pattern=r"^(a|aa)+$", group_1_target="rack_name"),
+            ),
+        )
+
+        batch = FlatWorkbookAdapter.interpret(content, config)
+
+        self.assertNotIn("rack_name", batch.rows[0])
 
     def test_a_candidate_column_is_kept_for_review_rather_than_written(self):
         """A candidate target offers review choices, so its values stay grouped by source column."""

@@ -333,6 +333,7 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
                     ).update(netbox_device_id=replacement.pk, device_name=replacement.name)
 
                 with run_on_separate_connection(move_binding):
+                    # Finish the competing update before the locked read.
                     pass
             return execute(sql, params, many, context)
 

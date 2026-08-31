@@ -26,7 +26,12 @@ from netbox_data_import.models import (
     SourceDocument,
 )
 from netbox_data_import.plan import ImportPlan
-from netbox_data_import.preview_row_actions import retire_preview_revision
+from netbox_data_import.preview_row_actions import (
+    PREVIEW_PLAN_SESSION_KEY,
+    PREVIEW_REVISION_SESSION_KEY,
+    PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+    retire_preview_revision,
+)
 from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission, workbook_bytes
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
@@ -107,7 +112,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
     def _sync_single_row(self, data=None):
         """Post an inline execution with the active preview revision when one exists."""
         payload = dict(data or {})
-        if revision := self.client.session.get("import_preview_revision"):
+        if revision := self.client.session.get(PREVIEW_REVISION_SESSION_KEY):
             payload.setdefault("preview_revision", revision)
         return self.client.post(reverse("plugins:netbox_data_import:sync_single_row"), payload)
 
@@ -816,7 +821,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self._upload()
         session = self.client.session
-        previous_revision = session["import_preview_revision"]
+        previous_revision = session[PREVIEW_REVISION_SESSION_KEY]
         retire_preview_revision(session)
         session.save()
 
@@ -931,7 +936,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             reverse("plugins:netbox_data_import:quick_resolve_device_type"),
             {
                 "profile_id": self.profile.pk,
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
                 "source_make": "Source Make",
                 "source_model": "Source Model",
                 "netbox_mfg_slug": "example",
@@ -969,13 +974,13 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             unit for unit in session["import_plan"]["units"] if unit["display"].get("object_type") == "device"
         )
         device_unit["display"].setdefault("extra_data", {})["candidate_values"] = ["invalid"]
-        session["import_preview_use_materialized_once"] = True
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         session.save()
 
         response = self.client.get(preview_url)
 
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
-        self.assertNotIn("import_plan", self.client.session)
+        self.assertNotIn(PREVIEW_PLAN_SESSION_KEY, self.client.session)
 
     def test_preview_discards_malformed_contact_candidate_values(self):
         """Contact suggestions require a source-column mapping, not any JSON value."""
@@ -986,13 +991,13 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             unit for unit in session["import_plan"]["units"] if unit["display"].get("object_type") == "device"
         )
         device_unit["display"].setdefault("extra_data", {})["candidate_values"] = {"contact": ["invalid"]}
-        session["import_preview_use_materialized_once"] = True
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         session.save()
 
         response = self.client.get(preview_url)
 
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
-        self.assertNotIn("import_plan", self.client.session)
+        self.assertNotIn(PREVIEW_PLAN_SESSION_KEY, self.client.session)
 
     def test_preview_discards_a_materialized_plan_with_an_unknown_schema(self):
         """Session state cannot keep a materialized plan with an unreadable schema."""
@@ -1000,7 +1005,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self._upload()
         session = self.client.session
         session["import_plan"]["schema_version"] = 999
-        session["import_preview_use_materialized_once"] = True
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         session.save()
         response = self.client.get(preview_url)
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))

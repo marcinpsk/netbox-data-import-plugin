@@ -18,7 +18,7 @@ from .values import comparison_key
 
 EXTRA_JSON_PREFIX = "extra_json:"
 _MAX_UNUSED_SAMPLES = 5
-_TRANSFORM_REGEX_TIMEOUT_SECONDS = 0.01
+_TRANSFORM_REGEX_TIMEOUT_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -101,7 +101,7 @@ def promote_extra_json_fields(row: dict) -> None:
 
 
 def _apply_transform_rules(row: dict, raw_row, headers: dict[str, int], rules) -> None:
-    """Apply each transform rule in place, refusing a pattern that does not compile."""
+    """Apply each transform rule in place, refusing invalid or over-budget patterns."""
     for rule in rules:
         raw_value = _cell(raw_row, headers.get(rule.source_column))
         if raw_value is None:

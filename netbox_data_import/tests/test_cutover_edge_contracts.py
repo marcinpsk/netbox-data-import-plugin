@@ -70,6 +70,11 @@ class ValueAndReviewBoundaryTest(SimpleTestCase):
         self.assertEqual(held.summary, "198.18.0.10/32 on mgmt")
         self.assertEqual(parse_address(""), None)
 
+    def test_labeled_ip_with_trailing_punctuation_is_read(self):
+        """Sentence punctuation must not hide the address inside a labeled value."""
+        self.assertEqual(parse_address("Management is 198.18.0.10."), "198.18.0.10/32")
+        self.assertEqual(parse_address("Management is 2001:db8::10:"), "2001:db8::10/128")
+
     def test_field_review_public_api_normalizes_fallback_and_location_values(self):
         """Every review value reaches snapshots through the shared field registry."""
         rack = SimpleNamespace(name="rack-a", location_id=7, location="Room A")

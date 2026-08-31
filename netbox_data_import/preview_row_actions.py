@@ -6,6 +6,7 @@ import secrets
 
 
 PREVIEW_DIRTY_SESSION_KEY = "import_preview_dirty"
+PREVIEW_PLAN_SESSION_KEY = "import_plan"
 PREVIEW_REVISION_SESSION_KEY = "import_preview_revision"
 PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY = "import_preview_use_materialized_once"
 
@@ -22,7 +23,7 @@ def current_preview_revision(session) -> str:
 def record_recalculated_preview(session, plan) -> str:
     """Store one authoritative preview and return its new revision."""
     revision = secrets.token_urlsafe(18)
-    session["import_plan"] = plan.to_dict()
+    session[PREVIEW_PLAN_SESSION_KEY] = plan.to_dict()
     session[PREVIEW_DIRTY_SESSION_KEY] = False
     session[PREVIEW_REVISION_SESSION_KEY] = revision
     return revision
@@ -42,7 +43,7 @@ def load_cached_preview(request):
     from .review_workspace import ReviewWorkspace
 
     context = request.session.get("import_context")
-    plan_data = request.session.get("import_plan")
+    plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
     if (
         request.session.get("import_preview_pending") is not True
         or not isinstance(context, dict)

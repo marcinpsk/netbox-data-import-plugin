@@ -70,8 +70,11 @@ class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase
 
         self.assertRegex(
             response.content.decode(),
-            r'<[^>]*(?=[^>]*\bid="res_save_error")(?=[^>]*\brole="alert")'
-            r'(?=[^>]*\baria-live="polite")[^>]*>',
+            r'<[^>]*(?=[^>]*\bid="res_save_error")(?=[^>]*\brole="alert")[^>]*>',
+        )
+        self.assertNotRegex(
+            response.content.decode(),
+            r'<[^>]*(?=[^>]*\bid="res_save_error")(?=[^>]*\baria-live=)[^>]*>',
         )
 
 

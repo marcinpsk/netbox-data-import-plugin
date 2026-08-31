@@ -949,7 +949,10 @@ class ImportResultsViewTest(BaseViewTestCase):
 
 
 class ImportExecutionListViewTest(BaseViewTestCase):
+    """Tests for the Import Execution history list."""
+
     def test_execution_list_returns_200(self):
+        """GET the execution list returns 200 for a permitted actor."""
         url = reverse("plugins:netbox_data_import:importexecution_list")
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
@@ -2655,6 +2658,7 @@ class ModelsStrTest(BaseViewTestCase):
         self.assertIn("dell-str", s)
 
     def test_import_execution_str(self):
+        """ImportExecution.__str__ includes the execution identifier."""
         from netbox_data_import.models import ImportExecution
 
         execution = ImportExecution.objects.create(profile=self.profile, input_filename="test.xlsx")

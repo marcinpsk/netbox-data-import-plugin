@@ -82,6 +82,7 @@ from .object_permissions import (
 )
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
+    PREVIEW_PLAN_SESSION_KEY,
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
     current_preview_revision,
     load_cached_preview,
@@ -147,7 +148,7 @@ def _candidate_values(extra_data):
 
 def _contact_candidate_context(request, profile_id, source_id):
     """Return Contact candidates and row state for one active preview row."""
-    plan_data = request.session.get("import_plan") or {}
+    plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY) or {}
     try:
         workspace = ReviewWorkspace.from_dict(plan_data)
     except PlanError as exc:
@@ -1040,7 +1041,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.warning(request, "The stored source is no longer available. Upload it again.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-        stored_plan = request.session.get("import_plan")
+        stored_plan = request.session.get(PREVIEW_PLAN_SESSION_KEY)
         if use_materialized_result and isinstance(stored_plan, dict):
             try:
                 plan = ImportPlan.from_dict(stored_plan)
@@ -1238,7 +1239,7 @@ def _discard_import_preview(request):
     for key in (
         "import_context",
         "import_idempotency_key",
-        "import_plan",
+        PREVIEW_PLAN_SESSION_KEY,
         "import_rows",
         "import_unused_columns",
     ):
@@ -1323,7 +1324,7 @@ def _restore_import_session(request, job):
         and _import_source_rows_available(request, job)
     )
     if failed_preview_available and not preview_is_pending:
-        request.session["import_plan"] = data["accepted_plan"]
+        request.session[PREVIEW_PLAN_SESSION_KEY] = data["accepted_plan"]
         request.session["import_context"] = data["context_data"]
         request.session["import_preview_pending"] = True
         request.session["import_preview_source_job_id"] = job.pk
@@ -1347,7 +1348,7 @@ class ImportRunView(PermissionRequiredMixin, View):
     def post(self, request):
         """Queue the accepted plan and redirect to its progress page."""
         ctx_data = request.session.get("import_context")
-        plan_data = request.session.get("import_plan")
+        plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
         if not isinstance(ctx_data, dict) or not isinstance(plan_data, dict):
             messages.warning(request, "No import in progress.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
@@ -1506,7 +1507,7 @@ class ImportResultsView(PermissionRequiredMixin, View):
             request.session.pop("import_background_job_id", None)
             request.session["import_preview_pending"] = False
             request.session.pop("import_preview_source_job_id", None)
-            for key in ("import_rows", "import_context", "import_plan", "import_unused_columns"):
+            for key in ("import_rows", "import_context", PREVIEW_PLAN_SESSION_KEY, "import_unused_columns"):
                 request.session.pop(key, None)
         return render(
             request,
@@ -4055,7 +4056,7 @@ class SyncSingleRowView(_AjaxPermissionView):
     def post(self, request):
         """Execute one selected Synchronization Unit and return JSON."""
         ctx_data = request.session.get("import_context")
-        plan_data = request.session.get("import_plan")
+        plan_data = request.session.get(PREVIEW_PLAN_SESSION_KEY)
         if not isinstance(ctx_data, dict) or not isinstance(plan_data, dict):
             return JsonResponse({"ok": False, "error": "No import in progress"}, status=400)
         if stale_reason := _stale_preview_reason(request):
