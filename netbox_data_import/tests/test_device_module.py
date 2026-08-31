@@ -168,6 +168,25 @@ class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
         self.assertEqual([match.device.pk for match in matches], [stored_source.pk, serial.pk, asset_tag.pk, name.pk])
         self.assertEqual([match.method for match in matches], ["stored source ID", "serial", "asset tag", "name"])
 
+    def test_case_insensitive_indexes_use_the_database_normalization(self):
+        """Batch indexes must use the same Unicode case rules as NetBox lookups."""
+        name = self._device("İdentity-Name")
+        expanded_name = self._device("Straße-Name")
+        asset_tag = self._device("asset-device", asset_tag="Identity-Tag")
+        rows = [
+            self._row(1, "D-1", "İdentity-name"),
+            self._row(2, "D-2", "different-name", asset_tag="ıdentity-tag"),
+            self._row(3, "D-3", "STRASSE-NAME"),
+        ]
+
+        batch = _DeviceBatch(self._batch(*rows), rows, self.profile, self.reader)
+        matches = [batch.match(row, row["device_name"]) for row in rows]
+
+        self.assertEqual(
+            [match.device.pk if match.device is not None else None for match in matches],
+            [name.pk, asset_tag.pk, expanded_name.pk],
+        )
+
 
 class DeviceModuleSelectionTest(DeviceModulePlanTestBase):
     """Class policy decides which rows belong to this module."""

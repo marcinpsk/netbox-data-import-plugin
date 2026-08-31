@@ -516,6 +516,33 @@ def _import_class_role_mappings(data, profile, stats):
         ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
 
 
+def _release_replaced_column_policy_rows(profile, mapping_rows, transform_rows):
+    """Remove rows that leave or change target ownership before validating their replacements."""
+    if mapping_rows is not None:
+        retained_mappings = {(row["source_column"], row["target_field"]) for row in mapping_rows}
+        stale_mapping_ids = [
+            mapping.pk
+            for mapping in profile.column_mappings.only("pk", "source_column", "target_field")
+            if (mapping.source_column, mapping.target_field) not in retained_mappings
+        ]
+        ColumnMapping.objects.filter(pk__in=stale_mapping_ids).delete()
+
+    if transform_rows is None:
+        return
+    desired_by_source = {row["source_column"]: row for row in transform_rows}
+    stale_transform_ids = []
+    for rule in profile.column_transform_rules.only(
+        "pk", "source_column", "pattern", "group_1_target", "group_2_target"
+    ):
+        desired = desired_by_source.get(rule.source_column)
+        if desired is None or any(
+            getattr(rule, field) != desired.get(field, getattr(rule, field))
+            for field in ("pattern", "group_1_target", "group_2_target")
+        ):
+            stale_transform_ids.append(rule.pk)
+    profile.column_transform_rules.filter(pk__in=stale_transform_ids).delete()
+
+
 def _apply_profile_yaml_data(data):
     """Create or update an ImportProfile and all its nested mappings from parsed YAML data.
 
@@ -538,6 +565,17 @@ def _apply_profile_yaml_data(data):
     if not pdata.get("name"):
         raise ValueError("Profile YAML must include a 'name' field.")
 
+    mapping_rows = (
+        list(_iter_yaml_section(data, "column_mappings", ("target_field", "source_column")))
+        if "column_mappings" in data
+        else None
+    )
+    transform_rows = (
+        list(_iter_yaml_section(data, "column_transform_rules", ("source_column", "pattern")))
+        if "column_transform_rules" in data
+        else None
+    )
+
     with transaction.atomic():
         # Only include fields that are explicitly present in the YAML so that a
         # partial reimport (e.g. just trimming child sections) does not silently
@@ -550,9 +588,10 @@ def _apply_profile_yaml_data(data):
         profile = _save_or_refetch(profile, ImportProfile, name=pdata["name"])
 
         stats = {}
+        _release_replaced_column_policy_rows(profile, mapping_rows, transform_rows)
 
         cm_ids = []
-        for cm in _iter_yaml_section(data, "column_mappings", ("target_field", "source_column")):
+        for cm in mapping_rows or ():
             mapping_key = {
                 "profile": profile,
                 "source_column": cm["source_column"],
@@ -604,7 +643,7 @@ def _apply_profile_yaml_data(data):
             ManufacturerMapping.objects.filter(profile=profile).exclude(source_make__in=mm_source_makes).delete()
 
         ctr_source_columns = []
-        for r in _iter_yaml_section(data, "column_transform_rules", ("source_column", "pattern")):
+        for r in transform_rows or ():
             instance = _get_or_init(ColumnTransformRule, profile=profile, source_column=r["source_column"])
             instance.pattern = r["pattern"]
             _set_if_present(instance, r, ("group_1_target", "group_2_target"))

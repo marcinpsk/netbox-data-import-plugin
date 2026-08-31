@@ -80,6 +80,22 @@ def _source_text(value) -> str:
     return source_text(value)
 
 
+def _database_upper_values(values, *, collation: str | None = None) -> dict[str, str]:
+    """Return PostgreSQL's case-insensitive comparison key for each distinct value."""
+    from django.db import connection
+
+    unique_values = sorted(set(values))
+    if not unique_values:
+        return {}
+    collation_sql = f" COLLATE {connection.ops.quote_name(collation)}" if collation else ""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT source_value, UPPER(source_value{collation_sql}) FROM unnest(%s::text[]) AS source_value",
+            [unique_values],
+        )
+        return dict(cursor.fetchall())
+
+
 def _duplicate_value_detail(label: str, value: str, other_rows: list[int]) -> str:
     """Name a duplicated identity value and every other source row that carries it."""
     where = ", ".join(f"row {number}" for number in other_rows)
@@ -883,12 +899,22 @@ class _DeviceBatch:
     def _load_identity_objects(self, rows):
         """Load the global Device identity candidates and their visibility once."""
         from dcim.models import Device
-        from django.db.models.functions import Lower
+        from django.db.models.functions import Upper
 
         source_ids = {_source_text(row.get("source_id")) for row in rows} - {""}
         serials = {_source_text(row.get("serial")) for row in rows} - {""}
-        asset_tags = {_source_text(row.get("asset_tag"))[:50].lower() for row in rows} - {""}
-        names = {_source_text(effective_device_name(row)).lower() for row in rows} - {""}
+        raw_asset_tags = {_source_text(row.get("asset_tag"))[:50] for row in rows} - {""}
+        raw_names = {_source_text(effective_device_name(row)) for row in rows} - {""}
+        self._database_asset_tag_keys = _database_upper_values(
+            raw_asset_tags,
+            collation=Device._meta.get_field("asset_tag").db_collation,
+        )
+        self._database_name_keys = _database_upper_values(
+            raw_names,
+            collation=Device._meta.get_field("name").db_collation,
+        )
+        asset_tags = set(self._database_asset_tag_keys.values())
+        names = set(self._database_name_keys.values())
         devices = Device.objects.select_related(
             "device_type__manufacturer",
             "rack__location",
@@ -905,12 +931,12 @@ class _DeviceBatch:
         )
         serial_devices = list(devices.filter(serial__in=serials))
         asset_tag_devices = list(
-            devices.annotate(_identity_asset_tag=Lower("asset_tag")).filter(_identity_asset_tag__in=asset_tags)
+            devices.annotate(_identity_asset_tag=Upper("asset_tag")).filter(_identity_asset_tag__in=asset_tags)
         )
         tenant_filter = {"tenant": self.reader.tenant} if self.reader.tenant is not None else {"tenant__isnull": True}
         name_devices = (
             list(
-                devices.annotate(_identity_name=Lower("name")).filter(
+                devices.annotate(_identity_name=Upper("name")).filter(
                     _identity_name__in=names,
                     site=self.reader.site,
                     **tenant_filter,
@@ -936,8 +962,8 @@ class _DeviceBatch:
         return (
             index(stored_devices, lambda device: _source_text(device.data_import_source.source_id)),
             index(serial_devices, lambda device: _text(device.serial)),
-            index(asset_tag_devices, lambda device: _text(device.asset_tag).lower()),
-            index(name_devices, lambda device: _text(device.name).lower()),
+            index(asset_tag_devices, lambda device: device._identity_asset_tag),
+            index(name_devices, lambda device: device._identity_name),
             visible_ids,
         )
 
@@ -1323,7 +1349,7 @@ class _DeviceBatch:
             value = _source_text(row.get(field))[:50] if field == "asset_tag" else _source_text(row.get(field))
             if not value:
                 continue
-            key = value.lower() if field == "asset_tag" else value
+            key = self._database_asset_tag_keys[value] if field == "asset_tag" else value
             found = matches.get(key, ())
             if len(found) > 1:
                 return _Match(ambiguous=code, value=value)
@@ -1332,7 +1358,8 @@ class _DeviceBatch:
 
         if identity_text(name) in self._duplicate_names or self.reader.site is None:
             return _Match()
-        by_name = self._devices_by_name.get(_source_text(name).lower(), ())
+        name_value = _source_text(name)
+        by_name = self._devices_by_name.get(self._database_name_keys[name_value], ()) if name_value else ()
         if len(by_name) > 1:
             return _Match(ambiguous="device.ambiguous_name", value=name)
         return self._visible_match(by_name[0], "name") if by_name else _Match()

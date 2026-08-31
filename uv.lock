@@ -999,7 +999,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-django" },
-    { name = "pytest-xdist", specifier = ">=3.8" },
+    { name = "pytest-xdist", specifier = ">=3.8,<4" },
     { name = "python-semantic-release" },
     { name = "reuse" },
     { name = "ruff" },

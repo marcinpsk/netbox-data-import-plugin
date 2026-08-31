@@ -3474,6 +3474,70 @@ column_mappings:
             "ColumnTransformRule must be created from hierarchical YAML",
         )
 
+    def test_post_hierarchical_yaml_transfers_a_transform_target_to_a_mapping(self):
+        """A complete YAML policy can give a transform target to a direct mapping."""
+        from netbox_data_import.models import ColumnTransformRule
+
+        initial = """profile:
+  name: TransformToMappingProfile
+column_mappings: []
+column_transform_rules:
+  - source_column: Combined
+    pattern: '^(.+)$'
+    group_1_target: device_name
+    group_2_target: ''
+"""
+        replacement = """profile:
+  name: TransformToMappingProfile
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+column_transform_rules: []
+"""
+
+        self.client.post(self._url(), {"data": initial})
+        response = self.client.post(self._url(), {"data": replacement})
+
+        profile = ImportProfile.objects.get(name="TransformToMappingProfile")
+        self.assertIn(response.status_code, (200, 302))
+        self.assertTrue(profile.column_mappings.filter(source_column="Name", target_field="device_name").exists())
+        self.assertFalse(ColumnTransformRule.objects.filter(profile=profile).exists())
+
+    def test_post_hierarchical_yaml_transfers_a_mapping_target_to_a_transform(self):
+        """A complete YAML policy can give a direct-mapping target to a transform."""
+        from netbox_data_import.models import ColumnTransformRule
+
+        initial = """profile:
+  name: MappingToTransformProfile
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+column_transform_rules: []
+"""
+        replacement = """profile:
+  name: MappingToTransformProfile
+column_mappings: []
+column_transform_rules:
+  - source_column: Combined
+    pattern: '^(.+)$'
+    group_1_target: device_name
+    group_2_target: ''
+"""
+
+        self.client.post(self._url(), {"data": initial})
+        response = self.client.post(self._url(), {"data": replacement})
+
+        profile = ImportProfile.objects.get(name="MappingToTransformProfile")
+        self.assertIn(response.status_code, (200, 302))
+        self.assertFalse(profile.column_mappings.exists())
+        self.assertTrue(
+            ColumnTransformRule.objects.filter(
+                profile=profile,
+                source_column="Combined",
+                group_1_target="device_name",
+            ).exists()
+        )
+
     # --- Authentication ---
 
     def test_unauthenticated_get_redirects_to_login(self):

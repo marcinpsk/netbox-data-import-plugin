@@ -48,7 +48,7 @@ dev = [
     "pytest",
     "pytest-cov>=7.1.0",
     "pytest-django",
-    "pytest-xdist>=3.8",
+    "pytest-xdist>=3.8,<4",
     "python-semantic-release",
     # openpyxl and PyYAML ship no py.typed. strawberry-django and django-rq do, so they need none.
     "types-PyYAML",

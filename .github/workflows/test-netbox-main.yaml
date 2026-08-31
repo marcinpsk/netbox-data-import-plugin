@@ -68,7 +68,7 @@ jobs:
         working-directory: netbox-data-import-plugin
         run: |
           uv pip install --system -r ../netbox/requirements.txt
-          uv pip install --system pytest pytest-cov pytest-django pytest-xdist tblib
+          uv pip install --system pytest pytest-cov pytest-django 'pytest-xdist>=3.8,<4' tblib
           uv pip install --system -e .
 
       - name: Set up NetBox configuration
