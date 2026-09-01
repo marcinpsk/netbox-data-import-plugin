@@ -446,8 +446,8 @@ topology identity.
 
 ### 5.3 Sheet combination
 
-- Blocks pair across sheets by exact From/To line text. A repeated block uses the ordinal as the
-  tiebreak.
+- Blocks pair across sheets by From/To line text, ignoring surrounding whitespace. A repeated block
+  uses the ordinal as the tiebreak.
 - `Trace From To` path rows are authoritative.
 - A non-empty `Trace List` block corroborates. The ordered device-label sequence must match the visit
   sequence. Consecutive duplicate device rows are tolerated. The final device may be omitted when the
