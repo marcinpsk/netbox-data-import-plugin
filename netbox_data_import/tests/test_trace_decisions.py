@@ -582,18 +582,54 @@ class CableClassMappingFormTest(TestCase):
             {"Unresolved", "Explicitly none"},
         )
 
+    def test_a_stale_stored_decision_is_never_silently_dropped(self):
+        """A select that cannot show the stored value makes the browser submit the first option."""
+        mapping = CableClassMapping.objects.create(
+            profile=self.profile,
+            cable_class="Legacy",
+            cable_type_resolved=True,
+            cable_type="retired-cat3",
+        )
+
+        form = CableClassMappingForm(instance=mapping)
+        # The browser can only send back a value the select actually offers.
+        self.assertIn("retired-cat3", [value for value, _label in form.fields["cable_type"].choices])
+
+        bound = CableClassMappingForm(
+            instance=mapping,
+            data={
+                "cable_class": "Legacy Renamed",
+                "cable_type": form.initial["cable_type"],
+                "cable_profile": form.initial["cable_profile"] or "",
+            },
+        )
+
+        # Keeping a retired value is refused, so the operator is told rather than losing the decision.
+        self.assertFalse(bound.is_valid())
+        self.assertEqual(len(bound.errors["cable_type"]), 1, bound.errors)
+        self.assertEqual(bound.errors.as_data()["cable_type"][0].code, "cable.cableclass_stale_mapping")
+        mapping.refresh_from_db()
+        self.assertTrue(mapping.cable_type_resolved)
+        self.assertEqual(mapping.cable_type, "retired-cat3")
+
+    def test_the_form_does_not_carry_the_profile(self):
+        """The profile is the view's to set, so a submitted value cannot re-parent the row."""
+        form = CableClassMappingForm(instance=CableClassMapping(profile=self.profile))
+
+        self.assertNotIn("profile", form.fields)
+
     def test_form_stores_explicit_none_as_resolved_null(self):
         """The form-only option never becomes a magic value in either model column."""
         unbound = CableClassMappingForm(initial={"profile": self.profile})
         none_type = _choice_value(unbound, "cable_type", "Explicitly none")
         none_profile = _choice_value(unbound, "cable_profile", "Explicitly none")
         form = CableClassMappingForm(
+            instance=CableClassMapping(profile=self.profile),
             data={
-                "profile": self.profile.pk,
                 "cable_class": "Plain Cable",
                 "cable_type": none_type,
                 "cable_profile": none_profile,
-            }
+            },
         )
 
         self.assertTrue(form.is_valid(), form.errors)
@@ -608,12 +644,12 @@ class CableClassMappingFormTest(TestCase):
         compatible = {value for value, _label in _compatible_profile_choices()}
         incompatible = next(value for value, _label in _runtime_cable_profile_choices() if value not in compatible)
         form = CableClassMappingForm(
+            instance=CableClassMapping(profile=self.profile),
             data={
-                "profile": self.profile.pk,
                 "cable_class": "Unsupported Trunk",
                 "cable_type": "",
                 "cable_profile": incompatible,
-            }
+            },
         )
 
         self.assertFalse(form.is_valid())

@@ -18,7 +18,6 @@ from .models import (
     ColumnTransformRule,
     _require_adapter_config_mapping,
     validate_registered_adapter,
-    cable_class_mapping_choice_errors,
     cable_type_choices,
     compatible_cable_profile_choices,
 )
@@ -39,6 +38,17 @@ def _decision_choices(runtime_choices):
     if _EXPLICIT_NONE in {value for value, _label in runtime_choices}:
         raise RuntimeError("A NetBox Cable choice conflicts with the form's explicit-none control value.")
     return [("", "Unresolved"), (_EXPLICIT_NONE, "Explicitly none"), *runtime_choices]
+
+
+def _with_stored_decision(choices, resolved, value):
+    """Keep a stored decision selectable after NetBox stops offering it.
+
+    A select cannot send back a value it does not list, so the browser would submit the first
+    option and `clean()` would record the loss as an unresolved decision without an error.
+    """
+    if not resolved or value is None or value in {key for key, _label in choices}:
+        return choices
+    return [*choices, (value, f"{value} (no longer offered)")]
 
 
 def _decision_initial(resolved, value):
@@ -204,13 +214,20 @@ class CableClassMappingForm(forms.ModelForm):
 
     class Meta:
         model = CableClassMapping
-        fields = ["profile", "cable_class", "cable_type", "cable_profile"]
-        widgets = {"profile": forms.HiddenInput()}
+        fields = ["cable_class", "cable_type", "cable_profile"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["cable_type"].choices = _decision_choices(cable_type_choices())
-        self.fields["cable_profile"].choices = _decision_choices(compatible_cable_profile_choices())
+        self.fields["cable_type"].choices = _with_stored_decision(
+            _decision_choices(cable_type_choices()),
+            self.instance.cable_type_resolved,
+            self.instance.cable_type,
+        )
+        self.fields["cable_profile"].choices = _with_stored_decision(
+            _decision_choices(compatible_cable_profile_choices()),
+            self.instance.cable_profile_resolved,
+            self.instance.cable_profile,
+        )
         self.initial["cable_type"] = _decision_initial(
             self.instance.cable_type_resolved,
             self.instance.cable_type,
@@ -231,8 +248,6 @@ class CableClassMappingForm(forms.ModelForm):
         self.instance.cable_profile = cable_profile
         cleaned["cable_type"] = cable_type
         cleaned["cable_profile"] = cable_profile
-        for field_name, error in cable_class_mapping_choice_errors(cable_type, cable_profile).items():
-            self.add_error(field_name, error)
         return cleaned
 
 
