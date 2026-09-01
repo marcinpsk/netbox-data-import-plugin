@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The target-neutral Import Plan: structure, fingerprints, and the dependency graph."""
 
+import json
 from dataclasses import replace
 
 from django.test import SimpleTestCase
@@ -393,6 +394,36 @@ class PlanBoundaryTest(SimpleTestCase):
             with self.subTest(value=value):
                 with self.assertRaises(PlanInvalid):
                     _change(payload={"u_position": value})
+
+    def test_a_frozen_payload_is_json_data_a_target_module_can_write(self):
+        """A Target Module writes a payload value into a JSONField, so it has to serialize."""
+        change = _change(payload={"extra_columns": {"Depth": "508"}, "ip_fields": [{"family": 4}]})
+
+        self.assertEqual(
+            json.dumps(change.payload, sort_keys=True),
+            '{"extra_columns": {"Depth": "508"}, "ip_fields": [{"family": 4}]}',
+        )
+        self.assertEqual(change.payload["extra_columns"], {"Depth": "508"})
+
+    def test_a_frozen_payload_refuses_every_mutation(self):
+        """Units share their changes after a merge, so one reader cannot rewrite another's payload."""
+        payload = _change().payload
+
+        mutations = {
+            "__setitem__": lambda: payload.__setitem__("name", "sw-2"),
+            "__delitem__": lambda: payload.__delitem__("name"),
+            "__ior__": lambda: payload.__ior__({"name": "sw-2"}),
+            "clear": payload.clear,
+            "pop": lambda: payload.pop("name"),
+            "popitem": payload.popitem,
+            "setdefault": lambda: payload.setdefault("name", "sw-2"),
+            "update": lambda: payload.update({"name": "sw-2"}),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name):
+                with self.assertRaises(TypeError):
+                    mutate()
+        self.assertEqual(payload, {"name": "sw-1"})
 
     def test_a_dependency_that_is_not_an_identity_string_is_rejected(self):
         """Dependencies are stable identities, so an ORM object must fail at construction."""

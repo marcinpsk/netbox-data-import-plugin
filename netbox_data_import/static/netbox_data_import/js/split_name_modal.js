@@ -347,7 +347,7 @@
     clearSaveError();
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
-    window.ndiPostPreviewAction(form.action, new FormData(form))
+    window.ndiPostPreviewAction(form.getAttribute('action'), new FormData(form))
       .then(function (payload) {
         saveBtn.textContent = 'Saved';
         saveBtn.title = payload.message || 'Resolution saved.';

@@ -21,6 +21,7 @@ from .import_engine import (
     SelectionError,
     StalePlan,
     StaleSourceDocument,
+    operator_failure_message,
 )
 from .models import ExecutionOutcome, ImportExecution, ImportProfile, SourceDocument, validate_registered_adapter
 from .netbox_reader import PlanningTargetUnavailable
@@ -30,13 +31,6 @@ from .plan import PlanError
 
 _PROGRESS_REPORT_INTERVAL = 25
 logger = logging.getLogger(__name__)
-
-
-def _operator_failure_message(exc) -> str:
-    """Return one exception as readable text for the native Job record."""
-    if isinstance(exc, DatabaseError):
-        return "The import could not be written. Check the NetBox logs and try again."
-    return "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
 
 
 class ImportJobRunner(JobRunner):
@@ -84,7 +78,7 @@ class ImportJobRunner(JobRunner):
         try:
             validate_registered_adapter(profile)
         except ValidationError as exc:
-            self._fail(_operator_failure_message(exc))
+            self._fail(operator_failure_message(exc))
         source_document = SourceDocument.objects.filter(pk=source_document_id, profile=profile).first()
         if source_document is None:
             self._fail("The stored source is no longer available. Upload it again.")
@@ -112,7 +106,7 @@ class ImportJobRunner(JobRunner):
             self._fail("The import profile is no longer available.")
         except DatabaseError as exc:
             logger.exception("Import execution failed with a database error")
-            self._fail(_operator_failure_message(exc))
+            self._fail(operator_failure_message(exc))
         except (
             EngineConfigurationError,
             ObjectPermissionDenied,
@@ -126,7 +120,7 @@ class ImportJobRunner(JobRunner):
             UnknownSourceAdapter,
             ValidationError,
         ) as exc:
-            self._fail(_operator_failure_message(exc))
+            self._fail(operator_failure_message(exc))
         if execution.outcome != ExecutionOutcome.SUCCEEDED:
             reason = (execution.failure_detail or {}).get("reason") or execution.outcome or "unknown"
             self._fail(f"The accepted import execution did not succeed ({reason}).")

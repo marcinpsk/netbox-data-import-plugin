@@ -36,6 +36,17 @@ def _resolution_section():
     return section
 
 
+def operator_failure_message(exc) -> str:
+    """Return one execution failure as the text the operator reads.
+
+    A database message names the table, the column and the constraint that refused the write, so it
+    stays in the log. Every other exception here carries a message this plugin or NetBox wrote.
+    """
+    if isinstance(exc, DatabaseError):
+        return "The import could not be written. Check the NetBox logs and try again."
+    return "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
+
+
 class StaleSourceDocument(Exception):
     """The referenced stored source no longer exists, so the operator has to upload it again."""
 

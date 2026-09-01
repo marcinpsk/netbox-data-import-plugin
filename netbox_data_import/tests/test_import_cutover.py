@@ -15,7 +15,8 @@ from django.urls import reverse
 from core.exceptions import JobFailed
 from core.models import Job
 
-from netbox_data_import.jobs import ImportJobRunner, _operator_failure_message
+from netbox_data_import.import_engine import operator_failure_message
+from netbox_data_import.jobs import ImportJobRunner
 from netbox_data_import.models import (
     ClassRoleMapping,
     ColumnMapping,
@@ -55,7 +56,7 @@ class ImportJobRunnerMessageTest(SimpleTestCase):
         error = ValidationError(["First validation failure.", "Second validation failure."])
 
         self.assertEqual(
-            _operator_failure_message(error),
+            operator_failure_message(error),
             "First validation failure.; Second validation failure.",
         )
 
@@ -64,7 +65,7 @@ class ImportJobRunnerMessageTest(SimpleTestCase):
         error = DatabaseError("duplicate key value violates constraint private_constraint")
 
         self.assertEqual(
-            _operator_failure_message(error),
+            operator_failure_message(error),
             "The import could not be written. Check the NetBox logs and try again.",
         )
 
@@ -809,6 +810,45 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self._upload()
         SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
+
+    def test_single_row_sync_does_not_echo_a_database_error(self):
+        """A database failure names no SQL to the operator and leaves its traceback in the log."""
+        from dcim.models import Rack
+        from django.db.models.signals import post_save
+
+        self._upload()
+        constraint = 'duplicate key value violates unique constraint "dcim_rack_name_site_id"'
+
+        def refuse_rack(sender, instance, created, **kwargs):
+            raise DatabaseError(constraint)
+
+        post_save.connect(refuse_rack, sender=Rack, weak=False)
+        self.addCleanup(post_save.disconnect, refuse_rack, sender=Rack)
+
+        with self.assertLogs("netbox_data_import.views", level="ERROR"):
+            response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(constraint, response.json()["error"])
+        self.assertNotIn("dcim_rack", response.json()["error"])
+
+    def test_single_row_sync_reports_a_refused_save_as_readable_text(self):
+        """A NetBox validator's reason reads as its own text, not as the repr of a list."""
+        from dcim.models import Rack
+        from django.db.models.signals import pre_save
+
+        self._upload()
+
+        def refuse_rack(sender, instance, **kwargs):
+            raise ValidationError("A NetBox validator refused this rack.")
+
+        pre_save.connect(refuse_rack, sender=Rack, weak=False)
+        self.addCleanup(pre_save.disconnect, refuse_rack, sender=Rack)
+
+        response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "A NetBox validator refused this rack.")
 
     def test_single_row_sync_rejects_a_queued_or_dirty_preview(self):
         """Inline execution cannot use a plan after import starts or a review changes it."""
