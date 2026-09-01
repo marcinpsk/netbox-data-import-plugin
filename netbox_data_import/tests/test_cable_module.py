@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Plan and write cable traces through the real adapter, engine, and Cable Target Module."""
 
+import json
 import uuid
 from io import BytesIO
 
@@ -261,14 +262,24 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
     def test_a_reused_cable_reports_attribute_drift_without_changing_the_disposition(self):
         """Drift on a matched Cable is review information, not a write."""
-        self.connect(self.eth0, self.eth1, type="cat5e", status="planned")
+        self.connect(
+            self.eth0,
+            self.eth1,
+            type="cat5e",
+            status="planned",
+            profile="single-1c2p",
+            label="PATCH-9",
+        )
 
         unit = self.unit(direct_path())
 
         self.assertEqual(unit.disposition, Disposition.NO_OP)
+        self.assertEqual(unit.changes, ())
         drift = next(item for item in unit.diagnostics if item.code == "cable.attribute_drift")
-        self.assertEqual(drift.display["type"], "cat5e")
-        self.assertEqual(drift.display["status"], "planned")
+        self.assertEqual(
+            {key: drift.display[key] for key in ("type", "status", "profile", "label")},
+            {"type": "cat5e", "status": "planned", "profile": "single-1c2p", "label": "PATCH-9"},
+        )
 
     def test_a_unique_mapped_peer_substitutes_and_appears_in_the_plan(self):
         """The second cable end moves to the one front port NetBox maps the rear port to."""
@@ -321,6 +332,27 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             self.termination_pairs(unit.changes[0]),
             sorted([("dcim.interface", self.eth0.pk), ("dcim.frontport", self.panel_1_fronts[0].pk)]),
         )
+
+    def test_a_stored_resolution_that_left_the_device_asks_the_operator_again(self):
+        """A saved selection no longer on the resolved Device cannot answer the question it was asked."""
+        elsewhere = Interface.objects.create(device=self.make_device("DEV-C"), name="eth9", type="1000base-t")
+        self.save_resolution(DEVICE_A, elsewhere)
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        unresolved = next(item for item in unit.diagnostics if item.code == "cable.termination_unresolved")
+        self.assertEqual(unresolved.display["selected_display_name"], str(elsewhere))
+
+    def test_a_same_port_continuation_through_an_unmapped_port_is_invalid(self):
+        """A rear port NetBox maps to nothing cannot continue the path to a second cable."""
+        PortMapping.objects.filter(device=self.panel_1).delete()
+
+        unit = self.unit(same_rear_port_path())
+
+        self.assertEqual(unit.disposition, Disposition.INVALID)
+        finding = next(item for item in unit.diagnostics if item.code == "cable.pass_through_not_mapped")
+        self.assertEqual(list(finding.display["mapped"]), [])
 
     def test_a_resolved_object_of_an_unsupported_kind_is_invalid(self):
         """No operator decision makes a console port a cable end this module writes."""
@@ -561,6 +593,18 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         with self.assertRaises(ValueError):
             eligible_terminations("device:source:7", reader)
 
+    def test_a_key_naming_a_kind_this_module_cannot_offer_is_refused(self):
+        """A well-formed key can still claim a termination kind with no candidate query."""
+        reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
+        key = json.dumps(
+            {"cards": "", "device": "PANEL-1", "kind": "console_port", "port": "F1", "role": "termination"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        with self.assertRaises(ValueError):
+            eligible_terminations(key, reader)
+
 
 class CablePreconditionRecheckTest(CableTopologyMixin, TestCase):
     """Execution rechecks its preconditions inside the transaction, against the real rows."""
@@ -647,8 +691,6 @@ class TraceWizardRenderTest(CableTopologyMixin, TestCase):
 
 class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
     """Patched Path Replacement end to end, asserted against the real database."""
-
-    serialized_rollback = True
 
     def setUp(self):
         self.build_topology()
