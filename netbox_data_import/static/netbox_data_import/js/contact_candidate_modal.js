@@ -517,7 +517,7 @@
     };
 
     saveInFlight = true;
-    window.ndiPostPreviewAction(form.action, new FormData(form))
+    window.ndiPostPreviewAction(form.getAttribute('action'), new FormData(form))
       .then(function () {
         window.ndiMarkPreviewStale();
         rememberResolution(sourceId, snapshot);

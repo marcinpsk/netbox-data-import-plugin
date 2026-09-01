@@ -45,6 +45,11 @@
       runImport.disabled = true;
       runImport.title = 'Recalculate the preview before importing.';
     }
+    // A button that is already disabled states its own reason, which stays the more specific one.
+    document.querySelectorAll('.ndi-sync-row-btn:not([disabled])').forEach(function (syncRow) {
+      syncRow.disabled = true;
+      syncRow.title = 'Recalculate the preview before synchronizing a row.';
+    });
   }
 
   function markSaved(button, message) {
@@ -104,7 +109,8 @@
     event.preventDefault();
     event.stopPropagation();
     var button = event.submitter || form.querySelector('button[type=submit]');
-    postAction(form.action, new FormData(form), button, 'Updating...', false);
+    // A control named `action` shadows the form property of the same name, so read the attribute.
+    postAction(form.getAttribute('action'), new FormData(form), button, 'Updating...', false);
   }, true);
 
   /* Recalculation reloads the whole preview and can take a while, so the page reports that it

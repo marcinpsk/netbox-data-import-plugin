@@ -39,6 +39,21 @@ class HeadBlockCarriesNoPageAssetsTest(SimpleTestCase):
         )
 
 
+class DeferredFormsReadTheirActionAttributeTest(SimpleTestCase):
+    """A form control named `action` shadows `form.action` with itself, so it is never the URL."""
+
+    def test_no_first_party_script_reads_the_action_property_of_a_form(self):
+        """The device-type modal carries such a control, so the property posted to a 404."""
+        sources = [*sorted(STATIC_JS_DIR.glob("*.js")), *sorted(TEMPLATE_DIR.glob("*.html"))]
+        offenders = [
+            f"{source.name}:{number}"
+            for source in sources
+            for number, line in enumerate(source.read_text().splitlines(), start=1)
+            if re.search(r"\bform\.action\b", line)
+        ]
+        self.assertEqual(offenders, [], "Read the posted URL with form.getAttribute('action').")
+
+
 class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase):
     """The rendered preview must carry its assets in the part htmx keeps."""
 
