@@ -2,15 +2,37 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The Import Engine executes accepted Synchronization Units as one audited transaction."""
 
+from io import BytesIO
+
+import openpyxl
 from django.test import TransactionTestCase
 
 from netbox_data_import.adapters import SourceUnreadable
 from netbox_data_import.import_engine import ImportEngine, SelectionError, StalePlan
 from netbox_data_import.netbox_reader import PlanningTargetUnavailable
-from netbox_data_import.models import ExecutionOutcome, IgnoredDevice, ImportExecution, SourceDocument
+from netbox_data_import.models import (
+    DeviceImportSource,
+    ExecutionOutcome,
+    IgnoredDevice,
+    ImportExecution,
+    SourceDocument,
+)
 from netbox_data_import.plan import Disposition
 from netbox_data_import.target_modules import PreconditionFailed
 from netbox_data_import.tests.test_import_engine import ImportEngineTestDataMixin, _workbook
+
+
+def _workbook_with_unmapped_column(*rows) -> bytes:
+    """Return one workbook whose last column no Column Mapping consumes."""
+    book = openpyxl.Workbook()
+    sheet = book.worksheets[0]
+    sheet.title = "Data"
+    sheet.append(["Source ID", "Class", "Name", "Rack", "Make", "Model", "Height", "Depth"])
+    for row in rows:
+        sheet.append(list(row))
+    buffer = BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
 
 
 class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
@@ -62,6 +84,43 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         self.assertEqual(execution.input_filename, self.document.filename)
         self.assertEqual(execution.site_name, self.site.name)
         self.assertEqual(execution.result_counts, {"created": {"device": 1}, "errors": 0})
+
+    def test_a_captured_extra_column_reaches_the_stored_provenance(self):
+        """A created device stores the captured extra columns its plan carries."""
+        from dcim.models import Device
+
+        self.profile.adapter_config = {**self.profile.adapter_config, "capture_extra_data": True}
+        self.profile.save(update_fields=["adapter_config"])
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=_workbook_with_unmapped_column(
+                (
+                    "D-1",
+                    "Server",
+                    "server-a",
+                    self.rack.name,
+                    self.manufacturer.name,
+                    self.device_type.model,
+                    1,
+                    "508",
+                )
+            ),
+            filename="extra-columns.xlsx",
+        )
+        accepted = self._plan(document)
+        unit = accepted.unit("device:source:D-1")
+
+        ImportEngine.execute(
+            self.profile,
+            document,
+            accepted.to_dict(),
+            [unit.identity],
+            "create-device-with-extra-columns",
+            self.actor,
+        )
+
+        device = Device.objects.get(name="server-a", site=self.site)
+        self.assertEqual(DeviceImportSource.objects.get(device=device).extra_columns, {"Depth": "508"})
 
     def test_execution_permission_overrides_constrain_the_saved_device(self):
         """Execution grants use the same model-to-constraint override contract as planning grants."""
