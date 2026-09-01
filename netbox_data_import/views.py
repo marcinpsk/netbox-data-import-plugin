@@ -84,6 +84,7 @@ from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+    PreviewActionInvalid,
     current_preview_revision,
     load_cached_preview,
     mark_preview_dirty,
@@ -91,7 +92,14 @@ from .preview_row_actions import (
     record_recalculated_preview,
     retire_preview_revision,
 )
-from .import_engine import ImportEngine, PreconditionFailed, SelectionError, StalePlan, StaleSourceDocument
+from .import_engine import (
+    ImportEngine,
+    PreconditionFailed,
+    SelectionError,
+    StalePlan,
+    StaleSourceDocument,
+    operator_failure_message,
+)
 from .netbox_reader import PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError
 from .review_workspace import ReviewWorkspace
@@ -373,7 +381,7 @@ def _validate_model_instance(instance, label):
             msg = "; ".join(f"{f}: {', '.join(es)}" for f, es in exc.message_dict.items())
         else:
             msg = "; ".join(exc.messages)
-        raise ValueError(f"Validation error in {label}: {msg}") from exc
+        raise PreviewActionInvalid(f"Validation error in {label}: {msg}") from exc
 
 
 def _legacy_adapter_config(profile_data):
@@ -1646,7 +1654,7 @@ class IgnoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, Vie
                 ignored.device_name = device_name
                 try:
                     _validate_model_instance(ignored, f"ignored device '{source_id}'")
-                except ValueError as exc:
+                except PreviewActionInvalid as exc:
                     messages.error(request, str(exc))
                     return redirect(next_url)
             save_permission_scoped_object(
@@ -2338,7 +2346,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             # Nothing wraps this request, and a receiver on the model can require a transaction.
             with transaction.atomic():
                 display = self._apply_field(device, field, value, status_map(), request.user)
-        except ValueError as exc:
+        except PreviewActionInvalid as exc:
             return JsonResponse({"ok": False, "error": str(exc)})
         except Exception:
             logger.exception(
@@ -2364,7 +2372,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         text = str(value)
         limit = type(device)._meta.get_field(model_field).max_length
         if len(text) > limit:
-            raise ValueError(f"The {label} is {len(text)} characters; NetBox allows {limit}.")
+            raise PreviewActionInvalid(f"The {label} is {len(text)} characters; NetBox allows {limit}.")
         return text
 
     def _apply_field(self, device, field, value, status_map, user):
@@ -2381,13 +2389,13 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             "face": lambda: self._apply_face(device, value),
         }.get(field)
         if writer is None:
-            raise ValueError(f"Field '{field}' is not syncable")
+            raise PreviewActionInvalid(f"Field '{field}' is not syncable")
         return writer()
 
     def _apply_device_name(self, device, value):
         new_name = self._writer_safe_text(device, "device name", "name", value)
         if type(device).objects.filter(site=device.site, name=new_name).exclude(pk=device.pk).exists():
-            raise ValueError(f"A device named '{new_name}' already exists in site '{device.site}'")
+            raise PreviewActionInvalid(f"A device named '{new_name}' already exists in site '{device.site}'")
         device.name = new_name
         device.save(update_fields=["name"])
         return new_name
@@ -2395,10 +2403,10 @@ class SyncDeviceFieldView(_AjaxPermissionView):
     def _apply_u_position(self, device, value):
         pos = source_position(value)
         if pos is None:
-            raise ValueError(f"Cannot parse '{value}' as a finite number for u_position")
+            raise PreviewActionInvalid(f"Cannot parse '{value}' as a finite number for u_position")
         zero_u_type = _zero_u_device_type(device)
         if zero_u_type:
-            raise ValueError(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
+            raise PreviewActionInvalid(f"Cannot set a rack position: the device type '{zero_u_type}' is 0U.")
         device.position = pos
         self._reject_invalid_placement(device)
         device.save(update_fields=["position"])
@@ -2410,7 +2418,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         # A NetBox status slug is accepted directly too (for example "active", "offline").
         mapped = status_map.get(text) or (text if text in set(status_map.values()) else None)
         if mapped is None:
-            raise ValueError(f"Unknown status value '{value}'")
+            raise PreviewActionInvalid(f"Unknown status value '{value}'")
         device.status = mapped
         device.save(update_fields=["status"])
         return device.status
@@ -2427,13 +2435,15 @@ class SyncDeviceFieldView(_AjaxPermissionView):
 
     def _apply_face(self, device, value):
         if device.rack_id is None:
-            raise ValueError("Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement.")
+            raise PreviewActionInvalid(
+                "Cannot set face: device has no rack assigned. Sync rack first, or use Sync Placement."
+            )
         zero_u_type = _zero_u_device_type(device)
         if zero_u_type:
-            raise ValueError(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
+            raise PreviewActionInvalid(f"Cannot set a rack face: the device type '{zero_u_type}' is 0U.")
         mapped = _FACE_MAP.get(str(value).strip().lower())
         if mapped is None:
-            raise ValueError(f"Unknown face value '{value}' — expected 'front' or 'rear'")
+            raise PreviewActionInvalid(f"Unknown face value '{value}' — expected 'front' or 'rear'")
         device.face = mapped
         self._reject_invalid_placement(device)
         device.save(update_fields=["face"])
@@ -2449,7 +2459,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         if mapped is None and text in set(airflow_map.values()):
             mapped = text
         if mapped is None:
-            raise ValueError(f"Unknown airflow value '{value}'")
+            raise PreviewActionInvalid(f"Unknown airflow value '{value}'")
         device.airflow = mapped
         device.save(update_fields=["airflow"])
         return device.airflow
@@ -2459,7 +2469,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         try:
             target = ip_assignment.resolve(device, field, value)
         except ip_assignment.IPAssignmentError as exc:
-            raise ValueError(str(exc)) from exc
+            raise PreviewActionInvalid(str(exc)) from exc
 
         if target.already_held:
             # The device carries it already, so only the field moves. No IPAM row is written.
@@ -2472,9 +2482,9 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         try:
             address = ip_assignment.apply(target, user)
         except ValidationError as exc:
-            raise ValueError("; ".join(exc.messages)) from exc
+            raise PreviewActionInvalid("; ".join(exc.messages)) from exc
         except ObjectPermissionDenied as exc:
-            raise ValueError(f"Permission denied: {exc} for this IP address.") from exc
+            raise PreviewActionInvalid(f"Permission denied: {exc} for this IP address.") from exc
         setattr(device, field, address)
         device.save(update_fields=[field])
         return f"{address.address} on {target.interface.name}"
@@ -2485,7 +2495,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
         try:
             _validate_device_placement(device)
         except ValidationError as exc:
-            raise ValueError(_placement_error_text(exc)) from exc
+            raise PreviewActionInvalid(_placement_error_text(exc)) from exc
 
 
 def _lookup_rack_for_device(device, value):
@@ -3403,7 +3413,7 @@ class QuickCreateManufacturerView(_PermissionScopedWriteMixin, PermissionRequire
             mfg.name = mfg_name
             try:
                 _validate_model_instance(mfg, f"manufacturer '{mfg_name}'")
-            except ValueError as exc:
+            except PreviewActionInvalid as exc:
                 return _preview_action_error(request, next_url, str(exc), status=400)
         result = save_permission_scoped_object(
             request.user,
@@ -3454,7 +3464,7 @@ class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequir
         mapping.netbox_manufacturer_slug = netbox_mfg_slug
         try:
             _validate_model_instance(mapping, f"manufacturer mapping '{source_make}'")
-        except ValueError as exc:
+        except PreviewActionInvalid as exc:
             return _preview_action_error(request, next_url, str(exc), status=400)
         result = save_permission_scoped_object(
             request.user,
@@ -3565,7 +3575,7 @@ class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequired
                         {"model": dt_name, "u_height": u_height},
                         on_existing="keep",
                     )
-        except ValueError as exc:
+        except PreviewActionInvalid as exc:
             return _preview_action_error(request, next_url, str(exc), status=400)
 
         if action == "create_now":
@@ -3650,7 +3660,7 @@ class QuickAddClassRoleMappingView(_PermissionScopedWriteMixin, PermissionRequir
             setattr(mapping, field_name, value)
         try:
             _validate_model_instance(mapping, f"class role mapping '{source_class}'")
-        except ValueError as exc:
+        except PreviewActionInvalid as exc:
             return _preview_action_error(request, next_url, str(exc), status=400)
         result = save_permission_scoped_object(
             request.user,
@@ -3711,7 +3721,7 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
                 ColumnMapping(profile=profile, source_column=source_column, target_field=target_field),
                 f"column mapping '{source_column}' -> {target_field}",
             )
-        except ValueError as exc:
+        except PreviewActionInvalid as exc:
             return _preview_action_error(request, next_url, str(exc), status=400)
 
         if target_field.startswith(CANDIDATE_TARGET_PREFIX):
@@ -4085,6 +4095,16 @@ class AutoMatchDevicesView(PermissionRequiredMixin, View):
         return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
+def _refused_row_write_response(exc, row_number):
+    """Return the answer one refused row write gives the operator.
+
+    The worker reports the same failures, so both read the message from one place.
+    """
+    if isinstance(exc, DatabaseError):
+        logger.exception("SyncSingleRowView: database error for row_number=%s", row_number)
+    return JsonResponse({"ok": False, "error": operator_failure_message(exc)}, status=400)
+
+
 class SyncSingleRowView(_AjaxPermissionView):
     """AJAX endpoint: execute a single row from the current import session.
 
@@ -4171,7 +4191,7 @@ class SyncSingleRowView(_AjaxPermissionView):
         ) as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=409)
         except (DatabaseError, ObjectPermissionDenied, ValidationError) as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+            return _refused_row_write_response(exc, row_number)
         except Exception:
             logger.exception("SyncSingleRowView: unexpected error for row_number=%s", row_number)
             return JsonResponse(
