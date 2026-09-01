@@ -295,6 +295,26 @@ class ColumnMappingViewTest(BaseViewTestCase):
         cm.refresh_from_db()
         self.assertEqual(cm.source_column, "SerialNo")
 
+    def test_the_add_page_does_not_call_itself_an_edit(self):
+        """`get_object` returns an unsaved instance for add, which is truthy but has no pk."""
+        url = reverse("plugins:netbox_data_import:columnmapping_add", kwargs={"profile_pk": self.profile.pk})
+
+        html = self.client.get(url).content.decode()
+
+        self.assertIn("Add Column Mapping", html)
+        self.assertNotIn("Edit Column Mapping", html)
+
+    def test_edit_cannot_move_a_mapping_to_another_profile(self):
+        """The hidden profile field is submitted text, so an edit must not re-parent the row."""
+        other = _make_profile("CMOtherProfile")
+        cm = ColumnMapping.objects.filter(profile=self.profile, target_field="serial").first()
+        url = reverse("plugins:netbox_data_import:columnmapping_edit", kwargs={"pk": cm.pk})
+
+        self.client.post(url, {"profile": other.pk, "source_column": "SerialNo", "target_field": "serial"})
+
+        cm.refresh_from_db()
+        self.assertEqual(cm.profile, self.profile)
+
     def test_delete_column_mapping_get(self):
         """Delete column mapping confirmation page returns 200."""
         cm = ColumnMapping.objects.filter(profile=self.profile).first()

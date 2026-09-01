@@ -199,8 +199,11 @@ def _store_contact_for_unmatched_row(profile, resolved_fields, candidates, user)
     return {**resolved_fields, "contact_id": contact.pk}, note
 
 
-def _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, user):
-    """Apply the decided Contact to the Device this row already matched."""
+def _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, user) -> bool:
+    """Apply the decided Contact to the Device this row already matched.
+
+    Returns whether a Contact now stands on the Device. A no-contact decision writes none.
+    """
     from dcim.models import Device
 
     device = Device.objects.restrict(user, "change").filter(pk=device_id).first()
@@ -209,7 +212,7 @@ def _assign_contact_to_matched_device(profile, resolved_fields, source_row, devi
     resolved_row = dict(source_row)
     resolved_row.update(resolved_fields)
     review = PrimaryContactResolver.review(device, resolved_row, profile, user)
-    PrimaryContactResolver.apply(device, profile, review, user)
+    return PrimaryContactResolver.apply(device, profile, review, user) is not None
 
 
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
@@ -2968,8 +2971,9 @@ class SaveResolutionView(_AjaxPermissionView):
                         },
                     )
                     if device_id:
-                        _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, request.user)
-                        contact_updated = True
+                        contact_updated = _assign_contact_to_matched_device(
+                            profile, resolved_fields, source_row, device_id, request.user
+                        )
             except IntegrityError:
                 return _preview_action_error(
                     request,
@@ -4227,7 +4231,8 @@ class SyncSingleRowView(_AjaxPermissionView):
             )
 
         mark_preview_dirty(request.session)
-        return JsonResponse(pending_preview_payload(row_number, "Synchronized."))
+        written = f"{preview_unit.object_type.capitalize()} '{preview_unit.name}' was created in NetBox."
+        return JsonResponse(pending_preview_payload(row_number, "Synchronized.", written))
 
 
 class UnlinkDeviceView(_AjaxPermissionView):

@@ -370,8 +370,8 @@
   /* Bootstrap moves focus to the dialog as it opens, so the first offered field asks for the
    * cursor only once the modal is on screen. */
   modal.addEventListener('shown.bs.modal', function () {
-    var first = valueRows.querySelector('.ndi-contact-literal');
-    if (first && !first.value && !first.disabled) first.focus();
+    var first = emptyLiteral();
+    if (first && !first.disabled) first.focus();
   });
 
   function showSuggestion(suggestion) {

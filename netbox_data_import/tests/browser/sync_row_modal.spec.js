@@ -47,7 +47,11 @@ async function setUp(page) {
       new Promise((resolveRequest, rejectRequest) => {
         window.pendingSyncs.push({ url, rowNumber: body.get("row_number"), resolveRequest, rejectRequest });
       });
-    window.ndiMarkPreviewStale = () => (window.staleCount = (window.staleCount || 0) + 1);
+    window.staleDetails = [];
+    window.ndiMarkPreviewStale = (detail) => {
+      window.staleCount = (window.staleCount || 0) + 1;
+      window.staleDetails.push(detail);
+    };
     window.recalculateCount = 0;
     window.ndiRecalculatePreview = () => {
       window.recalculateCount += 1;
@@ -264,4 +268,22 @@ test("a page without the recalculation helper still reports the stale preview", 
 
   await expect.poll(() => page.evaluate(() => window.staleCount || 0)).toBe(1);
   await expect.poll(() => page.evaluate(() => window.syncModalHideCount)).toBe(1);
+});
+
+test("the stale notice names the object the sync wrote", async ({ page }) => {
+  await setUp(page);
+  await page.locator("#syncRowRecalculate").uncheck();
+
+  await confirmRow(page, "sync-row-1");
+  await expect.poll(() => page.evaluate(() => window.pendingSyncs.length)).toBe(1);
+  await page.evaluate(() => {
+    window.pendingSyncs[0].resolveRequest({
+      message: "Synchronized.",
+      detail: "Rack 'rack-a' was created in NetBox.",
+    });
+  });
+
+  await expect.poll(() => page.evaluate(() => window.staleDetails)).toEqual([
+    "Rack 'rack-a' was created in NetBox.",
+  ]);
 });

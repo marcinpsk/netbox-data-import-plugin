@@ -626,10 +626,13 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         profile.adapter_config["primary_contact_role"] = "Second Owner"
         self.assertEqual(profile.resolved_primary_contact_role, replacement)
 
-    def test_a_non_numeric_profile_id_does_not_raise(self):
-        """A hidden field carries raw POST text, so the lookup must not crash the request."""
+    def test_a_submitted_profile_is_ignored(self):
+        """The profile is the view's to set, so submitted text reaches neither the lookup nor the row."""
         form = ColumnMappingForm(data={"profile": "abc", "source_column": "Name", "target_field": "device_name"})
-        self.assertFalse(form.is_valid())
+
+        self.assertNotIn("profile", form.fields)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIsNone(form.instance.profile_id)
 
     def test_a_stored_family_target_stays_editable(self):
         """A row saved with an extra_json target must re-save through its form."""

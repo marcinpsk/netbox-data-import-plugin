@@ -227,3 +227,28 @@ describe("reporting a write the action already made", () => {
     expect(lines[0].textContent).toBe("Second write.");
   });
 });
+
+describe("a recalculation that is already running", () => {
+  it("starts one navigation when the helper is called twice", () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign, href: "http://localhost/preview/" });
+
+    expect(window.ndiRecalculatePreview()).toBe(true);
+    expect(window.ndiRecalculatePreview()).toBe(true);
+
+    // The links are latched after the first call, so the second must not navigate again.
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts one navigation when a press is followed by the helper", () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign, href: "http://localhost/preview/" });
+    document
+      .getElementById("ndi-recalculate-preview")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+    expect(window.ndiRecalculatePreview()).toBe(true);
+
+    expect(assign).not.toHaveBeenCalled();
+  });
+});

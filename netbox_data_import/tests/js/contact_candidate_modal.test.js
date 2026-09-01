@@ -676,3 +676,28 @@ describe("a row that cannot identify a Contact from its own values", () => {
     );
   });
 });
+
+describe("the cursor lands where the operator has to type", () => {
+  it("skips a saved value and focuses the blank field beside it", () => {
+    addPreviewFixture({
+      "source-half": {
+        "candidate:contact": {
+          original_value: "{}",
+          resolved_fields: {
+            contact_resolution_applied: true,
+            contact_field_values: { name: "Saved Person" },
+            contact_field_sources: {},
+          },
+        },
+      },
+    });
+
+    openRow("row-without-candidates", "source-half");
+    document.getElementById("contactCandidateModal").dispatchEvent(new Event("shown.bs.modal"));
+
+    const inputs = [...document.querySelectorAll("#contactCandidateValueRows .ndi-contact-literal")];
+    // The saved name is rendered first, so the blank the operator must fill is not the first input.
+    expect(inputs.map((input) => input.value)).toEqual(["Saved Person", ""]);
+    expect(document.activeElement).toBe(inputs[1]);
+  });
+});

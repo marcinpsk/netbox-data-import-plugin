@@ -507,6 +507,87 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertEqual(assignment.role, role)
 
 
+class MatchedDeviceContactReportTest(ContactResolutionSessionMixin, TestCase):
+    """The response must claim a Device Contact write only when one happened."""
+
+    def _matched_device(self):
+        """Give the row a matched Device and a profile role, then replan onto it."""
+        from dcim.models import Device
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
+        self.profile.adapter_config["primary_contact_role"] = role.name
+        self.profile.save()
+        device = Device.objects.create(
+            name="ajax-contact-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        # The first decision unblocks the row, so the second one meets a matched device.
+        self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-one")
+        plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
+        result = ReviewWorkspace(plan)
+        session = self.client.session
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = result.source_rows
+        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
+        session.save()
+        return device
+
+    def _post_decision(self, sources, *, revision):
+        """Save one Contact decision for the row through the deferred endpoint."""
+        return self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "AJAX-001",
+                "source_column": "candidate:contact",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": sources,
+                        "contact_field_values": {},
+                        "contact_id": None,
+                    }
+                ),
+                "preview_revision": revision,
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+            HTTP_ACCEPT=JSON,
+        )
+
+    def test_a_no_contact_decision_on_a_matched_device_claims_no_write(self):
+        """`apply()` writes nothing for a no-contact decision, so the message must not claim one."""
+        from tenancy.models import ContactAssignment
+
+        device = self._matched_device()
+        ContactAssignment.objects.all().delete()
+
+        response = self._post_decision({}, revision="revision-two")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertNotIn("Device Contact", json.loads(response.content)["message"])
+        self.assertFalse(
+            ContactAssignment.objects.filter(
+                object_id=device.pk,
+                object_type=ContentType.objects.get_for_model(device),
+            ).exists()
+        )
+
+    def test_a_decision_that_assigns_a_contact_still_reports_the_write(self):
+        """The report must stay for the case it was written for."""
+        self._matched_device()
+
+        response = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIn("Device Contact", json.loads(response.content)["message"])
+
+
 class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
     """The picker asks the server on open, so a Contact created since the preview is offered."""
 

@@ -115,6 +115,8 @@
   function recalculatePreview() {
     var link = document.querySelector('.ndi-recalculate-preview');
     if (!link) return false;
+    // One recalculation is already on its way, and a second navigation would only interrupt it.
+    if (link.dataset.ndiRecalculating === 'true') return true;
     latchRecalculation(link);
     window.location.assign(link.href);
     return true;

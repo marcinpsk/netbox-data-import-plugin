@@ -1919,6 +1919,23 @@ class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):
         self.assertEqual(self._codes(units[0]), ["device.missing_name"])
         self.assertEqual(units[0].disposition, Disposition.INVALID)
 
+    def test_the_stated_reason_and_the_listed_problems_share_one_wording_rule(self):
+        """Two copies of the rule would let a row's reason and its remaining list drift apart."""
+        from netbox_data_import.review_workspace import WorkspaceUnit, _diagnostic_message
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-same", serial="SN-1"),
+            self._row(3, "D-2", "srv-same", serial="SN-1"),
+        )
+
+        row = WorkspaceUnit.from_unit(units[0])
+
+        self.assertEqual(row.detail, _diagnostic_message(units[0].diagnostics[0]))
+        self.assertEqual(
+            [issue["message"] for issue in row.extra_data["other_issues"]],
+            [_diagnostic_message(item) for item in units[0].diagnostics[1:]],
+        )
+
     def test_a_well_formed_row_is_still_actionable(self):
         """Running more checks must not turn a row that was fine into a refused one."""
         units = self._plan(self._row(2, "D-1", "srv-01"))
@@ -1926,7 +1943,6 @@ class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
 
     def test_an_ignored_row_is_an_answer_not_a_list_of_problems(self):
-        units = self._plan(self._row(2, "D-1", "srv-01"))
         IgnoredDevice.objects.create(profile=self.profile, source_id="D-1")
 
         units = self._plan(self._row(2, "D-1", "srv-01"))

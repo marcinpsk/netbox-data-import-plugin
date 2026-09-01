@@ -206,7 +206,7 @@
         return;
       }
       if (typeof window.ndiMarkPreviewStale === 'function') {
-        window.ndiMarkPreviewStale();
+        window.ndiMarkPreviewStale(data.detail);
       }
       if (!ownsCurrentModal) return;
       var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;

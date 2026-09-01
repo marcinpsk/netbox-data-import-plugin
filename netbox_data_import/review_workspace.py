@@ -123,11 +123,7 @@ def _detail(unit: SynchronizationUnit, action: str, object_type: str, name: str)
     """Return stable operator wording for one unit."""
     if unit.diagnostics:
         blocking = _blocking(unit)
-        diagnostic = blocking[0] if blocking else unit.diagnostics[0]
-        message = diagnostic.display.get("message")
-        if message:
-            return str(message)
-        return _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+        return _diagnostic_message(blocking[0] if blocking else unit.diagnostics[0])
     if detail := unit.display.get("detail"):
         return str(detail)
     verb = {
