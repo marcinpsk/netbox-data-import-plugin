@@ -2,6 +2,298 @@
 
 <!-- version list -->
 
+## v1.11.0 (2026-08-31)
+
+### Bug Fixes
+
+- Actually move the parsing out of the engine, and cover what layer 3 added
+  ([`c732523`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c73252314784c215064d4edb053fe7e8814b67c7))
+
+- Address import engine review findings
+  ([`776bc0a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/776bc0ad423b2255f7699c5f7f0fc734746677a4))
+
+- Address import engine review findings
+  ([`62274e2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/62274e25ee340e23839ca9570ebd05c4292c3f12))
+
+- Align import planning with writer behavior
+  ([`4746157`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4746157137902d2e688888a40e40182c97ac832d))
+
+- Apply saved Source Resolutions when the coordinator plans
+  ([`1638013`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1638013a3bfc734d3be0eabe6cd8f83a8354d0bb))
+
+- Bind row sync state to its request
+  ([`130f628`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/130f628e1fa02fefdd2ffb4f1992a09b0c4058a0))
+
+- Bound the address token so a cell cannot set the scan length
+  ([`5441f80`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5441f80695e662775088411ced6d195b14970867))
+
+- Bound transform work across workbooks
+  ([`c199254`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c199254f6befef93924de5a7c3f391fb85301076))
+
+- Check the declared type of each scalar plan field
+  ([`d62d8fc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d62d8fc94f985ddb1ce19cb42c5b987753a5ea2e))
+
+- Clarify contact resolution validation
+  ([`226afd5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/226afd575c4bb5c03fd0507f33ee70b570155d3e))
+
+- Close final import review findings
+  ([`01e1bf5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/01e1bf51a6387c7510b5053cf13a16ba0986620b))
+
+- Close final import review findings
+  ([`565e2ef`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/565e2ef56f05bf0e695dad8ef8a451719d634ace))
+
+- Close import review follow-ups
+  ([`13f7fa6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/13f7fa6d1e061260fd31813d80abbec2192139ec))
+
+- Close remaining import cutover review findings
+  ([`a23867a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a23867a7f64f1a248790c9f65ab70d8fb88b4624))
+
+- Close remaining import review findings
+  ([`e824708`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e824708fc1ea2bb9736a366646fa1f95875fd3c3))
+
+- Close the follow-up review findings on the audit record and the plan
+  ([`67eb385`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/67eb385baa5cffdaa7d874c991294e9f2682e947))
+
+- Close the review findings on the plan and audit models
+  ([`60a2609`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/60a2609e21b55fc2cbb50c79580c5b6ae9d80d97))
+
+- Close the review findings on the plan and the target modules
+  ([`1891df0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1891df052383c0f6d907b28155e933bd60bc38b6))
+
+- Close the second round of review findings on the audit record
+  ([`5135b70`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5135b70b55a0c4f7959b111eece751c3a33404a7))
+
+- Enforce plan and execution contracts
+  ([`0faf3df`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0faf3df25bed59490b3188549a1d003b9a6c82ec))
+
+- Follow the squashed profile cutover on develop
+  ([`55c7b16`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/55c7b1679860b6bdef2009760406f13f1ac81a48))
+
+- Freeze import plan values recursively
+  ([`da7074c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/da7074c52a908502866acd3de83d51b60b6b77c8))
+
+- Harden import cutover edge cases
+  ([`baa60cc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/baa60cc731cf7ac802e96396cc4f870d6d24c6c5))
+
+- Isolate conflict resolution requests
+  ([`e6b449c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e6b449c35d5b5fe37476b28dfb6b407c15ce700b))
+
+- Let a device row use the rack its own batch creates
+  ([`9ff36d7`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9ff36d74d8cab381f627080d6c228665ac3b2bd3))
+
+- Normalize device type resolver inputs
+  ([`ca5972f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ca5972f45041ba0b33684cd3ebc5b673e5f2bdd1))
+
+- Normalize persisted ignored source IDs
+  ([`6033a51`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6033a51441c7f7851bdbf44b8824daefb439e950))
+
+- Normalize target module source values
+  ([`708f240`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/708f2408ddec02d7a3c00f42e7e1416d0df7f230))
+
+- Preserve device ignore precedence
+  ([`e4f3dcc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e4f3dcc1093e9ccf30dd7ba49e9a6227bfd7f2e7))
+
+- Preserve device rejection precedence
+  ([`4646f08`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4646f08d6732130269ea8be54f229799b5ea8917))
+
+- Preserve import audit job links
+  ([`00b3ca4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/00b3ca41873b230abc6b4bc8352ab195b607d798))
+
+- Preserve import review contracts
+  ([`32b6c82`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/32b6c82e72c0ae15b5a82457b5781f58fe4e6acb))
+
+- Preserve safe bulk transform matching
+  ([`ff59d4d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ff59d4db5ee564cfdad7b96eba0bba2d2869981d))
+
+- Preview a device against the rack this batch leaves behind
+  ([`b22458f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b22458f8796a02020e2eb19d92ac26dde4e2bff7))
+
+- Refuse a retired adapter before suggesting a contact
+  ([`ac1c164`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ac1c164c122463d3f3598cc36e2e0dc73a8c52de))
+
+- Regenerate audit migrations after cutover
+  ([`114275a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/114275a3a8b98b9ff6239a2655d7ddd724e3dd9b))
+
+- Report the import target and the source-ID field as device work
+  ([`e6080e0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e6080e01b128fcd5a21c747cec5c968cd1fac6a8))
+
+- Resolve final import review findings
+  ([`bbe96c6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/bbe96c68b9bcd85ea3985e0db38c9bd9b044c223))
+
+- Resolve import audit review findings
+  ([`7d728e2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7d728e2c99b99ecdadb6c8055710f41ea78a6a48))
+
+- Resolve import engine review findings
+  ([`e7460ad`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e7460adb475b79810e7e08fcba0c8568e9db7d73))
+
+- Resolve import review findings
+  ([`e112ea0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e112ea0b30f414c2d83cdaa64bb2a010e1d8574e))
+
+- Resolve latest import engine review findings
+  ([`744ba8e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/744ba8ead84de29886883b4f5ec605736535314a))
+
+- Resolve latest import review findings
+  ([`1d568e3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1d568e37cd647358f91d1dc7cbb53d093ebfa268))
+
+- Resolve latest import review findings
+  ([`68e748f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/68e748facf3ca3b80e99c9694d648d42b15c4019))
+
+- Resolve release review findings
+  ([`e8e3ca3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e8e3ca3aa3a139c8cbae36aee3aabed022e8e52b))
+
+- Resolve remaining import review findings
+  ([`c893a02`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c893a024d9e89e89c89404253aa2e1e7bf2a6cd3))
+
+- Restack audit migrations after profile cutover
+  ([`b1d23f6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b1d23f63675f29847698457f0509dce3720aa426))
+
+- Scope null normalization to source values
+  ([`b9fbce5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b9fbce5915a34cacdc62fa9479cefd5e8b1aceb5))
+
+- Serialize conflict resolution requests
+  ([`b984a67`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b984a679b51247953305b66ca1c2feaaa0fba6e9))
+
+- Stop the Device module renaming a device it matched
+  ([`bad1582`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/bad15827fdf7d351ada3693318467e2748956d5c))
+
+- Unify device identity matching
+  ([`60d7ac5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/60d7ac5d1357ff2b74694c939a0e1a06038b7a60))
+
+- Validate import plan schema versions
+  ([`b65e06b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b65e06b7eb64d7023f0742e798589e28b4ff4e9e))
+
+- Validate saved resolution target fields
+  ([`9470b93`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9470b931a8cb82167ede81c1e2a7511685ac75d1))
+
+- Validate the plan's scalar fields at construction
+  ([`d6a4b08`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d6a4b089aec909d5cdfa59bc5741a2d97ef329c6))
+
+### Build System
+
+- Add mypy, and the two stub packages this project actually needs
+  ([`355b105`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/355b1051eee284c0b7dc91fcd0d2a596180e7ab9))
+
+### Code Style
+
+- Give each model comment its reason in one line
+  ([`06b989b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/06b989bfab948db53f9e7bc3ff9739cb7d650cf1))
+
+- Give this branch's parallel-setup comments one line each
+  ([`32b8f1b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/32b8f1bc479d81dfd62dede038fcf3533e72efe0))
+
+- State the plan scalar-check reason in one line
+  ([`d69d43b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d69d43bac9cff445debf9eb22f9baeaa62fb1b74))
+
+### Documentation
+
+- Correct NetBox minimum version
+  ([`e950e3b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e950e3b29843eae8c0486edf7c292f2aaa6ca2bc))
+
+- Correct RE2 Unicode migration guidance
+  ([`cf86682`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cf866825f4a97a388ecedec0c0dc0e38b03e43a3))
+
+- Cut test rationale to the one non-obvious line
+  ([`17e7965`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/17e7965e6bac44fdd17894d8aeed9866f4d990ab))
+
+- Drop two comments that restate the code
+  ([`c30bfe1`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c30bfe1c376accf242b864a4d6058fc784baced3))
+
+- One-line the comments and docstrings the review flagged
+  ([`f8e2780`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f8e2780d98894f6a1bf680bd6b4c0e9aaa036701))
+
+### Features
+
+- Add the source document and the Import Execution audit record
+  ([`2d509c5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2d509c5dc8d98f441e58f0b6f7cdbfbc73da6b75))
+
+- Add the target-neutral Import Plan model
+  ([`ebccbd2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ebccbd2b587720e1c7d728bf8eb3173b113a351c))
+
+- Apply one device change under its own lock and preconditions
+  ([`97d5c64`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/97d5c6404244e13cdb0a2ad0256a4da134072411))
+
+- Apply one rack change under its own lock and preconditions
+  ([`413e731`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/413e7316da119bdd869c55f5d870b6f2dd2d5110))
+
+- Cut import workflow over to import engine
+  ([`c4ba988`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c4ba988a08d9c01aa7a4145c108dfd37ade31189))
+
+- Decide a device's primary contact in the plan
+  ([`5ab99ef`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5ab99ef79f305e1f7d57cafd5a7b382d316d7ec2))
+
+- Execute an accepted plan as one audited transaction
+  ([`6794c07`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6794c076b27620712d14fde2dd440088aad9fd8c))
+
+- Move flat-workbook parsing behind the Source Adapter seam
+  ([`1d05170`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1d05170d57dcf48c864105decff5620da0aee743))
+
+- Place a device's addresses through the Device module
+  ([`979b94a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/979b94a70a26e5bbc02973480a3d5c5da241b77a))
+
+- Plan a device through the operator's saved field review
+  ([`69eed00`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/69eed006c821392c0734a384938494dec484bd8d))
+
+- Plan an import through the target-neutral coordinator
+  ([`b21dbdd`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b21dbdd58251e540b79a51aa5a026703ac87a005))
+
+- Plan device placement, and share the source-word tables
+  ([`9377530`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/937753070fe3c72c099c8d229dc81856d0051398))
+
+- Plan devices through a Target Module
+  ([`0838d34`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0838d34da5f4628713c6452a85664f97a06bd9f4))
+
+- Plan racks through a Target Module
+  ([`50a596d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/50a596d7aac757a9b7575d39156b388a1bc9012e))
+
+- Read target state through one permission-scoped accessor
+  ([`0732caa`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0732caaf3cafb9ba23545cc2d8f3caeeff5d8b4b))
+
+- Record and read the source that wrote a device
+  ([`6409285`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6409285725c2c1d672415032c3d1e5ae9f966fe8))
+
+### Performance Improvements
+
+- Defer preview recalculation after review actions
+  ([`f543efb`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f543efbf0442ce7b0c92a34469b177bd36cfcf19))
+
+### Refactoring
+
+- Share the Device Type identity resolver with the target modules
+  ([`58a64ca`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/58a64ca5ef08fa1701bb53328dc64afc2ded6e14))
+
+- State the held-address invariant once, on the target
+  ([`02e4626`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/02e4626143934db6657e7a23b971504f1b3f6260))
+
+### Testing
+
+- Correct the permission-test docstrings
+  ([`565c352`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/565c3522a18de752ee73f28481da51534f3133ac))
+
+- Cover the IP paths the coverage gate found untested
+  ([`3027076`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/30270767f21b4cc1a5810b6146fe0be55dbac9a4))
+
+- Cover the plan and catalog lookups the gate found untested
+  ([`67ddbf2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/67ddbf2a716db18a259e774936a1354eef703020))
+
+- Cover the preview's IP normalization fallback
+  ([`f1927af`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f1927af16639457d5db18817b2323aeb93ed2ebc))
+
+- Guard the one-line comment rule with a shrinking record
+  ([`e3c79ca`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e3c79ca50ab4d5d46afb1cf1653dddf5ec53f858))
+
+- Guard the views-to-engine seam, and stop the comment record fighting branches
+  ([`e52171e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e52171eb811d73f14a44afc22b864cd8c57cbc74))
+
+- Reuse the workbook bytes helper
+  ([`cf00291`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cf00291cda36e9dccfb698328aaa01e398fdcb77))
+
+- Share the stacked permission helper
+  ([`d1ab562`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d1ab562417e34721e70f8937ed1efba178416f4f))
+
+- Stop a permission test from passing on a failed login
+  ([`c41fdd5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c41fdd5a6d09128b101587a6a159c718f87bdf8b))
+
+
 ## v1.10.0 (2026-08-28)
 
 ### Bug Fixes
