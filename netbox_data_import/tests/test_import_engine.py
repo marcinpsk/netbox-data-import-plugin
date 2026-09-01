@@ -546,7 +546,7 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
             key = runtimes.RackModule.key
             consumes = runtimes.RackModule.consumes
 
-            def plan(self, source_batch, profile, catalog, netbox_reader):
+            def plan(self, source_batch, profile, catalog, netbox_reader, *, lock_plan_references=False):
                 """Return the one unreferenceable unit this test needs."""
                 return [
                     SynchronizationUnit(

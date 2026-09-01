@@ -225,8 +225,18 @@ class RackModule:
     key = "rack"
     consumes = frozenset({OutputKind.RACK_SOURCE_ROW})
 
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
+    def plan(
+        self,
+        source_batch,
+        profile,
+        catalog,
+        netbox_reader,
+        *,
+        lock_plan_references: bool = False,
+    ) -> list[SynchronizationUnit]:
         """Return one Synchronization Unit per rack row, with the disposition its state earns."""
+        # Planned Change preconditions carry every target row this module depends on, so no read-only reference remains.
+        del lock_plan_references
         rows = self._rack_rows(source_batch, profile)
         if not rows:
             return []
@@ -1476,8 +1486,18 @@ class DeviceModule:
     key = "device"
     consumes = frozenset({OutputKind.DEVICE_SOURCE_ROW})
 
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
+    def plan(
+        self,
+        source_batch,
+        profile,
+        catalog,
+        netbox_reader,
+        *,
+        lock_plan_references: bool = False,
+    ) -> list[SynchronizationUnit]:
         """Return one Synchronization Unit per device row, with the disposition its state earns."""
+        # Planned Change preconditions carry every target row this module depends on, so no read-only reference remains.
+        del lock_plan_references
         rows = self._device_rows(source_batch, profile)
         if not rows:
             return []

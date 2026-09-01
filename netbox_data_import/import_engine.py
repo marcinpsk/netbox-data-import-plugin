@@ -77,8 +77,13 @@ class ImportEngine:
     """Coordinate source interpretation and Target Module planning."""
 
     @classmethod
-    def plan(cls, profile, source_document, actor, planning_context) -> ImportPlan:
-        """Return the deterministic Import Plan for one stored source."""
+    def plan(
+        cls, profile, source_document, actor, planning_context, *, lock_plan_references: bool = False
+    ) -> ImportPlan:
+        """Return the plan and optionally lock read-only target references for execution.
+
+        The caller must open a transaction before it requests locks.
+        """
         document = cls._stored_source(profile, source_document)
         adapter = adapters.get_adapter(profile.source_adapter)
         if adapter is None:
@@ -112,7 +117,15 @@ class ImportEngine:
                 continue
             runtime = target_modules.runtime_for(declaration.key)
             if runtime is not None:
-                units.extend(runtime.plan(source_batch, profile, catalog.CATALOG, reader))
+                units.extend(
+                    runtime.plan(
+                        source_batch,
+                        profile,
+                        catalog.CATALOG,
+                        reader,
+                        lock_plan_references=lock_plan_references,
+                    )
+                )
 
         # Section 4.4 makes the merged graph the coordinator's, so a bad one fails here, not at a write.
         merge_changes(executable_units(units))
@@ -211,7 +224,13 @@ class ImportEngine:
         progress_callback,
     ) -> None:
         """Compare the selection against a fresh plan and apply it, inside the caller's transaction."""
-        current = cls.plan(profile, source_document, actor, accepted.planning_context)
+        current = cls.plan(
+            profile,
+            source_document,
+            actor,
+            accepted.planning_context,
+            lock_plan_references=True,
+        )
         units = cls._selected_units(accepted, current, selected_identities)
         try:
             changes = merge_changes(units)

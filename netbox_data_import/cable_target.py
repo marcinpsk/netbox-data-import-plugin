@@ -341,10 +341,11 @@ def eligible_terminations(
 class _CableBatch:
     """Plan every Source Trace in one batch, so an identical shared segment plans once."""
 
-    def __init__(self, traces, profile, netbox_reader):
+    def __init__(self, traces, profile, netbox_reader, *, lock_plan_references: bool = False):
         self.profile = profile
         self.reader = netbox_reader
         self.actor = netbox_reader.actor
+        self.lock_plan_references = lock_plan_references
         self.analyses = [self._new_analysis(trace) for trace in traces]
         self._objects: dict[tuple[str, int], Any] = {}
         self._components: dict[tuple[int, str], dict[str, list]] = {}
@@ -362,6 +363,7 @@ class _CableBatch:
         self._load_existing_cables()
         self._classify()
         self._decide()
+        self._refuse_conflicting_creations()
         self._deletes_by_segment = self._shared_deletes()
         self._sources_by_segment = self._shared_sources()
 
@@ -400,7 +402,20 @@ class _CableBatch:
         """Return the operator's saved termination decisions, keyed by field key."""
         from .models import TerminationResolution
 
-        rows = TerminationResolution.objects.filter(profile=self.profile, task_type=SELECT_TERMINATION_TASK)
+        field_keys = set()
+        for analysis in self.analyses:
+            if analysis.stopped:
+                continue
+            for reference in self._references(analysis.trace):
+                field_keys.add(_field_key(reference))
+                field_keys.add(_field_key(reference, MAPPED_PEER_ROLE))
+        if not field_keys:
+            return {}
+        rows = TerminationResolution.objects.filter(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key__in=sorted(field_keys),
+        ).select_related("selected_object_type")
         return {row.field_key: row for row in rows}
 
     def _load_devices(self) -> dict[str, list]:
@@ -510,7 +525,10 @@ class _CableBatch:
             if termination.kind != INTERFACE_KIND
         }
         if device_ids:
-            self._mappings = list(self.reader.port_mappings().filter(device_id__in=sorted(device_ids)))
+            mappings = self.reader.port_mappings().filter(device_id__in=sorted(device_ids)).order_by("pk")
+            if self.lock_plan_references:
+                mappings = mappings.select_for_update(of=("self",))
+            self._mappings = list(mappings)
             ids_by_kind = {
                 FRONT_PORT_KIND: {row.front_port_id for row in self._mappings},
                 REAR_PORT_KIND: {row.rear_port_id for row in self._mappings},
@@ -701,7 +719,10 @@ class _CableBatch:
         for row in CableTermination.objects.filter(cable_id__in=sorted(cable_ids)):
             label = _object_type_label(row.termination_type.model_class())
             sides.setdefault(row.cable_id, {"A": set(), "B": set()})[row.cable_end].add((label, row.termination_id))
-        for cable in Cable.objects.filter(pk__in=sorted(cable_ids)):
+        cables = Cable.objects.filter(pk__in=sorted(cable_ids)).order_by("pk")
+        if self.lock_plan_references:
+            cables = cables.select_for_update(of=("self",))
+        for cable in cables:
             ends = sides.get(cable.pk, {"A": set(), "B": set()})
             existing = _ExistingCable(cable=cable, a_side=frozenset(ends["A"]), b_side=frozenset(ends["B"]))
             self._existing[cable.pk] = existing
@@ -806,11 +827,14 @@ class _CableBatch:
                 code = (
                     "cable.multi_termination_conflict" if occupying.multi_termination else "cable.termination_occupied"
                 )
-                analysis.block(
-                    code,
-                    {"segment_index": segment.index, "port": termination.display, "cable": str(occupying.cable)},
-                    identities=(termination.identity, _object_identity("dcim.cable", occupying.cable.pk)),
-                )
+                display = {"segment_index": segment.index, "port": termination.display}
+                identities = [termination.identity]
+                cable_visible = self.actor is None or self.actor.has_perm("dcim.view_cable", occupying.cable)
+                display["cable_visible"] = cable_visible
+                if cable_visible:
+                    display["cable"] = str(occupying.cable)
+                    identities.append(_object_identity("dcim.cable", occupying.cable.pk))
+                analysis.block(code, display, identities=identities)
 
     def _cable_class_mapping(self, cable_class: str):
         """Return the Cable policy row one CableClass value carries, or None."""
@@ -863,6 +887,34 @@ class _CableBatch:
                 identities=(_object_identity("dcim.cable", logical.cable.pk),),
             )
 
+    def _refuse_conflicting_creations(self) -> None:
+        """Invalidate traces that resolve one shared segment to different Cable policies."""
+        contributors: dict[str, list] = {}
+        for analysis in self._writing():
+            for segment in analysis.pending:
+                policy = analysis.policies.get(segment.index)
+                if policy is not None:
+                    contributors.setdefault(segment.key, []).append((analysis, segment, policy))
+        for records in contributors.values():
+            policies = {
+                (segment.cable_class, policy["cable_type"], policy["cable_profile"])
+                for _analysis, segment, policy in records
+            }
+            if len(policies) < 2:
+                continue
+            for analysis, segment, policy in records:
+                analysis.refuse(
+                    "cable.resolved_segment_conflict",
+                    {
+                        "segment_index": segment.index,
+                        "cable_class": segment.cable_class,
+                        "cable_type": policy["cable_type"],
+                        "cable_profile": policy["cable_profile"],
+                        "terminations": segment.as_json(),
+                    },
+                    identities=(segment.left.identity, segment.right.identity),
+                )
+
     def _shared_deletes(self) -> dict[str, tuple[str, ...]]:
         """Return, per desired segment, every Logical Cable deletion its creation waits for.
 
@@ -879,7 +931,9 @@ class _CableBatch:
     def _shared_sources(self) -> dict[str, list]:
         """Return, per desired segment, the provenance of every Source Trace that states it."""
         sources: dict[str, list] = {}
-        for analysis in self._writing():
+        for analysis in self.analyses:
+            if analysis.invalid:
+                continue
             for segment in analysis.pending:
                 sources.setdefault(segment.key, []).append(_source_record(analysis.trace, segment.index))
         return {
@@ -927,7 +981,12 @@ class _CableBatch:
             identity=f"cable:delete:{logical.cable.pk}",
             target_module=CableModule.key,
             operation="delete",
-            payload={"cable_id": logical.cable.pk, "display": str(logical.cable)},
+            payload={
+                "cable_id": logical.cable.pk,
+                "display": str(logical.cable),
+                "description": logical.cable.description,
+                "tags": sorted(logical.cable.tags.values_list("name", flat=True)),
+            },
             preconditions={"cable_id": logical.cable.pk, "terminations": logical.terminations},
         )
 
@@ -967,12 +1026,25 @@ class CableModule:
     key = TargetModuleKey.CABLE
     consumes = frozenset({OutputKind.SOURCE_TRACE})
 
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
-        """Return one Synchronization Unit per Source Trace in the batch."""
+    def plan(
+        self,
+        source_batch,
+        profile,
+        catalog,
+        netbox_reader,
+        *,
+        lock_plan_references: bool = False,
+    ) -> list[SynchronizationUnit]:
+        """Return one unit per trace and optionally lock rows that prove the plan."""
         del catalog
         if not (self.consumes & source_batch.output_kinds):
             return []
-        return _CableBatch(source_batch.rows, profile, netbox_reader).units()
+        return _CableBatch(
+            source_batch.rows,
+            profile,
+            netbox_reader,
+            lock_plan_references=lock_plan_references,
+        ).units()
 
     def apply(self, planned_change: PlannedChange, execution_context) -> Any:
         """Apply one Cable change, having locked its rows and rechecked its preconditions."""
@@ -1065,7 +1137,7 @@ def _cable_terminations(cable_id: int) -> list:
 
     return sorted(
         [_object_type_label(row.termination_type.model_class()), row.termination_id]
-        for row in CableTermination.objects.filter(cable_id=cable_id)
+        for row in CableTermination.objects.filter(cable_id=cable_id).order_by("pk").select_for_update(of=("self",))
     )
 
 

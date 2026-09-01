@@ -399,7 +399,7 @@ class CoordinatorDefensiveContractTest(TestCase):
 
         class GhostPlanningRuntime:
             @staticmethod
-            def plan(*args):
+            def plan(*args, **kwargs):
                 return [unit]
 
             @staticmethod

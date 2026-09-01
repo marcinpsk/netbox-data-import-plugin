@@ -53,8 +53,19 @@ class TargetModuleRuntime(Protocol):
     key: str
     consumes: frozenset[str]
 
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
-        """Return the Synchronization Units this module owns for the whole batch."""
+    def plan(
+        self,
+        source_batch,
+        profile,
+        catalog,
+        netbox_reader,
+        *,
+        lock_plan_references: bool = False,
+    ) -> list[SynchronizationUnit]:
+        """Return this module's units and optionally lock target rows the plan only reads.
+
+        The caller must open a transaction before it requests locks.
+        """
         ...
 
     def apply(self, planned_change: PlannedChange, execution_context) -> Any:

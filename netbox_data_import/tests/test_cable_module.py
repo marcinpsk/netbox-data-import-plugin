@@ -21,6 +21,7 @@ from dcim.models import (
 from django.contrib.auth import get_user_model
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
+from extras.models import Tag
 
 from netbox_data_import.cable_target import CableModule, eligible_terminations
 from netbox_data_import.field_keys import (
@@ -39,10 +40,11 @@ from netbox_data_import.models import (
     TerminationResolution,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
-from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.plan import Disposition, PlannedChange
+from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
+    run_on_separate_connection,
     trace_endpoint_line,
     trace_segment,
     trace_termination,
@@ -220,6 +222,19 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             ],
         )
 
+    def test_logical_cable_deletion_review_carries_description_and_sorted_tags(self):
+        """The operator reviews the Logical Cable description and tags before approving deletion."""
+        logical = self.connect(self.eth0, self.eth1, description="Temporary logical path")
+        later = Tag.objects.create(name="Later", slug="later")
+        earlier = Tag.objects.create(name="Earlier", slug="earlier")
+        logical.tags.add(later, earlier)
+
+        unit = self.unit(patched_path())
+
+        deletion = unit.changes[0]
+        self.assertEqual(deletion.payload["description"], "Temporary logical path")
+        self.assertEqual(list(deletion.payload["tags"]), ["Earlier", "Later"])
+
     def test_a_trace_with_no_direct_cable_is_a_creation_only_replacement(self):
         """With nothing to remove the unit carries creations alone, and they wait on nothing."""
         unit = self.unit(patched_path())
@@ -346,6 +361,44 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             sorted([("dcim.interface", self.eth0.pk), ("dcim.frontport", self.panel_1_fronts[0].pk)]),
         )
 
+    def test_stored_resolution_query_is_limited_to_batch_reference_keys_and_joins_object_types(self):
+        """One workbook does not load unrelated decision history or query ObjectType per saved row."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        renamed = trace_termination("DEV-A", "", "source-port", "Port")
+        self.save_resolution(renamed, self.eth0)
+        object_type = ObjectType.objects.get_for_model(Interface)
+        for index in range(12):
+            TerminationResolution.objects.create(
+                profile=self.profile,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=termination_field_key(
+                    device=f"UNUSED-{index}",
+                    cards="",
+                    port="not-in-workbook",
+                    kind="interface",
+                ),
+                selected_object_type=object_type,
+                selected_object_id=self.eth0.pk,
+                selected_display_name=str(self.eth0),
+            )
+
+        with CaptureQueriesContext(connection) as captured:
+            unit = self.unit(direct_path(from_end=renamed))
+
+        table = TerminationResolution._meta.db_table
+        table_queries = [query["sql"] for query in captured.captured_queries if f'FROM "{table}"' in query["sql"]]
+        # The profile fingerprint reads every policy row by design, so select the batch planner query.
+        planner_queries = [query for query in table_queries if f'"{table}"."field_key" IN' in query]
+        self.assertEqual(len(planner_queries), 1, table_queries)
+        planner_query = planner_queries[0]
+        self.assertIn(f'JOIN "{ObjectType._meta.db_table}"', planner_query)
+        self.assertIn(f'"role":"{TERMINATION_ROLE}"', planner_query)
+        self.assertIn(f'"role":"{MAPPED_PEER_ROLE}"', planner_query)
+        self.assertNotIn("UNUSED-", planner_query)
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+
     def test_a_stored_resolution_that_left_the_device_asks_the_operator_again(self):
         """A saved selection no longer on the resolved Device cannot answer the question it was asked."""
         elsewhere = Interface.objects.create(device=self.make_device("DEV-C"), name="eth9", type="1000base-t")
@@ -443,7 +496,37 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(unit.changes, ())
         occupied = next(item for item in unit.diagnostics if item.code == "cable.termination_occupied")
         self.assertIn(f"dcim.cable:{foreign.pk}", occupied.identities)
+        self.assertIs(occupied.display["cable_visible"], True)
+        self.assertEqual(occupied.display["cable"], str(foreign))
         self.assertTrue(Cable.objects.filter(pk=foreign.pk).exists())
+
+    def test_an_invisible_occupying_cable_blocks_without_disclosing_its_identity(self):
+        """Occupancy stays unscoped, but its Cable details stay inside the actor's view scope."""
+        other = self.make_device("DEV-C")
+        foreign = self.connect(
+            self.panel_1_fronts[0],
+            Interface.objects.create(device=other, name="eth9", type="1000base-t"),
+        )
+        actor = user_with_object_permission(
+            "cable-hidden-occupant",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("add",), {}),
+            ],
+        )
+        self.assertFalse(actor.has_perm("dcim.view_cable", foreign))
+
+        unit = self.unit(patched_path(), actor=actor)
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        occupied = next(item for item in unit.diagnostics if item.code == "cable.termination_occupied")
+        self.assertIs(occupied.display["cable_visible"], False)
+        self.assertNotIn("cable", occupied.display)
+        self.assertNotIn(f"dcim.cable:{foreign.pk}", occupied.identities)
 
     def test_a_multi_termination_cable_touching_a_desired_port_blocks_the_unit(self):
         """A cable with two terminations on one side never matches a desired segment."""
@@ -613,6 +696,37 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
         dispositions = {unit.identity: unit.disposition for unit in plan.units}
         self.assertEqual(sorted(dispositions.values()), [Disposition.ACTIONABLE, Disposition.INVALID])
+
+    def test_resolved_aliases_with_conflicting_cable_policy_invalidate_their_own_traces(self):
+        """Two source names for one target segment cannot crash the complete batch preview."""
+        alias_a = trace_termination("DEV-A", "", "source-port-a", "Port")
+        alias_b = trace_termination("DEV-B", "", "source-port-b", "NIC")
+        aliased = (
+            trace_endpoint_line(alias_a),
+            trace_endpoint_line(alias_b),
+            (trace_segment(alias_a, "Patch", alias_b),),
+        )
+        conflicting = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (trace_segment(DEVICE_A, "Trunk", DEVICE_B),),
+        )
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(
+            cable_type=None,
+            cable_profile=None,
+        )
+        self.save_resolution(alias_a, self.eth0)
+        self.save_resolution(alias_b, self.eth1)
+
+        plan = self.plan(aliased, conflicting)
+
+        self.assertEqual(
+            [unit.disposition for unit in plan.units],
+            [Disposition.INVALID, Disposition.INVALID],
+        )
+        for unit in plan.units:
+            self.assertEqual(unit.changes, ())
+            self.assertIn("cable.resolved_segment_conflict", self.codes(unit))
 
     def save_resolution(self, reference, selected, role=TERMINATION_ROLE):
         """Store one manual termination decision for a Termination Reference."""
@@ -858,6 +972,41 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             self.actor,
         )
 
+    def assert_competing_write_is_blocked(self, plan, competing_write, signal):
+        """Assert that one write cannot move a row after the execution replan reads it."""
+        from threading import current_thread
+
+        from django.db import OperationalError, connection
+
+        execution_thread = current_thread()
+        observed = []
+        blocked = []
+
+        def contend_during_write(sender, instance, **kwargs):
+            if observed or current_thread() is not execution_thread:
+                return
+            observed.append(instance.pk)
+
+            def contend():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO '750ms'")
+                try:
+                    competing_write()
+                except OperationalError:
+                    blocked.append(True)
+
+            with run_on_separate_connection(contend):
+                pass
+
+        signal.connect(contend_during_write, sender=Cable, weak=False)
+        try:
+            self.execute(plan)
+        finally:
+            signal.disconnect(contend_during_write, sender=Cable)
+
+        self.assertTrue(observed, "the execution reached no Cable write")
+        self.assertEqual(blocked, [True], "the competing write did not wait for the execution")
+
     def test_one_execution_replaces_the_path_and_writes_provenance(self):
         """The logical cable goes, every segment arrives, and each created Cable earns one row."""
         logical = self.connect(self.eth0, self.eth1)
@@ -925,6 +1074,58 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         self.assertEqual(rows.count(), 2)
         self.assertEqual(len({row.trace_identity for row in rows}), 2)
 
+    def test_a_blocked_trace_contributes_provenance_to_a_shared_segment(self):
+        """A later policy decision cannot strand a trace without its shared Cable provenance."""
+        _panel_1, _fronts_1, panel_1_rear = self.rebuild_panel("PANEL-1", fronts=2)
+        self.rebuild_panel("PANEL-2", fronts=2)
+        Interface.objects.create(device=self.make_device("DEV-C"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("DEV-D"), name="eth1", type="1000base-t")
+        device_c = trace_termination("DEV-C", "", "eth0", "Port")
+        device_d = trace_termination("DEV-D", "", "eth1", "NIC")
+        second_in = trace_termination("PANEL-1", "", "F2", "Position Front")
+        second_out = trace_termination("PANEL-2", "", "F2", "Position Front")
+        first = patched_path()
+        blocked = (
+            trace_endpoint_line(device_c),
+            trace_endpoint_line(device_d),
+            (
+                trace_segment(device_c, "Unmapped", second_in),
+                trace_segment(PANEL_1_REAR, "Trunk", PANEL_2_REAR),
+                trace_segment(second_out, "Patch", device_d),
+            ),
+        )
+        plan = self.plan(first, blocked)
+        self.assertEqual(
+            [unit.disposition for unit in plan.units],
+            [Disposition.ACTIONABLE, Disposition.BLOCKED],
+        )
+
+        self.execute(plan, [plan.units[0].identity])
+        CableClassMapping.objects.create(
+            profile=self.profile,
+            cable_class="Unmapped",
+            cable_type_resolved=True,
+            cable_type="cat6",
+            cable_profile_resolved=True,
+            cable_profile="single-1c1p",
+        )
+        repaired = ImportEngine.plan(
+            self.profile,
+            self.document,
+            self.actor,
+            self.planning_context,
+        )
+        self.assertEqual(repaired.units[1].disposition, Disposition.ACTIONABLE)
+        self.execute(repaired, [repaired.units[1].identity])
+
+        trunk = Cable.objects.get(
+            terminations__termination_id=panel_1_rear.pk,
+            terminations__termination_type=ObjectType.objects.get_for_model(RearPort),
+        )
+        rows = CableImportSource.objects.filter(cable=trunk)
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(len({row.trace_identity for row in rows}), 2)
+
     def test_target_state_that_moved_after_preview_rolls_back_the_complete_selection(self):
         """The replan runs inside the transaction, so a stale unit takes the whole write with it."""
         from netbox_data_import.import_engine import StalePlan
@@ -939,3 +1140,55 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
 
         self.assertEqual(Cable.objects.count(), before)
         self.assertEqual(CableImportSource.objects.count(), 0)
+
+    def test_execution_holds_a_reused_cable_through_the_remaining_writes(self):
+        """A trunk proven during replan cannot disappear before both patch segments are written."""
+        from django.db.models.signals import pre_save
+
+        trunk = self.connect(self.panel_1_rear, self.panel_2_rear)
+        plan = self.plan(patched_path())
+
+        self.assert_competing_write_is_blocked(
+            plan,
+            lambda: Cable.objects.filter(pk=trunk.pk).delete(),
+            pre_save,
+        )
+
+        self.assertTrue(Cable.objects.filter(pk=trunk.pk).exists())
+        self.assertEqual(Cable.objects.count(), 3)
+
+    def test_execution_holds_a_relied_on_port_mapping_through_the_cable_writes(self):
+        """A panel mapping proven during replan cannot disappear before its path is written."""
+        from django.db.models.signals import pre_save
+
+        mapping = PortMapping.objects.get(
+            front_port=self.panel_1_fronts[0],
+            rear_port=self.panel_1_rear,
+        )
+        plan = self.plan(same_rear_port_path())
+
+        self.assert_competing_write_is_blocked(
+            plan,
+            lambda: PortMapping.objects.filter(pk=mapping.pk).delete(),
+            pre_save,
+        )
+
+        self.assertTrue(PortMapping.objects.filter(pk=mapping.pk).exists())
+        self.assertEqual(Cable.objects.count(), 3)
+
+    def test_deletion_holds_its_termination_rows_through_the_snapshot(self):
+        """A Logical Cable termination cannot move after deletion records its reviewed state."""
+        from django.db.models.signals import pre_delete
+
+        logical = self.connect(self.eth0, self.eth1)
+        plan = self.plan(patched_path())
+        termination = CableTermination.objects.get(cable=logical, cable_end="B")
+        moved = Interface.objects.create(device=self.make_device("DEV-C"), name="eth9", type="1000base-t")
+
+        self.assert_competing_write_is_blocked(
+            plan,
+            lambda: CableTermination.objects.filter(pk=termination.pk).update(termination_id=moved.pk),
+            pre_delete,
+        )
+
+        self.assertFalse(Cable.objects.filter(pk=logical.pk).exists())
