@@ -16,7 +16,6 @@ from django.db import IntegrityError, transaction
 from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import reverse
 
-from netbox_data_import.adapters import UnknownSourceAdapter
 from netbox_data_import import field_keys
 from netbox_data_import.catalog import OutputKind, policy_section
 from netbox_data_import.field_keys import (
@@ -37,9 +36,14 @@ from netbox_data_import.models import (
     TerminationResolution,
 )
 from netbox_data_import.object_permissions import ObjectPermissionDenied
+from netbox_data_import.plan import Disposition
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
     run_on_separate_connection,
+    trace_endpoint_line,
+    trace_segment,
+    trace_termination,
+    trace_workbook_bytes,
     wait_until_a_lock_is_blocked,
 )
 from netbox_data_import.review_workspace import save_termination_resolution_and_replan
@@ -539,11 +543,34 @@ class TerminationResolutionPersistenceTest(TestCase):
             source_adapter="trace_workbook",
             adapter_config={},
         )
-        cls.document = SourceDocument.store(profile=cls.profile, content=b"T5 will interpret this")
+        CableClassMapping.objects.create(
+            profile=cls.profile,
+            cable_class="Patch",
+            cable_type_resolved=True,
+            cable_type=CableTypeChoices.TYPE_CAT6,
+            cable_profile_resolved=True,
+            cable_profile=CableProfileChoices.SINGLE_1C1P,
+        )
         site, manufacturer, device_type, role = make_dcim_objects("TraceReplan")
         del manufacturer
         device = Device.objects.create(name="Replan Device", site=site, device_type=device_type, role=role)
+        peer = Device.objects.create(name="Replan Peer", site=site, device_type=device_type, role=role)
         cls.interface = Interface.objects.create(device=device, name="Ethernet 1/2")
+        Interface.objects.create(device=peer, name="Ethernet 1/1", type="1000base-t")
+        near = trace_termination(device.name, "", "Ethernet 1/2", "Port")
+        far = trace_termination(peer.name, "", "Ethernet 1/1", "NIC")
+        cls.document = SourceDocument.store(
+            profile=cls.profile,
+            content=trace_workbook_bytes(
+                path_blocks=(
+                    (
+                        trace_endpoint_line(near),
+                        trace_endpoint_line(far),
+                        (trace_segment(near, "Patch", far),),
+                    ),
+                )
+            ),
+        )
         cls.interface_type = ObjectType.objects.get_for_model(cls.interface)
         cls.field_key = termination_field_key(
             device=device.name,
@@ -568,11 +595,11 @@ class TerminationResolutionPersistenceTest(TestCase):
             selected_display_name=str(self.interface),
         )
 
-    def test_selection_is_saved_before_the_engine_reports_the_missing_cable_module(self):
-        """T5 turns this delegated typed error into a plan without changing the persistence path."""
-        with self.assertRaisesMessage(UnknownSourceAdapter, "Target Module"):
-            self._save(self.actor)
+    def test_the_saved_selection_is_followed_by_a_fresh_plan(self):
+        """The command persists through the owning model, then asks the engine for a new plan."""
+        plan = self._save(self.actor)
 
+        self.assertEqual([unit.disposition for unit in plan.units], [Disposition.ACTIONABLE])
         resolution = TerminationResolution.objects.get(
             profile=self.profile,
             task_type=SELECT_TERMINATION_TASK,

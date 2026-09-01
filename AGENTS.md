@@ -20,7 +20,9 @@ Standard NetBox plugin pattern:
 - **`adapters.py`**, **`adapter_forms.py`** - Source Adapter registry and the adapter-declared configuration forms
 - **`plan.py`** - The target-neutral Import Plan: units, changes, dispositions, diagnostics, fingerprints
 - **`import_engine.py`** - Public coordinator for planning and executing accepted Import Plans
-- **`target_modules.py`** - Target-specific planning and write runtimes
+- **`target_runtime.py`** - The seam a Target Module implements and the coordinator calls
+- **`target_modules.py`** - The Rack and Device runtimes, and the Target Module registry
+- **`cable_target.py`** - The Cable runtime: Patched Path Replacement planning and Cable writes
 - **`models.py`** - ImportProfile, ColumnMapping, ClassRoleMapping, SourceDocument, ImportExecution
 - **`views.py`** - CRUD for import profiles + import wizard (upload, preview, execute, results)
 - **`api/`** - DRF REST API. NetBoxModel resources use NetBox API bases; plain Django models use suitable DRF bases

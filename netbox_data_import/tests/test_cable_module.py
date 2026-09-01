@@ -1,0 +1,747 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+"""Plan and write cable traces through the real adapter, engine, and Cable Target Module."""
+
+import uuid
+from io import BytesIO
+
+from core.models import ObjectType
+from dcim.models import (
+    Cable,
+    CableTermination,
+    ConsolePort,
+    Device,
+    FrontPort,
+    Interface,
+    PortMapping,
+    RearPort,
+    Site,
+)
+from django.contrib.auth import get_user_model
+from django.test import TestCase, TransactionTestCase
+from django.urls import reverse
+
+from netbox_data_import.cable_target import CableModule, eligible_terminations
+from netbox_data_import.field_keys import (
+    MAPPED_PEER_ROLE,
+    SELECT_TERMINATION_TASK,
+    TERMINATION_ROLE,
+    termination_field_key,
+)
+from netbox_data_import.import_engine import ImportEngine
+from netbox_data_import.models import (
+    CableClassMapping,
+    CableImportSource,
+    ImportProfile,
+    SourceDocument,
+    TerminationResolution,
+)
+from netbox_data_import.netbox_reader import NetBoxReader
+from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
+from netbox_data_import.plan import Disposition, PlannedChange
+from netbox_data_import.tests.helpers import (
+    make_dcim_objects,
+    trace_endpoint_line,
+    trace_segment,
+    trace_termination,
+    trace_workbook_bytes,
+    user_with_object_permission,
+)
+
+User = get_user_model()
+
+DEVICE_A = trace_termination("DEV-A", "", "eth0", "Port")
+DEVICE_B = trace_termination("DEV-B", "", "eth1", "NIC")
+PANEL_1_FRONT = trace_termination("PANEL-1", "", "F1", "Position Front")
+PANEL_1_REAR = trace_termination("PANEL-1", "", "R1", "Punch-Down")
+PANEL_2_FRONT = trace_termination("PANEL-2", "", "F1", "Position Front")
+PANEL_2_REAR = trace_termination("PANEL-2", "", "R1", "Punch-Down")
+
+
+def patched_path(from_end=DEVICE_A, to_end=DEVICE_B):
+    """Return one path block whose trace crosses two panels through their rear-port trunk."""
+    return (
+        trace_endpoint_line(from_end),
+        trace_endpoint_line(to_end),
+        (
+            trace_segment(from_end, "Patch", PANEL_1_FRONT),
+            trace_segment(PANEL_1_REAR, "Trunk", PANEL_2_REAR),
+            trace_segment(PANEL_2_FRONT, "Patch", to_end),
+        ),
+    )
+
+
+def direct_path(from_end=DEVICE_A, to_end=DEVICE_B):
+    """Return one path block whose trace states a single direct segment."""
+    return (
+        trace_endpoint_line(from_end),
+        trace_endpoint_line(to_end),
+        (trace_segment(from_end, "Patch", to_end),),
+    )
+
+
+def same_rear_port_path():
+    """Return one path block that re-enters the trunk through the rear port it just left."""
+    return (
+        trace_endpoint_line(DEVICE_A),
+        trace_endpoint_line(DEVICE_B),
+        (
+            trace_segment(DEVICE_A, "Patch", PANEL_1_REAR),
+            trace_segment(PANEL_1_REAR, "Trunk", PANEL_2_REAR),
+            trace_segment(PANEL_2_FRONT, "Patch", DEVICE_B),
+        ),
+    )
+
+
+class CableTopologyMixin:
+    """Build the two devices, the two panels, and the Cable policy every trace test needs."""
+
+    @classmethod
+    def build_topology(cls):
+        """Create the shared NetBox objects and the Import Profile that plans against them."""
+        cls.actor = User.objects.create_superuser("cable-operator", "cable@example.com", "testpass")
+        cls.site, _manufacturer, cls.device_type, cls.role = make_dcim_objects("Cable")
+        cls.profile = ImportProfile.objects.create(
+            name="Cable Traces",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        for cable_class in ("Patch", "Trunk"):
+            CableClassMapping.objects.create(
+                profile=cls.profile,
+                cable_class=cable_class,
+                cable_type_resolved=True,
+                cable_type="cat6",
+                cable_profile_resolved=True,
+                cable_profile="single-1c1p",
+            )
+        cls.device_a = cls.make_device("DEV-A")
+        cls.device_b = cls.make_device("DEV-B")
+        cls.eth0 = Interface.objects.create(device=cls.device_a, name="eth0", type="1000base-t")
+        cls.eth1 = Interface.objects.create(device=cls.device_b, name="eth1", type="1000base-t")
+        cls.panel_1, cls.panel_1_fronts, cls.panel_1_rear = cls.make_panel("PANEL-1")
+        cls.panel_2, cls.panel_2_fronts, cls.panel_2_rear = cls.make_panel("PANEL-2")
+        cls.planning_context = {"site_id": cls.site.pk, "location_id": None, "tenant_id": None}
+
+    @classmethod
+    def make_device(cls, name):
+        """Create one Device at the shared site."""
+        return Device.objects.create(name=name, site=cls.site, device_type=cls.device_type, role=cls.role)
+
+    @classmethod
+    def rebuild_panel(cls, name, fronts):
+        """Replace one panel with a wider one, whose rear port maps to several front ports."""
+        Device.objects.filter(name=name, site=cls.site).delete()
+        return cls.make_panel(name, fronts=fronts)
+
+    @classmethod
+    def make_panel(cls, name, fronts=1):
+        """Create one patch panel whose front ports all map to its single rear port."""
+        device = cls.make_device(name)
+        rear = RearPort.objects.create(device=device, name="R1", type="8p8c", positions=fronts)
+        front_ports = []
+        for position in range(1, fronts + 1):
+            front = FrontPort.objects.create(device=device, name=f"F{position}", type="8p8c")
+            PortMapping.objects.create(
+                front_port=front,
+                rear_port=rear,
+                front_port_position=1,
+                rear_port_position=position,
+            )
+            front_ports.append(front)
+        return device, front_ports, rear
+
+    @staticmethod
+    def connect(first, second, **attributes):
+        """Create one real NetBox Cable between two terminations."""
+        cable = Cable(
+            a_terminations=[first],
+            b_terminations=[second],
+            status=attributes.pop("status", "connected"),
+            type=attributes.pop("type", "cat6"),
+            profile=attributes.pop("profile", "single-1c1p"),
+            **attributes,
+        )
+        cable.full_clean()
+        cable.save()
+        return cable
+
+    def plan(self, *blocks, actor=None):
+        """Plan the given path blocks through the public coordinator seam."""
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=trace_workbook_bytes(path_blocks=blocks),
+        )
+        self.document = document
+        return ImportEngine.plan(self.profile, document, actor or self.actor, self.planning_context)
+
+    def unit(self, *blocks, actor=None):
+        """Plan one path block and return the single unit it produces."""
+        plan = self.plan(*blocks, actor=actor)
+        self.assertEqual(len(plan.units), len(blocks), plan.units)
+        return plan.units[0]
+
+    def codes(self, unit):
+        """Return the diagnostic codes one unit carries, in order."""
+        return [diagnostic.code for diagnostic in unit.diagnostics]
+
+    def termination_pairs(self, change):
+        """Return the sorted termination pairs one create change writes."""
+        return [tuple(item) for item in change.payload["terminations"]]
+
+
+class CablePlanningTest(CableTopologyMixin, TestCase):
+    """Section 6 planning: comparison, precedence, substitution, and every blocking condition."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def test_a_trace_with_patching_replaces_the_logical_cable(self):
+        """The unit deletes the direct cable first, then creates each segment in canonical order."""
+        logical = self.connect(self.eth0, self.eth1)
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual([change.operation for change in unit.changes], ["delete", "create", "create", "create"])
+        deletion = unit.changes[0]
+        self.assertEqual(deletion.payload["cable_id"], logical.pk)
+        for creation in unit.changes[1:]:
+            self.assertEqual(creation.dependencies, (deletion.identity,))
+        self.assertEqual(
+            [self.termination_pairs(change) for change in unit.changes[1:]],
+            [
+                sorted([("dcim.interface", self.eth0.pk), ("dcim.frontport", self.panel_1_fronts[0].pk)]),
+                sorted([("dcim.rearport", self.panel_1_rear.pk), ("dcim.rearport", self.panel_2_rear.pk)]),
+                sorted([("dcim.frontport", self.panel_2_fronts[0].pk), ("dcim.interface", self.eth1.pk)]),
+            ],
+        )
+
+    def test_a_trace_with_no_direct_cable_is_a_creation_only_replacement(self):
+        """With nothing to remove the unit carries creations alone, and they wait on nothing."""
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual([change.operation for change in unit.changes], ["create", "create", "create"])
+        self.assertEqual([change.dependencies for change in unit.changes], [(), (), ()])
+
+    def test_a_single_segment_trace_with_a_matching_cable_is_a_no_op(self):
+        """Segment precedence makes the direct cable a proven segment, never the Logical Cable."""
+        existing = self.connect(self.eth0, self.eth1)
+
+        unit = self.unit(direct_path())
+
+        self.assertEqual(unit.disposition, Disposition.NO_OP)
+        self.assertEqual(unit.changes, ())
+        self.assertIn("cable.segment_reused", self.codes(unit))
+        self.assertTrue(Cable.objects.filter(pk=existing.pk).exists())
+
+    def test_a_complete_existing_path_is_a_no_op(self):
+        """Every segment proven and no Logical Cable left means there is nothing to do."""
+        self.connect(self.eth0, self.panel_1_fronts[0])
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+        self.connect(self.panel_2_fronts[0], self.eth1)
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.NO_OP)
+        self.assertEqual(unit.changes, ())
+
+    def test_a_partial_path_reuses_its_proven_segments(self):
+        """A proven trunk is kept, so only the missing segments are created."""
+        trunk = self.connect(self.panel_1_rear, self.panel_2_rear)
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual([change.operation for change in unit.changes], ["create", "create"])
+        reuse = next(item for item in unit.diagnostics if item.code == "cable.segment_reused")
+        self.assertIn(f"dcim.cable:{trunk.pk}", reuse.identities)
+
+    def test_a_reused_cable_reports_attribute_drift_without_changing_the_disposition(self):
+        """Drift on a matched Cable is review information, not a write."""
+        self.connect(self.eth0, self.eth1, type="cat5e", status="planned")
+
+        unit = self.unit(direct_path())
+
+        self.assertEqual(unit.disposition, Disposition.NO_OP)
+        drift = next(item for item in unit.diagnostics if item.code == "cable.attribute_drift")
+        self.assertEqual(drift.display["type"], "cat5e")
+        self.assertEqual(drift.display["status"], "planned")
+
+    def test_a_unique_mapped_peer_substitutes_and_appears_in_the_plan(self):
+        """The second cable end moves to the one front port NetBox maps the rear port to."""
+        unit = self.unit(same_rear_port_path())
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        substitution = next(item for item in unit.diagnostics if item.code == "cable.same_port_continuation")
+        self.assertEqual(substitution.display["peer"], str(self.panel_1_fronts[0]))
+        self.assertEqual(
+            self.termination_pairs(unit.changes[1]),
+            sorted([("dcim.frontport", self.panel_1_fronts[0].pk), ("dcim.rearport", self.panel_2_rear.pk)]),
+        )
+
+    def test_several_mapped_peers_block_the_unit_and_offer_exactly_them(self):
+        """A fan-out rear port needs the operator to say which front port continues the path."""
+        panel, fronts, _rear = self.rebuild_panel("PANEL-1", fronts=2)
+        del panel
+
+        unit = self.unit(same_rear_port_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        ambiguous = next(item for item in unit.diagnostics if item.code == "cable.ambiguous_mapped_peer")
+        self.assertEqual(list(ambiguous.display["peers"]), sorted(str(front) for front in fronts))
+
+    def test_a_stored_mapped_peer_resolution_is_reused_on_a_replan(self):
+        """The saved second-role decision resolves the fan-out without another operator visit."""
+        _panel, fronts, _rear = self.rebuild_panel("PANEL-1", fronts=2)
+        self.save_resolution(PANEL_1_REAR, fronts[1], role=MAPPED_PEER_ROLE)
+
+        unit = self.unit(same_rear_port_path())
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(
+            self.termination_pairs(unit.changes[1]),
+            sorted([("dcim.frontport", fronts[1].pk), ("dcim.rearport", self.panel_2_rear.pk)]),
+        )
+
+    def test_a_stored_termination_resolution_is_reused_on_a_replan(self):
+        """A port name the source states differently is resolved once and then stays resolved."""
+        renamed = trace_termination("DEV-A", "", "GigabitEthernet0/1", "Port")
+        blocked = self.unit(patched_path(from_end=renamed))
+        self.assertEqual(blocked.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.termination_unresolved", self.codes(blocked))
+
+        self.save_resolution(renamed, self.eth0)
+        unit = self.unit(patched_path(from_end=renamed))
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(
+            self.termination_pairs(unit.changes[0]),
+            sorted([("dcim.interface", self.eth0.pk), ("dcim.frontport", self.panel_1_fronts[0].pk)]),
+        )
+
+    def test_a_resolved_object_of_an_unsupported_kind_is_invalid(self):
+        """No operator decision makes a console port a cable end this module writes."""
+        console = ConsolePort.objects.create(device=self.device_a, name="con0", type="rj-45")
+        self.save_resolution(DEVICE_A, console)
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.INVALID)
+        self.assertIn("cable.unsupported_termination_kind", self.codes(unit))
+
+    def test_a_contradicted_pass_through_claim_is_invalid(self):
+        """A panel NetBox does not map cannot realize the path, and the finding names both ports."""
+        PortMapping.objects.filter(device=self.panel_1).delete()
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.INVALID)
+        finding = next(item for item in unit.diagnostics if item.code == "cable.pass_through_not_mapped")
+        self.assertEqual(finding.display["entry"], str(self.panel_1_fronts[0]))
+        self.assertEqual(finding.display["exit"], str(self.panel_1_rear))
+        self.assertEqual(list(finding.display["mapped"]), [])
+
+    def test_a_foreign_cable_on_a_desired_termination_blocks_the_unit(self):
+        """The plugin never removes a cable it did not plan, so the operator clears it first."""
+        other = self.make_device("DEV-C")
+        foreign = self.connect(
+            self.panel_1_fronts[0], Interface.objects.create(device=other, name="eth9", type="1000base-t")
+        )
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.changes, ())
+        occupied = next(item for item in unit.diagnostics if item.code == "cable.termination_occupied")
+        self.assertIn(f"dcim.cable:{foreign.pk}", occupied.identities)
+        self.assertTrue(Cable.objects.filter(pk=foreign.pk).exists())
+
+    def test_a_multi_termination_cable_touching_a_desired_port_blocks_the_unit(self):
+        """A cable with two terminations on one side never matches a desired segment."""
+        other = self.make_device("DEV-C")
+        second = Interface.objects.create(device=other, name="eth9", type="1000base-t")
+        third = Interface.objects.create(device=other, name="eth8", type="1000base-t")
+        bundle = Cable(a_terminations=[self.eth0], b_terminations=[second, third], status="connected")
+        bundle.full_clean()
+        bundle.save()
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.multi_termination_conflict", self.codes(unit))
+
+    def test_an_unmapped_cable_class_blocks_the_unit(self):
+        """A segment cannot be written until its CableClass names a Cable Type and Profile."""
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").delete()
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.cableclass_unmapped", self.codes(unit))
+
+    def test_a_stale_cable_class_mapping_blocks_the_unit(self):
+        """A stored value this NetBox no longer offers has its own diagnostic."""
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_type="obsolete-type")
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.cableclass_stale_mapping", self.codes(unit))
+
+    def test_an_incompatible_cable_profile_blocks_the_unit(self):
+        """A Cable Profile with more than one connector per side cannot carry one termination each."""
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(cable_profile="trunk-2c1p")
+
+        unit = self.unit(patched_path())
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.profile_incompatible", self.codes(unit))
+
+    def test_a_device_the_import_cannot_resolve_blocks_the_unit(self):
+        """Endpoint Device resolution runs before port resolution and reports its own condition."""
+        unit = self.unit(patched_path(to_end=trace_termination("DEV-GONE", "", "eth1", "NIC")))
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("trace.device_unresolved", self.codes(unit))
+
+    def test_endpoint_evidence_only_blocks_when_no_direct_cable_exists(self):
+        """A Trace List block states endpoints alone, so nothing proves the physical path."""
+        content = trace_workbook_bytes(
+            include_path=False,
+            include_list=True,
+            list_blocks=(
+                (
+                    trace_endpoint_line(DEVICE_A),
+                    trace_endpoint_line(DEVICE_B),
+                    (("", "", "", "DEV-A", "", "eth0", "Port", "Ignored"),),
+                ),
+            ),
+        )
+        document = SourceDocument.store(profile=self.profile, content=content)
+
+        plan = ImportEngine.plan(self.profile, document, self.actor, self.planning_context)
+
+        self.assertEqual(plan.units[0].disposition, Disposition.BLOCKED)
+        self.assertIn("trace.endpoint_evidence_only", self.codes(plan.units[0]))
+
+    def test_endpoint_evidence_only_is_a_no_op_when_the_direct_cable_exists(self):
+        """The stated endpoints are already joined, so the evidence is satisfied and nothing moves."""
+        existing = self.connect(self.eth0, self.eth1)
+        content = trace_workbook_bytes(
+            include_path=False,
+            include_list=True,
+            list_blocks=(
+                (
+                    trace_endpoint_line(DEVICE_A),
+                    trace_endpoint_line(DEVICE_B),
+                    (("", "", "", "DEV-A", "", "eth0", "Port", "Ignored"),),
+                ),
+            ),
+        )
+        document = SourceDocument.store(profile=self.profile, content=content)
+
+        plan = ImportEngine.plan(self.profile, document, self.actor, self.planning_context)
+
+        self.assertEqual(plan.units[0].disposition, Disposition.NO_OP)
+        self.assertEqual(plan.units[0].changes, ())
+        self.assertTrue(Cable.objects.filter(pk=existing.pk).exists())
+
+    def test_an_operator_without_the_cable_permissions_is_blocked(self):
+        """Planning refuses a write the actor could not make, with the permission named."""
+        actor = user_with_object_permission(
+            "cable-viewer",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+            ],
+        )
+
+        unit = self.unit(patched_path(), actor=actor)
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        denied = next(item for item in unit.diagnostics if item.code == "cable.permission_denied")
+        self.assertEqual(denied.display["permission"], "dcim.add_cable")
+
+    def test_an_operator_who_may_not_delete_the_logical_cable_is_blocked(self):
+        """The replacement removes one cable, so planning refuses it without the delete right."""
+        self.connect(self.eth0, self.eth1)
+        actor = user_with_object_permission(
+            "cable-adder",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("view", "add"), {}),
+            ],
+        )
+
+        unit = self.unit(patched_path(), actor=actor)
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        denied = next(item for item in unit.diagnostics if item.code == "cable.permission_denied")
+        self.assertEqual(denied.display["permission"], "dcim.delete_cable")
+
+    def test_an_invalid_source_trace_does_not_stop_the_batch(self):
+        """A refused trace becomes its own invalid unit while the rest of the batch plans."""
+        broken = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (trace_segment(DEVICE_A, "Patch", trace_termination("PANEL-1", "", "F1", "Bogus Class")),),
+        )
+        other_a = trace_termination("DEV-C", "", "eth0", "Port")
+        other_b = trace_termination("DEV-D", "", "eth1", "NIC")
+        for name, port in (("DEV-C", "eth0"), ("DEV-D", "eth1")):
+            Interface.objects.create(device=self.make_device(name), name=port, type="1000base-t")
+
+        plan = self.plan(broken, direct_path(other_a, other_b))
+
+        dispositions = {unit.identity: unit.disposition for unit in plan.units}
+        self.assertEqual(sorted(dispositions.values()), [Disposition.ACTIONABLE, Disposition.INVALID])
+
+    def save_resolution(self, reference, selected, role=TERMINATION_ROLE):
+        """Store one manual termination decision for a Termination Reference."""
+        device, cards, port, port_class = reference
+        kind = {"Port": "interface", "NIC": "interface", "Position Front": "front_port", "Punch-Down": "rear_port"}[
+            port_class
+        ]
+        TerminationResolution.objects.create(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=termination_field_key(device=device, cards=cards, port=port, kind=kind, role=role),
+            selected_object_type=ObjectType.objects.get_for_model(selected),
+            selected_object_id=selected.pk,
+            selected_display_name=str(selected),
+        )
+
+
+class EligibleTerminationTest(CableTopologyMixin, TestCase):
+    """The picker and a proposal request share one candidate query."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def test_candidates_are_the_claimed_kind_on_the_resolved_device(self):
+        """A front-port question never offers an interface, and never leaves the device."""
+        Interface.objects.create(device=self.panel_1, name="mgmt0", type="1000base-t")
+        field_key = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
+        reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
+
+        candidates = eligible_terminations(field_key, reader)
+
+        self.assertEqual(candidates, list(FrontPort.objects.filter(device=self.panel_1).order_by("name", "pk")))
+
+    def test_candidates_stay_inside_the_actor_view_scope(self):
+        """An actor who may not view the front ports is offered none of them."""
+        actor = user_with_object_permission("cable-partial", [(Device, ("view",), {})])
+        field_key = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+
+        self.assertEqual(eligible_terminations(field_key, reader), [])
+
+    def test_an_unresolved_device_offers_no_candidate(self):
+        """With no single Device there is no scope to list candidates from."""
+        field_key = termination_field_key(device="DEV-GONE", cards="", port="F1", kind="front_port")
+        reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
+
+        self.assertEqual(eligible_terminations(field_key, reader), [])
+
+    def test_a_key_that_is_not_a_termination_field_key_is_refused(self):
+        """The seam validates its input rather than returning an empty list for a typo."""
+        reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
+
+        with self.assertRaises(ValueError):
+            eligible_terminations("device:source:7", reader)
+
+
+class CablePreconditionRecheckTest(CableTopologyMixin, TestCase):
+    """Execution rechecks its preconditions inside the transaction, against the real rows."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def context(self):
+        """Return the execution context the coordinator would open the transaction with."""
+        return ExecutionContext(
+            actor=self.actor,
+            reader=NetBoxReader.for_actor(self.actor).for_target(site=self.site),
+            profile=self.profile,
+        )
+
+    def test_a_termination_cabled_after_planning_refuses_its_creation(self):
+        """The write cannot land a second cable on a port, so it stops before NetBox validates."""
+        unit = self.unit(patched_path())
+        other = self.make_device("DEV-C")
+        self.connect(self.panel_1_fronts[0], Interface.objects.create(device=other, name="eth9", type="1000base-t"))
+
+        with self.assertRaises(PreconditionFailed):
+            CableModule().apply(unit.changes[0], self.context())
+
+        self.assertEqual(CableImportSource.objects.count(), 0)
+
+    def test_a_re_terminated_logical_cable_refuses_its_deletion(self):
+        """The one cable this import removes must still hold the terminations the plan recorded."""
+        logical = self.connect(self.eth0, self.eth1)
+        unit = self.unit(patched_path())
+        moved = Interface.objects.create(device=self.make_device("DEV-C"), name="eth9", type="1000base-t")
+        CableTermination.objects.filter(cable=logical, cable_end="B").update(termination_id=moved.pk)
+
+        with self.assertRaises(PreconditionFailed):
+            CableModule().apply(unit.changes[0], self.context())
+
+        self.assertTrue(Cable.objects.filter(pk=logical.pk).exists())
+
+    def test_a_logical_cable_that_is_gone_refuses_its_deletion(self):
+        """A cable someone else already removed is a stale plan, not a silent success."""
+        logical = self.connect(self.eth0, self.eth1)
+        unit = self.unit(patched_path())
+        logical.delete()
+
+        with self.assertRaises(PreconditionFailed):
+            CableModule().apply(unit.changes[0], self.context())
+
+    def test_an_unknown_operation_is_refused(self):
+        """A Planned Change this module did not write never reaches a NetBox row."""
+        change = PlannedChange(
+            identity="cable:update:1",
+            target_module="cable",
+            operation="update",
+            payload={},
+        )
+
+        with self.assertRaises(PreconditionFailed):
+            CableModule().apply(change, self.context())
+
+
+class TraceWizardRenderTest(CableTopologyMixin, TestCase):
+    """A trace profile is selectable now, so the existing wizard has to survive one."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def test_the_wizard_uploads_a_trace_workbook_and_renders_its_preview(self):
+        """The review workspace is generic until T6, and it must render a Cable unit today."""
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
+        upload.name = "traces.xlsx"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "DEV-A eth0 to DEV-B eth1")
+
+
+class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
+    """Patched Path Replacement end to end, asserted against the real database."""
+
+    serialized_rollback = True
+
+    def setUp(self):
+        self.build_topology()
+
+    def execute(self, plan, identities=None):
+        """Run one selection through the public coordinator seam."""
+        return ImportEngine.execute(
+            self.profile,
+            self.document,
+            plan.to_dict(),
+            identities or [unit.identity for unit in plan.units if unit.disposition == Disposition.ACTIONABLE],
+            str(uuid.uuid4()),
+            self.actor,
+        )
+
+    def test_one_execution_replaces_the_path_and_writes_provenance(self):
+        """The logical cable goes, every segment arrives, and each created Cable earns one row."""
+        logical = self.connect(self.eth0, self.eth1)
+        plan = self.plan(patched_path())
+
+        execution = self.execute(plan)
+
+        self.assertEqual(execution.outcome, "succeeded")
+        self.assertFalse(Cable.objects.filter(pk=logical.pk).exists())
+        self.assertEqual(Cable.objects.count(), 3)
+        self.assertEqual(CableImportSource.objects.count(), 3)
+        self.assertEqual(
+            sorted(CableImportSource.objects.values_list("segment_index", flat=True)),
+            [0, 1, 2],
+        )
+        self.assertEqual({cable.status for cable in Cable.objects.all()}, {"connected"})
+        self.assertEqual({cable.type for cable in Cable.objects.all()}, {"cat6"})
+
+    def test_the_removed_logical_cable_is_recorded_only_in_the_execution_snapshot(self):
+        """Provenance rows never record a deletion, so the audit row is where it lives."""
+        logical = self.connect(self.eth0, self.eth1)
+        plan = self.plan(patched_path())
+
+        execution = self.execute(plan)
+
+        deleted = execution.applied_changes["deleted"]
+        self.assertEqual([item["object_id"] for item in deleted], [logical.pk])
+        self.assertEqual(deleted[0]["object_type"], "dcim.cable")
+        self.assertFalse(CableImportSource.objects.filter(cable_id=logical.pk).exists())
+
+    def test_two_traces_sharing_one_segment_create_one_cable_and_two_rows(self):
+        """ADR 0001 identity sharing writes the trunk once and credits both Source Traces."""
+        _panel_1, _fronts_1, panel_1_rear = self.rebuild_panel("PANEL-1", fronts=2)
+        self.rebuild_panel("PANEL-2", fronts=2)
+        Interface.objects.create(device=self.make_device("DEV-C"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("DEV-D"), name="eth1", type="1000base-t")
+        device_c = trace_termination("DEV-C", "", "eth0", "Port")
+        device_d = trace_termination("DEV-D", "", "eth1", "NIC")
+        second_in = trace_termination("PANEL-1", "", "F2", "Position Front")
+        second_out = trace_termination("PANEL-2", "", "F2", "Position Front")
+        first = patched_path()
+        second = (
+            trace_endpoint_line(device_c),
+            trace_endpoint_line(device_d),
+            (
+                trace_segment(device_c, "Patch", second_in),
+                trace_segment(PANEL_1_REAR, "Trunk", PANEL_2_REAR),
+                trace_segment(second_out, "Patch", device_d),
+            ),
+        )
+        plan = self.plan(first, second)
+        self.assertEqual(
+            [unit.disposition for unit in plan.units],
+            [Disposition.ACTIONABLE, Disposition.ACTIONABLE],
+            [unit.diagnostics for unit in plan.units],
+        )
+
+        self.execute(plan)
+
+        trunk = Cable.objects.get(
+            terminations__termination_id=panel_1_rear.pk,
+            terminations__termination_type=ObjectType.objects.get_for_model(RearPort),
+        )
+        rows = CableImportSource.objects.filter(cable=trunk)
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(len({row.trace_identity for row in rows}), 2)
+
+    def test_target_state_that_moved_after_preview_rolls_back_the_complete_selection(self):
+        """The replan runs inside the transaction, so a stale unit takes the whole write with it."""
+        from netbox_data_import.import_engine import StalePlan
+
+        plan = self.plan(patched_path())
+        other = self.make_device("DEV-C")
+        self.connect(self.panel_2_fronts[0], Interface.objects.create(device=other, name="eth9", type="1000base-t"))
+        before = Cable.objects.count()
+
+        with self.assertRaises((PreconditionFailed, StalePlan)):
+            self.execute(plan)
+
+        self.assertEqual(Cable.objects.count(), before)
+        self.assertEqual(CableImportSource.objects.count(), 0)

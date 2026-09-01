@@ -30,6 +30,18 @@ TERMINATION_ROLES = frozenset({TERMINATION_ROLE, MAPPED_PEER_ROLE})
 SELECT_TERMINATION_TASK = "select_termination"
 
 
+def same_device_and_cards(first, second) -> bool:
+    """Return whether two Termination References name one device and one cards label.
+
+    The Source Adapter reads it to claim a pass-through, and the Cable Target Module reads it to
+    place one, so the rule has one definition.
+    """
+    return (identity_text(first.device), identity_text(first.cards)) == (
+        identity_text(second.device),
+        identity_text(second.cards),
+    )
+
+
 def claimed_termination_kind(port_class: str) -> str:
     """Return the NetBox termination kind claimed by one fixed PortClass value."""
     try:
@@ -72,5 +84,6 @@ __all__ = (
     "TERMINATION_ROLE",
     "TERMINATION_ROLES",
     "claimed_termination_kind",
+    "same_device_and_cards",
     "termination_field_key",
 )

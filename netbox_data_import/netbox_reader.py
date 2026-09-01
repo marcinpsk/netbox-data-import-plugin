@@ -105,5 +105,33 @@ class NetBoxReader:
 
         return self._scoped(Rack, action)
 
+    def interfaces(self, action: str = "view"):
+        """Return the Interfaces the actor may take *action* on."""
+        from dcim.models import Interface
+
+        return self._scoped(Interface, action)
+
+    def front_ports(self, action: str = "view"):
+        """Return the Front Ports the actor may take *action* on."""
+        from dcim.models import FrontPort
+
+        return self._scoped(FrontPort, action)
+
+    def rear_ports(self, action: str = "view"):
+        """Return the Rear Ports the actor may take *action* on."""
+        from dcim.models import RearPort
+
+        return self._scoped(RearPort, action)
+
+    def port_mappings(self):
+        """Return the PortMapping rows of the Devices this actor may view.
+
+        NetBox keeps the model private, with no manager of its own, so the parent Device carries
+        the scope.
+        """
+        from dcim.models import PortMapping
+
+        return PortMapping.objects.filter(device__in=self.devices())
+
 
 __all__ = ("NetBoxReader", "PlanningTargetUnavailable")

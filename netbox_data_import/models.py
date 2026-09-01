@@ -392,6 +392,15 @@ class AdapterSettings:
         self._fields = adapter.config_form_class().base_fields if adapter is not None else None
         self._config = _require_adapter_config_mapping(config)
 
+    def get(self, name, default):
+        """Return one setting, or *default* when this profile's adapter declares none.
+
+        Only a caller that serves every adapter may ask this way. Adapter-specific code reads the
+        attribute, so a setting it depends on cannot go missing quietly.
+        """
+        fields = object.__getattribute__(self, "_fields")
+        return getattr(self, name) if fields is not None and name in fields else default
+
     def __getattr__(self, name):
         fields = object.__getattribute__(self, "_fields")
         if fields is None:
@@ -1465,6 +1474,55 @@ class DeviceImportSource(models.Model):
 
     def __str__(self):
         return f"{self.source_id or '(no source ID)'} → Device #{self.device_id}"
+
+
+class CableImportSource(models.Model):
+    """Import provenance the plugin keeps for one Cable and one contributing Source Trace.
+
+    Two Source Traces that state one identical segment share one created Cable, so the Cable
+    reference is a plain foreign key and the row is keyed by the trace as well (section 5.7).
+    """
+
+    cable = models.ForeignKey(
+        to="dcim.Cable",
+        on_delete=models.CASCADE,
+        related_name="data_import_sources",
+    )
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="cable_sources",
+    )
+    trace_identity = models.TextField(
+        help_text="Canonical JSON identity of the Source Trace that states this segment",
+    )
+    segment_index = models.PositiveIntegerField(
+        help_text="Position of this segment in the Source Trace, in canonical order",
+    )
+    from_text = models.CharField(max_length=500, blank=True, default="")
+    to_text = models.CharField(max_length=500, blank=True, default="")
+    direction = models.CharField(max_length=20, blank=True, default="")
+    workbook_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    sheet = models.CharField(max_length=100, blank=True, default="")
+    block_ordinal = models.PositiveIntegerField(null=True, blank=True)
+    row_start = models.PositiveIntegerField(null=True, blank=True)
+    row_end = models.PositiveIntegerField(null=True, blank=True)
+    export_timestamp = models.CharField(max_length=100, blank=True, default="")
+
+    class Meta:
+        ordering = ["cable", "profile", "trace_identity"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cable", "profile", "trace_identity"],
+                name="ndi_cableimportsource_cable_profile_trace",
+            ),
+        ]
+        indexes = [models.Index(fields=["profile", "trace_identity"])]
+        verbose_name = "Cable Import Source"
+        verbose_name_plural = "Cable Import Sources"
+
+    def __str__(self):
+        return f"segment {self.segment_index} of {self.from_text} to {self.to_text} \u2192 Cable #{self.cable_id}"
 
 
 def stored_import_source(obj):

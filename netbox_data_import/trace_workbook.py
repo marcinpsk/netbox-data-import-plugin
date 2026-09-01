@@ -20,6 +20,7 @@ from .field_keys import (
     PORT_CLASS_CLAIMED_KINDS,
     PORT_CLASSES,
     REAR_PORT_CLASSES,
+    same_device_and_cards,
 )
 from .values import identity_text, source_text
 
@@ -466,11 +467,6 @@ def _unknown_port_class_error(
     return None
 
 
-def _same_device_and_cards(first: TerminationReference, second: TerminationReference) -> bool:
-    """Return whether two terminations name one device and cards label."""
-    return first.identity_key[:2] == second.identity_key[:2]
-
-
 def _linearity_error(
     block: _Block, summary: EndpointSummary, segments: Sequence[_ParsedSegment]
 ) -> SourceDiagnostic | None:
@@ -517,7 +513,7 @@ def _linearity_error(
                 parsed.row_number,
             )
     for previous, following in zip(segments, segments[1:], strict=False):
-        if not _same_device_and_cards(previous.evidence.right, following.evidence.left):
+        if not same_device_and_cards(previous.evidence.right, following.evidence.left):
             return _error(
                 block,
                 "trace.non_linear_path",
@@ -538,7 +534,7 @@ def _pass_through_claims(segments: Sequence[SegmentEvidence]) -> tuple[PassThrou
     """Return the continuation each pair of consecutive segments claims."""
     claims = []
     for previous, following in zip(segments, segments[1:], strict=False):
-        if not _same_device_and_cards(previous.right, following.left):
+        if not same_device_and_cards(previous.right, following.left):
             continue
         claims.append(
             PassThroughClaim(
@@ -554,7 +550,7 @@ def _pass_through_claims(segments: Sequence[SegmentEvidence]) -> tuple[PassThrou
 def _pass_through_error(block: _Block, segments: Sequence[_ParsedSegment]) -> SourceDiagnostic | None:
     """Return a diagnostic for the first Pass-Through Claim at an interface PortClass."""
     for previous, following in zip(segments, segments[1:], strict=False):
-        if not _same_device_and_cards(previous.evidence.right, following.evidence.left):
+        if not same_device_and_cards(previous.evidence.right, following.evidence.left):
             continue
         if (
             previous.evidence.right.port_class in INTERFACE_PORT_CLASSES

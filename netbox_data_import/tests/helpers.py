@@ -33,6 +33,100 @@ def workbook_bytes(headers, rows, *, sheet_name="Data") -> bytes:
     return content.getvalue()
 
 
+TRACE_PATH_HEADER = (
+    "Port",
+    "PortClass",
+    "Cards",
+    "Device",
+    "UPos",
+    "Rack",
+    "Location",
+    "CableClass",
+    "Port",
+    "PortClass",
+    "Cards",
+    "Device",
+    "UPos",
+    "Rack",
+    "Location",
+)
+TRACE_LIST_HEADER = ("Location", "Rack", "UPos", "Device", "Cards", "Port", "PortClass", "Cable")
+
+
+def trace_termination(device, cards, port, port_class):
+    """Return one compact termination tuple for an in-memory trace workbook."""
+    return device, cards, port, port_class
+
+
+def trace_endpoint_line(termination):
+    """Render one endpoint line in the source format."""
+    device, cards, port, port_class = termination
+    parts = [device]
+    if cards:
+        parts.append(cards)
+    parts.append(f"{port} ({port_class})")
+    return " > ".join(parts)
+
+
+def trace_segment(left, cable_class, right, corroboration=("", "", "")):
+    """Render one Segment Evidence row in the source column order."""
+    left_device, left_cards, left_port, left_class = left
+    right_device, right_cards, right_port, right_class = right
+    return (
+        left_port,
+        left_class,
+        left_cards,
+        left_device,
+        *corroboration,
+        cable_class,
+        right_port,
+        right_class,
+        right_cards,
+        right_device,
+        *corroboration,
+    )
+
+
+def trace_visit(termination):
+    """Render one Trace List visit row."""
+    device, cards, port, port_class = termination
+    return "", "", "", device, cards, port, port_class, "Ignored"
+
+
+def add_trace_sheet(book, name, header, blocks):
+    """Add one trace sheet with the supplied source blocks."""
+    sheet = book.create_sheet(name)
+    sheet.append(("Executed", "2026-08-31 12:00:00"))
+    sheet.append(())
+    for from_line, to_line, rows in blocks:
+        sheet.append(("From", from_line))
+        sheet.append(("To", to_line))
+        sheet.append(header)
+        for row in rows:
+            sheet.append(row)
+    return sheet
+
+
+def trace_workbook_bytes(*, path_blocks=(), list_blocks=(), include_path=True, include_list=False) -> bytes:
+    """Build trace workbook bytes with the fixed trace sheet names."""
+    from io import BytesIO
+
+    import openpyxl
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    book = openpyxl.Workbook()
+    active = book.active
+    if isinstance(active, Worksheet):
+        book.remove(active)
+    if include_path:
+        add_trace_sheet(book, "Trace From To", TRACE_PATH_HEADER, path_blocks)
+    if include_list:
+        add_trace_sheet(book, "Trace List", TRACE_LIST_HEADER, list_blocks)
+    buffer = BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
 def store_workbook_document(profile, headers, rows, uploaded_by, filename, *, sheet_name="Data"):
     """Store one generated workbook and return its Source Document."""
     from netbox_data_import.models import SourceDocument
