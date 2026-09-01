@@ -126,7 +126,7 @@
     });
     btn.textContent = 'Saving…';
 
-    window.ndiPostPreviewAction(form.action, new FormData(form))
+    window.ndiPostPreviewAction(form.getAttribute('action'), new FormData(form))
       .then(function (payload) {
         var currentForm = releaseSubmission();
         if (typeof window.ndiMarkPreviewStale === 'function') {

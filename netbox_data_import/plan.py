@@ -18,7 +18,6 @@ import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -74,10 +73,32 @@ def fingerprint_of(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+class FrozenDict(dict):
+    """The JSON object a plan hands out: JSON data, closed to mutation.
+
+    A frozen plan value stays JSON data, because a Target Module writes one into a JSONField.
+    """
+
+    __slots__ = ()
+
+    def _immutable(self, *args, **kwargs):
+        """Refuse one mutation, so a shared plan value cannot change under its other readers."""
+        raise TypeError("An Import Plan value cannot be changed.")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __ior__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+
+
 def _freeze_json(value: Any) -> Any:
     """Return recursively immutable JSON data."""
     if isinstance(value, dict):
-        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+        return FrozenDict({key: _freeze_json(item) for key, item in value.items()})
     if isinstance(value, list):
         return tuple(_freeze_json(item) for item in value)
     return value
@@ -95,11 +116,7 @@ def _thaw_json(value: Any) -> Any:
 def _frozen_json(value: Any, label: str) -> Any:
     """Validate, detach, and recursively freeze JSON data entering a plan."""
     try:
-        try:
-            serialized = canonical_json(value)
-        except TypeError:
-            serialized = canonical_json(_thaw_json(value))
-        return _freeze_json(json.loads(serialized))
+        return _freeze_json(json.loads(canonical_json(value)))
     except (TypeError, ValueError) as exc:
         raise PlanInvalid(f"{label} must be JSON-serializable plan data: {exc}") from exc
 
@@ -505,6 +522,7 @@ __all__ = (
     "SCHEMA_VERSION",
     "Diagnostic",
     "Disposition",
+    "FrozenDict",
     "ImportPlan",
     "PlanError",
     "PlanInvalid",

@@ -26,6 +26,16 @@ const fixture = `
   <a href="/plugins/data-import/import/preview/" class="btn ndi-recalculate-preview"
      id="ndi-recalculate-preview">Recalculate Preview</a>
   <button id="ndi-run-import" type="submit">Run Import</button>
+  <!-- the device-type modal form: its own control named action shadows form.action -->
+  <form id="ndi-device-type-form" class="ndi-deferred-preview-form" method="post"
+        action="/plugins/data-import/quick-resolve-device-type/">
+    <input type="hidden" name="action" value="map">
+    <button type="submit">Save mapping</button>
+  </form>
+  <button class="ndi-sync-row-btn" id="ndi-sync-row-1" data-ndi-modal="#syncRowModal"
+          title="Create this device in NetBox now">Sync to NetBox</button>
+  <button class="ndi-sync-row-btn" id="ndi-sync-row-2" disabled
+          title="Resolve all conflicts before syncing">Sync to NetBox</button>
   <table><tbody>
     <tr id="row-1"><td>
       <button class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="true">Fields differ</button>
@@ -74,6 +84,64 @@ test("Ignore saves without recalculating and marks the preview stale", async ({ 
   await expect(page.locator("#diff-1")).toBeVisible();
   await expect(page.locator("#ndi-preview-stale")).toBeVisible();
   await expect(page.locator("#ndi-run-import")).toBeDisabled();
+});
+
+test("a saved row action disables every sync button until the preview is recalculated", async ({ page }) => {
+  await page.route("**/ignore-field-difference/", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        row_number: 1,
+        preview_state: "recalculation_required",
+        message: "Ignored the current u_position difference.",
+      }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  await page.locator(".ndi-field-review-form button").click();
+  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
+
+  // The row write needs the plan the preview no longer shows, so the server refuses it anyway.
+  await expect(page.locator("#ndi-sync-row-1")).toBeDisabled();
+  await expect(page.locator("#ndi-sync-row-1")).toHaveAttribute(
+    "title",
+    "Recalculate the preview before synchronizing a row.",
+  );
+  await expect(page.locator("#ndi-sync-row-2")).toHaveAttribute(
+    "title",
+    "Resolve all conflicts before syncing",
+  );
+});
+
+test("a deferred form posts to its action attribute, not to a control that shadows it", async ({ page }) => {
+  let requestedUrl = "";
+  await page.route("**/*", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    requestedUrl = route.request().url();
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        row_number: 1,
+        preview_state: "recalculation_required",
+        message: "Mapped the device type.",
+      }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  const button = page.locator("#ndi-device-type-form button");
+  await button.click();
+
+  await expect(button).toContainText("Saved");
+  expect(requestedUrl).toBe("http://preview.test/plugins/data-import/quick-resolve-device-type/");
 });
 
 test("placement sync defers field-detail refresh", async ({ page }) => {
