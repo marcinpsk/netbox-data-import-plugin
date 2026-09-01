@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import hashlib
-import json
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -24,7 +23,7 @@ from .adapters import (
 )
 from . import plan
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
-from .field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -704,22 +703,12 @@ def index_digest(value: str) -> str:
 def _canonical_termination_field_key(value):
     """Return *value* when it is an exact canonical termination field key."""
     try:
-        data = json.loads(value)
-        if not isinstance(data, dict) or set(data) != {"cards", "device", "kind", "port", "role"}:
-            raise ValueError
-        if not all(isinstance(data[name], str) for name in data):
-            raise ValueError
-        canonical = termination_field_key(**data)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        parse_termination_field_key(value)
+    except (TypeError, ValueError) as exc:
         raise ValidationError(
             "Enter the canonical JSON termination field key.",
             code="invalid",
         ) from exc
-    if canonical != value:
-        raise ValidationError(
-            "Enter the canonical JSON termination field key.",
-            code="invalid",
-        )
     return value
 
 
