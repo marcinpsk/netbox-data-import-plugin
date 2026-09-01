@@ -674,3 +674,88 @@ class TraceWorkbookExportArtifactTest(SimpleTestCase):
         self.assertFalse(overrun_trace.valid)
         self.assertEqual([error.code for error in overrun_trace.errors], ["trace.incomplete_block"])
         self.assertTrue(following_trace.valid, "the next block still reads normally")
+
+
+class TraceWorkbookCollapseAndPairingTest(SimpleTestCase):
+    """Two statements of one identity must pair, corroborate, and report independently."""
+
+    endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+    panel_front = _termination("PANEL-A", "CARD-A", "FRONT", "Position Front")
+    panel_rear = _termination("PANEL-A", "CARD-A", "REAR", "Punch-Down")
+    endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+
+    def _path_block(self, from_line, to_line):
+        """Return one two-segment path block under the supplied endpoint lines."""
+        return (
+            from_line,
+            to_line,
+            (
+                _segment(self.endpoint_a, "Cable A", self.panel_front),
+                _segment(self.panel_rear, "Cable B", self.endpoint_b),
+            ),
+        )
+
+    def test_a_later_occurrence_keeps_the_finding_its_own_trace_list_states(self):
+        """The fingerprint excludes Trace List data, so equal fingerprints are not equal findings."""
+        lines = _endpoint_line(self.endpoint_a), _endpoint_line(self.endpoint_b)
+        corroborating = (*lines, (_visit(self.endpoint_a), _visit(self.panel_front), _visit(self.endpoint_b)))
+        contradicting = (*lines, (_visit(self.endpoint_a), _visit(_termination("WRONG", "", "P", "Port"))))
+
+        batch = _interpret(
+            _workbook(
+                path_blocks=(self._path_block(*lines), self._path_block(*lines)),
+                list_blocks=(corroborating, contradicting),
+                include_list=True,
+            )
+        )
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(_codes(batch), ["trace.corroboration_mismatch"])
+        self.assertFalse(batch.rows[0].valid)
+
+    def test_surrounding_space_on_one_sheet_still_pairs_the_block(self):
+        """An untrimmed export line must not turn its own Trace List block into a rival trace."""
+        from_line, to_line = _endpoint_line(self.endpoint_a), _endpoint_line(self.endpoint_b)
+        list_block = (
+            f" {from_line}",
+            f"{to_line} ",
+            (_visit(self.endpoint_a), _visit(self.panel_front), _visit(self.endpoint_b)),
+        )
+
+        batch = _interpret(
+            _workbook(
+                path_blocks=(self._path_block(from_line, to_line),),
+                list_blocks=(list_block,),
+                include_list=True,
+            )
+        )
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertTrue(batch.rows[0].valid)
+        self.assertEqual(batch.diagnostics, ())
+        self.assertEqual(len(batch.rows[0].corroboration), 3)
+
+    def test_the_next_block_header_is_not_absorbed_as_a_carried_row(self):
+        """Only a From or To line overwrites a trailing row, so a header row is never carried."""
+        book = openpyxl.Workbook()
+        sheet = book.active
+        if not isinstance(sheet, Worksheet):
+            sheet = book.create_sheet()
+        sheet.title = "Trace From To"
+        sheet.append(("Executed", "2026-08-31 12:00:00"))
+        sheet.append(())
+        sheet.append(("From", _endpoint_line(self.endpoint_a)))
+        sheet.append(("To", _endpoint_line(self.endpoint_b)))
+        sheet.append(PATH_HEADER)
+        sheet.append(_segment(self.endpoint_a, "Cable A", self.panel_front))
+        sheet.append(_segment(self.panel_rear, "Cable B", self.endpoint_b))
+        sheet.append(("From", _endpoint_line(_termination("DEVICE-C", "", "PORT-C", "Port"))))
+        sheet.append(PATH_HEADER)
+        buffer = BytesIO()
+        book.save(buffer)
+
+        batch = _interpret(buffer.getvalue())
+
+        complete = next(trace for trace in batch.rows if trace.segments)
+        self.assertTrue(complete.valid, [error.code for error in complete.errors])
+        self.assertEqual(len(complete.segments), 2)

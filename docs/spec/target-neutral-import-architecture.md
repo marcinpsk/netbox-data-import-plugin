@@ -1562,8 +1562,9 @@ T5 registers the key.
   row with no NetBox access.
 - The adapter never emits `cable.unsupported_termination_kind`, `trace.device_unresolved`, or
   `trace.endpoint_evidence_only`, because all three depend on NetBox state.
-- The `trace_workbook` key is absent from the profile form, REST, GraphQL, and YAML adapter choices
-  after this ticket merges.
+- The `trace_workbook` key is absent from the profile form, REST creation, GraphQL, and YAML adapter
+  choices after this ticket merges. A REST update keeps the whole registry, so a client that reads a
+  stored profile the release cannot run can write it back unchanged.
 - The copper fixture produces 10 Source Traces, all valid with 3 Segment Evidence entries each and
   zero duplicate conflicts.
 - The fiber fixture produces 10 Source Traces, 8 valid with 4 to 9 segments and 4 ending at a rear

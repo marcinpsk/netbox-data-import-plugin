@@ -42,6 +42,7 @@ _PATH_HEADER = (
     "Location",
 )
 _LIST_HEADER = ("Location", "Rack", "UPos", "Device", "Cards", "Port", "PortClass", "Cable")
+_BLOCK_LINE_MARKERS = ("From", "To")
 
 
 @dataclass(frozen=True)
@@ -157,7 +158,7 @@ class _Block:
     @property
     def pair_key(self) -> tuple[str, str]:
         """Return the From and To text that pairs this block with the other sheet."""
-        return self.from_text, self.to_text
+        return source_text(self.from_text), source_text(self.to_text)
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,8 @@ def _extract_blocks(sheet, workbook_fingerprint: str) -> tuple[_Block, ...]:
             if carry_row > sheet.max_row:
                 continue
             values = _row_values(sheet, carry_row, width)
+            if source_text(values[0]) not in _BLOCK_LINE_MARKERS:
+                continue
             if _row_has_data(values[2:]):
                 rows.append(_RawRow(carry_row, ("", "", *values[2:])))
                 row_end = carry_row
@@ -772,8 +775,8 @@ def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ..
     for occurrences in by_identity.values():
         selected = occurrences[0]
         provenance = tuple(dict.fromkeys(item for trace in occurrences for item in trace.provenance))
-        # Identical occurrences repeat one finding, so the kept occurrence already reports it once.
-        errors = list(selected.errors)
+        # The fingerprint excludes Trace List data, so a later occurrence can state its own finding.
+        errors = _first_of_each_code(occurrences)
         if len({trace.content_fingerprint for trace in occurrences}) > 1:
             locations = "; ".join(_location_from_provenance(trace.provenance[0]) for trace in occurrences)
             errors.append(
@@ -785,6 +788,19 @@ def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ..
             )
         collapsed.append(replace(selected, provenance=provenance, errors=_deduplicate_errors(errors)))
     return tuple(collapsed)
+
+
+def _first_of_each_code(occurrences: Sequence[SourceTrace]) -> list[SourceDiagnostic]:
+    """Return every occurrence's findings, reporting one repeated condition once."""
+    errors: list[SourceDiagnostic] = []
+    seen_codes: set[str] = set()
+    for occurrence in occurrences:
+        for error in occurrence.errors:
+            if error.code in seen_codes and occurrence is not occurrences[0]:
+                continue
+            seen_codes.add(error.code)
+            errors.append(error)
+    return errors
 
 
 def _location_from_provenance(provenance: TraceProvenance) -> str:
