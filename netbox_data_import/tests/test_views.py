@@ -4176,6 +4176,29 @@ class SyncDeviceFieldViewTests(TestCase):
         )
         self.url = reverse("plugins:netbox_data_import:sync_device_field")
 
+    def test_an_unexpected_value_error_is_not_reported_to_the_operator(self):
+        """Only a message this plugin writes reaches the response; a bug reads as an internal error."""
+        from dcim.models import Device
+        from django.db.models.signals import pre_save
+
+        def fail_internally(sender, instance, **kwargs):
+            raise ValueError("internal detail from a library")
+
+        pre_save.connect(fail_internally, sender=Device, weak=False)
+        self.addCleanup(pre_save.disconnect, fail_internally, sender=Device)
+
+        with self.assertLogs("netbox_data_import.views", level="ERROR"):
+            response = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-12345"})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["error"], "An internal error occurred.")
+
+    def test_a_refused_field_value_still_states_its_reason(self):
+        """The narrowed handler keeps the operator-facing reason this plugin raises itself."""
+        response = self.client.post(self.url, {"device_id": self.device.pk, "field": "status", "value": "not-a-status"})
+
+        self.assertEqual(response.json()["error"], "Unknown status value 'not-a-status'")
+
     def test_sync_serial(self):
         """Set serial on device via SyncDeviceFieldView."""
         response = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "SN-12345"})

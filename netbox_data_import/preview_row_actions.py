@@ -5,6 +5,13 @@
 import secrets
 
 
+class PreviewActionInvalid(ValueError):
+    """A row action refused for a reason this plugin wrote, so the response may state it.
+
+    Any other exception carries internal detail, so it reaches the operator as a generic message.
+    """
+
+
 PREVIEW_DIRTY_SESSION_KEY = "import_preview_dirty"
 PREVIEW_PLAN_SESSION_KEY = "import_plan"
 PREVIEW_REVISION_SESSION_KEY = "import_preview_revision"
