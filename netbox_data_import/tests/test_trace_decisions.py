@@ -10,6 +10,7 @@ from dcim.choices import CableProfileChoices, CableTypeChoices
 from dcim.models import Cable, Device, Interface
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.test import Client, SimpleTestCase, TestCase
 from django.urls import reverse
 
@@ -290,6 +291,102 @@ class TracePolicyModelTest(TestCase):
             [(False, None, False, None), (True, None, True, None), (True, cable_type, True, cable_profile)],
         )
 
+    def _assert_database_rejects_invalid_value_states(self, resolved_field, value_field, selected_value):
+        """Assert that each direct write path enforces one resolution dimension."""
+        invalid_states = (
+            ("unresolved value", {resolved_field: False, value_field: selected_value}),
+            ("resolved empty", {resolved_field: True, value_field: ""}),
+        )
+        for invalid_state, invalid_values in invalid_states:
+            for write_method in ("create", "bulk_create", "update"):
+                cable_class = f"Invalid {value_field} {invalid_state} {write_method}"
+                if write_method == "update":
+                    mapping = CableClassMapping.objects.create(profile=self.trace_profile, cable_class=cable_class)
+                with (
+                    self.subTest(invalid_state=invalid_state, value_field=value_field, write_method=write_method),
+                    self.assertRaises(IntegrityError),
+                ):
+                    with transaction.atomic():
+                        if write_method == "create":
+                            CableClassMapping.objects.create(
+                                profile=self.trace_profile,
+                                cable_class=cable_class,
+                                **invalid_values,
+                            )
+                        elif write_method == "bulk_create":
+                            CableClassMapping.objects.bulk_create(
+                                [
+                                    CableClassMapping(
+                                        profile=self.trace_profile,
+                                        cable_class=cable_class,
+                                        **invalid_values,
+                                    )
+                                ]
+                            )
+                        else:
+                            CableClassMapping.objects.filter(pk=mapping.pk).update(**invalid_values)
+
+    def test_database_rejects_invalid_cable_type_states(self):
+        """Every database write path rejects invalid Cable Type state representations."""
+        self._assert_database_rejects_invalid_value_states(
+            "cable_type_resolved",
+            "cable_type",
+            "cat6",
+        )
+
+    def test_database_rejects_invalid_cable_profile_states(self):
+        """Every database write path rejects invalid Cable Profile state representations."""
+        self._assert_database_rejects_invalid_value_states(
+            "cable_profile_resolved",
+            "cable_profile",
+            "lc",
+        )
+
+    def test_database_accepts_each_cable_mapping_tri_state(self):
+        """The database accepts unresolved, explicit none, and selected values."""
+        cable_type = _runtime_cable_type_choices()[0][0]
+        cable_profile = _compatible_profile_choices()[0][0]
+        mappings = (
+            CableClassMapping.objects.create(profile=self.trace_profile, cable_class="Database unresolved"),
+            CableClassMapping.objects.create(
+                profile=self.trace_profile,
+                cable_class="Database explicit none",
+                cable_type_resolved=True,
+                cable_profile_resolved=True,
+            ),
+            CableClassMapping.objects.create(
+                profile=self.trace_profile,
+                cable_class="Database selected",
+                cable_type_resolved=True,
+                cable_type=cable_type,
+                cable_profile_resolved=True,
+                cable_profile=cable_profile,
+            ),
+            CableClassMapping.objects.create(
+                profile=self.trace_profile,
+                cable_class="Database stale selected",
+                cable_type_resolved=True,
+                cable_type="not-a-running-cable-type",
+                cable_profile_resolved=True,
+                cable_profile="not-a-running-cable-profile",
+            ),
+        )
+        for mapping in mappings:
+            mapping.refresh_from_db()
+
+        self.assertEqual(
+            [
+                (mapping.cable_type_resolved, mapping.cable_type, mapping.cable_profile_resolved, mapping.cable_profile)
+                for mapping in mappings
+            ],
+            [
+                (False, None, False, None),
+                (True, None, True, None),
+                (True, cable_type, True, cable_profile),
+                (True, "not-a-running-cable-type", True, "not-a-running-cable-profile"),
+            ],
+        )
+
     def test_stale_runtime_choices_have_the_stale_mapping_code(self):
         """Removed Cable Type and Cable Profile values share the stale-mapping condition."""
         cases = (
@@ -418,6 +515,27 @@ class TerminationResolutionPersistenceTest(TestCase):
             self._save(actor)
 
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile, field_key=self.field_key).exists())
+
+    def test_selection_cannot_store_trace_policy_for_a_flat_database_profile(self):
+        """The stored profile controls whether a trace-only decision applies."""
+        flat_profile = ImportProfile.objects.create(name="Flat Replan", adapter_config={})
+        flat_document = SourceDocument.store(profile=flat_profile, content=b"Flat source content")
+        fabricated_trace_profile = ImportProfile(pk=flat_profile.pk, source_adapter="trace_workbook")
+
+        with self.assertRaisesMessage(ValidationError, "do not apply"):
+            save_termination_resolution_and_replan(
+                profile=fabricated_trace_profile,
+                source_document=flat_document,
+                actor=self.actor,
+                planning_context=self.planning_context,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=self.field_key,
+                selected_object_type=self.interface_type,
+                selected_object_id=self.interface.pk,
+                selected_display_name=str(self.interface),
+            )
+
+        self.assertFalse(TerminationResolution.objects.filter(profile=flat_profile).exists())
 
 
 class CableClassMappingFormTest(TestCase):

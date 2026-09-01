@@ -626,6 +626,16 @@ class CableClassMapping(PolicySectionModel):
                 fields=["profile", "cable_class"],
                 name="ndi_cableclassmapping_profile_class",
             ),
+            models.CheckConstraint(
+                condition=models.Q(cable_type__isnull=True)
+                | (models.Q(cable_type_resolved=True) & ~models.Q(cable_type="")),
+                name="ndi_cableclassmapping_type_resolved_value",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(cable_profile__isnull=True)
+                | (models.Q(cable_profile_resolved=True) & ~models.Q(cable_profile="")),
+                name="ndi_cableclassmapping_profile_resolved_value",
+            ),
         ]
         verbose_name = "CableClass Mapping"
         verbose_name_plural = "CableClass Mappings"

@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any
 
 from .import_engine import ImportEngine
-from .models import TerminationResolution, locked_profile_policy
+from .models import ImportProfile, TerminationResolution, locked_profile_policy
 from .object_permissions import save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
@@ -36,26 +36,27 @@ def save_termination_resolution_and_replan(
     selected_display_name,
 ):
     """Persist one manual termination selection, then request a fresh Import Plan."""
-    lookup = {
-        "profile": profile,
-        "task_type": task_type,
-        "field_key": field_key,
-    }
     values = {
         "selected_object_type": selected_object_type,
         "selected_object_id": selected_object_id,
         "selected_display_name": selected_display_name,
     }
-    candidate = TerminationResolution(**lookup, **values)
-    candidate.full_clean(validate_unique=False, validate_constraints=False)
     with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {
+            "profile": locked_profile,
+            "task_type": task_type,
+            "field_key": field_key,
+        }
+        candidate = TerminationResolution(**lookup, **values)
+        candidate.full_clean(validate_unique=False, validate_constraints=False)
         save_permission_scoped_object(
             actor,
             TerminationResolution,
             lookup,
             values,
         )
-    return ImportEngine.plan(profile, source_document, actor, planning_context)
+    return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
 _DIAGNOSTIC_MESSAGES = {

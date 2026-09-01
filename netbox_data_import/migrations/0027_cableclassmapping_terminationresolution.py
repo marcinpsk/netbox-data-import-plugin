@@ -36,7 +36,26 @@ class Migration(migrations.Migration):
                 "constraints": [
                     models.UniqueConstraint(
                         fields=("profile", "cable_class"), name="ndi_cableclassmapping_profile_class"
-                    )
+                    ),
+                    models.CheckConstraint(
+                        condition=models.Q(
+                            ("cable_type__isnull", True),
+                            models.Q(("cable_type_resolved", True), models.Q(("cable_type", ""), _negated=True)),
+                            _connector="OR",
+                        ),
+                        name="ndi_cableclassmapping_type_resolved_value",
+                    ),
+                    models.CheckConstraint(
+                        condition=models.Q(
+                            ("cable_profile__isnull", True),
+                            models.Q(
+                                ("cable_profile_resolved", True),
+                                models.Q(("cable_profile", ""), _negated=True),
+                            ),
+                            _connector="OR",
+                        ),
+                        name="ndi_cableclassmapping_profile_resolved_value",
+                    ),
                 ],
             },
         ),
