@@ -76,11 +76,16 @@ def mark_preview_dirty(session) -> None:
     session[PREVIEW_DIRTY_SESSION_KEY] = True
 
 
-def pending_preview_payload(row_number: int, message: str) -> dict:
-    """Return the small response shared by deferred preview-row actions."""
+def pending_preview_payload(row_number: int, message: str, detail: str = "") -> dict:
+    """Return the small response shared by deferred preview-row actions.
+
+    `detail` names a write this action already made in NetBox, which the page reports rather than
+    leaving the operator to discover it. A save that only records a decision carries none.
+    """
     return {
         "ok": True,
         "row_number": row_number,
         "preview_state": "recalculation_required",
         "message": message,
+        "detail": detail,
     }

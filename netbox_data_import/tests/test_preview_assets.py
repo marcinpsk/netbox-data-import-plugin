@@ -678,3 +678,101 @@ class PlacementBadgeTest(PreviewSessionMixin, BaseViewTestCase):
         self._place_the_workbook_device_in_netbox(same_rack=True)
 
         self.assertNotIn("ndi-placement-badge", self._preview_html())
+
+
+class RowNamesEveryProblemItHasTest(PreviewSessionMixin, BaseViewTestCase):
+    """A row that stated one reason sent the operator round the recalculation loop once per problem."""
+
+    def _preview_html_with_two_problems(self):
+        """Give two workbook rows one serial and one name, so each row has two problems."""
+        row_numbers = []
+
+        def spoil_both(worksheet):
+            headings = {cell.value: cell.column for cell in worksheet[1]}
+            devices = [
+                row
+                for row in worksheet.iter_rows(min_row=2)
+                if row[headings["Class"] - 1].value in {"Server", "Switch"}
+            ][:2]
+            self.assertEqual(len(devices), 2, "the sample workbook must carry two device rows")
+            for row in devices:
+                row[headings["Serial Number"] - 1].value = "SHARED-TWO-PROBLEM-SERIAL"
+                row[headings["Name"] - 1].value = "shared-two-problem-name"
+                row_numbers.append(row[0].row)
+
+        self._setup_session(mutate_workbook=spoil_both)
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        return row_numbers, response
+
+    def _device_row_cells(self, html, row_number):
+        """Return one device row's own cells: a source row also renders a manufacturer and a rack."""
+        for block in html.split("<tr")[1:]:
+            opening, _, body = block.partition(">")
+            if f'data-row-number="{row_number}"' in opening and 'data-object-type="device"' in opening:
+                return body
+        self.fail(f"the page renders no device row {row_number}")
+
+    def test_the_row_still_states_the_problem_it_always_did(self):
+        """The stated reason is the first problem, so nothing an operator already knows moves."""
+        (first, _second), response = self._preview_html_with_two_problems()
+
+        cells = self._device_row_cells(response.content.decode(), first)
+        self.assertIn("Duplicate serial", cells)
+
+    def test_the_row_carries_the_problem_the_serial_used_to_hide(self):
+        """Before this the name conflict only appeared after the serial was settled and replanned."""
+        _numbers, response = self._preview_html_with_two_problems()
+
+        rows = [row for row in response.context["result"].units if row.object_type == "device"]
+        with_issues = [row for row in rows if row.extra_data.get("other_issues")]
+        self.assertTrue(with_issues, "no device row reports a second problem")
+        self.assertEqual(
+            [issue["code"] for issue in with_issues[0].extra_data["other_issues"]],
+            ["device.duplicate_name"],
+        )
+
+    def test_the_page_names_the_remaining_problem_in_words(self):
+        """A diagnostic code is not an instruction, so the row shows the operator wording."""
+        _numbers, response = self._preview_html_with_two_problems()
+
+        html = response.content.decode()
+        self.assertIn("This row also needs:", html)
+        self.assertIn("The device name appears more than once in this import.", html)
+
+    def test_the_row_says_there_is_more_without_being_opened(self):
+        """The detail row is collapsed, so the count has to be on the row itself."""
+        (first, _second), response = self._preview_html_with_two_problems()
+
+        cells = self._device_row_cells(response.content.decode(), first)
+        self.assertIn("+1 more", cells)
+
+    def test_the_row_offers_the_action_for_the_problem_reported_second(self):
+        """A list the operator cannot act on would still cost one recalculation per problem."""
+        (first, _second), response = self._preview_html_with_two_problems()
+
+        cells = self._device_row_cells(response.content.decode(), first)
+        self.assertIn("ignore-duplicate-serial/", cells)
+        self.assertIn("resolve-duplicate-name/", cells)
+
+    def test_the_row_names_every_identity_conflict_it_has(self):
+        """The row column and the comparison table both choose their actions from this list."""
+        _numbers, response = self._preview_html_with_two_problems()
+
+        rows = [row for row in response.context["result"].units if row.object_type == "device"]
+        with_issues = [row for row in rows if row.extra_data.get("other_issues")]
+        self.assertEqual(
+            with_issues[0].extra_data["identity_conflicts"],
+            ["duplicate_serial", "duplicate_name"],
+        )
+        # The stated problem keeps the scalar every existing control already reads.
+        self.assertEqual(with_issues[0].extra_data["identity_conflict"], "duplicate_serial")
+
+    def test_a_row_with_one_problem_claims_no_others(self):
+        """The extra list must not appear on every refused row and turn into noise."""
+        self._setup_session()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertNotIn("This row also needs:", response.content.decode())
+        for row in response.context["result"].units:
+            self.assertEqual(row.extra_data.get("other_issues", []), [])

@@ -153,24 +153,29 @@ class PrimaryContactResolver:
         return values
 
     @classmethod
+    def selection_for_resolution(cls, profile, resolved_fields, candidate_values) -> ContactSelection | None:
+        """Return the Contact one saved resolution names, without planning an assignment."""
+        normalized = validate_contact_candidate_resolution(
+            {
+                "contact_resolution_applied": True,
+                "contact_field_sources": resolved_fields.get("contact_field_sources", {}),
+                "contact_field_values": resolved_fields.get("contact_field_values", {}),
+                "contact_id": resolved_fields.get("contact_id"),
+            },
+            profile.adapter_settings.primary_contact_lookup_field,
+            candidate_values,
+        )
+        values = dict(normalized["field_values"])
+        for field_name, source_column in normalized["field_sources"].items():
+            values[field_name] = candidate_values[source_column]
+        if not values and normalized["contact_id"] is None:
+            return None
+        return ContactSelection(values=values, contact_id=normalized["contact_id"])
+
+    @classmethod
     def _selection(cls, row, profile, candidate_values, legacy_primary_contact) -> ContactSelection | None:
         if row.get("contact_resolution_applied") is True:
-            normalized = validate_contact_candidate_resolution(
-                {
-                    "contact_resolution_applied": True,
-                    "contact_field_sources": row.get("contact_field_sources", {}),
-                    "contact_field_values": row.get("contact_field_values", {}),
-                    "contact_id": row.get("contact_id"),
-                },
-                profile.adapter_settings.primary_contact_lookup_field,
-                candidate_values,
-            )
-            values = dict(normalized["field_values"])
-            for field_name, source_column in normalized["field_sources"].items():
-                values[field_name] = candidate_values[source_column]
-            if not values and normalized["contact_id"] is None:
-                return None
-            return ContactSelection(values=values, contact_id=normalized["contact_id"])
+            return cls.selection_for_resolution(profile, row, candidate_values)
 
         if legacy_primary_contact:
             candidate_values.setdefault("Legacy primary contact", legacy_primary_contact)
@@ -312,6 +317,60 @@ class PrimaryContactResolver:
         return primary_assignment, assignment, "unchanged"
 
     @classmethod
+    def _contact_for_values(cls, contact_values, lookup_field, user, contact_queryset):
+        """Return the stored Contact these values identify, or an unsaved one to create."""
+        from tenancy.models import Contact
+
+        value = _text(contact_values.get(lookup_field))
+        if not value:
+            raise ValidationError(
+                {"primary_contact": f"Select or enter a value for the Contact {lookup_field} lookup field."}
+            )
+        if lookup_field == "email":
+            validate_email(value)
+        proposed_contact = Contact(**contact_values)
+        proposed_contact.full_clean()
+        contacts = list(contact_queryset.filter(**{f"{lookup_field}__iexact": value})[:2])
+        if len(contacts) > 1:
+            raise ValidationError({"primary_contact": f"More than one contact has the {lookup_field} value '{value}'."})
+        if contacts:
+            contact = contacts[0]
+            if user is not None and not Contact.objects.restrict(user, "view").filter(pk=contact.pk).exists():
+                raise ObjectPermissionDenied("tenancy.view_contact")
+            return contact
+        if user is not None and not user.has_perm("tenancy.add_contact"):
+            raise ObjectPermissionDenied("tenancy.add_contact")
+        return proposed_contact
+
+    @classmethod
+    def create_contact(cls, profile, selection: ContactSelection, user=None):
+        """Store the Contact one resolution names, so it exists before any import runs.
+
+        Returns ``(contact, created)``. A row whose values already name a stored Contact reuses it,
+        which is what keeps a second save from making a duplicate identity.
+        """
+        from tenancy.models import Contact
+
+        if selection.contact_id is not None:
+            contacts = Contact.objects.restrict(user, "view") if user is not None else Contact.objects
+            contact = contacts.filter(pk=selection.contact_id).first()
+            if contact is None:
+                raise ValidationError({"primary_contact": "The selected NetBox Contact no longer exists."})
+            return contact, False
+
+        lookup_field = profile.adapter_settings.primary_contact_lookup_field
+        with transaction.atomic():
+            cls.lock_imports()
+            contact = cls._contact_for_values(selection.values, lookup_field, user, Contact.objects.select_for_update())
+            if contact.pk is not None:
+                # atomic-exit-safe: stored-contact-reused
+                return contact, False
+            contact.save()
+            enforce_saved_object_permission(contact, user, "add")
+            # atomic-exit-safe: success-commit-intended
+            return contact, True
+
+    @classmethod
     def _plan(cls, obj, profile, selection: ContactSelection, user=None, lock=False) -> dict:
         role_name = profile.adapter_settings.primary_contact_role
         if not role_name:
@@ -354,28 +413,7 @@ class PrimaryContactResolver:
             }
         else:
             contact_values = selection.values
-            value = _text(contact_values.get(lookup_field))
-            if not value:
-                raise ValidationError(
-                    {"primary_contact": f"Select or enter a value for the Contact {lookup_field} lookup field."}
-                )
-            if lookup_field == "email":
-                validate_email(value)
-            proposed_contact = Contact(**contact_values)
-            proposed_contact.full_clean()
-            contacts = list(contact_queryset.filter(**{f"{lookup_field}__iexact": value})[:2])
-            if len(contacts) > 1:
-                raise ValidationError(
-                    {"primary_contact": f"More than one contact has the {lookup_field} value '{value}'."}
-                )
-            if contacts:
-                contact = contacts[0]
-                if user is not None and not Contact.objects.restrict(user, "view").filter(pk=contact.pk).exists():
-                    raise ObjectPermissionDenied("tenancy.view_contact")
-            else:
-                if user is not None and not user.has_perm("tenancy.add_contact"):
-                    raise ObjectPermissionDenied("tenancy.add_contact")
-                contact = proposed_contact
+            contact = cls._contact_for_values(contact_values, lookup_field, user, contact_queryset)
 
         primary_assignment, assignment, assignment_action = cls._plan_assignment(obj, role, contact, user, lock)
         return {

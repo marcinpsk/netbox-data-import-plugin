@@ -436,6 +436,12 @@
               </td>
               <td class="small text-muted">
                 {{ row.detail }}
+                {% if row.extra_data.other_issues %}
+                  <span class="badge ndi-badge-error ms-1 ndi-other-issue-count"
+                        title="This row needs {{ row.extra_data.other_issues|length }} more thing{{ row.extra_data.other_issues|length|pluralize }} before it can be imported. Open the detail row.">
+                    +{{ row.extra_data.other_issues|length }} more
+                  </span>
+                {% endif %}
                 {% if row.action == 'error' and row.extra_data.conflict_row_number %}
                   <button type="button"
                           class="badge bg-warning text-dark border-0 ms-1 ndi-jump-to-row"
@@ -578,7 +584,8 @@
 
                 {% elif row.action == 'error' and row.object_type == 'device' and profile_id %}
                   {# Device error — show class mapping button if we have source_class #}
-                  {% if row.extra_data.identity_conflict == 'duplicate_serial' and row.source_id %}
+                  {% if row.source_id %}
+                  {% if 'duplicate_serial' in row.extra_data.identity_conflicts %}
                   {# Two rows cannot both claim one serial, so one of them gives it up. #}
                   <form method="post" action="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
                         hx-post="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
@@ -599,7 +606,8 @@
                     </button>
                   </form>
                   {% endif %}
-                  {% if row.extra_data.identity_conflict == 'duplicate_name' or row.extra_data.identity_conflict == 'name_placement_conflict' %}
+                  {% endif %}
+                  {% if 'duplicate_name' in row.extra_data.identity_conflicts or 'name_placement_conflict' in row.extra_data.identity_conflicts %}
                   {% if row.extra_data.suggested_name and row.source_id %}
                   <form method="post" action="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}"
                         hx-post="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}"
@@ -815,6 +823,23 @@
             <tr id="diff-{{ forloop.counter }}" class="ndi-diff-row" hidden>
               <td colspan="7" class="p-0 border-top-0">
                 <div class="px-3 py-2" style="background: var(--tblr-bg-surface-secondary, rgba(0,0,0,0.02));">
+                  {# The row states one reason. These are the rest, so they can be fixed in any order. #}
+                  {% if row.extra_data.other_issues %}
+                  <div class="mb-2 ndi-other-issues">
+                    <div class="small mb-1">
+                      <i class="mdi mdi-format-list-checks text-danger"></i>
+                      This row also needs:
+                    </div>
+                    <ul class="small mb-1 ps-4">
+                      {% for issue in row.extra_data.other_issues %}
+                      <li class="ndi-other-issue" data-issue-code="{{ issue.code }}">{{ issue.message }}</li>
+                      {% endfor %}
+                    </ul>
+                    <div class="small text-muted mt-1">
+                      Fix them in any order, then recalculate the preview.
+                    </div>
+                  </div>
+                  {% endif %}
                   {# A conflicted field is dropped, so a no-op row gives no other sign of what is missing. #}
                   {% if row.extra_data.conflicts %}
                   <div class="mb-2 ndi-conflict-detail">
@@ -893,7 +918,8 @@
                               <span class="small text-muted">{{ conflict_row.detail }}</span>
                             </td>
                             <td class="text-nowrap">
-                              {% if conflict_row.identity_conflict == 'duplicate_serial' and conflict_row.source_id and profile_id %}
+                              {% if conflict_row.source_id and profile_id %}
+                              {% if 'duplicate_serial' in conflict_row.identity_conflicts %}
                               {# The operator picks which of the colliding rows gives the serial up. #}
                               <form method="post" action="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
                                     hx-post="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
@@ -913,6 +939,9 @@
                                   <i class="mdi mdi-barcode-off"></i> Ignore serial
                                 </button>
                               </form>
+                              {% else %}
+                              <span class="text-muted small">—</span>
+                              {% endif %}
                               {% else %}
                               <span class="text-muted small">—</span>
                               {% endif %}
@@ -2278,7 +2307,8 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
 </script>
 
 {# ===== Per-row sync confirmation modal ===== #}
-<div class="modal fade" id="syncRowModal" tabindex="-1" aria-labelledby="syncRowModalLabel" aria-hidden="true">
+<div class="modal fade" id="syncRowModal" tabindex="-1" aria-labelledby="syncRowModalLabel"
+     aria-hidden="true" data-sync-url="{% url 'plugins:netbox_data_import:sync_single_row' %}">
   <div class="modal-dialog modal-lg">
     <div class="modal-content">
       <div class="modal-header">
@@ -2305,7 +2335,16 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
         </table>
         <div class="alert alert-warning mb-0">
           <i class="mdi mdi-alert-outline"></i>
-          This will write to NetBox immediately. Recalculate the preview when you finish your changes.
+          This will write to NetBox immediately.
+        </div>
+        <div class="form-check mt-3">
+          <input class="form-check-input" type="checkbox" id="syncRowRecalculate" checked>
+          <label class="form-check-label" for="syncRowRecalculate">
+            Recalculate the preview after syncing
+            <span class="d-block text-muted small">
+              The row keeps the state it was rendered with until the preview is recalculated.
+            </span>
+          </label>
         </div>
         <div id="syncRowError" class="alert alert-danger mt-2 d-none" role="alert"></div>
       </div>
@@ -2313,198 +2352,17 @@ function ndiOpenQuickMapModal(colName, suggestedField) {
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
         <button type="button" class="btn btn-success" id="syncRowConfirm">
           <span class="ndi-sync-row-idle"><i class="mdi mdi-lightning-bolt"></i> Confirm &amp; Sync</span>
-          <span class="ndi-sync-row-loading d-none"><i class="mdi mdi-loading mdi-spin"></i> Syncing&hellip;</span>
+          <span class="ndi-sync-row-loading d-none"><i class="mdi mdi-loading mdi-spin"></i>
+            <span class="ndi-sync-row-loading-label">Syncing&hellip;</span></span>
         </button>
       </div>
     </div>
   </div>
 </div>
-<script>
-(function () {
-  var modal = document.getElementById('syncRowModal');
-  if (!modal) return;
-
-  var currentRowNumber = null;
-  var currentSyncButton = null;
-  var currentSyncRequest = null;
-  var pendingSyncRequests = new WeakMap();
-
-  modal.addEventListener('show.bs.modal', function (e) {
-    var btn = e.relatedTarget;
-    if (!btn) return;
-    currentRowNumber = btn.dataset.rowNumber;
-    currentSyncButton = btn;
-    currentSyncRequest = pendingSyncRequests.get(btn) || null;
-
-    document.getElementById('syncRowName').textContent = btn.dataset.name || '—';
-    document.getElementById('syncRowNumber').textContent = currentRowNumber || '—';
-    document.getElementById('syncRowSourceId').textContent = btn.dataset.sourceId || '—';
-    document.getElementById('syncRowBadge').textContent = 'Create ' + (btn.dataset.objectType || '');
-
-    var resolutions = (typeof EXISTING_RESOLUTIONS !== 'undefined' ? EXISTING_RESOLUTIONS : {});
-    var rowRes = resolutions[btn.dataset.sourceId] || {};
-    var resolvedFieldKeys = {};
-    for (var col in rowRes) {
-      var resolved = rowRes[col].resolved_fields || {};
-      for (var f in resolved) {
-        resolvedFieldKeys[f] = true;
-      }
-    }
-
-    function makeValueCell(value, fieldKey) {
-      var td = document.createElement('td');
-      td.appendChild(document.createTextNode(value || '—'));
-      if (resolvedFieldKeys[fieldKey]) {
-        var badge = document.createElement('span');
-        badge.className = 'badge text-bg-success ms-1';
-        badge.textContent = 'from resolution';
-        td.appendChild(badge);
-      }
-      return td;
-    }
-
-    var tbody = document.getElementById('syncRowFields');
-    tbody.innerHTML = '';
-
-    var fieldDefs = [
-      ['Name', btn.dataset.name, 'device_name'],
-      ['Rack', btn.dataset.rackName, 'rack_name'],
-      ['Source ID', btn.dataset.sourceId, 'source_id'],
-      ['Manufacturer', btn.dataset.sourceMake, 'source_make'],
-      ['Model', btn.dataset.sourceModel, 'source_model'],
-      ['Asset tag', btn.dataset.assetTag, 'asset_tag'],
-      ['Rack type', btn.dataset.rackTypeName, 'rack_type'],
-      ['Serial', btn.dataset.serial, 'serial'],
-      ['U Position', btn.dataset.uPosition, 'u_position'],
-      ['U Height', btn.dataset.uHeight, 'u_height'],
-      ['Face', btn.dataset.face, 'face'],
-      ['Airflow', btn.dataset.airflow, 'airflow'],
-      ['Status', btn.dataset.status, 'status'],
-    ];
-
-    fieldDefs.forEach(function (def) {
-      var label = def[0], value = def[1], fieldKey = def[2];
-      if (!value) return;
-      var tr = document.createElement('tr');
-      var th = document.createElement('td');
-      th.className = 'fw-semibold';
-      th.textContent = label;
-      tr.appendChild(th);
-      tr.appendChild(makeValueCell(value, fieldKey));
-      tbody.appendChild(tr);
-    });
-
-    // Append extra_columns (custom fields / unmapped columns) below standard fields
-    var EXTRA_COLUMNS_BY_ROW = JSON.parse(
-      (document.getElementById('ndi-extra-columns-by-row') || {textContent: '{}'}).textContent
-    );
-    var rowNumber = btn.dataset.rowNumber;
-    var extraCols = EXTRA_COLUMNS_BY_ROW[rowNumber] || {};
-    for (var ecKey in extraCols) {
-      var ecVal = String(extraCols[ecKey]);
-      if (!ecVal) continue;
-      var ecTr = document.createElement('tr');
-      var ecTd1 = document.createElement('td');
-      ecTd1.className = 'text-muted small';
-      ecTd1.textContent = ecKey;
-      var ecTd2 = document.createElement('td');
-      ecTd2.textContent = ecVal;
-      ecTr.appendChild(ecTd1);
-      ecTr.appendChild(ecTd2);
-      tbody.appendChild(ecTr);
-    }
-
-    if (btn.dataset.detail) {
-      var tr = document.createElement('tr');
-      var th = document.createElement('td');
-      th.className = 'fw-semibold';
-      th.textContent = 'Detail';
-      tr.appendChild(th);
-      var td = document.createElement('td');
-      td.textContent = btn.dataset.detail;
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    }
-
-    var errorDiv = document.getElementById('syncRowError');
-    errorDiv.textContent = '';
-    errorDiv.classList.add('d-none');
-
-    var confirmBtn = document.getElementById('syncRowConfirm');
-    var rowIsPending = pendingSyncRequests.has(btn);
-    confirmBtn.disabled = rowIsPending;
-    confirmBtn.querySelector('.ndi-sync-row-idle').classList.toggle('d-none', rowIsPending);
-    confirmBtn.querySelector('.ndi-sync-row-loading').classList.toggle('d-none', !rowIsPending);
-  });
-
-  document.getElementById('syncRowConfirm').addEventListener('click', function () {
-    if (!currentSyncButton || pendingSyncRequests.has(currentSyncButton)) return;
-    var confirmBtn = this;
-    confirmBtn.disabled = true;
-    confirmBtn.querySelector('.ndi-sync-row-idle').classList.add('d-none');
-    confirmBtn.querySelector('.ndi-sync-row-loading').classList.remove('d-none');
-
-    var errorDiv = document.getElementById('syncRowError');
-    errorDiv.classList.add('d-none');
-
-    if (typeof window.ndiPostPreviewAction !== 'function') {
-      confirmBtn.disabled = false;
-      confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
-      confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
-      errorDiv.textContent = 'The preview action script is unavailable. Reload the page.';
-      errorDiv.classList.remove('d-none');
-      return;
-    }
-
-    var submittedRowNumber = currentRowNumber;
-    var submittedSyncButton = currentSyncButton;
-    var submittedSyncRequest = {};
-    currentSyncRequest = submittedSyncRequest;
-    pendingSyncRequests.set(submittedSyncButton, submittedSyncRequest);
-    submittedSyncButton.disabled = true;
-    var body = new URLSearchParams({row_number: submittedRowNumber});
-    window.ndiPostPreviewAction('{% url "plugins:netbox_data_import:sync_single_row" %}', body)
-    .then(function (data) {
-      submittedSyncButton.disabled = true;
-      submittedSyncButton.removeAttribute('data-ndi-modal');
-      submittedSyncButton.title = data.message || 'Synced to NetBox.';
-      submittedSyncButton.innerHTML = '<i class="mdi mdi-check"></i> Synced';
-      if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
-        pendingSyncRequests.delete(submittedSyncButton);
-      }
-      if (typeof window.ndiMarkPreviewStale === 'function') {
-        window.ndiMarkPreviewStale();
-      }
-      var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
-        && currentSyncButton === submittedSyncButton;
-      if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
-      if (!ownsCurrentModal) return;
-      var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
-      if (ModalClass) {
-        ModalClass.getOrCreateInstance(modal).hide();
-      }
-    })
-    .catch(function (error) {
-      if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
-        pendingSyncRequests.delete(submittedSyncButton);
-        submittedSyncButton.disabled = false;
-      }
-      var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
-        && currentSyncButton === submittedSyncButton;
-      if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
-      if (!ownsCurrentModal) return;
-      confirmBtn.disabled = false;
-      confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');
-      confirmBtn.querySelector('.ndi-sync-row-loading').classList.add('d-none');
-      errorDiv.textContent = error.message || 'Sync failed';
-      errorDiv.classList.remove('d-none');
-    });
-  });
-}());
-</script>
 <script src="{% static 'netbox_data_import/js/contact_candidate_modal.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/preview_row_actions.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/conflict_modal.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/split_name_modal.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/sync_row_modal.js' %}?v={{ plugin_version }}"></script>
 
 {% endblock %}

@@ -1847,3 +1847,166 @@ class DeviceModuleTargetStateIsWorkTest(DeviceModulePlanTestBase):
         units = self._plan(self._row(2, "D-1", "srv-01"))
 
         self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+
+class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):
+    """A row used to state only the first thing wrong with it.
+
+    The operator then fixed that, paid a full recalculation, and met the next one. Every problem a
+    row can already prove is reported at once, with the first still deciding what the row is.
+    """
+
+    def _codes(self, unit):
+        return [diagnostic.code for diagnostic in unit.diagnostics]
+
+    def test_a_duplicate_serial_no_longer_hides_the_rest_of_the_row(self):
+        """This is the reported case: the serial masked a name the operator also had to settle."""
+        units = self._plan(
+            self._row(2, "D-1", "srv-same", serial="SN-1"),
+            self._row(3, "D-2", "srv-same", serial="SN-1"),
+        )
+
+        self.assertEqual(self._codes(units[0]), ["device.duplicate_serial", "device.duplicate_name"])
+        self.assertEqual(self._codes(units[1]), ["device.duplicate_serial", "device.duplicate_name"])
+
+    def test_the_first_problem_still_decides_what_the_row_is(self):
+        """Nothing downstream may move: the disposition and the stated reason are unchanged."""
+        units = self._plan(
+            self._row(2, "D-1", "srv-same", serial="SN-1"),
+            self._row(3, "D-2", "srv-same", serial="SN-1"),
+        )
+
+        self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
+        self.assertEqual(units[0].diagnostics[0].code, "device.duplicate_serial")
+        self.assertIn("Duplicate serial", units[0].diagnostics[0].display["message"])
+        # The unit shows the first problem, so the row reads as it did when that was the only one.
+        self.assertEqual(dict(units[0].display), dict(units[0].diagnostics[0].display))
+
+    def test_a_blocked_dependency_keeps_its_own_disposition(self):
+        """The first problem sets the disposition, so a blocked row is not turned invalid."""
+        self.profile.adapter_config = {**self.profile.adapter_config, "create_missing_device_types": False}
+        self.profile.save(update_fields=["adapter_config"])
+
+        units = self._plan(self._row(2, "D-1", "srv-same", make="Nope", model="Nothing"))
+
+        self.assertEqual(units[0].disposition, Disposition.BLOCKED)
+        self.assertEqual(units[0].diagnostics[0].code, "device.device_type_missing")
+
+    def test_a_row_blocked_on_its_device_type_still_reports_its_identity_clash(self):
+        """The two are independent, so the operator can settle either one first."""
+        self.profile.adapter_config = {**self.profile.adapter_config, "create_missing_device_types": False}
+        self.profile.save(update_fields=["adapter_config"])
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", serial="SN-1", make="Nope", model="Nothing"),
+            self._row(3, "D-2", "srv-02", serial="SN-1", make="Nope", model="Nothing"),
+        )
+
+        self.assertEqual(self._codes(units[0]), ["device.duplicate_serial", "device.device_type_missing"])
+        # The clash is first, so it still decides the row.
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+
+    def test_an_unmapped_class_reports_nothing_it_cannot_prove(self):
+        """Without a class mapping there is no device type or role to check, so neither is claimed."""
+        units = self._plan(self._row(2, "D-1", "srv-01", device_class="Unmapped"))
+
+        self.assertEqual(self._codes(units[0]), ["device.class_unmapped"])
+
+    def test_a_row_with_one_problem_reports_one(self):
+        """The list only exists to carry a second problem; one problem must read as it always did."""
+        units = self._plan(self._row(2, "D-1", "", device_class="Server"))
+
+        self.assertEqual(self._codes(units[0]), ["device.missing_name"])
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+
+    def test_a_well_formed_row_is_still_actionable(self):
+        """Running more checks must not turn a row that was fine into a refused one."""
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+
+    def test_an_ignored_row_is_an_answer_not_a_list_of_problems(self):
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+        IgnoredDevice.objects.create(profile=self.profile, source_id="D-1")
+
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].disposition, Disposition.EXCLUDED)
+        self.assertEqual(self._codes(units[0]), ["device.ignored"])
+
+    def test_ignoring_a_row_releases_the_serial_it_claimed(self):
+        """Ignoring one of two rows is how an operator settles a shared identity, so it must work."""
+        IgnoredDevice.objects.create(profile=self.profile, source_id="D-1")
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", serial="SN-1"),
+            self._row(3, "D-2", "srv-02", serial="SN-1"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.EXCLUDED)
+        self.assertEqual(self._codes(units[0]), ["device.ignored"])
+        self.assertEqual(units[1].disposition, Disposition.ACTIONABLE)
+
+    def test_every_reported_problem_is_an_error(self):
+        """The list is what the row still needs, so nothing in it reads as information."""
+        units = self._plan(
+            self._row(2, "D-1", "srv-same", serial="SN-1"),
+            self._row(3, "D-2", "srv-same", serial="SN-1"),
+        )
+
+        self.assertEqual({diagnostic.severity for diagnostic in units[0].diagnostics}, {Severity.ERROR})
+
+    def test_a_clashing_row_reports_the_placement_conflict_behind_it(self):
+        """The reported row: a duplicate serial masked a name that matches a device placed elsewhere."""
+        self._device("srv-placed", rack=self.rack, position=10, face="front")
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-placed", serial="SN-1", u_position=20, face="front"),
+            self._row(3, "D-2", "srv-other", serial="SN-1"),
+        )
+
+        self.assertEqual(
+            self._codes(units[0]),
+            ["device.duplicate_serial", "device.name_placement_conflict"],
+        )
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+
+    def test_an_unparseable_ip_is_a_warning_not_work_the_row_must_do(self):
+        """Two unusable IP values leave the row actionable, so neither may read as a problem."""
+        from netbox_data_import.review_workspace import WorkspaceUnit
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", primary_ip4="not-an-address", primary_ip6="also-not-an-address")
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE)
+        self.assertEqual({diagnostic.severity for diagnostic in units[0].diagnostics}, {Severity.WARNING})
+        self.assertEqual(WorkspaceUnit.from_unit(units[0]).extra_data["other_issues"], [])
+
+    def test_a_clashing_row_still_reports_the_contact_decision_it_needs(self):
+        """The second reported case: a duplicate serial masked an unanswered Contact."""
+        rows = [
+            self._row(
+                2,
+                "D-1",
+                "srv-01",
+                serial="SN-1",
+                _candidate_values={"contact": {"Owner": "owner@example.invalid"}},
+            ),
+            self._row(
+                3,
+                "D-2",
+                "srv-02",
+                serial="SN-1",
+                _candidate_values={"contact": {"Owner": "other@example.invalid"}},
+            ),
+        ]
+
+        units = self._plan(*rows)
+
+        self.assertEqual(
+            self._codes(units[0]),
+            ["device.duplicate_serial", "device.contact_resolution_required"],
+        )
+        candidates = units[0].diagnostics[1].display["extra_data"]["candidate_values"]["contact"]
+        self.assertEqual(candidates, {"Owner": "owner@example.invalid"})

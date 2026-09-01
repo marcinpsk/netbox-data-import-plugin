@@ -31,6 +31,12 @@ const candidates = {
       "Contact Name": "Second Contact",
     },
   },
+  // A row that names a person but carries nothing the configured lookup field can use.
+  "name-only-row": {
+    contact: {
+      "Contact Name": "Named Contact",
+    },
+  },
 };
 
 const contactSuggestions = {
@@ -44,6 +50,7 @@ const contactSuggestions = {
 
 const roleSuggestions = {
   "first-row": { name: "Contact Name", email: "Contact Email" },
+  "name-only-row": { name: "Contact Name" },
 };
 
 function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/", suggestionUrl = null } = {}) {
@@ -100,7 +107,7 @@ function openRow(rowNumber, sourceId) {
 
 function rolesByColumn() {
   return Object.fromEntries(
-    [...document.querySelectorAll("#contactCandidateValueRows .ndi-contact-value-row")].map((row) => [
+    [...document.querySelectorAll("#contactCandidateValueRows [data-source-column]")].map((row) => [
       row.dataset.sourceColumn,
       row.querySelector(".ndi-contact-role").value,
     ]),
@@ -564,5 +571,108 @@ describe("contact candidate modal", () => {
       name: "Contact Name",
       email: "Contact Email",
     });
+  });
+});
+
+/* The operator opens the modal to give a row a Contact. A row whose own values cannot name one
+ * used to show no field at all: the only way to get one was to submit the empty form. */
+describe("a row that cannot identify a Contact from its own values", () => {
+  function editPanel() {
+    return document.getElementById("contactCandidateEdit");
+  }
+
+  function literalRows() {
+    return [...document.querySelectorAll("#contactCandidateValueRows [data-literal]")].map((row) => ({
+      role: row.querySelector(".ndi-contact-role").value,
+      value: row.querySelector(".ndi-contact-literal").value,
+    }));
+  }
+
+  it("offers the fields to type into as soon as it opens", () => {
+    addPreviewFixture();
+
+    openRow("row-without-candidates", "source-empty");
+
+    expect(editPanel().hidden).toBe(false);
+    expect(literalRows()).toEqual([
+      { role: "name", value: "" },
+      { role: "email", value: "" },
+    ]);
+  });
+
+  it("asks only for the field the row is missing", () => {
+    addPreviewFixture();
+
+    openRow("name-only-row", "source-name-only");
+
+    expect(editPanel().hidden).toBe(false);
+    expect(literalRows()).toEqual([{ role: "email", value: "" }]);
+    expect(rolesByColumn()).toEqual({ "Contact Name": "name" });
+  });
+
+  it("stays out of the way when the row already answers", () => {
+    addPreviewFixture();
+
+    openRow("first-row", "source-first");
+
+    expect(editPanel().hidden).toBe(true);
+    expect(literalRows()).toEqual([]);
+  });
+
+  it("stays out of the way when the row is already resolved", () => {
+    addPreviewFixture({
+      "source-saved": {
+        "candidate:contact": {
+          original_value: "{}",
+          resolved_fields: {
+            contact_resolution_applied: true,
+            contact_field_values: { name: "Saved Person", email: "saved@example.invalid" },
+            contact_field_sources: {},
+          },
+        },
+      },
+    });
+
+    openRow("row-without-candidates", "source-saved");
+
+    expect(editPanel().hidden).toBe(true);
+    expect(literalRows()).toEqual([
+      { role: "name", value: "Saved Person" },
+      { role: "email", value: "saved@example.invalid" },
+    ]);
+  });
+
+  it("asks for nothing when the operator chose no contact for the row", () => {
+    addPreviewFixture({
+      "source-none": {
+        "candidate:contact": {
+          original_value: "{}",
+          resolved_fields: {
+            contact_resolution_applied: true,
+            contact_field_values: {},
+            contact_field_sources: {},
+          },
+        },
+      },
+    });
+
+    openRow("row-without-candidates", "source-none");
+
+    expect(document.getElementById("contactCandidateNone").checked).toBe(true);
+    expect(editPanel().hidden).toBe(true);
+    expect(literalRows()).toEqual([]);
+  });
+
+  it("puts the cursor in the first field it added once the modal is on screen", () => {
+    addPreviewFixture();
+    openRow("row-without-candidates", "source-empty");
+
+    document
+      .getElementById("contactCandidateModal")
+      .dispatchEvent(new Event("shown.bs.modal"));
+
+    expect(document.activeElement).toBe(
+      document.querySelector("#contactCandidateValueRows .ndi-contact-literal"),
+    );
   });
 });

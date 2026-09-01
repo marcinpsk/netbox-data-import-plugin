@@ -37,9 +37,21 @@
 
   /* Every deferred row action leaves the rendered row showing the state it had before, so the
    * page reports that a recalculation is due and refuses an import until it happens. */
-  function markPreviewStale() {
+  function markPreviewStale(detail) {
     var staleNotice = document.getElementById('ndi-preview-stale');
-    if (staleNotice) staleNotice.hidden = false;
+    if (staleNotice) {
+      staleNotice.hidden = false;
+      // A write this action already made in NetBox outlives the modal that made it.
+      if (detail) {
+        var line = staleNotice.querySelector('.ndi-preview-stale-detail');
+        if (!line) {
+          line = document.createElement('div');
+          line.className = 'ndi-preview-stale-detail small mt-1';
+          staleNotice.appendChild(line);
+        }
+        line.textContent = detail;
+      }
+    }
     var runImport = document.getElementById('ndi-run-import');
     if (runImport) {
       runImport.disabled = true;
@@ -87,8 +99,30 @@
       });
   }
 
+  /* The page holds more than one link to the same recalculation, so starting one latches them all. */
+  function latchRecalculation(started) {
+    document.querySelectorAll('.ndi-recalculate-preview').forEach(function (link) {
+      link.dataset.ndiRecalculating = 'true';
+      link.classList.add('disabled');
+      link.setAttribute('aria-busy', 'true');
+      link.setAttribute('aria-disabled', 'true');
+    });
+    started.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Recalculating...';
+  }
+
+  /* One recalculation path, so an automatic recalculation leaves the page exactly as a press does.
+   * Returns whether it started one, because the caller must not also report a stale preview. */
+  function recalculatePreview() {
+    var link = document.querySelector('.ndi-recalculate-preview');
+    if (!link) return false;
+    latchRecalculation(link);
+    window.location.assign(link.href);
+    return true;
+  }
+
   window.ndiPostPreviewAction = requestAction;
   window.ndiMarkPreviewStale = markPreviewStale;
+  window.ndiRecalculatePreview = recalculatePreview;
 
   function postAction(url, body, button, pendingLabel, placementError) {
     setPending(button, pendingLabel);
@@ -114,8 +148,7 @@
   }, true);
 
   /* Recalculation reloads the whole preview and can take a while, so the page reports that it
-   * was pressed and refuses a second press until the new page arrives. The page holds more
-   * than one link to the same recalculation, so pressing one latches them all. */
+   * was pressed and refuses a second press until the new page arrives. */
   document.addEventListener('click', function (event) {
     var recalculate = event.target.closest('.ndi-recalculate-preview');
     if (!recalculate) return;
@@ -127,13 +160,7 @@
       event.preventDefault();
       return;
     }
-    document.querySelectorAll('.ndi-recalculate-preview').forEach(function (link) {
-      link.dataset.ndiRecalculating = 'true';
-      link.classList.add('disabled');
-      link.setAttribute('aria-busy', 'true');
-      link.setAttribute('aria-disabled', 'true');
-    });
-    recalculate.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i> Recalculating...';
+    latchRecalculation(recalculate);
   });
 
   document.addEventListener('click', function (event) {
