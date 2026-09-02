@@ -709,11 +709,13 @@ class RowNamesEveryProblemItHasTest(PreviewSessionMixin, BaseViewTestCase):
 
         rows = [row for row in response.context["result"].units if row.object_type == "device"]
         with_issues = [row for row in rows if row.extra_data.get("other_issues")]
-        self.assertTrue(with_issues, "no device row reports a second problem")
-        self.assertEqual(
-            [issue["code"] for issue in with_issues[0].extra_data["other_issues"]],
-            ["device.duplicate_name"],
-        )
+        # Both rows carry both problems, so reporting on one of them is still the old behaviour.
+        self.assertEqual(len(with_issues), 2, "both colliding rows must report the second problem")
+        for row in with_issues:
+            self.assertEqual(
+                [issue["code"] for issue in row.extra_data["other_issues"]],
+                ["device.duplicate_name"],
+            )
 
     def test_the_page_names_the_remaining_problem_in_words(self):
         """A diagnostic code is not an instruction, so the row shows the operator wording."""
@@ -744,12 +746,14 @@ class RowNamesEveryProblemItHasTest(PreviewSessionMixin, BaseViewTestCase):
 
         rows = [row for row in response.context["result"].units if row.object_type == "device"]
         with_issues = [row for row in rows if row.extra_data.get("other_issues")]
-        self.assertEqual(
-            with_issues[0].extra_data["identity_conflicts"],
-            ["duplicate_serial", "duplicate_name"],
-        )
-        # The stated problem keeps the scalar every existing control already reads.
-        self.assertEqual(with_issues[0].extra_data["identity_conflict"], "duplicate_serial")
+        self.assertEqual(len(with_issues), 2, "both colliding rows must list their conflicts")
+        for row in with_issues:
+            self.assertEqual(
+                row.extra_data["identity_conflicts"],
+                ["duplicate_serial", "duplicate_name"],
+            )
+            # The stated problem keeps the scalar every existing control already reads.
+            self.assertEqual(row.extra_data["identity_conflict"], "duplicate_serial")
 
     def test_a_row_with_one_problem_claims_no_others(self):
         """The extra list must not appear on every refused row and turn into noise."""

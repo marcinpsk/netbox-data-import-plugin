@@ -854,9 +854,9 @@ class ImportProfileBulkImportView(generic.BulkImportView):
 class _ProfileChildEditView(PermissionRequiredMixin, generic.ObjectEditView):
     """Base add/edit view for objects that belong to an ImportProfile.
 
-    Handles pre-populating the hidden ``profile`` field on add (via the
-    ``profile_pk`` URL kwarg) and redirecting back to the parent profile
-    detail page after a successful save.
+    Assigns ``profile`` on add from the ``profile_pk`` URL kwarg, and redirects back to the
+    parent profile detail page after a successful save. The forms carry no ``profile`` field,
+    so a posted one is ignored.
 
     Override ``get_required_permission`` so that add-URLs (which carry
     ``profile_pk`` but not ``pk``) are not misidentified as edit-URLs by

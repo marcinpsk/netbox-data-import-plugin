@@ -26,7 +26,7 @@ def _profile_output_kinds(form):
     if not profile:
         return None
     if not isinstance(profile, ImportProfile):
-        # A hidden field carries raw POST text, so a non-numeric value must not reach the query.
+        # NetBox seeds form initial from the query string, so a non-numeric value must not reach the query.
         try:
             profile = ImportProfile.objects.filter(pk=int(profile)).first()
         except (TypeError, ValueError):
