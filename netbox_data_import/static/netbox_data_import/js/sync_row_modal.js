@@ -14,6 +14,7 @@
   var currentSyncRequest = null;
   var pendingSyncRequests = new WeakMap();
   var syncsInFlight = 0;
+  var syncWritePending = false;
   var recalculateChoice = document.getElementById('syncRowRecalculate');
 
   function readJson(id) {
@@ -46,11 +47,14 @@
   }
 
   /* A write the operator cannot see the result of is the reason this exists, so the preview is
-   * recalculated once the last write lands, never while another one is still in flight. */
+   * recalculated once the last request settles, never while another one is still in flight.
+   * The last request to settle owns the recalculation even when it is the one that failed. */
   function recalculateAfterSync() {
+    if (!syncWritePending) return false;
     if (!recalculateChoice || !recalculateChoice.checked) return false;
     if (syncsInFlight > 0) return false;
     if (typeof window.ndiRecalculatePreview !== 'function') return false;
+    syncWritePending = false;
     return window.ndiRecalculatePreview();
   }
 
@@ -192,6 +196,7 @@
     window.ndiPostPreviewAction(modal.dataset.syncUrl, body)
     .then(function (data) {
       syncsInFlight -= 1;
+      syncWritePending = true;
       submittedSyncButton.disabled = true;
       submittedSyncButton.removeAttribute('data-ndi-modal');
       submittedSyncButton.title = data.message || 'Synced to NetBox.';
@@ -227,6 +232,7 @@
       var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
         && currentSyncButton === submittedSyncButton;
       if (currentSyncRequest === submittedSyncRequest) currentSyncRequest = null;
+      recalculateAfterSync();
       if (!ownsCurrentModal) return;
       confirmBtn.disabled = false;
       confirmBtn.querySelector('.ndi-sync-row-idle').classList.remove('d-none');

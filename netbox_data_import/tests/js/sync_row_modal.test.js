@@ -122,3 +122,56 @@ describe("the recalculation choice", () => {
     }
   });
 });
+
+describe("a sync that succeeds while another row is still in flight", () => {
+  function deferred() {
+    let settle = {};
+    const promise = new Promise((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    return { promise, ...settle };
+  }
+
+  function openAndConfirm(modal, rowNumber, sourceId) {
+    const trigger = document.createElement("button");
+    trigger.dataset.rowNumber = String(rowNumber);
+    trigger.dataset.sourceId = sourceId;
+    trigger.dataset.name = "device-" + rowNumber;
+    trigger.dataset.objectType = "device";
+    document.body.appendChild(trigger);
+    modal.dispatchEvent(Object.assign(new Event("show.bs.modal"), { relatedTarget: trigger }));
+    document.getElementById("syncRowConfirm").click();
+    return trigger;
+  }
+
+  it("recalculates once the last pending request fails", async () => {
+    loadModal();
+    const modal = document.getElementById("syncRowModal");
+    const first = deferred();
+    const second = deferred();
+    const queue = [first, second];
+    window.ndiPostPreviewAction = () => queue.shift().promise;
+    window.ndiMarkPreviewStale = () => {};
+    let recalculations = 0;
+    window.ndiRecalculatePreview = () => {
+      recalculations += 1;
+      return true;
+    };
+
+    openAndConfirm(modal, 17, "SRC-17");
+    openAndConfirm(modal, 18, "SRC-18");
+
+    // The write landed, but the second request still holds the preview, so nothing recalculates yet.
+    first.resolve({ message: "Synced." });
+    await first.promise;
+    await Promise.resolve();
+    expect(recalculations).toBe(0);
+
+    second.reject(new Error("Sync failed"));
+    await second.promise.catch(() => {});
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(recalculations).toBe(1);
+  });
+});
