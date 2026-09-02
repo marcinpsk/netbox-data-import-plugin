@@ -347,6 +347,15 @@ class PrimaryContactResolver:
             raise ObjectPermissionDenied("tenancy.add_contact")
         return proposed_contact
 
+    @staticmethod
+    def _reject_moved_lookup(contact, selection: ContactSelection, lookup_field) -> None:
+        """Refuse a selected Contact whose lookup value no longer matches the saved decision."""
+        selected = _text(selection.values.get(lookup_field))
+        if selected and selected.casefold() != _text(getattr(contact, lookup_field)).casefold():
+            raise ValidationError(
+                {"primary_contact": f"The selected Contact no longer has the chosen {lookup_field} value."}
+            )
+
     @classmethod
     def create_contact(cls, profile, selection: ContactSelection, user=None):
         """Store the Contact one resolution names, so it exists before any import runs.
@@ -356,14 +365,16 @@ class PrimaryContactResolver:
         """
         from tenancy.models import Contact
 
+        lookup_field = profile.adapter_settings.primary_contact_lookup_field
         if selection.contact_id is not None:
             contacts = Contact.objects.restrict(user, "view") if user is not None else Contact.objects
             contact = contacts.filter(pk=selection.contact_id).first()
             if contact is None:
                 raise ValidationError({"primary_contact": "The selected NetBox Contact no longer exists."})
+            # `_plan` refuses this later, so storing it here would report success on a doomed decision.
+            cls._reject_moved_lookup(contact, selection, lookup_field)
             return contact, False
 
-        lookup_field = profile.adapter_settings.primary_contact_lookup_field
         with transaction.atomic():
             cls.lock_imports()
             contact = cls._contact_for_values(selection.values, lookup_field, user, Contact.objects.select_for_update())
@@ -405,12 +416,7 @@ class PrimaryContactResolver:
                 raise ValidationError({"primary_contact": "The selected NetBox Contact no longer exists."})
             if user is not None and not Contact.objects.restrict(user, "view").filter(pk=contact.pk).exists():
                 raise ObjectPermissionDenied("tenancy.view_contact")
-            selected_lookup = _text(selection.values.get(lookup_field))
-            current_lookup = _text(getattr(contact, lookup_field))
-            if selected_lookup and selected_lookup.casefold() != current_lookup.casefold():
-                raise ValidationError(
-                    {"primary_contact": f"The selected Contact no longer has the chosen {lookup_field} value."}
-                )
+            cls._reject_moved_lookup(contact, selection, lookup_field)
             contact_values = {
                 "name": contact.name,
                 "email": contact.email,

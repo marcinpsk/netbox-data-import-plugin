@@ -900,6 +900,27 @@ class ContactCreatedOnSaveTest(ContactResolutionSessionMixin, TestCase):
         existing.refresh_from_db()
         self.assertEqual(existing.name, "Already Here")
 
+    def test_a_selected_contact_whose_lookup_value_moved_is_refused(self):
+        """`_plan` rejects this later, so storing it here reports success on a resolution that fails."""
+        from tenancy.models import Contact
+
+        selected = Contact.objects.create(name="Moved Person", email="moved.person@example.invalid")
+
+        response = self._post(
+            resolved_fields=json.dumps(
+                {
+                    "contact_resolution_applied": True,
+                    "contact_field_sources": {"email": "Contact"},
+                    "contact_field_values": {"name": "Ajax Person"},
+                    "contact_id": selected.pk,
+                }
+            )
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("no longer has the chosen email value", json.loads(response.content)["error"])
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
     def test_the_response_names_the_netbox_write_in_its_own_field(self):
         """The modal closes on save, so the page needs the write in a field it can keep showing."""
         body = json.loads(self._post().content)
