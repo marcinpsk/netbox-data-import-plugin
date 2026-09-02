@@ -76,11 +76,22 @@ def mark_preview_dirty(session) -> None:
     session[PREVIEW_DIRTY_SESSION_KEY] = True
 
 
-def pending_preview_payload(row_number: int, message: str) -> dict:
-    """Return the small response shared by deferred preview-row actions."""
-    return {
+def pending_preview_payload(row_number: int, message: str, detail: str = "", resolution: dict | None = None) -> dict:
+    """Return the small response shared by deferred preview-row actions.
+
+    `detail` names a write this action already made in NetBox, which the page reports rather than
+    leaving the operator to discover it. A save that only records a decision carries none.
+
+    `resolution` is the decision as it was stored, which the page keeps in place of the one it
+    posted. Only an action that saves a resolution carries it.
+    """
+    payload = {
         "ok": True,
         "row_number": row_number,
         "preview_state": "recalculation_required",
         "message": message,
+        "detail": detail,
     }
+    if resolution is not None:
+        payload["resolution"] = resolution
+    return payload

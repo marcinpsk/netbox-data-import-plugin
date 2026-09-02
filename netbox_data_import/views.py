@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
@@ -72,7 +72,7 @@ from .tables import (
     ImportProfileTable,
 )
 from . import adapters, ip_assignment
-from .contact_resolution import PrimaryContactResolver, suggest_contact_roles
+from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
 from .device_field_review import DeviceFieldReviewer
 from .object_permissions import (
     ObjectPermissionDenied,
@@ -179,6 +179,124 @@ def _contact_candidate_context(request, profile_id, source_id):
         source_rows[0],
         result_rows[0],
     )
+
+
+def _store_contact_for_unmatched_row(profile, resolved_fields, candidates, user):
+    """Store the Contact a row names while it still has no Device to assign it to.
+
+    Returns the resolved fields to save, which name the stored Contact, the sentence the operator
+    is told about it, and the stored Contact itself. A decision that names no Contact stores nothing.
+    """
+    selection = PrimaryContactResolver.selection_for_resolution(profile, resolved_fields, candidates)
+    if selection is None:
+        return resolved_fields, "", None
+    contact, created = PrimaryContactResolver.create_contact(profile, selection, user)
+    note = (
+        f" Contact '{contact.name}' was created in NetBox."
+        if created
+        else f" Contact '{contact.name}' already existed in NetBox."
+    )
+    return {**resolved_fields, "contact_id": contact.pk}, note, contact_identity(contact)
+
+
+def _planned_device_id(result_row):
+    """Return the Device a row plans to write to, or None when the import refused the row.
+
+    A refused row still carries the Device it matched, so the identifier alone does not mean the
+    import accepted the match.
+    """
+    if result_row.action != "update":
+        return None
+    return result_row.extra_data.get("netbox_device_id")
+
+
+@dataclass(frozen=True)
+class _ContactWrite:
+    """What one decided Contact changed on the Device a row already matched."""
+
+    assignment_changed: bool
+    contact_created: bool
+    contact: dict
+
+
+def _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, user) -> _ContactWrite | None:
+    """Apply the decided Contact to the Device this row already matched.
+
+    Returns what the write changed, or None when the decision names no Contact. `apply` creates the
+    Contact even when the assignment itself is unchanged, so the two are reported separately.
+    """
+    from dcim.models import Device
+
+    device = Device.objects.restrict(user, "change").filter(pk=device_id).first()
+    if device is None:
+        raise ObjectPermissionDenied("dcim.change_device")
+    resolved_row = dict(source_row)
+    resolved_row.update(resolved_fields)
+    review = PrimaryContactResolver.review(device, resolved_row, profile, user)
+    plan = PrimaryContactResolver.apply(device, profile, review, user)
+    if plan is None:
+        return None
+    return _ContactWrite(
+        assignment_changed=plan["assignment_action"] != "unchanged",
+        contact_created=plan["contact_id"] is None,
+        contact=plan["saved_contact"],
+    )
+
+
+@dataclass(frozen=True)
+class _ContactDecision:
+    """One saved Contact decision: the fields to store, and what writing it changed."""
+
+    resolved_fields: Mapping
+    write: _ContactWrite | None = None
+    note: str = ""
+    contact: dict | None = None
+
+
+def _persist_contact_decision(profile, resolved_fields, candidates, contact_context, user) -> _ContactDecision:
+    """Write the Contact a decision names, before the decision itself is stored.
+
+    A row with a planned Device has the Contact assigned to it. A row without one stores the Contact
+    alone. Either way the returned fields name the Contact that was persisted, so the stored decision
+    links it instead of the null the page posted.
+    """
+    if contact_context is None:
+        return _ContactDecision(resolved_fields)
+    source_row, result_row = contact_context
+    device_id = _planned_device_id(result_row)
+    if not device_id:
+        # No Device to assign to yet, so the Contact itself is stored now.
+        fields, note, contact = _store_contact_for_unmatched_row(profile, resolved_fields, candidates, user)
+        return _ContactDecision(fields, note=note, contact=contact)
+    write = _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, user)
+    if write is None:
+        return _ContactDecision(resolved_fields)
+    return _ContactDecision(
+        {**resolved_fields, "contact_id": write.contact["id"]},
+        write=write,
+        contact=write.contact,
+    )
+
+
+def _saved_resolution_report(contact_write, contact_note):
+    """Return the sentence and the write detail one saved Contact decision reports.
+
+    An assignment that did not move is not a Device Contact update, and a Contact this save created
+    is reported whether or not the assignment moved.
+    """
+    if contact_write is None:
+        return "Resolution saved. Recalculate the preview to apply it." + contact_note, contact_note.strip()
+    detail = (
+        f"Contact '{contact_write.contact['name']}' was created in NetBox."
+        if contact_write.contact_created
+        else contact_note.strip()
+    )
+    message = (
+        "Resolution saved and the linked Device Contact was updated."
+        if contact_write.assignment_changed
+        else "Resolution saved. The Device Contact already stood as decided."
+    )
+    return (f"{message} {detail}" if detail else message), detail
 
 
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
@@ -736,9 +854,9 @@ class ImportProfileBulkImportView(generic.BulkImportView):
 class _ProfileChildEditView(PermissionRequiredMixin, generic.ObjectEditView):
     """Base add/edit view for objects that belong to an ImportProfile.
 
-    Handles pre-populating the hidden ``profile`` field on add (via the
-    ``profile_pk`` URL kwarg) and redirecting back to the parent profile
-    detail page after a successful save.
+    Assigns ``profile`` on add from the ``profile_pk`` URL kwarg, and redirects back to the
+    parent profile detail page after a successful save. The forms carry no ``profile`` field,
+    so a posted one is ignored.
 
     Override ``get_required_permission`` so that add-URLs (which carry
     ``profile_pk`` but not ``pk``) are not misidentified as edit-URLs by
@@ -1001,6 +1119,7 @@ def _conflict_comparison_row(row, source_rows_by_number, *, is_current):
         "detail": row.detail,
         # The comparison offers the same action the row column does, so it carries the same facts.
         "identity_conflict": extra_data.get("identity_conflict", ""),
+        "identity_conflicts": extra_data.get("identity_conflicts", []),
         "duplicate_serial": extra_data.get("duplicate_serial", ""),
         "is_current": is_current,
     }
@@ -2897,6 +3016,7 @@ class SaveResolutionView(_AjaxPermissionView):
                 return _preview_action_error(request, next_url, stale_reason, status=409)
 
             contact_context = None
+            candidates = {}
             if source_column == "candidate:contact":
                 try:
                     validate_registered_adapter(profile)
@@ -2914,6 +3034,10 @@ class SaveResolutionView(_AjaxPermissionView):
                 validate_source_resolution_fields(profile, source_column, resolved_fields)
                 # Serialize against an executing import, which holds the same profile row.
                 with locked_profile_policy(profile.pk):
+                    decision = _persist_contact_decision(
+                        profile, resolved_fields, candidates, contact_context, request.user
+                    )
+                    resolved_fields = decision.resolved_fields
                     save_permission_scoped_object(
                         request.user,
                         SourceResolution,
@@ -2923,26 +3047,6 @@ class SaveResolutionView(_AjaxPermissionView):
                             "resolved_fields": resolved_fields,
                         },
                     )
-                    contact_updated = False
-                    if contact_context is not None:
-                        source_row, result_row = contact_context
-                        device_id = result_row.extra_data.get("netbox_device_id")
-                        if device_id:
-                            from dcim.models import Device
-
-                            device = Device.objects.restrict(request.user, "change").filter(pk=device_id).first()
-                            if device is None:
-                                raise ObjectPermissionDenied("dcim.change_device")
-                            resolved_row = dict(source_row)
-                            resolved_row.update(resolved_fields)
-                            contact_review = PrimaryContactResolver.review(
-                                device,
-                                resolved_row,
-                                profile,
-                                request.user,
-                            )
-                            PrimaryContactResolver.apply(device, profile, contact_review, request.user)
-                            contact_updated = True
             except IntegrityError:
                 return _preview_action_error(
                     request,
@@ -2959,17 +3063,21 @@ class SaveResolutionView(_AjaxPermissionView):
                 )
             except ValidationError as exc:
                 return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
-            saved_message = (
-                "Resolution saved and the linked Device Contact was updated."
-                if contact_updated
-                else "Resolution saved. Recalculate the preview to apply it."
-            )
+            saved_message, contact_detail = _saved_resolution_report(decision.write, decision.note)
             # The rendered row keeps the action it had before this decision, so the page must
             # ask for a recalculation whichever path saved it.
             mark_preview_dirty(request.session)
             if _wants_json(request):
                 row_number = contact_context[1].row_number if contact_context else None
-                return JsonResponse(pending_preview_payload(row_number, saved_message))
+                # The page keeps its own copy of the decision, so it is given the saved one.
+                resolution = {
+                    "original_value": original_value or "",
+                    "resolved_fields": resolved_fields,
+                    "contact": decision.contact,
+                }
+                return JsonResponse(
+                    pending_preview_payload(row_number, saved_message, contact_detail, resolution=resolution)
+                )
             messages.success(request, saved_message)
             return redirect(next_url)
         return _preview_action_error(request, next_url, "A source row and column are required.", status=400)
@@ -4200,7 +4308,8 @@ class SyncSingleRowView(_AjaxPermissionView):
             )
 
         mark_preview_dirty(request.session)
-        return JsonResponse(pending_preview_payload(row_number, "Synchronized."))
+        written = f"{preview_unit.object_type.capitalize()} '{preview_unit.name}' was created in NetBox."
+        return JsonResponse(pending_preview_payload(row_number, "Synchronized.", written))
 
 
 class UnlinkDeviceView(_AjaxPermissionView):

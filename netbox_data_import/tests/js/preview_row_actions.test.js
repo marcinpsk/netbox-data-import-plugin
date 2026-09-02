@@ -172,3 +172,83 @@ describe("preview row actions", () => {
     expect(opened).toBe(true);
   });
 });
+
+describe("automatic recalculation", () => {
+  it("latches the links and navigates to the recalculation the operator would press", () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign, href: "http://localhost/preview/" });
+    const link = document.getElementById("ndi-recalculate-preview");
+    const staleLink = document.querySelector("#ndi-preview-stale .ndi-recalculate-preview");
+
+    expect(window.ndiRecalculatePreview()).toBe(true);
+
+    expect(assign).toHaveBeenCalledWith(link.href);
+    expect(link.textContent).toContain("Recalculating");
+    expect(link.getAttribute("aria-disabled")).toBe("true");
+    expect(staleLink.classList.contains("disabled")).toBe(true);
+  });
+
+  it("reports that it started nothing when the page offers no recalculation", () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign, href: "http://localhost/preview/" });
+    document.querySelectorAll(".ndi-recalculate-preview").forEach((link) => link.remove());
+
+    expect(window.ndiRecalculatePreview()).toBe(false);
+
+    expect(assign).not.toHaveBeenCalled();
+  });
+});
+
+describe("reporting a write the action already made", () => {
+  it("keeps the named write on the page after the modal that made it closes", () => {
+    window.ndiMarkPreviewStale("Contact 'Ada Lovelace' was created in NetBox.");
+
+    const notice = document.getElementById("ndi-preview-stale");
+    expect(notice.hidden).toBe(false);
+    expect(notice.querySelector(".ndi-preview-stale-detail").textContent).toBe(
+      "Contact 'Ada Lovelace' was created in NetBox.",
+    );
+  });
+
+  it("says nothing extra when the action only recorded a decision", () => {
+    window.ndiMarkPreviewStale("");
+
+    const notice = document.getElementById("ndi-preview-stale");
+    expect(notice.hidden).toBe(false);
+    expect(notice.querySelector(".ndi-preview-stale-detail")).toBeNull();
+  });
+
+  it("replaces the previous write rather than stacking them up", () => {
+    window.ndiMarkPreviewStale("First write.");
+    window.ndiMarkPreviewStale("Second write.");
+
+    const lines = document.querySelectorAll("#ndi-preview-stale .ndi-preview-stale-detail");
+    expect(lines).toHaveLength(1);
+    expect(lines[0].textContent).toBe("Second write.");
+  });
+});
+
+describe("a recalculation that is already running", () => {
+  it("starts one navigation when the helper is called twice", () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign, href: "http://localhost/preview/" });
+
+    expect(window.ndiRecalculatePreview()).toBe(true);
+    expect(window.ndiRecalculatePreview()).toBe(true);
+
+    // The links are latched after the first call, so the second must not navigate again.
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts one navigation when a press is followed by the helper", () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign, href: "http://localhost/preview/" });
+    document
+      .getElementById("ndi-recalculate-preview")
+      .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+    expect(window.ndiRecalculatePreview()).toBe(true);
+
+    expect(assign).not.toHaveBeenCalled();
+  });
+});

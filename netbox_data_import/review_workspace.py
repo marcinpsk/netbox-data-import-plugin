@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
-from .plan import Disposition, ImportPlan, SynchronizationUnit
+from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
     has_below_rack_position,
@@ -29,11 +29,16 @@ _DIAGNOSTIC_MESSAGES = {
     "device.ambiguous_serial": "Multiple devices have this serial number.",
     "device.ambiguous_stored_source_id": "More than one device stores this source ID.",
     "device.contact_invalid": "The primary contact selection is invalid.",
+    "device.contact_permission": "Permission denied: cannot read or write this row's primary contact.",
     "device.contact_resolution_required": "Choose the primary contact values before importing.",
     "device.class_ignored": "Ignored source class",
     "device.class_unmapped": "No class-to-role mapping exists for this source class.",
     "device.cross_site_match": "A strong identity matches a device at another site.",
     "device.device_type_missing": "The device type does not exist. Map or create it before importing.",
+    "device.device_type_permission": "Permission denied: dcim.add_devicetype",
+    "device.device_type_slug_collision": "A stored device type already uses the slug this model derives.",
+    "device.manufacturer_permission": "Permission denied: dcim.add_manufacturer",
+    "device.manufacturer_slug_collision": "A stored manufacturer already uses the slug this make derives.",
     "device.derived_slug_collision": "Different source identities derive the same dependency slug.",
     "device.duplicate_asset_tag": "The asset tag appears more than once in this import.",
     "device.duplicate_name": "The device name appears more than once in this import.",
@@ -51,8 +56,11 @@ _DIAGNOSTIC_MESSAGES = {
     "device.rack_position_claimed": "Another row claims this rack position.",
     "device.rack_position_occupied": "The rack position is occupied.",
     "device.rack_required": "A rack position needs a target rack.",
+    "device.role_permission": "Permission denied: dcim.add_devicerole",
     "device.role_unconfigured": "No device role is configured for this source class.",
     "device.zero_u_review_conflict": "A saved review keeps a rack position on a 0U device type.",
+    "device.unparseable_ip": "The source value is not a valid IP address.",
+    "device.validation_failed": "The planned device does not pass NetBox validation.",
     "rack.add_permission": "Permission denied: dcim.add_rack",
     "rack.change_permission": "Permission denied: dcim.change_rack",
     "rack.duplicate_name": "The rack name appears more than once in this import.",
@@ -105,17 +113,21 @@ def _object_type(unit: SynchronizationUnit) -> str:
     return unit.identity.partition(":")[0]
 
 
+def _blocking(unit: SynchronizationUnit) -> list:
+    """Return the unit's error diagnostics: the first states the row, the rest are what it needs."""
+    return [item for item in unit.diagnostics if item.severity == Severity.ERROR]
+
+
+def _diagnostic_message(diagnostic) -> str:
+    """Return the operator wording for one diagnostic."""
+    return str(diagnostic.display.get("message") or "") or _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+
+
 def _detail(unit: SynchronizationUnit, action: str, object_type: str, name: str) -> str:
     """Return stable operator wording for one unit."""
     if unit.diagnostics:
-        diagnostic = next(
-            (item for item in unit.diagnostics if item.severity == "error"),
-            unit.diagnostics[0],
-        )
-        message = diagnostic.display.get("message")
-        if message:
-            return str(message)
-        return _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
+        blocking = _blocking(unit)
+        return _diagnostic_message(blocking[0] if blocking else unit.diagnostics[0])
     if detail := unit.display.get("detail"):
         return str(detail)
     verb = {
@@ -188,6 +200,22 @@ class WorkspaceUnit:
                 }.get(diagnostic.code)
                 if row_key:
                     extra_data[row_key] = [number for number in rows if number != row_number]
+            # The first error states the row; the rest are what it still needs. A warning is neither.
+            blocking = _blocking(unit)
+            extra_data["other_issues"] = [
+                {"code": item.code, "message": _diagnostic_message(item)} for item in blocking[1:]
+            ]
+            # A row action reads these facts, so a second problem is settled like a first one.
+            extra_data["identity_conflicts"] = [
+                conflict for item in blocking if (conflict := _IDENTITY_CONFLICTS.get(item.code))
+            ]
+            for item in blocking[1:]:
+                secondary = item.to_dict()["display"]
+                for key, value in secondary.items():
+                    if key not in structural:
+                        extra_data.setdefault(key, value)
+                for key, value in (secondary.get("extra_data") or {}).items():
+                    extra_data.setdefault(key, value)
         return cls(
             identity=unit.identity,
             disposition=unit.disposition,

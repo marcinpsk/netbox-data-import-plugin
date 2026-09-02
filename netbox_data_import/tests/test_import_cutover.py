@@ -907,6 +907,17 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertEqual(response.status_code, 500)
 
+    def test_single_row_sync_names_the_object_it_wrote(self):
+        """The modal closes on success, so the page needs the write named to keep it on screen."""
+        self._upload()
+
+        response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 200, response.content)
+        detail = response.json()["detail"]
+        self.assertIn("rack-a", detail)
+        self.assertIn("created", detail.lower())
+
     def test_single_row_sync_reports_real_stale_target_state(self):
         """A Rack that appears after planning invalidates the accepted unit."""
         from dcim.models import Rack

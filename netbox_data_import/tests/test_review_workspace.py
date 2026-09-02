@@ -54,6 +54,46 @@ def _workspace(*units):
     )
 
 
+class DiagnosticWordingTest(TestCase):
+    """A blocked row must read as an instruction, not as an internal code name."""
+
+    # Repeated on purpose: reading the registry the code reads would let one wrong entry pass.
+    EXPECTED = {
+        "device.role_permission": "Permission denied: dcim.add_devicerole",
+        "device.contact_permission": "Permission denied: cannot read or write this row's primary contact.",
+        "device.unparseable_ip": "The source value is not a valid IP address.",
+        "device.validation_failed": "The planned device does not pass NetBox validation.",
+    }
+
+    def _detail_for(self, code):
+        """Return the wording a real Review Workspace renders for one diagnostic code."""
+        unit = _unit("device:1", Disposition.INVALID, row={"_row_number": 1, "device_name": "dev-a"})
+        unit = SynchronizationUnit(
+            identity=unit.identity,
+            disposition=unit.disposition,
+            changes=unit.changes,
+            display=unit.display,
+            diagnostics=(
+                Diagnostic(
+                    code=code,
+                    severity=Severity.ERROR,
+                    identities=(unit.identity,),
+                    display=unit.display,
+                ),
+            ),
+        )
+        return _workspace(unit).units[0].detail
+
+    def test_each_code_renders_a_sentence_rather_than_its_code(self):
+        """`_diagnostic_message` falls back to the code, so a missing entry reaches the operator."""
+        for code, expected in self.EXPECTED.items():
+            with self.subTest(code=code):
+                detail = self._detail_for(code)
+
+                self.assertNotEqual(detail, code)
+                self.assertEqual(detail, expected)
+
+
 class ReviewWorkspacePresentationTest(TestCase):
     """The workspace maps plan vocabulary to stable preview vocabulary."""
 

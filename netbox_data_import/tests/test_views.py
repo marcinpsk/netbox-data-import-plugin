@@ -295,6 +295,27 @@ class ColumnMappingViewTest(BaseViewTestCase):
         cm.refresh_from_db()
         self.assertEqual(cm.source_column, "SerialNo")
 
+    def test_the_add_page_does_not_call_itself_an_edit(self):
+        """`get_object` returns an unsaved instance for add, which is truthy but has no pk."""
+        url = reverse("plugins:netbox_data_import:columnmapping_add", kwargs={"profile_pk": self.profile.pk})
+
+        html = self.client.get(url).content.decode()
+
+        self.assertIn("Add Column Mapping", html)
+        self.assertNotIn("Edit Column Mapping", html)
+
+    def test_edit_cannot_move_a_mapping_to_another_profile(self):
+        """The form has no profile field, so a posted one is ignored and cannot re-parent the row."""
+        other = _make_profile("CMOtherProfile")
+        cm = ColumnMapping.objects.filter(profile=self.profile, target_field="serial").first()
+        url = reverse("plugins:netbox_data_import:columnmapping_edit", kwargs={"pk": cm.pk})
+
+        resp = self.client.post(url, {"profile": other.pk, "source_column": "SerialNo", "target_field": "serial"})
+
+        self.assertEqual(resp.status_code, 302, "a rejected form would also leave the profile unchanged")
+        cm.refresh_from_db()
+        self.assertEqual(cm.profile, self.profile)
+
     def test_delete_column_mapping_get(self):
         """Delete column mapping confirmation page returns 200."""
         cm = ColumnMapping.objects.filter(profile=self.profile).first()
@@ -418,6 +439,24 @@ class DeviceTypeMappingViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
+    def test_the_add_page_does_not_call_itself_an_edit(self):
+        """`get_object` returns an unsaved instance for add, which is truthy but has no pk."""
+        url = reverse("plugins:netbox_data_import:devicetypemapping_add", kwargs={"profile_pk": self.profile.pk})
+
+        html = self.client.get(url).content.decode()
+
+        self.assertIn("Add Device Type Mapping", html)
+        self.assertNotIn("Edit Device Type Mapping", html)
+
+    def test_the_edit_page_names_itself_an_edit(self):
+        """The other `object.pk` branch: a stored row must not offer itself as an add."""
+        url = reverse("plugins:netbox_data_import:devicetypemapping_edit", kwargs={"pk": self.dtm.pk})
+
+        html = self.client.get(url).content.decode()
+
+        self.assertIn("Edit Device Type Mapping", html)
+        self.assertNotIn("Add Device Type Mapping", html)
+
     def test_edit_dtm_post(self):
         """POST to edit DTM updates it."""
         url = reverse("plugins:netbox_data_import:devicetypemapping_edit", kwargs={"pk": self.dtm.pk})
@@ -500,6 +539,14 @@ class ImportSetupViewTest(BaseViewTestCase):
 
 class PreviewSessionMixin:
     """Build the preview session state without dragging another class's test methods along."""
+
+    def _device_row_cells(self, html, row_number):
+        """Return one device row's own cells: a source row also renders a manufacturer and a rack."""
+        for block in html.split("<tr")[1:]:
+            opening, _, body = block.partition(">")
+            if f'data-row-number="{row_number}"' in opening and 'data-object-type="device"' in opening:
+                return body
+        self.fail(f"the page renders no device row {row_number}")
 
     def _setup_session(self, *, mutate_workbook=None):
         """Populate session with a valid import state."""

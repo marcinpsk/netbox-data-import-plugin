@@ -133,7 +133,7 @@ async function setUp(page, fixture = previewFixture, candidateRows = {}) {
 function rolesByColumn(page) {
   return page.evaluate(() =>
     Object.fromEntries(
-      [...document.querySelectorAll("#contactCandidateValueRows .ndi-contact-value-row")].map((row) => [
+      [...document.querySelectorAll("#contactCandidateValueRows [data-source-column]")].map((row) => [
         row.dataset.sourceColumn,
         row.querySelector(".ndi-contact-role").value,
       ]),
@@ -616,10 +616,11 @@ test("a linked Contact is still shown when the saved row is reopened", async ({ 
 
 test("the missing-field message lands on an empty input, not a filled one", async ({ page }) => {
   await setUpBothControllers(page);
-  // This row stores a typed name and no email, so a saved literal is already on screen.
+  // This row stores a typed name and no email, so it opens with the saved literal and a blank
+  // one for the email it still needs.
   await openRow(page, "saved-row", "source-literal");
-  await page.locator("#contactCandidateEditToggle").click();
-  await expect(page.locator(".ndi-contact-literal")).toHaveValue("Typed Name");
+  await expect(page.locator(".ndi-contact-literal")).toHaveCount(2);
+  await expect(page.locator(".ndi-contact-literal").first()).toHaveValue("Typed Name");
 
   await page.locator("#contactCandidateForm button[type=submit]").click();
 
@@ -729,4 +730,135 @@ test("a reused blank input is given the role it was asked for", async ({ page })
   expect(JSON.parse(requests[0].fields.resolved_fields).contact_field_values.email).toBe(
     "typed@example.invalid",
   );
+});
+
+/* A row whose own values name no Contact is where the modal used to offer nothing to type into:
+ * the operator had to press Save on an empty form to be handed a field. */
+test("a row with no values of its own opens with the fields it needs", async ({ page }) => {
+  await setUpBothControllers(page);
+
+  await openRow(page, "row-without-values", "source-blank");
+
+  await expect(page.locator("#contactCandidateEdit")).toBeVisible();
+  const offered = await page.evaluate(() =>
+    [...document.querySelectorAll("#contactCandidateValueRows [data-literal]")].map((row) => ({
+      role: row.querySelector(".ndi-contact-role").value,
+      value: row.querySelector(".ndi-contact-literal").value,
+    })),
+  );
+  expect(offered).toEqual([
+    { role: "name", value: "" },
+    { role: "email", value: "" },
+  ]);
+  expect(await page.evaluate(() => window.__requests.length)).toBe(0);
+});
+
+test("typing a new Contact into the offered fields saves it without a rejected submit", async ({ page }) => {
+  await setUpBothControllers(page);
+  await openRow(page, "row-without-values", "source-blank");
+
+  const literals = page.locator("#contactCandidateValueRows .ndi-contact-literal");
+  await literals.nth(0).fill("Katherine Johnson");
+  await literals.nth(1).fill("katherine@example.invalid");
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  const requests = await page.evaluate(() => window.__requests);
+  expect(requests).toHaveLength(1);
+  expect(JSON.parse(requests[0].fields.resolved_fields)).toEqual({
+    contact_resolution_applied: true,
+    contact_field_sources: {},
+    contact_field_values: { name: "Katherine Johnson", email: "katherine@example.invalid" },
+    contact_id: null,
+  });
+});
+
+test("the summary reads back what the operator typed before they save", async ({ page }) => {
+  await setUpBothControllers(page);
+  await openRow(page, "row-without-values", "source-blank");
+
+  await page.locator("#contactCandidateValueRows .ndi-contact-literal").nth(0).fill("Katherine Johnson");
+
+  await expect(page.locator("#contactCandidateSummaryName")).toHaveText("Katherine Johnson");
+});
+
+test("choosing no contact puts the offered fields out of use", async ({ page }) => {
+  await setUpBothControllers(page);
+  await openRow(page, "row-without-values", "source-blank");
+
+  await page.locator("#contactCandidateNone").check();
+
+  await expect(page.locator("#contactCandidateValueRows .ndi-contact-literal").first()).toBeDisabled();
+  await expect(page.locator("#contactCandidateSummaryName")).toHaveText("No contact for this row");
+});
+
+test("a Contact the save created is named on the page after the modal closes", async ({ page }) => {
+  await setUpBothControllers(page, {
+    payload: {
+      ok: true,
+      row_number: 1,
+      preview_state: "recalculation_required",
+      message: "Resolution saved.",
+      detail: "Contact 'Grace Hopper' was created in NetBox.",
+    },
+  });
+  await openRow(page, "first-row", "source-first");
+
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
+  await expect(page.locator("#ndi-preview-stale .ndi-preview-stale-detail")).toHaveText(
+    "Contact 'Grace Hopper' was created in NetBox.",
+  );
+});
+
+test("a save that wrote nothing to NetBox claims nothing", async ({ page }) => {
+  await setUpBothControllers(page);
+  await openRow(page, "first-row", "source-first");
+
+  await page.locator("#contactCandidateForm button[type=submit]").click();
+
+  await expect(page.locator("#ndi-preview-stale")).toBeVisible();
+  await expect(page.locator("#ndi-preview-stale .ndi-preview-stale-detail")).toHaveCount(0);
+});
+
+test("a Contact this save created stays linked when the row is reopened", async ({ page }) => {
+  await setUp(page);
+  // The server answers with the decision it stored, which names the Contact it just created.
+  await page.evaluate(() => {
+    window.ndiMarkPreviewStale = () => {};
+    window.ndiPostPreviewAction = () =>
+      Promise.resolve({
+        ok: true,
+        detail: "Contact 'Grace Hopper' was created in NetBox.",
+        resolution: {
+          original_value: "{}",
+          resolved_fields: {
+            contact_resolution_applied: true,
+            contact_field_sources: { email: "Primary Contact", name: "Contact", phone: "Contact Number" },
+            contact_field_values: {},
+            contact_id: 4242,
+          },
+          contact: {
+            id: 4242,
+            name: "Grace Hopper",
+            email: "grace.hopper@example.invalid",
+            phone: "+44 20 7946 0102",
+          },
+        },
+      });
+  });
+  await openRow(page, "first-row", "source-first");
+
+  await page.evaluate(() => document.getElementById("contactCandidateForm")
+    .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await expect(
+    page.locator('[data-ndi-modal="#contactCandidateModal"][data-source-id="source-first"]'),
+  ).toHaveClass(/ndi-contact-resolved/);
+
+  await openRow(page, "first-row", "source-first");
+
+  await expect(page.locator("#contactCandidateContactId")).toHaveValue("4242");
+  expect(
+    await page.evaluate(() => document.getElementById("contactCandidateExisting").tomselect.getValue()),
+  ).toBe("4242");
 });

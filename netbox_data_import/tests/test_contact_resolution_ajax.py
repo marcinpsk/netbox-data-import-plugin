@@ -24,6 +24,56 @@ JSON = "application/json"
 class ContactResolutionSessionMixin:
     """Seed the preview session with one device row that still needs a Contact decision."""
 
+    def _matched_device(self):
+        """Give the row a matched Device and a profile role, then replan onto it."""
+        from dcim.models import Device
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
+        self.profile.adapter_config["primary_contact_role"] = role.name
+        self.profile.save()
+        device = Device.objects.create(
+            name="ajax-contact-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        # The first decision unblocks the row, so the second one meets a matched device.
+        self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-one")
+        plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
+        result = ReviewWorkspace(plan)
+        session = self.client.session
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = result.source_rows
+        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
+        session.save()
+        return device
+
+    def _post_decision(self, sources, *, revision, values=None):
+        """Save one Contact decision for the row through the deferred endpoint."""
+        return self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "AJAX-001",
+                "source_column": "candidate:contact",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": sources,
+                        "contact_field_values": values or {},
+                        "contact_id": None,
+                    }
+                ),
+                "preview_revision": revision,
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+            HTTP_ACCEPT=JSON,
+        )
+
     def setUp(self):
         """Put one device row that needs a Contact decision into the preview session."""
         self.site, self.manufacturer, self.device_type, self.role = make_dcim_objects("CtcAjax")
@@ -507,6 +557,173 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertEqual(assignment.role, role)
 
 
+class MatchedDeviceContactReportTest(ContactResolutionSessionMixin, TestCase):
+    """The response must claim a Device Contact write only when one happened."""
+
+    def test_a_no_contact_decision_on_a_matched_device_claims_no_write(self):
+        """`apply()` writes nothing for a no-contact decision, so the message must not claim one."""
+        from tenancy.models import ContactAssignment
+
+        device = self._matched_device()
+        ContactAssignment.objects.all().delete()
+
+        response = self._post_decision({}, revision="revision-two")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertNotIn("Device Contact", json.loads(response.content)["message"])
+        self.assertFalse(
+            ContactAssignment.objects.filter(
+                object_id=device.pk,
+                object_type=ContentType.objects.get_for_model(device),
+            ).exists()
+        )
+
+    def test_a_decision_that_assigns_a_contact_still_reports_the_write(self):
+        """The report must stay for the case it was written for."""
+        self._matched_device()
+
+        response = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertIn("Device Contact", json.loads(response.content)["message"])
+
+
+class MatchedDeviceContactDetailTest(ContactResolutionSessionMixin, TestCase):
+    """The matched path reports the Contact it created, and never claims an assignment it kept."""
+
+    def test_a_contact_created_for_a_matched_device_is_named_in_the_detail(self):
+        """The unmatched path reports its Contact write, so the matched path must not stay silent."""
+        self._matched_device()
+
+        response = self._post_decision(
+            {},
+            revision="revision-two",
+            values={"name": "Second Person", "email": "second.person@example.invalid"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        body = json.loads(response.content)
+        self.assertIn("Second Person", body["detail"])
+        self.assertIn("was created in NetBox", body["detail"])
+
+    def test_the_saved_resolution_names_the_contact_the_matched_path_created(self):
+        """Reopening the row must show the Contact this save created, not an unlinked candidate."""
+        from tenancy.models import Contact
+
+        self._matched_device()
+
+        self._post_decision(
+            {},
+            revision="revision-two",
+            values={"name": "Second Person", "email": "second.person@example.invalid"},
+        )
+
+        contact = Contact.objects.get(email="second.person@example.invalid")
+        saved = SourceResolution.objects.get(
+            profile=self.profile, source_id="AJAX-001", source_column="candidate:contact"
+        )
+        self.assertEqual(saved.resolved_fields["contact_id"], contact.pk)
+
+    def test_the_response_returns_the_resolution_that_was_saved(self):
+        """The page stores what it gets back, so the response has to carry the persisted identity."""
+        from tenancy.models import Contact
+
+        self._matched_device()
+
+        response = self._post_decision(
+            {},
+            revision="revision-two",
+            values={"name": "Second Person", "email": "second.person@example.invalid"},
+        )
+
+        contact = Contact.objects.get(email="second.person@example.invalid")
+        resolution = json.loads(response.content)["resolution"]
+        self.assertEqual(resolution["resolved_fields"]["contact_id"], contact.pk)
+        # The picker rebuilds from the page's own data, so it needs the Contact itself to show it.
+        self.assertEqual(
+            resolution["contact"],
+            {
+                "id": contact.pk,
+                "name": "Second Person",
+                "email": "second.person@example.invalid",
+                "phone": contact.phone,
+            },
+        )
+
+    def test_an_unmoved_assignment_does_not_claim_a_contact_update(self):
+        """`apply` returns a plan for an unchanged assignment, which is not a Device Contact write."""
+        self._matched_device()
+        first = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+        self.assertIn("was updated", json.loads(first.content)["message"])
+
+        response = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        message = json.loads(response.content)["message"]
+        self.assertIn("already stood as decided", message)
+        self.assertNotIn("was updated", message)
+
+
+class RefusedRowContactAssignmentTest(ContactResolutionSessionMixin, TestCase):
+    """A refused row still names the Device it matched, but its Contact must not reach it."""
+
+    def _refused_row_device(self):
+        """Match the row to a Device another source row already owns, then replan onto it."""
+        from dcim.models import Device
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import DeviceExistingMatch
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
+        self.profile.adapter_config["primary_contact_role"] = role.name
+        self.profile.save()
+        device = Device.objects.create(
+            name="ajax-contact-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="AJAX-OTHER",
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+        # The first decision settles the Contact question, so the replan reaches the binding check.
+        self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-one")
+        plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
+        result = ReviewWorkspace(plan)
+        session = self.client.session
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = result.source_rows
+        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
+        session.save()
+        return device, result
+
+    def test_a_refused_row_writes_no_contact_onto_the_device_it_named(self):
+        """`device.already_bound` still carries `netbox_device_id`, and the row plans no update."""
+        from tenancy.models import ContactAssignment
+
+        device, result = self._refused_row_device()
+        row = next(unit for unit in result.units if unit.source_id == "AJAX-001")
+        self.assertEqual(row.action, "error", "the row must be refused for this test to mean anything")
+        self.assertEqual(row.extra_data.get("netbox_device_id"), device.pk)
+        ContactAssignment.objects.all().delete()
+
+        response = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(
+            ContactAssignment.objects.filter(
+                object_id=device.pk,
+                object_type=ContentType.objects.get_for_model(device),
+            ).exists(),
+            "the import refused this row, so its Contact must not reach the Device",
+        )
+
+
 class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
     """The picker asks the server on open, so a Contact created since the preview is offered."""
 
@@ -584,3 +801,194 @@ class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):
         response = self._suggest(profile_id="")
 
         self.assertEqual(response.status_code, 400, response.content)
+
+
+class ContactCreatedOnSaveTest(ContactResolutionSessionMixin, TestCase):
+    """A row that still has to create its Device has nothing to assign a Contact to yet.
+
+    The Contact itself is stored as soon as the decision is saved, because the operator would
+    otherwise only get it by syncing the row or running the whole import.
+    """
+
+    def _payload(self, **overrides):
+        payload = {
+            "profile_id": self.profile.pk,
+            "source_id": "AJAX-001",
+            "source_column": "candidate:contact",
+            "resolved_fields": json.dumps(
+                {
+                    "contact_resolution_applied": True,
+                    "contact_field_sources": {"email": "Contact", "phone": "Contact Number"},
+                    "contact_field_values": {"name": "Ajax Person"},
+                    "contact_id": None,
+                }
+            ),
+            "preview_revision": "revision-one",
+            "next": reverse("plugins:netbox_data_import:import_preview"),
+        }
+        payload.update(overrides)
+        return payload
+
+    def _post(self, **overrides):
+        return self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            self._payload(**overrides),
+            HTTP_ACCEPT=JSON,
+        )
+
+    def _saved_resolution(self):
+        return SourceResolution.objects.get(
+            profile=self.profile,
+            source_id="AJAX-001",
+            source_column="candidate:contact",
+        )
+
+    def test_the_contact_is_stored_when_the_decision_is_saved(self):
+        """This is the whole point: the Contact exists in NetBox before any import runs."""
+        from tenancy.models import Contact
+
+        response = self._post()
+
+        self.assertEqual(response.status_code, 200, response.content)
+        contact = Contact.objects.get(email="ajax.person@example.invalid")
+        self.assertEqual(contact.name, "Ajax Person")
+        self.assertEqual(contact.phone, "+1 202-555-0180")
+
+    def test_the_message_names_the_contact_it_created(self):
+        """A silent write to NetBox is the one thing the operator must not have to guess at."""
+        body = json.loads(self._post().content)
+
+        self.assertIn("Ajax Person", body["message"])
+        self.assertIn("created", body["message"].lower())
+        self.assertEqual(body["preview_state"], "recalculation_required")
+
+    def test_the_resolution_records_the_contact_it_created(self):
+        """The stored decision names the Contact, so planning reuses it instead of proposing one."""
+        from tenancy.models import Contact
+
+        self._post()
+
+        contact = Contact.objects.get(email="ajax.person@example.invalid")
+        self.assertEqual(self._saved_resolution().resolved_fields["contact_id"], contact.pk)
+
+    def test_saving_the_same_decision_twice_creates_one_contact(self):
+        """The second save meets the Contact the first one made, so it must reuse it."""
+        from tenancy.models import Contact
+
+        self._post()
+        session = self.client.session
+        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
+        session.save()
+
+        response = self._post(preview_revision="revision-two")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(Contact.objects.filter(email="ajax.person@example.invalid").count(), 1)
+
+    def test_a_contact_that_already_exists_is_reused_not_duplicated(self):
+        """The lookup field identifies the Contact, so a stored one answers for these values."""
+        from tenancy.models import Contact
+
+        existing = Contact.objects.create(name="Already Here", email="ajax.person@example.invalid")
+
+        body = json.loads(self._post().content)
+
+        self.assertEqual(Contact.objects.filter(email="ajax.person@example.invalid").count(), 1)
+        self.assertEqual(self._saved_resolution().resolved_fields["contact_id"], existing.pk)
+        self.assertIn("already", body["message"].lower())
+        # Reuse must not rewrite the stored Contact from the source row.
+        existing.refresh_from_db()
+        self.assertEqual(existing.name, "Already Here")
+
+    def test_a_selected_contact_whose_lookup_value_moved_is_refused(self):
+        """`_plan` rejects this later, so storing it here reports success on a resolution that fails."""
+        from tenancy.models import Contact
+
+        selected = Contact.objects.create(name="Moved Person", email="moved.person@example.invalid")
+
+        response = self._post(
+            resolved_fields=json.dumps(
+                {
+                    "contact_resolution_applied": True,
+                    "contact_field_sources": {"email": "Contact"},
+                    "contact_field_values": {"name": "Ajax Person"},
+                    "contact_id": selected.pk,
+                }
+            )
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("no longer has the chosen email value", json.loads(response.content)["error"])
+        self.assertFalse(SourceResolution.objects.filter(source_id="AJAX-001").exists())
+
+    def test_the_response_names_the_netbox_write_in_its_own_field(self):
+        """The modal closes on save, so the page needs the write in a field it can keep showing."""
+        body = json.loads(self._post().content)
+
+        self.assertIn("Ajax Person", body["detail"])
+        self.assertIn("created", body["detail"].lower())
+
+    def test_a_decision_that_writes_nothing_reports_no_detail(self):
+        """A recorded decision is not news, so it must not claim a NetBox write."""
+        body = json.loads(
+            self._post(
+                resolved_fields=json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": {},
+                        "contact_field_values": {},
+                        "contact_id": None,
+                    }
+                )
+            ).content
+        )
+
+        self.assertEqual(body["detail"], "")
+
+    def test_no_contact_for_this_row_creates_nothing(self):
+        """An operator who answered "no contact" is not asking for one to be made."""
+        from tenancy.models import Contact
+
+        response = self._post(
+            resolved_fields=json.dumps(
+                {
+                    "contact_resolution_applied": True,
+                    "contact_field_sources": {},
+                    "contact_field_values": {},
+                    "contact_id": None,
+                }
+            )
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(Contact.objects.count(), 0)
+
+    def test_linking_an_existing_contact_creates_nothing(self):
+        """The operator already chose the Contact, so nothing new belongs in NetBox."""
+        from tenancy.models import Contact
+
+        linked = Contact.objects.create(name="Linked Person", email="linked@example.invalid")
+
+        response = self._post(
+            resolved_fields=json.dumps(
+                {
+                    "contact_resolution_applied": True,
+                    "contact_field_sources": {},
+                    "contact_field_values": {},
+                    "contact_id": linked.pk,
+                }
+            )
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(Contact.objects.count(), 1)
+        self.assertEqual(self._saved_resolution().resolved_fields["contact_id"], linked.pk)
+
+    def test_a_refused_decision_stores_no_contact(self):
+        """A rejected save must leave NetBox exactly as it was."""
+        from tenancy.models import Contact
+
+        response = self._post(preview_revision="revision-zero")
+
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertEqual(Contact.objects.count(), 0)
