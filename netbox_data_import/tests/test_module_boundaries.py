@@ -198,7 +198,10 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
     def test_no_first_party_module_names_the_cable_path_model(self):
         """Section 6.4: the plugin writes Cables and NetBox derives every path from them."""
-        offenders = [source.name for source in sorted(PACKAGE.glob("*.py")) if "CablePath" in _referenced_names(source)]
+        sources = (
+            source for source in sorted(PACKAGE.rglob("*.py")) if "tests" not in source.relative_to(PACKAGE).parts
+        )
+        offenders = [str(source.relative_to(PACKAGE)) for source in sources if "CablePath" in _referenced_names(source)]
 
         self.assertEqual(offenders, [])
 

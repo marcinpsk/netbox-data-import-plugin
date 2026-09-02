@@ -96,7 +96,7 @@ def trace_visit(termination):
 def add_trace_sheet(book, name, header, blocks):
     """Add one trace sheet with the supplied source blocks."""
     sheet = book.create_sheet(name)
-    sheet.append(("Executed", "2026-08-31 12:00:00"))
+    sheet.append(("Executed", "2026-08-31 12:00:00+00:00"))
     sheet.append(())
     for from_line, to_line, rows in blocks:
         sheet.append(("From", from_line))

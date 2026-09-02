@@ -602,6 +602,19 @@ class _CableBatch:
             if entry is None:
                 return
             left_ends[index + 1] = entry
+        for index, segment in enumerate(segments):
+            if left_ends[index].key != right_ends[index].key:
+                continue
+            analysis.block(
+                "cable.segment_self_connection",
+                {
+                    "segment_index": index,
+                    "cable_class": source_text(segment.cable_class),
+                    "termination": left_ends[index].display,
+                },
+                identities=(left_ends[index].identity,),
+            )
+            return
         analysis.segments = [
             _DesiredSegment(
                 index=index,
@@ -890,7 +903,9 @@ class _CableBatch:
     def _refuse_conflicting_creations(self) -> None:
         """Invalidate traces that resolve one shared segment to different Cable policies."""
         contributors: dict[str, list] = {}
-        for analysis in self._writing():
+        for analysis in self.analyses:
+            if analysis.invalid or not analysis.endpoints:
+                continue
             for segment in analysis.pending:
                 policy = analysis.policies.get(segment.index)
                 if policy is not None:
@@ -1067,11 +1082,16 @@ class CableModule:
         if current != [list(item) for item in planned_change.preconditions["terminations"]]:
             raise PreconditionFailed(f"Cable {cable_id} was re-terminated after the plan was made.")
         enforce_saved_object_permission(cable, execution_context.actor, "delete")
+        # The audit row is the only record left of this Cable, so it keeps what the row carried.
         snapshot = DeletedObject(
             object_type="dcim.cable",
             object_id=cable_id,
             display=str(cable),
-            detail={"terminations": current},
+            detail={
+                "terminations": current,
+                "description": cable.description,
+                "tags": sorted(cable.tags.values_list("name", flat=True)),
+            },
         )
         cable.delete()
         return snapshot

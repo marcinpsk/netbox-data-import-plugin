@@ -728,6 +728,49 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             self.assertEqual(unit.changes, ())
             self.assertIn("cable.resolved_segment_conflict", self.codes(unit))
 
+    def test_a_segment_that_ends_on_its_own_termination_is_blocked(self):
+        """NetBox refuses a Cable carrying one termination on both ends, so planning must catch it."""
+        unit = self.unit(direct_path(DEVICE_A, DEVICE_A))
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertIn("cable.segment_self_connection", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+
+    def test_a_blocked_trace_still_contributes_its_policy_to_a_shared_segment(self):
+        """Leaving it out let the other trace create the shared Cable with the losing policy."""
+        alias_front = trace_termination("PANEL-2", "", "source-front", "Position Front")
+        alias_b = trace_termination("DEV-B", "", "source-port-b", "NIC")
+        # Two source names for one target segment, which is what gets past the adapter's own
+        # cross-trace conflict guard.
+        partner = (
+            trace_endpoint_line(alias_front),
+            trace_endpoint_line(alias_b),
+            (trace_segment(alias_front, "Trunk", alias_b),),
+        )
+        # This trace blocks on its middle segment and still resolves a policy for the last one.
+        blocked = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (
+                trace_segment(DEVICE_A, "Patch", PANEL_1_FRONT),
+                trace_segment(PANEL_1_REAR, "Bogus Class", PANEL_2_REAR),
+                trace_segment(PANEL_2_FRONT, "Patch", DEVICE_B),
+            ),
+        )
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(
+            cable_type=None,
+            cable_profile=None,
+        )
+        self.save_resolution(alias_front, self.panel_2_fronts[0])
+        self.save_resolution(alias_b, self.eth1)
+
+        plan = self.plan(partner, blocked)
+
+        for unit in plan.units:
+            self.assertIn("cable.resolved_segment_conflict", self.codes(unit))
+            self.assertEqual(unit.changes, ())
+        self.assertIn("cable.cableclass_unmapped", self.codes(plan.units[1]))
+
     def save_resolution(self, reference, selected, role=TERMINATION_ROLE):
         """Store one manual termination decision for a Termination Reference."""
         device, cards, port, port_class = reference
@@ -1175,6 +1218,20 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
 
         self.assertTrue(PortMapping.objects.filter(pk=mapping.pk).exists())
         self.assertEqual(Cable.objects.count(), 3)
+
+    def test_the_deleted_object_snapshot_records_what_the_cable_carried(self):
+        """The audit row is the only record left of a Logical Cable, so it keeps its metadata."""
+        logical = self.connect(self.eth0, self.eth1, description="Temporary logical path")
+        later = Tag.objects.create(name="Later", slug="later")
+        earlier = Tag.objects.create(name="Earlier", slug="earlier")
+        logical.tags.add(later, earlier)
+
+        execution = self.execute(self.plan(patched_path()))
+
+        deleted = execution.applied_changes["deleted"]
+        self.assertEqual(len(deleted), 1, deleted)
+        self.assertEqual(deleted[0]["detail"]["description"], "Temporary logical path")
+        self.assertEqual(deleted[0]["detail"]["tags"], ["Earlier", "Later"])
 
     def test_deletion_holds_its_termination_rows_through_the_snapshot(self):
         """A Logical Cable termination cannot move after deletion records its reviewed state."""
