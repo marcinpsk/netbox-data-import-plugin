@@ -4,6 +4,7 @@
 
 import ast
 import pathlib
+import secrets
 
 from core.models import ObjectType
 from dcim.choices import CableProfileChoices, CableTypeChoices
@@ -242,6 +243,43 @@ class TracePolicyModelTest(TestCase):
             duplicate.full_clean()
 
         self.assertIn("__all__", caught.exception.message_dict)
+
+    def _long_resolution(self, port):
+        """Build one unsaved resolution whose field key exceeds the btree entry limit."""
+        resolution = self._resolution(TERMINATION_ROLE)
+        resolution.field_key = termination_field_key(
+            device=self.device.name,
+            cards="Line Card A",
+            port=port,
+            kind="interface",
+            role=TERMINATION_ROLE,
+        )
+        return resolution
+
+    def test_a_long_field_key_still_stores_its_decision(self):
+        """The key holds unbounded source text, and a btree entry cannot exceed about 2704 bytes."""
+        # A repeated character compresses away, so the port text has to be incompressible.
+        resolution = self._long_resolution(secrets.token_hex(2000))
+        resolution.full_clean()
+        resolution.save()
+
+        stored = TerminationResolution.objects.get(pk=resolution.pk)
+
+        self.assertGreater(len(stored.field_key), 2704)
+        self.assertEqual(stored.field_key, resolution.field_key)
+
+    def test_two_long_field_keys_stay_separate_decisions(self):
+        """The index carries a digest of the whole key, so a long key is never truncated to a peer."""
+        shared = secrets.token_hex(2000)
+        for port in (f"{shared}-left", f"{shared}-right"):
+            resolution = self._long_resolution(port)
+            resolution.full_clean()
+            resolution.save()
+
+        rows = TerminationResolution.objects.filter(profile=self.trace_profile)
+
+        self.assertEqual(rows.count(), 2)
+        self.assertEqual(len({row.field_key for row in rows}), 2)
 
     def test_termination_resolution_rejects_a_noncanonical_key(self):
         """A display form or unnormalized JSON cannot become a stored decision key."""

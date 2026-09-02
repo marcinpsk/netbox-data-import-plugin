@@ -683,6 +683,15 @@ class CableClassMapping(PolicySectionModel):
         return reverse("plugins:netbox_data_import:cableclassmapping_edit", args=[self.pk])
 
 
+def index_digest(value: str) -> str:
+    """Return the fixed-width index key one piece of unbounded source text is stored under.
+
+    PostgreSQL refuses a btree entry past about 2704 bytes, so a constraint over source text
+    carries this digest instead of the text.
+    """
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _canonical_termination_field_key(value):
     """Return *value* when it is an exact canonical termination field key."""
     try:
@@ -720,6 +729,12 @@ class TerminationResolution(PolicySectionModel):
         choices=((SELECT_TERMINATION_TASK, "Select termination"),),
     )
     field_key = models.TextField()
+    field_key_digest = models.CharField(
+        max_length=64,
+        blank=True,
+        editable=False,
+        help_text="Fixed-width digest of field_key, which is what the index and constraint carry",
+    )
     selected_object_type = models.ForeignKey(
         to="core.ObjectType",
         on_delete=models.PROTECT,
@@ -732,7 +747,7 @@ class TerminationResolution(PolicySectionModel):
         ordering = ["profile", "task_type", "field_key"]
         constraints = [
             models.UniqueConstraint(
-                fields=["profile", "task_type", "field_key"],
+                fields=["profile", "task_type", "field_key_digest"],
                 name="ndi_termresolution_profile_task_key",
             ),
         ]
@@ -746,6 +761,13 @@ class TerminationResolution(PolicySectionModel):
             _canonical_termination_field_key(self.field_key)
         except ValidationError as exc:
             raise ValidationError({"field_key": exc}) from exc
+        # Before validate_unique, which reads the constraint's own fields.
+        self.field_key_digest = index_digest(self.field_key)
+
+    def save(self, *args, **kwargs):
+        """Derive the index key, so no caller can store one that disagrees with the field key."""
+        self.field_key_digest = index_digest(self.field_key)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.task_type}: {self.selected_display_name}"
