@@ -767,6 +767,10 @@ class TerminationResolution(PolicySectionModel):
     def save(self, *args, **kwargs):
         """Derive the index key, so no caller can store one that disagrees with the field key."""
         self.field_key_digest = index_digest(self.field_key)
+        update_fields = kwargs.get("update_fields")
+        # A partial save of the key alone would leave the constraint on the digest it replaced.
+        if update_fields is not None and "field_key" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "field_key_digest"}
         super().save(*args, **kwargs)
 
     def __str__(self):

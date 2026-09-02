@@ -28,6 +28,7 @@ from netbox_data_import.field_keys import (
 )
 from netbox_data_import.forms import CableClassMappingForm
 from netbox_data_import.models import (
+    index_digest,
     CableClassMapping,
     ImportProfile,
     SourceDocument,
@@ -280,6 +281,25 @@ class TracePolicyModelTest(TestCase):
 
         self.assertEqual(rows.count(), 2)
         self.assertEqual(len({row.field_key for row in rows}), 2)
+
+    def test_a_partial_save_of_the_key_rewrites_its_digest(self):
+        """The constraint carries the digest, so a stored key that outruns it admits a duplicate."""
+        resolution = self._resolution(TERMINATION_ROLE)
+        resolution.save()
+        moved = termination_field_key(
+            device=self.device.name,
+            cards="Line Card B",
+            port=self.interface.name,
+            kind="interface",
+            role=TERMINATION_ROLE,
+        )
+
+        resolution.field_key = moved
+        resolution.save(update_fields={"field_key"})
+
+        stored = TerminationResolution.objects.get(pk=resolution.pk)
+        self.assertEqual(stored.field_key, moved)
+        self.assertEqual(stored.field_key_digest, index_digest(moved))
 
     def test_termination_resolution_rejects_a_noncanonical_key(self):
         """A display form or unnormalized JSON cannot become a stored decision key."""
