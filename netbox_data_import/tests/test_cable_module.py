@@ -3,6 +3,7 @@
 """Plan and write cable traces through the real adapter, engine, and Cable Target Module."""
 
 import json
+import secrets
 import uuid
 from io import BytesIO
 
@@ -740,8 +741,7 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         """Leaving it out let the other trace create the shared Cable with the losing policy."""
         alias_front = trace_termination("PANEL-2", "", "source-front", "Position Front")
         alias_b = trace_termination("DEV-B", "", "source-port-b", "NIC")
-        # Two source names for one target segment, which is what gets past the adapter's own
-        # cross-trace conflict guard.
+        # Two source names for one target segment: the adapter's own guard refuses one name twice.
         partner = (
             trace_endpoint_line(alias_front),
             trace_endpoint_line(alias_b),
@@ -770,6 +770,23 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             self.assertIn("cable.resolved_segment_conflict", self.codes(unit))
             self.assertEqual(unit.changes, ())
         self.assertIn("cable.cableclass_unmapped", self.codes(plan.units[1]))
+
+    def test_a_long_trace_identity_still_records_its_provenance(self):
+        """The identity is unbounded source text, and a btree entry cannot exceed about 2704 bytes."""
+        cable = self.connect(self.eth0, self.eth1)
+        # A repeated character compresses away, so the port text has to be incompressible.
+        port = secrets.token_hex(2000)
+        identity = json.dumps([["dev-a", "", port], ["dev-b", "", "eth1"]], separators=(",", ":"))
+
+        CableImportSource.objects.create(
+            cable=cable,
+            profile=self.profile,
+            trace_identity=identity,
+            segment_index=0,
+        )
+
+        stored = CableImportSource.objects.get(cable=cable, profile=self.profile)
+        self.assertEqual(stored.trace_identity, identity)
 
     def save_resolution(self, reference, selected, role=TERMINATION_ROLE):
         """Store one manual termination decision for a Termination Reference."""
@@ -1199,6 +1216,24 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
 
         self.assertTrue(Cable.objects.filter(pk=trunk.pk).exists())
         self.assertEqual(Cable.objects.count(), 3)
+
+    def test_execution_holds_the_termination_rows_that_prove_a_reused_cable(self):
+        """The replan proves the trunk from its termination rows, so those cannot move under it."""
+        from django.db.models.signals import pre_save
+
+        trunk = self.connect(self.panel_1_rear, self.panel_2_rear)
+        termination = CableTermination.objects.get(cable=trunk, cable_end="B")
+        _panel_3, _fronts, spare_rear = self.make_panel("PANEL-3")
+        plan = self.plan(patched_path())
+
+        self.assert_competing_write_is_blocked(
+            plan,
+            lambda: CableTermination.objects.filter(pk=termination.pk).update(termination_id=spare_rear.pk),
+            pre_save,
+        )
+
+        termination.refresh_from_db()
+        self.assertEqual(termination.termination_id, self.panel_2_rear.pk)
 
     def test_execution_holds_a_relied_on_port_mapping_through_the_cable_writes(self):
         """A panel mapping proven during replan cannot disappear before its path is written."""

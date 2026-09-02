@@ -1465,6 +1465,15 @@ class DeviceImportSource(models.Model):
         return f"{self.source_id or '(no source ID)'} → Device #{self.device_id}"
 
 
+def trace_identity_key(trace_identity: str) -> str:
+    """Return the fixed-width index key one canonical trace identity is stored under.
+
+    The identity is unbounded source text, and PostgreSQL refuses a btree entry past about
+    2704 bytes, so the digest is what the unique constraint and the index carry.
+    """
+    return hashlib.sha256(trace_identity.encode("utf-8")).hexdigest()
+
+
 class CableImportSource(models.Model):
     """Import provenance the plugin keeps for one Cable and one contributing Source Trace.
 
@@ -1485,6 +1494,11 @@ class CableImportSource(models.Model):
     trace_identity = models.TextField(
         help_text="Canonical JSON identity of the Source Trace that states this segment",
     )
+    trace_key = models.CharField(
+        max_length=64,
+        editable=False,
+        help_text="Fixed-width digest of trace_identity, which is what the index and constraint carry",
+    )
     segment_index = models.PositiveIntegerField(
         help_text="Position of this segment in the Source Trace, in canonical order",
     )
@@ -1498,15 +1512,20 @@ class CableImportSource(models.Model):
     row_end = models.PositiveIntegerField(null=True, blank=True)
     export_timestamp = models.CharField(max_length=100, blank=True, default="")
 
+    def save(self, *args, **kwargs):
+        """Derive the index key, so no caller can store one that disagrees with the identity."""
+        self.trace_key = trace_identity_key(self.trace_identity)
+        super().save(*args, **kwargs)
+
     class Meta:
         ordering = ["cable", "profile", "trace_identity"]
         constraints = [
             models.UniqueConstraint(
-                fields=["cable", "profile", "trace_identity"],
+                fields=["cable", "profile", "trace_key"],
                 name="ndi_cableimportsource_cable_profile_trace",
             ),
         ]
-        indexes = [models.Index(fields=["profile", "trace_identity"])]
+        indexes = [models.Index(fields=["profile", "trace_key"])]
         verbose_name = "Cable Import Source"
         verbose_name_plural = "Cable Import Sources"
 

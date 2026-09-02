@@ -728,14 +728,18 @@ class _CableBatch:
         }
         if not cable_ids:
             return
-        sides: dict[int, dict[str, set]] = {}
-        for row in CableTermination.objects.filter(cable_id__in=sorted(cable_ids)):
-            label = _object_type_label(row.termination_type.model_class())
-            sides.setdefault(row.cable_id, {"A": set(), "B": set()})[row.cable_end].add((label, row.termination_id))
         cables = Cable.objects.filter(pk__in=sorted(cable_ids)).order_by("pk")
+        terminations = CableTermination.objects.filter(cable_id__in=sorted(cable_ids)).order_by("pk")
         if self.lock_plan_references:
             cables = cables.select_for_update(of=("self",))
-        for cable in cables:
+            terminations = terminations.select_for_update(of=("self",))
+        # The Cable lock comes first, as the writes take it, so no retermination slips underneath.
+        locked = list(cables)
+        sides: dict[int, dict[str, set]] = {}
+        for row in terminations:
+            label = _object_type_label(row.termination_type.model_class())
+            sides.setdefault(row.cable_id, {"A": set(), "B": set()})[row.cable_end].add((label, row.termination_id))
+        for cable in locked:
             ends = sides.get(cable.pk, {"A": set(), "B": set()})
             existing = _ExistingCable(cable=cable, a_side=frozenset(ends["A"]), b_side=frozenset(ends["B"]))
             self._existing[cable.pk] = existing
@@ -1129,14 +1133,16 @@ class CableModule:
     @staticmethod
     def _store_provenance(cable, payload, profile) -> None:
         """Write one provenance row per Source Trace that states this segment."""
-        from .models import CableImportSource
+        from .models import CableImportSource, trace_identity_key
 
         for record in payload["sources"]:
+            # The unique constraint carries the digest, so the lookup matches it.
             CableImportSource.objects.update_or_create(
                 cable=cable,
                 profile=profile,
-                trace_identity=record["trace_identity"],
+                trace_key=trace_identity_key(record["trace_identity"]),
                 defaults={
+                    "trace_identity": record["trace_identity"],
                     "segment_index": record["segment_index"],
                     "from_text": record["from_text"],
                     "to_text": record["to_text"],
