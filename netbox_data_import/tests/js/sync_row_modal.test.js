@@ -175,3 +175,57 @@ describe("a sync that succeeds while another row is still in flight", () => {
     expect(recalculations).toBe(1);
   });
 });
+
+describe("a failed sync alongside a successful one, with recalculation off", () => {
+  function deferred() {
+    let settle = {};
+    const promise = new Promise((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    return { promise, ...settle };
+  }
+
+  function trigger(rowNumber, sourceId) {
+    const button = document.createElement("button");
+    button.className = "ndi-sync-row-btn";
+    button.dataset.rowNumber = String(rowNumber);
+    button.dataset.sourceId = sourceId;
+    button.dataset.name = "device-" + rowNumber;
+    button.dataset.objectType = "device";
+    document.body.appendChild(button);
+    return button;
+  }
+
+  it("leaves the failed row disabled, because the successful write made the preview stale", async () => {
+    const choice = loadModal();
+    choice.checked = false;
+    choice.dispatchEvent(new Event("change"));
+    const modal = document.getElementById("syncRowModal");
+    const first = deferred();
+    const second = deferred();
+    const queue = [first, second];
+    window.ndiPostPreviewAction = () => queue.shift().promise;
+    window.ndiMarkPreviewStale = () => {};
+    window.ndiRecalculatePreview = () => true;
+
+    const buttonA = trigger(17, "SRC-17");
+    modal.dispatchEvent(Object.assign(new Event("show.bs.modal"), { relatedTarget: buttonA }));
+    document.getElementById("syncRowConfirm").click();
+    const buttonB = trigger(18, "SRC-18");
+    modal.dispatchEvent(Object.assign(new Event("show.bs.modal"), { relatedTarget: buttonB }));
+    document.getElementById("syncRowConfirm").click();
+
+    first.resolve({ message: "Synced." });
+    await first.promise;
+    await Promise.resolve();
+
+    second.reject(new Error("Sync failed"));
+    await second.promise.catch(() => {});
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Retrying it would only reach the server's "Recalculate the preview" refusal.
+    expect(buttonB.disabled).toBe(true);
+    expect(buttonB.title).toBe("Recalculate the preview before synchronizing a row.");
+  });
+});

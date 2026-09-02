@@ -227,7 +227,13 @@
       syncsInFlight -= 1;
       if (pendingSyncRequests.get(submittedSyncButton) === submittedSyncRequest) {
         pendingSyncRequests.delete(submittedSyncButton);
-        submittedSyncButton.disabled = false;
+        // markPreviewStale() skips a button that is already disabled, so a write that landed while
+        // this one was in flight never latched it. Retrying it would only meet the server refusal.
+        if (syncWritePending) {
+          submittedSyncButton.title = 'Recalculate the preview before synchronizing a row.';
+        } else {
+          submittedSyncButton.disabled = false;
+        }
       }
       var ownsCurrentModal = currentSyncRequest === submittedSyncRequest
         && currentSyncButton === submittedSyncButton;
