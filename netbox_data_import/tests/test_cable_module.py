@@ -29,6 +29,7 @@ from netbox_data_import.field_keys import (
     MAPPED_PEER_ROLE,
     SELECT_TERMINATION_TASK,
     TERMINATION_ROLE,
+    claimed_termination_kind,
     parse_termination_field_key,
     termination_field_key,
 )
@@ -791,9 +792,7 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
     def save_resolution(self, reference, selected, role=TERMINATION_ROLE):
         """Store one manual termination decision for a Termination Reference."""
         device, cards, port, port_class = reference
-        kind = {"Port": "interface", "NIC": "interface", "Position Front": "front_port", "Punch-Down": "rear_port"}[
-            port_class
-        ]
+        kind = claimed_termination_kind(port_class)
         TerminationResolution.objects.create(
             profile=self.profile,
             task_type=SELECT_TERMINATION_TASK,
@@ -1001,18 +1000,40 @@ class TraceWizardRenderTest(CableTopologyMixin, TestCase):
 
     def test_the_wizard_uploads_a_trace_workbook_and_renders_its_preview(self):
         """The review workspace is generic until T6, and it must render a Cable unit today."""
+        response = self._upload()
+
+        self.assertContains(response, "DEV-A eth0 to DEV-B eth1")
+
+    def test_a_trace_profile_falls_back_to_the_row_view(self):
+        """Only the flat adapter declares a stored view mode, and reading it answered 500."""
+        response = self._upload()
+
+        self.assertEqual(response.context["view_mode"], "rows")
+
+    def test_the_view_query_parameter_overrides_the_fallback(self):
+        """The Rack view link has to keep working for a profile that declares no mode."""
+        self._upload()
+
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:import_preview"),
+            {"view": "racks"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["view_mode"], "racks")
+
+    def _upload(self):
+        """Drive the wizard to a rendered preview for the trace profile."""
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
         upload.name = "traces.xlsx"
-
         response = self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
             follow=True,
         )
-
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "DEV-A eth0 to DEV-B eth1")
+        return response
 
 
 class CableExecutionTest(CableTopologyMixin, TransactionTestCase):

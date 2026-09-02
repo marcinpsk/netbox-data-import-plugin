@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""The Rack and Device Target Modules, and the registry the coordinator resolves them through.
+"""The Rack, Device and Cable Target Modules, and the registry the coordinator resolves them through.
 
 Section 2.3 gives a Target Module target-specific matching, ORM queries, permission checks,
 preconditions, locking and writes. It plans against the complete relevant Source Batch and applies

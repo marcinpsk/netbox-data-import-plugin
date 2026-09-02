@@ -1465,15 +1465,6 @@ class DeviceImportSource(models.Model):
         return f"{self.source_id or '(no source ID)'} → Device #{self.device_id}"
 
 
-def trace_identity_key(trace_identity: str) -> str:
-    """Return the fixed-width index key one canonical trace identity is stored under.
-
-    The identity is unbounded source text, and PostgreSQL refuses a btree entry past about
-    2704 bytes, so the digest is what the unique constraint and the index carry.
-    """
-    return hashlib.sha256(trace_identity.encode("utf-8")).hexdigest()
-
-
 class CableImportSource(models.Model):
     """Import provenance the plugin keeps for one Cable and one contributing Source Trace.
 
@@ -1514,7 +1505,7 @@ class CableImportSource(models.Model):
 
     def save(self, *args, **kwargs):
         """Derive the index key, so no caller can store one that disagrees with the identity."""
-        self.trace_key = trace_identity_key(self.trace_identity)
+        self.trace_key = index_digest(self.trace_identity)
         super().save(*args, **kwargs)
 
     class Meta:

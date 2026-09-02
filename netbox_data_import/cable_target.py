@@ -1133,14 +1133,14 @@ class CableModule:
     @staticmethod
     def _store_provenance(cable, payload, profile) -> None:
         """Write one provenance row per Source Trace that states this segment."""
-        from .models import CableImportSource, trace_identity_key
+        from .models import CableImportSource, index_digest
 
         for record in payload["sources"]:
             # The unique constraint carries the digest, so the lookup matches it.
             CableImportSource.objects.update_or_create(
                 cable=cable,
                 profile=profile,
-                trace_key=trace_identity_key(record["trace_identity"]),
+                trace_key=index_digest(record["trace_identity"]),
                 defaults={
                     "trace_identity": record["trace_identity"],
                     "segment_index": record["segment_index"],
