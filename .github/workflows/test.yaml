@@ -28,8 +28,10 @@ jobs:
           # One row per NetBox version, which pins the Python versions it supports.
           # `coverage` marks the row that publishes the report, so a version bump cannot miss it.
           - python-version: "3.12"
-            netbox-version: "v4.6.8"
+            netbox-version: "v4.7.0"
             coverage: true
+          - python-version: "3.12"
+            netbox-version: "v4.6.10"
 
     services:
       redis:
