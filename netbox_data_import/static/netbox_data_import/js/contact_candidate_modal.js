@@ -257,6 +257,25 @@
     refreshSummary();
   }
 
+  /* The Contact identity this profile needs: a name, plus whatever the lookup field is. */
+  function requiredRoles() {
+    var roles = ['name'];
+    var lookupField = form.dataset.contactLookupField;
+    if (lookupField && roles.indexOf(lookupField) === -1) roles.push(lookupField);
+    return roles;
+  }
+
+  /* A row whose own values cannot name a Contact gets the fields to type into when it opens.
+   * Without this the only way to reach one is to submit the empty form and be handed it. */
+  function offerMissingValues() {
+    if (noContact.checked || contactId.value) return;
+    var selection = readSelection();
+    var missing = requiredRoles().filter(function (role) { return !selection.resolved[role]; });
+    if (!missing.length) return;
+    missing.forEach(function (role) { valueRows.appendChild(literalRow(role, '')); });
+    setExpanded(editToggle, editPanel, true);
+  }
+
   function setExpanded(button, panel, expanded) {
     panel.hidden = !expanded;
     button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
@@ -344,7 +363,15 @@
     resetSaveButton();
     setExpanded(editToggle, editPanel, false);
     setExpanded(linkExisting, existingWrap, Boolean(contactId.value || suggestion));
+    offerMissingValues();
     toggleContactFields();
+  });
+
+  /* Bootstrap moves focus to the dialog as it opens, so the first offered field asks for the
+   * cursor only once the modal is on screen. */
+  modal.addEventListener('shown.bs.modal', function () {
+    var first = emptyLiteral();
+    if (first && !first.disabled) first.focus();
   });
 
   function showSuggestion(suggestion) {
@@ -448,7 +475,7 @@
   form.addEventListener('submit', function (event) {
     var selection = readSelection();
     if (!noContact.checked && !contactId.value) {
-      var required = ['name', form.dataset.contactLookupField];
+      var required = requiredRoles();
       for (var index = 0; index < required.length; index++) {
         var role = required[index];
         if (selection.resolved[role]) continue;
@@ -518,8 +545,8 @@
 
     saveInFlight = true;
     window.ndiPostPreviewAction(form.getAttribute('action'), new FormData(form))
-      .then(function () {
-        window.ndiMarkPreviewStale();
+      .then(function (payload) {
+        window.ndiMarkPreviewStale(payload && payload.detail);
         rememberResolution(sourceId, snapshot);
         markRowResolved(sourceId);
         if (!stillShowing(sourceId)) return;

@@ -22,9 +22,7 @@ from .models import (
 
 def _profile_output_kinds(form):
     """Return the output kinds of the profile this row belongs to, or None when unknown."""
-    profile = form.initial.get("profile") or form.instance.profile_id
-    if form.is_bound:
-        profile = form.data.get(form.add_prefix("profile")) or profile
+    profile = form.instance.profile_id or form.initial.get("profile")
     if not profile:
         return None
     if not isinstance(profile, ImportProfile):
@@ -131,8 +129,7 @@ class ColumnMappingForm(forms.ModelForm):
 
     class Meta:
         model = ColumnMapping
-        fields = ["profile", "source_column", "target_field"]
-        widgets = {"profile": forms.HiddenInput()}
+        fields = ["source_column", "target_field"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -146,8 +143,7 @@ class ClassRoleMappingForm(forms.ModelForm):
 
     class Meta:
         model = ClassRoleMapping
-        fields = ["profile", "source_class", "creates_rack", "rack_type", "role_slug", "ignore"]
-        widgets = {"profile": forms.HiddenInput()}
+        fields = ["source_class", "creates_rack", "rack_type", "role_slug", "ignore"]
 
     def clean(self):
         """Require role_slug unless creates_rack or ignore is set."""
@@ -169,13 +165,11 @@ class DeviceTypeMappingForm(forms.ModelForm):
     class Meta:
         model = DeviceTypeMapping
         fields = [
-            "profile",
             "source_make",
             "source_model",
             "netbox_manufacturer_slug",
             "netbox_device_type_slug",
         ]
-        widgets = {"profile": forms.HiddenInput()}
 
 
 class ColumnTransformRuleForm(forms.ModelForm):
@@ -186,8 +180,7 @@ class ColumnTransformRuleForm(forms.ModelForm):
 
     class Meta:
         model = ColumnTransformRule
-        fields = ["profile", "source_column", "pattern", "group_1_target", "group_2_target"]
-        widgets = {"profile": forms.HiddenInput()}
+        fields = ["source_column", "pattern", "group_1_target", "group_2_target"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

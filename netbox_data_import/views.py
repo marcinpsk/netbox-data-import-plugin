@@ -181,6 +181,40 @@ def _contact_candidate_context(request, profile_id, source_id):
     )
 
 
+def _store_contact_for_unmatched_row(profile, resolved_fields, candidates, user):
+    """Store the Contact a row names while it still has no Device to assign it to.
+
+    Returns the resolved fields to save, which name the stored Contact, and the sentence the
+    operator is told about it. A decision that names no Contact stores nothing.
+    """
+    selection = PrimaryContactResolver.selection_for_resolution(profile, resolved_fields, candidates)
+    if selection is None:
+        return resolved_fields, ""
+    contact, created = PrimaryContactResolver.create_contact(profile, selection, user)
+    note = (
+        f" Contact '{contact.name}' was created in NetBox."
+        if created
+        else f" Contact '{contact.name}' already existed in NetBox."
+    )
+    return {**resolved_fields, "contact_id": contact.pk}, note
+
+
+def _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, user) -> bool:
+    """Apply the decided Contact to the Device this row already matched.
+
+    Returns whether a Contact now stands on the Device. A no-contact decision writes none.
+    """
+    from dcim.models import Device
+
+    device = Device.objects.restrict(user, "change").filter(pk=device_id).first()
+    if device is None:
+        raise ObjectPermissionDenied("dcim.change_device")
+    resolved_row = dict(source_row)
+    resolved_row.update(resolved_fields)
+    review = PrimaryContactResolver.review(device, resolved_row, profile, user)
+    return PrimaryContactResolver.apply(device, profile, review, user) is not None
+
+
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
     """Persist the confirmed source-to-device identity for a field review."""
     existing_match = (
@@ -1001,6 +1035,7 @@ def _conflict_comparison_row(row, source_rows_by_number, *, is_current):
         "detail": row.detail,
         # The comparison offers the same action the row column does, so it carries the same facts.
         "identity_conflict": extra_data.get("identity_conflict", ""),
+        "identity_conflicts": extra_data.get("identity_conflicts", []),
         "duplicate_serial": extra_data.get("duplicate_serial", ""),
         "is_current": is_current,
     }
@@ -2897,6 +2932,7 @@ class SaveResolutionView(_AjaxPermissionView):
                 return _preview_action_error(request, next_url, stale_reason, status=409)
 
             contact_context = None
+            candidates = {}
             if source_column == "candidate:contact":
                 try:
                     validate_registered_adapter(profile)
@@ -2914,6 +2950,17 @@ class SaveResolutionView(_AjaxPermissionView):
                 validate_source_resolution_fields(profile, source_column, resolved_fields)
                 # Serialize against an executing import, which holds the same profile row.
                 with locked_profile_policy(profile.pk):
+                    contact_updated = False
+                    contact_note = ""
+                    device_id = None
+                    if contact_context is not None:
+                        source_row, result_row = contact_context
+                        device_id = result_row.extra_data.get("netbox_device_id")
+                    if contact_context is not None and not device_id:
+                        # No Device to assign to yet, so the Contact itself is stored now.
+                        resolved_fields, contact_note = _store_contact_for_unmatched_row(
+                            profile, resolved_fields, candidates, request.user
+                        )
                     save_permission_scoped_object(
                         request.user,
                         SourceResolution,
@@ -2923,26 +2970,10 @@ class SaveResolutionView(_AjaxPermissionView):
                             "resolved_fields": resolved_fields,
                         },
                     )
-                    contact_updated = False
-                    if contact_context is not None:
-                        source_row, result_row = contact_context
-                        device_id = result_row.extra_data.get("netbox_device_id")
-                        if device_id:
-                            from dcim.models import Device
-
-                            device = Device.objects.restrict(request.user, "change").filter(pk=device_id).first()
-                            if device is None:
-                                raise ObjectPermissionDenied("dcim.change_device")
-                            resolved_row = dict(source_row)
-                            resolved_row.update(resolved_fields)
-                            contact_review = PrimaryContactResolver.review(
-                                device,
-                                resolved_row,
-                                profile,
-                                request.user,
-                            )
-                            PrimaryContactResolver.apply(device, profile, contact_review, request.user)
-                            contact_updated = True
+                    if device_id:
+                        contact_updated = _assign_contact_to_matched_device(
+                            profile, resolved_fields, source_row, device_id, request.user
+                        )
             except IntegrityError:
                 return _preview_action_error(
                     request,
@@ -2962,14 +2993,14 @@ class SaveResolutionView(_AjaxPermissionView):
             saved_message = (
                 "Resolution saved and the linked Device Contact was updated."
                 if contact_updated
-                else "Resolution saved. Recalculate the preview to apply it."
+                else "Resolution saved. Recalculate the preview to apply it." + contact_note
             )
             # The rendered row keeps the action it had before this decision, so the page must
             # ask for a recalculation whichever path saved it.
             mark_preview_dirty(request.session)
             if _wants_json(request):
                 row_number = contact_context[1].row_number if contact_context else None
-                return JsonResponse(pending_preview_payload(row_number, saved_message))
+                return JsonResponse(pending_preview_payload(row_number, saved_message, contact_note.strip()))
             messages.success(request, saved_message)
             return redirect(next_url)
         return _preview_action_error(request, next_url, "A source row and column are required.", status=400)
@@ -4200,7 +4231,8 @@ class SyncSingleRowView(_AjaxPermissionView):
             )
 
         mark_preview_dirty(request.session)
-        return JsonResponse(pending_preview_payload(row_number, "Synchronized."))
+        written = f"{preview_unit.object_type.capitalize()} '{preview_unit.name}' was created in NetBox."
+        return JsonResponse(pending_preview_payload(row_number, "Synchronized.", written))
 
 
 class UnlinkDeviceView(_AjaxPermissionView):

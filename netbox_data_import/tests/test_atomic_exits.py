@@ -55,6 +55,12 @@ AUDITED_EXITS = {
     ("PrimaryContactResolver.apply", "success-commit-intended"): (
         "The success path of the block: committing the planned Contact writes is the point."
     ),
+    ("PrimaryContactResolver.create_contact", "stored-contact-reused"): (
+        "The values already name a stored Contact, so the block wrote nothing to commit."
+    ),
+    ("PrimaryContactResolver.create_contact", "success-commit-intended"): (
+        "The success path of the block: committing the one created Contact is the point."
+    ),
 }
 
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)

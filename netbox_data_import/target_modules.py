@@ -542,6 +542,24 @@ def _refused(identity, code, display) -> SynchronizationUnit:
     )
 
 
+def _with_issues(identity, issues) -> SynchronizationUnit:
+    """Return one unit carrying every problem a row has, in the order the checks found them.
+
+    The first problem decides the disposition and the display, so a unit reads exactly as it did
+    when only that problem was reported. The rest tell the operator what this row still needs.
+    """
+    disposition, _first_code, first_display = issues[0]
+    return SynchronizationUnit(
+        identity=identity,
+        disposition=disposition,
+        diagnostics=tuple(
+            Diagnostic(code=code, severity=Severity.ERROR, identities=(identity,), display=issue_display)
+            for _disposition, code, issue_display in issues
+        ),
+        display=first_display,
+    )
+
+
 def _blocked(identity, code, display) -> SynchronizationUnit:
     """Return a unit waiting on a dependency this module does not create."""
     return SynchronizationUnit(
@@ -1319,7 +1337,10 @@ class _DeviceBatch:
         self._claimed.update({key: row.get("_row_number") for key in claim.keys})
 
     def match(self, row, name) -> _Match:
-        """Return the stored device this row reconciles, strongest identifier first."""
+        """Return the stored device this row reconciles, strongest identifier first.
+
+        Only for a row `_is_identity_writing_row` accepts: the collation keys are loaded for those.
+        """
         source_id = _source_text(row.get("source_id"))
 
         bound_id = self._bindings.get(source_id) if source_id else None
@@ -1499,7 +1520,15 @@ class DeviceModule:
         return f"device:name:{identity_text(effective_device_name(row))}"
 
     def _unit(self, row, batch) -> SynchronizationUnit:  # noqa: C901
-        """Return the one unit this row produces."""
+        """Return the one unit this row produces, naming every problem it can already prove.
+
+        The checks run in one fixed order and record what they find instead of returning, so a row
+        held up by its identity still reports the mapping, placement and Contact work it needs. The
+        first problem stays the authoritative one, and an operator fixing them in any order sees the
+        rest of the list shrink. Only the checks whose inputs are available run, and every one of
+        them reads: the helpers that reserve a name, a rack unit or a device stay on the paths that
+        settle a row.
+        """
         identity = self.unit_identity(row)
         name = effective_device_name(row)
         source_id = _source_text(row.get("source_id"))
@@ -1511,6 +1540,12 @@ class DeviceModule:
         display["device_name"] = name
         display["source_id"] = source_id
 
+        issues: list[tuple[str, str, dict]] = []
+
+        def problem(disposition, code, extra=None) -> None:
+            """Record one problem this row has, so the checks after it still run."""
+            issues.append((disposition, code, {**display, **(extra or {})}))
+
         clash = batch.clash(row)
         if clash is not None:
             code, value, numbers = clash
@@ -1521,16 +1556,16 @@ class DeviceModule:
                 "device.duplicate_asset_tag": "asset tag",
             }[code]
             conflict_display = {
-                **display,
                 "message": _duplicate_value_detail(label, value, other_rows),
                 "value": value,
                 "rows": numbers,
             }
             if code == "device.duplicate_serial":
                 conflict_display["duplicate_serial"] = value
-            return _refused(identity, code, conflict_display)
+            problem(Disposition.INVALID, code, conflict_display)
 
-        if source_id and source_id in batch.ignored:
+        # An excluded or below-rack row is an answer rather than a problem, so it reports no list.
+        if not issues and source_id and source_id in batch.ignored:
             ignored_display = {
                 **display,
                 "extra_data": {**display["extra_data"], "ignore_kind": "individual"},
@@ -1550,7 +1585,7 @@ class DeviceModule:
             )
 
         position = source_position(row.get("u_position"))
-        if position is not None and position < 1:
+        if not issues and position is not None and position < 1:
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.NO_OP,
@@ -1565,69 +1600,71 @@ class DeviceModule:
                 display=display,
             )
         if not name:
-            return _refused(identity, "device.missing_name", display)
+            problem(Disposition.INVALID, "device.missing_name")
 
         mapping = batch._mappings.get(_source_text(row.get("device_class")))
         if mapping is None:
-            return _refused(
-                identity,
+            problem(
+                Disposition.INVALID,
                 "device.class_unmapped",
-                {**display, "source_class": _source_text(row.get("device_class"))},
+                {"source_class": _source_text(row.get("device_class"))},
             )
-        if mapping.ignore:
-            return SynchronizationUnit(
-                identity=identity,
-                disposition=Disposition.EXCLUDED,
-                diagnostics=(
-                    Diagnostic(
-                        code="device.class_ignored",
-                        severity=Severity.INFO,
-                        identities=(identity,),
-                        display={
-                            **display,
-                            "extra_data": {**display["extra_data"], "ignore_kind": "class"},
-                        },
+        elif mapping.ignore:
+            if not issues:
+                return SynchronizationUnit(
+                    identity=identity,
+                    disposition=Disposition.EXCLUDED,
+                    diagnostics=(
+                        Diagnostic(
+                            code="device.class_ignored",
+                            severity=Severity.INFO,
+                            identities=(identity,),
+                            display={
+                                **display,
+                                "extra_data": {**display["extra_data"], "ignore_kind": "class"},
+                            },
+                        ),
                     ),
-                ),
-                display={**display, "extra_data": {**display["extra_data"], "ignore_kind": "class"}},
-            )
+                    display={**display, "extra_data": {**display["extra_data"], "ignore_kind": "class"}},
+                )
+            # The class says to skip this row, so nothing after it has anything to plan.
+            mapping = None
 
         if slug_conflict := batch._slug_conflicts.get(row.get("_row_number")):
-            return _refused(identity, "device.derived_slug_collision", {**display, **slug_conflict})
+            problem(Disposition.INVALID, "device.derived_slug_collision", slug_conflict)
 
-        dependencies = batch.dependencies(row)
-        if dependencies.missing is not None:
+        dependencies = batch.dependencies(row) if mapping is not None else None
+        if dependencies is not None and dependencies.missing is not None:
             code, missing_display = dependencies.missing
-            return _blocked(identity, code, {**display, **missing_display})
+            problem(Disposition.BLOCKED, code, missing_display)
 
-        match = batch.match(row, name)
+        # Only an identity-writing row has its name and asset tag in the batch's collation keys.
+        match = batch.match(row, name) if name and batch._is_identity_writing_row(row) else _Match()
         if match.ambiguous is not None:
-            return _refused(identity, match.ambiguous, {**display, "value": match.value})
-        if match.inaccessible:
-            return _refused(identity, "device.inaccessible_match", display)
-        if match.device is not None and match.device.site_id != batch.reader.site.pk:
-            return _refused(
-                identity,
+            problem(Disposition.INVALID, match.ambiguous, {"value": match.value})
+        elif match.inaccessible:
+            problem(Disposition.INVALID, "device.inaccessible_match")
+        elif match.device is not None and match.device.site_id != batch.reader.site.pk:
+            problem(
+                Disposition.INVALID,
                 "device.cross_site_match",
-                {**display, "netbox_device_id": match.device.pk, "match_method": match.method},
+                {"netbox_device_id": match.device.pk, "match_method": match.method},
             )
-        if identity_text(name) in batch._duplicate_names and match.device is None:
-            return _refused(
-                identity,
+        elif identity_text(name) in batch._duplicate_names and match.device is None:
+            problem(
+                Disposition.INVALID,
                 "device.duplicate_name",
-                {
-                    **display,
-                    "extra_data": {**display["extra_data"], "suggested_name": batch.suggest_name(row)},
-                },
+                {"extra_data": {**display["extra_data"], "suggested_name": batch.suggest_name(row)}},
             )
-        if match.device is not None and (bound_source := batch.binding_conflict(row, match)):
-            return _refused(
-                identity,
+        elif match.device is not None and (bound_source := batch.binding_conflict(row, match)):
+            problem(
+                Disposition.INVALID,
                 "device.already_bound",
-                {**display, "bound_source_id": bound_source, "netbox_device_id": match.device.pk},
+                {"bound_source_id": bound_source, "netbox_device_id": match.device.pk},
             )
 
-        if match.device is not None:
+        # Only a row that has settled every check so far may claim the device it matched.
+        if not issues and match.device is not None:
             name_note = (
                 f"; name stays '{match.device.name}' (source: '{name}')"
                 if match.device.name != name
@@ -1656,57 +1693,66 @@ class DeviceModule:
                     display=display,
                 )
 
-        placement = batch.placement(row, dependencies.device_type, dependencies.rack, dependencies.rack_identity)
-        if placement.refused is not None:
-            code, placement_display = placement.refused
-            return _refused(identity, code, {**display, **placement_display})
-        display = {
-            **display,
-            "extra_data": {
-                **display["extra_data"],
-                "airflow": placement.airflow,
-                "dt_exists": dependencies.device_type_exists,
-                "dt_slug": dependencies.device_type_slugs[1],
-                "face": placement.face,
-                "is_explicit_mapping": dependencies.explicit_device_type,
-                "mfg_slug": dependencies.device_type_slugs[0],
-                "status": placement.status,
-                "u_height": _display_value(dependencies.device_type.u_height),
-                "u_position": placement.position,
-                **({"zero_u": True} if dependencies.device_type.u_height == 0 else {}),
-            },
-        }
+        placement = None
+        if dependencies is not None and dependencies.missing is None:
+            placement = batch.placement(row, dependencies.device_type, dependencies.rack, dependencies.rack_identity)
+            if placement.refused is not None:
+                code, placement_display = placement.refused
+                problem(Disposition.INVALID, code, placement_display)
+                placement = None
+            else:
+                display = {
+                    **display,
+                    "extra_data": {
+                        **display["extra_data"],
+                        "airflow": placement.airflow,
+                        "dt_exists": dependencies.device_type_exists,
+                        "dt_slug": dependencies.device_type_slugs[1],
+                        "face": placement.face,
+                        "is_explicit_mapping": dependencies.explicit_device_type,
+                        "mfg_slug": dependencies.device_type_slugs[0],
+                        "status": placement.status,
+                        "u_height": _display_value(dependencies.device_type.u_height),
+                        "u_position": placement.position,
+                        **({"zero_u": True} if dependencies.device_type.u_height == 0 else {}),
+                    },
+                }
 
-        payload = self._payload(row, name, dependencies, placement, batch)
+        contact = None
         try:
             contact = batch.contact_review(row, match.device)
         except ObjectPermissionDenied as exc:
-            return _refused(identity, "device.contact_permission", {**display, "message": str(exc)})
+            problem(Disposition.INVALID, "device.contact_permission", {"message": str(exc)})
         except ContactResolutionRequired as exc:
-            contact_display = {
+            problem(
+                Disposition.INVALID,
+                "device.contact_resolution_required",
+                {
+                    "extra_data": {
+                        **display["extra_data"],
+                        "candidate_values": {"contact": exc.candidate_values},
+                        "contact_suggestion": exc.suggestion or {},
+                    },
+                },
+            )
+        except ValidationError as exc:
+            problem(Disposition.INVALID, "device.contact_invalid", {"error": "; ".join(exc.messages)})
+        else:
+            display = {
                 **display,
                 "extra_data": {
                     **display["extra_data"],
-                    "candidate_values": {"contact": exc.candidate_values},
-                    "contact_suggestion": exc.suggestion or {},
+                    "candidate_values": {"contact": contact.candidate_values} if contact.candidate_values else {},
+                    "contact_suggestion": contact.suggestion or {},
+                    "extra_columns": contact.extra_columns,
                 },
             }
-            return _refused(
-                identity,
-                "device.contact_resolution_required",
-                contact_display,
-            )
-        except ValidationError as exc:
-            return _refused(identity, "device.contact_invalid", {**display, "error": "; ".join(exc.messages)})
-        display = {
-            **display,
-            "extra_data": {
-                **display["extra_data"],
-                "candidate_values": {"contact": contact.candidate_values} if contact.candidate_values else {},
-                "contact_suggestion": contact.suggestion or {},
-                "extra_columns": contact.extra_columns,
-            },
-        }
+
+        # Everything below reads all of these, and a row that could not settle one recorded why.
+        if dependencies is None or dependencies.missing is not None or placement is None or contact is None:
+            return _with_issues(identity, issues)
+
+        payload = self._payload(row, name, dependencies, placement, batch)
         ip_fields, ip_diagnostics = self._ip_fields(row, identity, display)
         payload = {
             **payload,
@@ -1725,12 +1771,14 @@ class DeviceModule:
             )
             if claim.refused is not None:
                 code, taken_display = claim.refused
-                return _refused(identity, code, {**display, **taken_display})
+                problem(Disposition.INVALID, code, taken_display)
             actor = batch.reader.actor
             if actor is not None and not actor.has_perm("dcim.add_device"):
-                return _refused(identity, "device.add_permission", display)
+                problem(Disposition.INVALID, "device.add_permission")
             if validation := self._validation_error(None, payload):
-                return _refused(identity, "device.validation_failed", {**display, "message": validation})
+                problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
+            if issues:
+                return _with_issues(identity, issues)
             batch.commit_claim(row, claim)
             device_change = self._change(
                 identity,
@@ -1765,7 +1813,9 @@ class DeviceModule:
 
             effective_type = DeviceType.objects.filter(pk=payload["device_type_id"]).first()
             if effective_type is None:
-                return _refused(identity, "device.device_type_missing", display)
+                # Every check below reads the device type this row would write.
+                problem(Disposition.INVALID, "device.device_type_missing")
+                return _with_issues(identity, issues)
         if effective_type.u_height == 0:
             zero_u_conflicts = []
             if "u_position" in review.ignored and payload["u_position"] is not None:
@@ -1777,11 +1827,7 @@ class DeviceModule:
             else:
                 payload["face"] = ""
             if zero_u_conflicts:
-                return _refused(
-                    identity,
-                    "device.zero_u_review_conflict",
-                    {**display, "fields": zero_u_conflicts},
-                )
+                problem(Disposition.INVALID, "device.zero_u_review_conflict", {"fields": zero_u_conflicts})
         effective_rack = dependencies.rack
         effective_rack_identity = dependencies.rack_identity
         if payload["rack_name"] is None:
@@ -1805,16 +1851,17 @@ class DeviceModule:
         )
         if claim.refused is not None:
             code, taken_display = claim.refused
-            return _refused(identity, code, {**display, **taken_display})
+            problem(Disposition.INVALID, code, taken_display)
         if not self._placement_differs(match.device, payload):
             display = {
                 **display,
                 "extra_data": {**display["extra_data"], "placement_sync_writes_nothing": True},
             }
         if match.method == "name" and self._placement_differs(match.device, payload):
-            return _refused(identity, "device.name_placement_conflict", display)
+            problem(Disposition.INVALID, "device.name_placement_conflict")
         if (
-            not self._differs(match.device, payload)
+            not issues
+            and not self._differs(match.device, payload)
             and _contact_writes_nothing(contact)
             and _provenance_is_current(match.device, payload, batch.profile)
         ):
@@ -1837,9 +1884,11 @@ class DeviceModule:
             )
         actor = batch.reader.actor
         if actor is not None and not batch.reader.devices("change").filter(pk=match.device.pk).exists():
-            return _refused(identity, "device.change_permission", display)
+            problem(Disposition.INVALID, "device.change_permission")
         if validation := self._validation_error(match.device, payload):
-            return _refused(identity, "device.validation_failed", {**display, "message": validation})
+            problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
+        if issues:
+            return _with_issues(identity, issues)
         batch.commit_claim(row, claim)
         batch.commit_device_claim(row, match)
         device_change = self._change(
