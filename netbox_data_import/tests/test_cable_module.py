@@ -20,6 +20,7 @@ from dcim.models import (
     Site,
 )
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from extras.models import Tag
@@ -40,6 +41,7 @@ from netbox_data_import.models import (
     ImportProfile,
     SourceDocument,
     TerminationResolution,
+    index_digest,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.plan import Disposition, PlannedChange
@@ -771,6 +773,18 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             self.assertIn("cable.resolved_segment_conflict", self.codes(unit))
             self.assertEqual(unit.changes, ())
         self.assertIn("cable.cableclass_unmapped", self.codes(plan.units[1]))
+
+    def test_validation_sees_the_digest_the_constraint_carries(self):
+        """`full_clean` checks the unique constraint on `trace_key`, so it cannot read an empty one."""
+        cable = self.connect(self.eth0, self.eth1)
+        identity = json.dumps([["dev-a", "", "eth0"], ["dev-b", "", "eth1"]], separators=(",", ":"))
+        CableImportSource.objects.create(cable=cable, profile=self.profile, trace_identity=identity, segment_index=0)
+        duplicate = CableImportSource(cable=cable, profile=self.profile, trace_identity=identity, segment_index=1)
+
+        with self.assertRaises(ValidationError):
+            duplicate.full_clean()
+
+        self.assertEqual(duplicate.trace_key, index_digest(identity))
 
     def test_a_long_trace_identity_still_records_its_provenance(self):
         """The identity is unbounded source text, and a btree entry cannot exceed about 2704 bytes."""

@@ -1487,6 +1487,7 @@ class CableImportSource(models.Model):
     )
     trace_key = models.CharField(
         max_length=64,
+        blank=True,
         editable=False,
         help_text="Fixed-width digest of trace_identity, which is what the index and constraint carry",
     )
@@ -1503,9 +1504,18 @@ class CableImportSource(models.Model):
     row_end = models.PositiveIntegerField(null=True, blank=True)
     export_timestamp = models.CharField(max_length=100, blank=True, default="")
 
+    def clean(self):
+        """Derive the index key before validate_unique reads the constraint's own fields."""
+        super().clean()
+        self.trace_key = index_digest(self.trace_identity)
+
     def save(self, *args, **kwargs):
         """Derive the index key, so no caller can store one that disagrees with the identity."""
         self.trace_key = index_digest(self.trace_identity)
+        update_fields = kwargs.get("update_fields")
+        # A partial save of the identity alone would leave the constraint on the digest it replaced.
+        if update_fields is not None and "trace_identity" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "trace_key"}
         super().save(*args, **kwargs)
 
     class Meta:
