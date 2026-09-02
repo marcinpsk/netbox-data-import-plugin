@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
@@ -210,10 +210,20 @@ def _planned_device_id(result_row):
     return result_row.extra_data.get("netbox_device_id")
 
 
-def _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, user) -> bool:
+@dataclass(frozen=True)
+class _ContactWrite:
+    """What one decided Contact changed on the Device a row already matched."""
+
+    assignment_changed: bool
+    contact_created: bool
+    contact_name: str
+
+
+def _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, user) -> _ContactWrite | None:
     """Apply the decided Contact to the Device this row already matched.
 
-    Returns whether a Contact now stands on the Device. A no-contact decision writes none.
+    Returns what the write changed, or None when the decision names no Contact. `apply` creates the
+    Contact even when the assignment itself is unchanged, so the two are reported separately.
     """
     from dcim.models import Device
 
@@ -223,7 +233,35 @@ def _assign_contact_to_matched_device(profile, resolved_fields, source_row, devi
     resolved_row = dict(source_row)
     resolved_row.update(resolved_fields)
     review = PrimaryContactResolver.review(device, resolved_row, profile, user)
-    return PrimaryContactResolver.apply(device, profile, review, user) is not None
+    plan = PrimaryContactResolver.apply(device, profile, review, user)
+    if plan is None:
+        return None
+    return _ContactWrite(
+        assignment_changed=plan["assignment_action"] != "unchanged",
+        contact_created=plan["contact_id"] is None,
+        contact_name=str((plan.get("contact_values") or {}).get("name") or ""),
+    )
+
+
+def _saved_resolution_report(contact_write, contact_note):
+    """Return the sentence and the write detail one saved Contact decision reports.
+
+    An assignment that did not move is not a Device Contact update, and a Contact this save created
+    is reported whether or not the assignment moved.
+    """
+    if contact_write is None:
+        return "Resolution saved. Recalculate the preview to apply it." + contact_note, contact_note.strip()
+    detail = (
+        f"Contact '{contact_write.contact_name}' was created in NetBox."
+        if contact_write.contact_created
+        else contact_note.strip()
+    )
+    message = (
+        "Resolution saved and the linked Device Contact was updated."
+        if contact_write.assignment_changed
+        else "Resolution saved. The Device Contact already stood as decided."
+    )
+    return (f"{message} {detail}" if detail else message), detail
 
 
 def _ensure_field_review_device_match(user, profile, source_id, device, source_asset_tag=""):
@@ -2961,7 +2999,7 @@ class SaveResolutionView(_AjaxPermissionView):
                 validate_source_resolution_fields(profile, source_column, resolved_fields)
                 # Serialize against an executing import, which holds the same profile row.
                 with locked_profile_policy(profile.pk):
-                    contact_updated = False
+                    contact_write = None
                     contact_note = ""
                     device_id = None
                     if contact_context is not None:
@@ -2982,7 +3020,7 @@ class SaveResolutionView(_AjaxPermissionView):
                         },
                     )
                     if device_id:
-                        contact_updated = _assign_contact_to_matched_device(
+                        contact_write = _assign_contact_to_matched_device(
                             profile, resolved_fields, source_row, device_id, request.user
                         )
             except IntegrityError:
@@ -3001,17 +3039,13 @@ class SaveResolutionView(_AjaxPermissionView):
                 )
             except ValidationError as exc:
                 return _preview_action_error(request, next_url, "; ".join(exc.messages), status=400)
-            saved_message = (
-                "Resolution saved and the linked Device Contact was updated."
-                if contact_updated
-                else "Resolution saved. Recalculate the preview to apply it." + contact_note
-            )
+            saved_message, contact_detail = _saved_resolution_report(contact_write, contact_note)
             # The rendered row keeps the action it had before this decision, so the page must
             # ask for a recalculation whichever path saved it.
             mark_preview_dirty(request.session)
             if _wants_json(request):
                 row_number = contact_context[1].row_number if contact_context else None
-                return JsonResponse(pending_preview_payload(row_number, saved_message, contact_note.strip()))
+                return JsonResponse(pending_preview_payload(row_number, saved_message, contact_detail))
             messages.success(request, saved_message)
             return redirect(next_url)
         return _preview_action_error(request, next_url, "A source row and column are required.", status=400)

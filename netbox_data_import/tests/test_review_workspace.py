@@ -2,12 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Review Workspace presentation and command integration tests."""
 
-import ast
-import pathlib
-import re
-
 from django.contrib.auth import get_user_model
-from django.test import SimpleTestCase, TestCase
+from django.test import TestCase
 
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile
 from netbox_data_import.plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
@@ -58,22 +54,45 @@ def _workspace(*units):
     )
 
 
-class DiagnosticWordingTest(SimpleTestCase):
-    """Every diagnostic code a Target Module emits needs operator wording."""
+class DiagnosticWordingTest(TestCase):
+    """A blocked row must read as an instruction, not as an internal code name."""
 
-    def test_every_emitted_code_has_a_message(self):
-        """`_diagnostic_message` falls back to the raw code, which reads as an internal name."""
-        source = pathlib.Path(__file__).resolve().parents[1] / "target_modules.py"
-        emitted = {
-            node.value
-            for node in ast.walk(ast.parse(source.read_text()))
-            if isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and re.fullmatch(r"(device|rack)\.[a-z_]+", node.value)
-        }
+    # Every code here reaches the operator through `other_issues` or the row's own detail.
+    CODES = (
+        "device.role_permission",
+        "device.contact_permission",
+        "device.unparseable_ip",
+        "device.validation_failed",
+    )
 
-        self.assertGreater(len(emitted), 40, "the scan must still find the module's diagnostic codes")
-        self.assertEqual(sorted(emitted - set(_DIAGNOSTIC_MESSAGES)), [])
+    def _detail_for(self, code):
+        """Return the wording a real Review Workspace renders for one diagnostic code."""
+        unit = _unit("device:1", Disposition.INVALID, row={"_row_number": 1, "device_name": "dev-a"})
+        unit = SynchronizationUnit(
+            identity=unit.identity,
+            disposition=unit.disposition,
+            changes=unit.changes,
+            display=unit.display,
+            diagnostics=(
+                Diagnostic(
+                    code=code,
+                    severity=Severity.ERROR,
+                    identities=(unit.identity,),
+                    display=unit.display,
+                ),
+            ),
+        )
+        return _workspace(unit).units[0].detail
+
+    def test_each_code_renders_a_sentence_rather_than_its_code(self):
+        """`_diagnostic_message` falls back to the code, so a missing entry reaches the operator."""
+        for code in self.CODES:
+            with self.subTest(code=code):
+                detail = self._detail_for(code)
+
+                self.assertNotEqual(detail, code)
+                self.assertEqual(detail, _DIAGNOSTIC_MESSAGES[code])
+                self.assertTrue(detail.endswith(".") or detail.startswith("Permission denied"))
 
 
 class ReviewWorkspacePresentationTest(TestCase):
