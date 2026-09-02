@@ -1850,11 +1850,7 @@ class DeviceModuleTargetStateIsWorkTest(DeviceModulePlanTestBase):
 
 
 class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):
-    """A row used to state only the first thing wrong with it.
-
-    The operator then fixed that, paid a full recalculation, and met the next one. Every problem a
-    row can already prove is reported at once, with the first still deciding what the row is.
-    """
+    """Every problem a row can prove is reported at once, and the first still decides the row."""
 
     def _codes(self, unit):
         return [diagnostic.code for diagnostic in unit.diagnostics]
