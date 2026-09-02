@@ -35,12 +35,12 @@ jobs:
 
     services:
       redis:
-        image: redis:7
+        image: redis:8-alpine
         ports:
           - 6379:6379
 
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: netbox
           POSTGRES_PASSWORD: netbox
