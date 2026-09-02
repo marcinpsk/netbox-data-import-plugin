@@ -913,9 +913,13 @@ class _ProfileChildEditView(generic.ObjectEditView):
 
     def post(self, request, *args, **kwargs):
         """Write under the profile policy lock, so a replan cannot commit against stale policy."""
-        with locked_profile_policy(_profile_pk_for_policy_write(self, kwargs)):
-            # atomic-exit-safe: locked-policy-write-committed
-            return super().post(request, *args, **kwargs)
+        try:
+            with locked_profile_policy(_profile_pk_for_policy_write(self, kwargs)):
+                # atomic-exit-safe: locked-policy-write-committed
+                return super().post(request, *args, **kwargs)
+        except ImportProfile.DoesNotExist:
+            # The URL names a profile that is gone, which is the 404 its own fetch would give.
+            raise Http404 from None
 
 
 class _ProfileChildDeleteView(generic.ObjectDeleteView):
@@ -932,9 +936,12 @@ class _ProfileChildDeleteView(generic.ObjectDeleteView):
 
     def post(self, request, *args, **kwargs):
         """Delete under the profile policy lock, for the same reason the edit view takes it."""
-        with locked_profile_policy(_profile_pk_for_policy_write(self, kwargs)):
-            # atomic-exit-safe: locked-policy-delete-committed
-            return super().post(request, *args, **kwargs)
+        try:
+            with locked_profile_policy(_profile_pk_for_policy_write(self, kwargs)):
+                # atomic-exit-safe: locked-policy-delete-committed
+                return super().post(request, *args, **kwargs)
+        except ImportProfile.DoesNotExist:
+            raise Http404 from None
 
 
 # ---------------------------------------------------------------------------

@@ -99,6 +99,26 @@ class ProfileChildObjectScopeTest(TestCase):
         self.assertEqual(self.my_mapping.source_column, "SerialNo")
 
 
+class MissingProfileIsNotAServerErrorTest(TestCase):
+    """The lock names a profile the URL supplies, which may already be gone."""
+
+    def setUp(self):
+        """Log in a superuser; each test names a profile that does not exist."""
+        from django.contrib.auth import get_user_model
+
+        self.user = get_user_model().objects.create_superuser("gone-user", "gone@example.invalid", "testpass")
+        self.client = Client(raise_request_exception=False)
+        self.client.force_login(self.user)
+
+    def test_adding_to_a_profile_that_is_gone_is_a_404(self):
+        """`locked_profile_policy` refuses an absent profile, and that is a 404 like any missing row."""
+        url = reverse("plugins:netbox_data_import:columnmapping_add", kwargs={"profile_pk": 9_999_999})
+
+        response = self.client.post(url, {"source_column": "Serial Number", "target_field": "serial"})
+
+        self.assertEqual(response.status_code, 404, response.status_code)
+
+
 class ProfileChildPolicyLockTest(TransactionTestCase):
     """A policy edit must hold the same profile lock an execution takes, or it can race a replan."""
 
