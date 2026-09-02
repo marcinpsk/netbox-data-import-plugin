@@ -811,6 +811,7 @@ class AdapterRuntimeSupportTest(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         self.trace.refresh_from_db()
         self.assertEqual(self.trace.name, "Runtime Trace Renamed")
+        self.assertEqual(self.trace.source_adapter, "trace_workbook", "the write-back must not drop the adapter")
 
     def test_the_profile_form_rejects_an_adapter_without_a_target_module(self):
         """Choice filtering alone is presentation, so the form must also reject the value."""
