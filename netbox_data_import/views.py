@@ -851,12 +851,27 @@ class ImportProfileBulkImportView(generic.BulkImportView):
 # ---------------------------------------------------------------------------
 
 
-class _ProfileChildEditView(PermissionRequiredMixin, generic.ObjectEditView):
+def _profile_pk_for_policy_write(view, url_kwargs):
+    """Return the ImportProfile whose policy this write changes.
+
+    An add names it in the URL. An edit or delete reads it off the row, through the already-scoped
+    queryset, so a row outside the operator's grant raises here rather than locking someone else's
+    profile.
+    """
+    if "pk" in url_kwargs:
+        return get_object_or_404(view.queryset, pk=url_kwargs["pk"]).profile_id
+    return url_kwargs.get("profile_pk")
+
+
+class _ProfileChildEditView(generic.ObjectEditView):
     """Base add/edit view for objects that belong to an ImportProfile.
 
     Assigns ``profile`` on add from the ``profile_pk`` URL kwarg, and redirects back to the
     parent profile detail page after a successful save. The forms carry no ``profile`` field,
     so a posted one is ignored.
+
+    Object scoping comes from NetBox's ``ObjectPermissionRequiredMixin``. Django's
+    ``PermissionRequiredMixin`` must not sit ahead of it: that shadows the ``restrict()`` call.
 
     Override ``get_required_permission`` so that add-URLs (which carry
     ``profile_pk`` but not ``pk``) are not misidentified as edit-URLs by
@@ -896,17 +911,30 @@ class _ProfileChildEditView(PermissionRequiredMixin, generic.ObjectEditView):
             return {"profile": get_object_or_404(ImportProfile, pk=profile_pk)}
         return {}
 
+    def post(self, request, *args, **kwargs):
+        """Write under the profile policy lock, so a replan cannot commit against stale policy."""
+        with locked_profile_policy(_profile_pk_for_policy_write(self, kwargs)):
+            # atomic-exit-safe: locked-policy-write-committed
+            return super().post(request, *args, **kwargs)
 
-class _ProfileChildDeleteView(PermissionRequiredMixin, generic.ObjectDeleteView):
+
+class _ProfileChildDeleteView(generic.ObjectDeleteView):
     """Base delete view for objects that belong to an ImportProfile.
 
-    Redirects to the parent profile detail page after successful deletion.
+    Redirects to the parent profile detail page after successful deletion. Object scoping comes from
+    NetBox's ``ObjectPermissionRequiredMixin``, which Django's must not shadow.
     """
 
     def get_return_url(self, request, obj=None):
         if obj is not None and getattr(obj, "profile", None):
             return obj.profile.get_absolute_url()
         return super().get_return_url(request, obj)
+
+    def post(self, request, *args, **kwargs):
+        """Delete under the profile policy lock, for the same reason the edit view takes it."""
+        with locked_profile_policy(_profile_pk_for_policy_write(self, kwargs)):
+            # atomic-exit-safe: locked-policy-delete-committed
+            return super().post(request, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -920,7 +948,6 @@ class ColumnMappingAddView(_ProfileChildEditView):
     queryset = ColumnMapping.objects.all()
     form = ColumnMappingForm
     template_name = "netbox_data_import/columnmapping_edit.html"
-    permission_required = "netbox_data_import.add_columnmapping"
 
 
 class ColumnMappingEditView(_ProfileChildEditView):
@@ -929,14 +956,12 @@ class ColumnMappingEditView(_ProfileChildEditView):
     queryset = ColumnMapping.objects.all()
     form = ColumnMappingForm
     template_name = "netbox_data_import/columnmapping_edit.html"
-    permission_required = "netbox_data_import.change_columnmapping"
 
 
 class ColumnMappingDeleteView(_ProfileChildDeleteView):
     """Delete a column mapping."""
 
     queryset = ColumnMapping.objects.all()
-    permission_required = "netbox_data_import.delete_columnmapping"
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +975,6 @@ class ClassRoleMappingAddView(_ProfileChildEditView):
     queryset = ClassRoleMapping.objects.all()
     form = ClassRoleMappingForm
     template_name = "netbox_data_import/classrolemapping_edit.html"
-    permission_required = "netbox_data_import.add_classrolemapping"
 
 
 class ClassRoleMappingEditView(_ProfileChildEditView):
@@ -959,14 +983,12 @@ class ClassRoleMappingEditView(_ProfileChildEditView):
     queryset = ClassRoleMapping.objects.all()
     form = ClassRoleMappingForm
     template_name = "netbox_data_import/classrolemapping_edit.html"
-    permission_required = "netbox_data_import.change_classrolemapping"
 
 
 class ClassRoleMappingDeleteView(_ProfileChildDeleteView):
     """Delete a class→role mapping."""
 
     queryset = ClassRoleMapping.objects.all()
-    permission_required = "netbox_data_import.delete_classrolemapping"
 
 
 # ---------------------------------------------------------------------------
@@ -980,7 +1002,6 @@ class DeviceTypeMappingAddView(_ProfileChildEditView):
     queryset = DeviceTypeMapping.objects.all()
     form = DeviceTypeMappingForm
     template_name = "netbox_data_import/devicetypemapping_edit.html"
-    permission_required = "netbox_data_import.add_devicetypemapping"
 
 
 class DeviceTypeMappingEditView(_ProfileChildEditView):
@@ -989,14 +1010,12 @@ class DeviceTypeMappingEditView(_ProfileChildEditView):
     queryset = DeviceTypeMapping.objects.all()
     form = DeviceTypeMappingForm
     template_name = "netbox_data_import/devicetypemapping_edit.html"
-    permission_required = "netbox_data_import.change_devicetypemapping"
 
 
 class DeviceTypeMappingDeleteView(_ProfileChildDeleteView):
     """Delete a device type mapping."""
 
     queryset = DeviceTypeMapping.objects.all()
-    permission_required = "netbox_data_import.delete_devicetypemapping"
 
 
 # ---------------------------------------------------------------------------
@@ -1706,7 +1725,6 @@ class ColumnTransformRuleAddView(_ProfileChildEditView):
     queryset = ColumnTransformRule.objects.all()
     form = ColumnTransformRuleForm
     template_name = "netbox_data_import/columntransformrule_edit.html"
-    permission_required = "netbox_data_import.add_columntransformrule"
 
 
 class ColumnTransformRuleEditView(_ProfileChildEditView):
@@ -1715,14 +1733,12 @@ class ColumnTransformRuleEditView(_ProfileChildEditView):
     queryset = ColumnTransformRule.objects.all()
     form = ColumnTransformRuleForm
     template_name = "netbox_data_import/columntransformrule_edit.html"
-    permission_required = "netbox_data_import.change_columntransformrule"
 
 
 class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
     """Delete a column transform rule."""
 
     queryset = ColumnTransformRule.objects.all()
-    permission_required = "netbox_data_import.delete_columntransformrule"
 
 
 # ---------------------------------------------------------------------------
@@ -3471,7 +3487,6 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
     """Delete a saved source resolution."""
 
     queryset = SourceResolution.objects.all()
-    permission_required = "netbox_data_import.delete_sourceresolution"
 
     def post(self, request, *args, **kwargs):
         """Serialize against an executing import, which holds the same profile row."""

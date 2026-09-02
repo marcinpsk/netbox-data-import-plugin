@@ -41,8 +41,7 @@ class EnforceSavedObjectPermissionTest(TestCase):
             enforce_saved_object_permission(refused, user, "view")
 
     def test_a_constrained_plain_plugin_model_is_scoped(self):
-        """DeviceTypeMapping is a plain Model, so its manager has no restrict()."""
-        self.assertFalse(hasattr(DeviceTypeMapping.objects, "restrict"))
+        """A policy model is not a NetBoxModel, so its scope check has to hold on its own."""
         mine = DeviceTypeMapping.objects.create(profile=self.profile, source_make="A", source_model="B")
         theirs = DeviceTypeMapping.objects.create(profile=self.other, source_make="A", source_model="B")
         user = user_with_object_permission("scope-map", [(DeviceTypeMapping, ["view"], {"profile": self.profile.pk})])
