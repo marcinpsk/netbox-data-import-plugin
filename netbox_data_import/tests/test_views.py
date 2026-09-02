@@ -310,8 +310,9 @@ class ColumnMappingViewTest(BaseViewTestCase):
         cm = ColumnMapping.objects.filter(profile=self.profile, target_field="serial").first()
         url = reverse("plugins:netbox_data_import:columnmapping_edit", kwargs={"pk": cm.pk})
 
-        self.client.post(url, {"profile": other.pk, "source_column": "SerialNo", "target_field": "serial"})
+        resp = self.client.post(url, {"profile": other.pk, "source_column": "SerialNo", "target_field": "serial"})
 
+        self.assertEqual(resp.status_code, 302, "a rejected form would also leave the profile unchanged")
         cm.refresh_from_db()
         self.assertEqual(cm.profile, self.profile)
 
