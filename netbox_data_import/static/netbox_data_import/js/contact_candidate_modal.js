@@ -547,7 +547,7 @@
     window.ndiPostPreviewAction(form.getAttribute('action'), new FormData(form))
       .then(function (payload) {
         window.ndiMarkPreviewStale(payload && payload.detail);
-        rememberResolution(sourceId, snapshot);
+        rememberResolution(sourceId, snapshot, payload && payload.resolution);
         markRowResolved(sourceId);
         if (!stillShowing(sourceId)) return;
         var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
@@ -570,20 +570,23 @@
   }
 
   /* The page no longer reloads after a save, so the map the modal reads on open has to record
-   * the decision here. Without this the next open shows the proposal and a second save
-   * overwrites what the operator chose. */
-  function rememberResolution(sourceId, snapshot) {
+   * the decision here. `saved` is what the server stored: the snapshot predates the request, so a
+   * Contact this save created is absent from it and only the stored decision names that Contact. */
+  function rememberResolution(sourceId, snapshot, saved) {
     if (!window.EXISTING_RESOLUTIONS) window.EXISTING_RESOLUTIONS = {};
     var forSource = window.EXISTING_RESOLUTIONS[sourceId] || {};
-    forSource['candidate:contact'] = {
-      original_value: snapshot.originalValue,
-      resolved_fields: JSON.parse(snapshot.resolvedFields),
-    };
+    forSource['candidate:contact'] = saved
+      ? { original_value: saved.original_value, resolved_fields: saved.resolved_fields }
+      : { original_value: snapshot.originalValue, resolved_fields: JSON.parse(snapshot.resolvedFields) };
     window.EXISTING_RESOLUTIONS[sourceId] = forSource;
 
     // The picker rebuilds from the page's suggestions, which never held a Contact the operator
-    // searched for. Keep the option so reopening the row still shows what it is linked to.
+    // searched for, nor one this save created. Keep the option so reopening shows the link.
     if (snapshot.linkedOption) linkedContacts[snapshot.contactId] = snapshot.linkedOption;
+    // `contactOption` reads the picker's field names, so it needs the picker to exist.
+    if (saved && saved.contact && picker()) {
+      linkedContacts[String(saved.contact.id)] = contactOption(saved.contact);
+    }
   }
 
   /* The row keeps the action it was rendered with until the preview is recalculated. Only the

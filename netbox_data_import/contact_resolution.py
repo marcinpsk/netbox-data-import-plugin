@@ -126,6 +126,11 @@ class ContactResolutionRequired(ValidationError):
         )
 
 
+def contact_identity(contact) -> dict:
+    """Return the persisted Contact fields the preview picker needs to show it again."""
+    return {"id": contact.pk, "name": contact.name, "email": contact.email, "phone": contact.phone}
+
+
 class PrimaryContactResolver:
     """Hide Contact resolution, lookup, assignment, and JSON migration behind one interface."""
 
@@ -486,6 +491,7 @@ class PrimaryContactResolver:
                 enforce_saved_object_permission(assignment, user, "change")
 
             cls._remove_legacy_json(obj)
+            plan["saved_contact"] = contact_identity(contact)
             # atomic-exit-safe: success-commit-intended
             return plan
 

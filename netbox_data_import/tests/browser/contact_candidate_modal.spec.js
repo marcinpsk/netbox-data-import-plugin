@@ -820,3 +820,45 @@ test("a save that wrote nothing to NetBox claims nothing", async ({ page }) => {
   await expect(page.locator("#ndi-preview-stale")).toBeVisible();
   await expect(page.locator("#ndi-preview-stale .ndi-preview-stale-detail")).toHaveCount(0);
 });
+
+test("a Contact this save created stays linked when the row is reopened", async ({ page }) => {
+  await setUp(page);
+  // The server answers with the decision it stored, which names the Contact it just created.
+  await page.evaluate(() => {
+    window.ndiMarkPreviewStale = () => {};
+    window.ndiPostPreviewAction = () =>
+      Promise.resolve({
+        ok: true,
+        detail: "Contact 'Grace Hopper' was created in NetBox.",
+        resolution: {
+          original_value: "{}",
+          resolved_fields: {
+            contact_resolution_applied: true,
+            contact_field_sources: { email: "Primary Contact", name: "Contact", phone: "Contact Number" },
+            contact_field_values: {},
+            contact_id: 4242,
+          },
+          contact: {
+            id: 4242,
+            name: "Grace Hopper",
+            email: "grace.hopper@example.invalid",
+            phone: "+44 20 7946 0102",
+          },
+        },
+      });
+  });
+  await openRow(page, "first-row", "source-first");
+
+  await page.evaluate(() => document.getElementById("contactCandidateForm")
+    .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await expect(
+    page.locator('[data-ndi-modal="#contactCandidateModal"][data-source-id="source-first"]'),
+  ).toHaveClass(/ndi-contact-resolved/);
+
+  await openRow(page, "first-row", "source-first");
+
+  await expect(page.locator("#contactCandidateContactId")).toHaveValue("4242");
+  expect(
+    await page.evaluate(() => document.getElementById("contactCandidateExisting").tomselect.getValue()),
+  ).toBe("4242");
+});

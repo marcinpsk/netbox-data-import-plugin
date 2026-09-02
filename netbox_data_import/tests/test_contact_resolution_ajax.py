@@ -606,6 +606,50 @@ class MatchedDeviceContactDetailTest(ContactResolutionSessionMixin, TestCase):
         self.assertIn("Second Person", body["detail"])
         self.assertIn("was created in NetBox", body["detail"])
 
+    def test_the_saved_resolution_names_the_contact_the_matched_path_created(self):
+        """Reopening the row must show the Contact this save created, not an unlinked candidate."""
+        from tenancy.models import Contact
+
+        self._matched_device()
+
+        self._post_decision(
+            {},
+            revision="revision-two",
+            values={"name": "Second Person", "email": "second.person@example.invalid"},
+        )
+
+        contact = Contact.objects.get(email="second.person@example.invalid")
+        saved = SourceResolution.objects.get(
+            profile=self.profile, source_id="AJAX-001", source_column="candidate:contact"
+        )
+        self.assertEqual(saved.resolved_fields["contact_id"], contact.pk)
+
+    def test_the_response_returns_the_resolution_that_was_saved(self):
+        """The page stores what it gets back, so the response has to carry the persisted identity."""
+        from tenancy.models import Contact
+
+        self._matched_device()
+
+        response = self._post_decision(
+            {},
+            revision="revision-two",
+            values={"name": "Second Person", "email": "second.person@example.invalid"},
+        )
+
+        contact = Contact.objects.get(email="second.person@example.invalid")
+        resolution = json.loads(response.content)["resolution"]
+        self.assertEqual(resolution["resolved_fields"]["contact_id"], contact.pk)
+        # The picker rebuilds from the page's own data, so it needs the Contact itself to show it.
+        self.assertEqual(
+            resolution["contact"],
+            {
+                "id": contact.pk,
+                "name": "Second Person",
+                "email": "second.person@example.invalid",
+                "phone": contact.phone,
+            },
+        )
+
     def test_an_unmoved_assignment_does_not_claim_a_contact_update(self):
         """`apply` returns a plan for an unchanged assignment, which is not a Device Contact write."""
         self._matched_device()
