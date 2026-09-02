@@ -631,6 +631,29 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].changes[-1].operation, "create")
 
+    def test_a_device_row_carries_the_stored_class_policy_for_its_editor(self):
+        """Reopening the class editor must show the policy already saved, not an empty form."""
+        units = self._plan(self._row(2, "D-1", "srv-01"))
+
+        self.assertEqual(units[0].display["extra_data"]["class_mapping_action"], "role")
+        self.assertEqual(units[0].display["extra_data"]["class_mapping_role_slug"], "server")
+
+    def test_a_device_row_whose_class_is_ignored_reports_the_ignore_policy(self):
+        """An ignore mapping must reopen as ignore, so a save cannot silently change the action."""
+        ClassRoleMapping.objects.create(profile=self.profile, source_class="Sensor", ignore=True)
+
+        units = self._plan(self._row(2, "D-1", "srv-01", device_class="Sensor"))
+
+        self.assertEqual(units[0].display["extra_data"]["class_mapping_action"], "ignore")
+        self.assertEqual(units[0].display["extra_data"]["class_mapping_role_slug"], "")
+
+    def test_a_device_row_with_no_class_policy_reports_none(self):
+        """An unmapped class has nothing to restore, so the editor opens on its own default."""
+        units = self._plan(self._row(2, "D-1", "srv-01", device_class="Traffic Generator"))
+
+        self.assertEqual(units[0].display["extra_data"]["class_mapping_action"], "")
+        self.assertEqual(units[0].display["extra_data"]["class_mapping_role_slug"], "")
+
     def test_a_name_only_match_on_an_unplaced_device_says_the_device_is_unplaced(self):
         """The stored Device holds no placement, so the row must not report one it could differ from."""
         self._device("srv-01")

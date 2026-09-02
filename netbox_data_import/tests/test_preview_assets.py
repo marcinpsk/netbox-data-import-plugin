@@ -54,6 +54,19 @@ class DeferredFormsReadTheirActionAttributeTest(SimpleTestCase):
         self.assertEqual(offenders, [], "Read the posted URL with form.getAttribute('action').")
 
 
+class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
+    """The class editor resets its fields on open, so a trigger that states nothing opens empty."""
+
+    def test_every_class_mapping_trigger_declares_its_initial_action(self):
+        """Without it the editor reopens on Ignore and a save discards the stored role."""
+        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+        triggers = re.findall(r'<button[^>]*data-ndi-modal="#classMappingModal"[^>]*>', html)
+
+        self.assertTrue(triggers, "the preview must offer the class editor")
+        missing = [trigger for trigger in triggers if "data-initial-action" not in trigger]
+        self.assertEqual(missing, [], "every class editor trigger must carry data-initial-action")
+
+
 class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase):
     """The rendered preview must carry its assets in the part htmx keeps."""
 

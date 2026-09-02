@@ -146,6 +146,19 @@ def _unit_display(row, object_type: str, name: str, rack_name: str = "") -> dict
     }
 
 
+def _class_mapping_display(mapping) -> dict:
+    """Return the stored class policy, so its editor reopens on what the operator saved."""
+    if mapping is None:
+        return {"class_mapping_action": "", "class_mapping_role_slug": ""}
+    if mapping.ignore:
+        action = "ignore"
+    elif mapping.creates_rack:
+        action = "rack"
+    else:
+        action = "role"
+    return {"class_mapping_action": action, "class_mapping_role_slug": _text(mapping.role_slug)}
+
+
 def _ignored_source_ids(profile) -> frozenset[str]:
     """Return the source identities the operator has chosen to skip."""
     return frozenset(_source_text(value) for value in profile.ignored_devices.values_list("source_id", flat=True))
@@ -1537,6 +1550,7 @@ class DeviceModule:
         ):
             identity = f"{identity}:row:{row.get('_row_number')}"
         display = _unit_display(row, self.key, name, _source_text(row.get("rack_name")))
+        display["extra_data"].update(_class_mapping_display(batch._mappings.get(_source_text(row.get("device_class")))))
         display["device_name"] = name
         display["source_id"] = source_id
 
