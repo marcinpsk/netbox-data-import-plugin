@@ -631,11 +631,20 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].changes[-1].operation, "create")
 
-    def test_a_name_only_match_with_different_placement_is_invalid(self):
-        """A coincidental name must not move a Device to the source placement."""
+    def test_a_name_only_match_on_an_unplaced_device_says_the_device_is_unplaced(self):
+        """The stored Device holds no placement, so the row must not report one it could differ from."""
         self._device("srv-01")
 
         units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack"))
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "device.name_unplaced_match")
+
+    def test_a_name_only_match_at_another_placement_reports_the_conflict(self):
+        """A stored Device the source would move keeps the wording that states it sits elsewhere."""
+        self._device("srv-01", rack=self.rack, position=10, face="front")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack", u_position="20", face="Front"))
 
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.name_placement_conflict")
@@ -830,7 +839,7 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         )
 
         self.assertEqual(units[0].disposition, Disposition.INVALID)
-        self.assertEqual(units[0].diagnostics[0].code, "device.name_placement_conflict")
+        self.assertEqual(units[0].diagnostics[0].code, "device.name_unplaced_match")
         self.assertEqual(units[1].disposition, Disposition.ACTIONABLE, units[1].diagnostics)
 
     def test_two_rows_still_cannot_claim_one_slot_in_a_batch_created_rack(self):
