@@ -16,7 +16,7 @@ import sys
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[1] / "netbox_data_import"
 CODE = re.compile(r"(device|rack)\.[a-z_]+")
-TABLE_ENTRY = re.compile(r'"((?:device|rack)\.[a-z_]+)":')
+TABLE = "_DIAGNOSTIC_MESSAGES"
 
 
 def emitted_codes(source: pathlib.Path) -> set[str]:
@@ -28,13 +28,24 @@ def emitted_codes(source: pathlib.Path) -> set[str]:
     }
 
 
+def answered_codes(source: pathlib.Path) -> set[str]:
+    """Return the literal keys of the wording table, so prose naming a code cannot answer for it."""
+    for node in ast.walk(ast.parse(source.read_text())):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == TABLE for t in node.targets):
+            continue
+        return {k.value for k in node.value.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    raise SystemExit(f"check-diagnostic-wording: {TABLE} is not a dict literal in {source.name}")
+
+
 def main() -> int:
     """Report each emitted code the wording table does not answer."""
     emitted = emitted_codes(PACKAGE / "target_modules.py")
     if not emitted:
         print("check-diagnostic-wording: found no diagnostic codes, so the scan is broken", file=sys.stderr)
         return 1
-    answered = set(TABLE_ENTRY.findall((PACKAGE / "review_workspace.py").read_text()))
+    answered = answered_codes(PACKAGE / "review_workspace.py")
     missing = sorted(emitted - answered)
     if missing:
         print("check-diagnostic-wording: _DIAGNOSTIC_MESSAGES has no wording for:", file=sys.stderr)

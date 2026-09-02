@@ -7,7 +7,7 @@ from django.test import TestCase
 
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile
 from netbox_data_import.plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
-from netbox_data_import.review_workspace import _DIAGNOSTIC_MESSAGES, AutoMatchSummary, ReviewWorkspace
+from netbox_data_import.review_workspace import AutoMatchSummary, ReviewWorkspace
 from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object_permission
 
 
@@ -57,13 +57,13 @@ def _workspace(*units):
 class DiagnosticWordingTest(TestCase):
     """A blocked row must read as an instruction, not as an internal code name."""
 
-    # Every code here reaches the operator through `other_issues` or the row's own detail.
-    CODES = (
-        "device.role_permission",
-        "device.contact_permission",
-        "device.unparseable_ip",
-        "device.validation_failed",
-    )
+    # Repeated on purpose: reading the registry the code reads would let one wrong entry pass.
+    EXPECTED = {
+        "device.role_permission": "Permission denied: dcim.add_devicerole",
+        "device.contact_permission": "Permission denied: cannot read or write this row's primary contact.",
+        "device.unparseable_ip": "The source value is not a valid IP address.",
+        "device.validation_failed": "The planned device does not pass NetBox validation.",
+    }
 
     def _detail_for(self, code):
         """Return the wording a real Review Workspace renders for one diagnostic code."""
@@ -86,13 +86,12 @@ class DiagnosticWordingTest(TestCase):
 
     def test_each_code_renders_a_sentence_rather_than_its_code(self):
         """`_diagnostic_message` falls back to the code, so a missing entry reaches the operator."""
-        for code in self.CODES:
+        for code, expected in self.EXPECTED.items():
             with self.subTest(code=code):
                 detail = self._detail_for(code)
 
                 self.assertNotEqual(detail, code)
-                self.assertEqual(detail, _DIAGNOSTIC_MESSAGES[code])
-                self.assertTrue(detail.endswith(".") or detail.startswith("Permission denied"))
+                self.assertEqual(detail, expected)
 
 
 class ReviewWorkspacePresentationTest(TestCase):
