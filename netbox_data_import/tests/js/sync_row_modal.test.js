@@ -45,6 +45,31 @@ afterEach(() => {
   window.sessionStorage.clear();
 });
 
+describe("a modal open with no trigger button", () => {
+  it("does not confirm the row the previous open left behind", () => {
+    loadModal();
+    const modal = document.getElementById("syncRowModal");
+    const trigger = document.createElement("button");
+    trigger.dataset.rowNumber = "17";
+    trigger.dataset.sourceId = "SRC-17";
+    trigger.dataset.name = "device-a";
+    trigger.dataset.objectType = "device";
+    document.body.appendChild(trigger);
+    modal.dispatchEvent(Object.assign(new Event("show.bs.modal"), { relatedTarget: trigger }));
+
+    const posted = [];
+    window.ndiPostPreviewAction = (url, body) => {
+      posted.push(body.get("row_number"));
+      return Promise.resolve({ message: "Synced." });
+    };
+
+    modal.dispatchEvent(new Event("show.bs.modal"));
+    document.getElementById("syncRowConfirm").click();
+
+    expect(posted).toEqual([]);
+  });
+});
+
 describe("the recalculation choice", () => {
   it("is on for an operator who has not chosen", () => {
     expect(loadModal().checked).toBe(true);

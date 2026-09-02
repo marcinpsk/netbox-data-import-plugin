@@ -481,14 +481,6 @@ class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertIn("Duplicate serial", html)
         self.assertIn("ignore-duplicate-serial/", html)
 
-    def _device_row_cells(self, html, row_number):
-        """Return one device row's own cells: a source row also renders a manufacturer and a rack."""
-        for block in html.split("<tr")[1:]:
-            opening, _, body = block.partition(">")
-            if f'data-row-number="{row_number}"' in opening and 'data-object-type="device"' in opening:
-                return body
-        self.fail(f"the page renders no device row {row_number}")
-
     def test_a_duplicate_serial_row_names_the_other_row(self):
         """A row naming itself, or a row number this one only prefixes, both strand the operator."""
         (first, second), html = self._preview_html_with_a_shared_serial()
@@ -703,14 +695,6 @@ class RowNamesEveryProblemItHasTest(PreviewSessionMixin, BaseViewTestCase):
         self._setup_session(mutate_workbook=spoil_both)
         response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
         return row_numbers, response
-
-    def _device_row_cells(self, html, row_number):
-        """Return one device row's own cells: a source row also renders a manufacturer and a rack."""
-        for block in html.split("<tr")[1:]:
-            opening, _, body = block.partition(">")
-            if f'data-row-number="{row_number}"' in opening and 'data-object-type="device"' in opening:
-                return body
-        self.fail(f"the page renders no device row {row_number}")
 
     def test_the_row_still_states_the_problem_it_always_did(self):
         """The stated reason is the first problem, so nothing an operator already knows moves."""

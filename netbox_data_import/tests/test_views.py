@@ -522,6 +522,14 @@ class ImportSetupViewTest(BaseViewTestCase):
 class PreviewSessionMixin:
     """Build the preview session state without dragging another class's test methods along."""
 
+    def _device_row_cells(self, html, row_number):
+        """Return one device row's own cells: a source row also renders a manufacturer and a rack."""
+        for block in html.split("<tr")[1:]:
+            opening, _, body = block.partition(">")
+            if f'data-row-number="{row_number}"' in opening and 'data-object-type="device"' in opening:
+                return body
+        self.fail(f"the page renders no device row {row_number}")
+
     def _setup_session(self, *, mutate_workbook=None):
         """Populate session with a valid import state."""
         from dcim.models import Site

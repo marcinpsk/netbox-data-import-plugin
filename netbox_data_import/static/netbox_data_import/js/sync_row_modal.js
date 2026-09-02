@@ -56,6 +56,10 @@
 
   modal.addEventListener('show.bs.modal', function (e) {
     var btn = e.relatedTarget;
+    // An open with no trigger must not inherit the row the last open left behind.
+    currentRowNumber = '';
+    currentSyncButton = null;
+    currentSyncRequest = null;
     if (!btn) return;
     currentRowNumber = btn.dataset.rowNumber;
     currentSyncButton = btn;

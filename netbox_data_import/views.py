@@ -199,6 +199,17 @@ def _store_contact_for_unmatched_row(profile, resolved_fields, candidates, user)
     return {**resolved_fields, "contact_id": contact.pk}, note
 
 
+def _planned_device_id(result_row):
+    """Return the Device a row plans to write to, or None when the import refused the row.
+
+    A refused row still carries the Device it matched, so the identifier alone does not mean the
+    import accepted the match.
+    """
+    if result_row.action != "update":
+        return None
+    return result_row.extra_data.get("netbox_device_id")
+
+
 def _assign_contact_to_matched_device(profile, resolved_fields, source_row, device_id, user) -> bool:
     """Apply the decided Contact to the Device this row already matched.
 
@@ -2955,7 +2966,7 @@ class SaveResolutionView(_AjaxPermissionView):
                     device_id = None
                     if contact_context is not None:
                         source_row, result_row = contact_context
-                        device_id = result_row.extra_data.get("netbox_device_id")
+                        device_id = _planned_device_id(result_row)
                     if contact_context is not None and not device_id:
                         # No Device to assign to yet, so the Contact itself is stored now.
                         resolved_fields, contact_note = _store_contact_for_unmatched_row(

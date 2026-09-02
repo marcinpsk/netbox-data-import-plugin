@@ -24,6 +24,28 @@ JSON = "application/json"
 class ContactResolutionSessionMixin:
     """Seed the preview session with one device row that still needs a Contact decision."""
 
+    def _post_decision(self, sources, *, revision):
+        """Save one Contact decision for the row through the deferred endpoint."""
+        return self.client.post(
+            reverse("plugins:netbox_data_import:save_resolution"),
+            {
+                "profile_id": self.profile.pk,
+                "source_id": "AJAX-001",
+                "source_column": "candidate:contact",
+                "resolved_fields": json.dumps(
+                    {
+                        "contact_resolution_applied": True,
+                        "contact_field_sources": sources,
+                        "contact_field_values": {},
+                        "contact_id": None,
+                    }
+                ),
+                "preview_revision": revision,
+                "next": reverse("plugins:netbox_data_import:import_preview"),
+            },
+            HTTP_ACCEPT=JSON,
+        )
+
     def setUp(self):
         """Put one device row that needs a Contact decision into the preview session."""
         self.site, self.manufacturer, self.device_type, self.role = make_dcim_objects("CtcAjax")
@@ -538,28 +560,6 @@ class MatchedDeviceContactReportTest(ContactResolutionSessionMixin, TestCase):
         session.save()
         return device
 
-    def _post_decision(self, sources, *, revision):
-        """Save one Contact decision for the row through the deferred endpoint."""
-        return self.client.post(
-            reverse("plugins:netbox_data_import:save_resolution"),
-            {
-                "profile_id": self.profile.pk,
-                "source_id": "AJAX-001",
-                "source_column": "candidate:contact",
-                "resolved_fields": json.dumps(
-                    {
-                        "contact_resolution_applied": True,
-                        "contact_field_sources": sources,
-                        "contact_field_values": {},
-                        "contact_id": None,
-                    }
-                ),
-                "preview_revision": revision,
-                "next": reverse("plugins:netbox_data_import:import_preview"),
-            },
-            HTTP_ACCEPT=JSON,
-        )
-
     def test_a_no_contact_decision_on_a_matched_device_claims_no_write(self):
         """`apply()` writes nothing for a no-contact decision, so the message must not claim one."""
         from tenancy.models import ContactAssignment
@@ -586,6 +586,66 @@ class MatchedDeviceContactReportTest(ContactResolutionSessionMixin, TestCase):
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertIn("Device Contact", json.loads(response.content)["message"])
+
+
+class RefusedRowContactAssignmentTest(ContactResolutionSessionMixin, TestCase):
+    """A refused row still names the Device it matched, but its Contact must not reach it."""
+
+    def _refused_row_device(self):
+        """Match the row to a Device another source row already owns, then replan onto it."""
+        from dcim.models import Device
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import DeviceExistingMatch
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        role = ContactRole.objects.create(name="CtcAjax Primary", slug="ctcajax-primary")
+        self.profile.adapter_config["primary_contact_role"] = role.name
+        self.profile.save()
+        device = Device.objects.create(
+            name="ajax-contact-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="AJAX-OTHER",
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+        # The first decision settles the Contact question, so the replan reaches the binding check.
+        self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-one")
+        plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
+        result = ReviewWorkspace(plan)
+        session = self.client.session
+        record_recalculated_preview(session, plan)
+        session["import_rows"] = result.source_rows
+        session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
+        session.save()
+        return device, result
+
+    def test_a_refused_row_writes_no_contact_onto_the_device_it_named(self):
+        """`device.already_bound` still carries `netbox_device_id`, and the row plans no update."""
+        from tenancy.models import ContactAssignment
+
+        device, result = self._refused_row_device()
+        row = next(unit for unit in result.units if unit.source_id == "AJAX-001")
+        self.assertEqual(row.action, "error", "the row must be refused for this test to mean anything")
+        self.assertEqual(row.extra_data.get("netbox_device_id"), device.pk)
+        ContactAssignment.objects.all().delete()
+
+        response = self._post_decision({"name": "Contact", "email": "Contact"}, revision="revision-two")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(
+            ContactAssignment.objects.filter(
+                object_id=device.pk,
+                object_type=ContentType.objects.get_for_model(device),
+            ).exists(),
+            "the import refused this row, so its Contact must not reach the Device",
+        )
 
 
 class ContactSuggestionEndpointTest(ContactResolutionSessionMixin, TestCase):

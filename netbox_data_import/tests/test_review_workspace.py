@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Review Workspace presentation and command integration tests."""
 
+import ast
+import pathlib
+import re
+
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from netbox_data_import.models import ClassRoleMapping, DeviceExistingMatch, ImportProfile
 from netbox_data_import.plan import Diagnostic, Disposition, ImportPlan, PlannedChange, Severity, SynchronizationUnit
-from netbox_data_import.review_workspace import AutoMatchSummary, ReviewWorkspace
+from netbox_data_import.review_workspace import _DIAGNOSTIC_MESSAGES, AutoMatchSummary, ReviewWorkspace
 from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object_permission
 
 
@@ -52,6 +56,24 @@ def _workspace(*units):
             planning_context={"site_id": 1, "location_id": None, "tenant_id": None},
         )
     )
+
+
+class DiagnosticWordingTest(SimpleTestCase):
+    """Every diagnostic code a Target Module emits needs operator wording."""
+
+    def test_every_emitted_code_has_a_message(self):
+        """`_diagnostic_message` falls back to the raw code, which reads as an internal name."""
+        source = pathlib.Path(__file__).resolve().parents[1] / "target_modules.py"
+        emitted = {
+            node.value
+            for node in ast.walk(ast.parse(source.read_text()))
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and re.fullmatch(r"(device|rack)\.[a-z_]+", node.value)
+        }
+
+        self.assertGreater(len(emitted), 40, "the scan must still find the module's diagnostic codes")
+        self.assertEqual(sorted(emitted - set(_DIAGNOSTIC_MESSAGES)), [])
 
 
 class ReviewWorkspacePresentationTest(TestCase):
