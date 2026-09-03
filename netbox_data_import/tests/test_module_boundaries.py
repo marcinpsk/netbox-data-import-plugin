@@ -9,7 +9,33 @@ from tempfile import TemporaryDirectory
 from django.test import SimpleTestCase
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[1]
+PACKAGE_NAME = PACKAGE.name
 CALLERS = ("views.py", "jobs.py")
+INTERPRETERS = ("flat_workbook.py", "trace_workbook.py")
+FORBIDDEN_INTERPRETER_IMPORTS = frozenset(
+    {
+        "django",
+        "circuits",
+        "core",
+        "dcim",
+        "extras",
+        "ipam",
+        "netbox",
+        "tenancy",
+        "utilities",
+        "adapter_config",
+        "adapter_forms",
+        "api",
+        "forms",
+        "import_engine",
+        "jobs",
+        "models",
+        "netbox_reader",
+        "plan",
+        "target_modules",
+        "views",
+    }
+)
 
 
 def _import_engine_calls(path: pathlib.Path) -> set[str]:
@@ -20,6 +46,27 @@ def _import_engine_calls(path: pathlib.Path) -> set[str]:
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "ImportEngine"
     }
+
+
+def _import_root(name: str) -> str:
+    """Return the module a dotted name belongs to, with the plugin's own package stripped."""
+    parts = name.removeprefix(f"{PACKAGE_NAME}.").partition(".")
+    return parts[0]
+
+
+def _imported_roots(path: pathlib.Path) -> set[str]:
+    """Return the module of every import in one file, including imports inside a function."""
+    roots: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            roots.update(_import_root(name.name) for name in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            # `from netbox_data_import import models` names the module in the imported names.
+            if node.module in (None, PACKAGE_NAME):
+                roots.update(_import_root(name.name) for name in node.names)
+            else:
+                roots.add(_import_root(node.module))
+    return roots
 
 
 def _imports_target_modules(path: pathlib.Path) -> bool:
@@ -113,3 +160,28 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
         self.assertFalse(hasattr(SourceAdapter, "config_for"))
         self.assertFalse(hasattr(FlatWorkbookAdapter, "config_for"))
+
+    def test_source_interpretation_imports_no_target_state(self):
+        """Section 2.2 gives a Source Adapter parsing libraries and the catalog, nothing else."""
+        for name in INTERPRETERS:
+            with self.subTest(module=name):
+                self.assertEqual(_imported_roots(PACKAGE / name) & FORBIDDEN_INTERPRETER_IMPORTS, set())
+
+    def test_the_interpreter_guard_reads_every_import_form(self):
+        """A lazy import inside a function must not escape the boundary guard."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "interpreter.py"
+            path.write_text("def parse():\n    from dcim.models import Device\n    return Device\n")
+
+            self.assertEqual(_imported_roots(path) & FORBIDDEN_INTERPRETER_IMPORTS, {"dcim"})
+
+    def test_the_interpreter_guard_reads_a_package_root_import(self):
+        """`from netbox_data_import import models` names the module in the imported names."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "interpreter.py"
+            path.write_text("from netbox_data_import import models, target_modules\n")
+
+            self.assertEqual(
+                _imported_roots(path) & FORBIDDEN_INTERPRETER_IMPORTS,
+                {"models", "target_modules"},
+            )

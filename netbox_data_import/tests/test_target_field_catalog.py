@@ -784,6 +784,35 @@ class AdapterRuntimeSupportTest(TestCase):
         offered = {key for key, _label in ImportProfileForm().fields["source_adapter"].choices if key}
         self.assertEqual(offered, {"flat_workbook"})
 
+    def test_rest_offers_only_adapters_this_release_can_run(self):
+        """The REST schema states the choices the create path accepts, not the whole registry."""
+        from netbox_data_import.api.serializers import ImportProfileSerializer
+
+        creating = ImportProfileSerializer()
+        updating = ImportProfileSerializer(instance=self.trace)
+
+        self.assertEqual(set(creating.fields["source_adapter"].choices), {"flat_workbook"})
+        self.assertIn(
+            "trace_workbook",
+            set(updating.fields["source_adapter"].choices),
+            "an existing trace profile must still round-trip through REST",
+        )
+
+    def test_rest_updates_an_existing_profile_without_a_target_module(self):
+        """A client that reads a trace profile can write it back unchanged."""
+        self.client.force_login(_superuser())
+        response = self.client.patch(
+            _api_url("importprofile-detail", self.trace.pk),
+            data=json.dumps({"name": "Runtime Trace Renamed", "source_adapter": "trace_workbook"}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.trace.refresh_from_db()
+        self.assertEqual(self.trace.name, "Runtime Trace Renamed")
+        self.assertEqual(self.trace.source_adapter, "trace_workbook", "the write-back must not drop the adapter")
+
     def test_the_profile_form_rejects_an_adapter_without_a_target_module(self):
         """Choice filtering alone is presentation, so the form must also reject the value."""
         form = ImportProfileForm(data={"name": "Form Trace", "source_adapter": "trace_workbook"})

@@ -9,6 +9,8 @@ workbook, no column and no NetBox object type.
 
 from __future__ import annotations
 
+from typing import cast
+
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError
 
@@ -94,9 +96,11 @@ class ImportEngine:
         )
         # The catalog already declares which output kinds the resolution policy applies to.
         if _resolution_section().applies_to(source_batch.output_kinds):
+            # The section applies only to the flat output kinds, whose rows are always dictionaries.
+            source_rows = cast(tuple[dict, ...], source_batch.rows)
             source_batch = adapters.SourceBatch(
                 output_kinds=source_batch.output_kinds,
-                rows=tuple(derive_effective_rows(list(source_batch.rows), profile)),
+                rows=tuple(derive_effective_rows(list(source_rows), profile)),
                 diagnostics=source_batch.diagnostics,
                 unused_columns=source_batch.unused_columns,
             )
