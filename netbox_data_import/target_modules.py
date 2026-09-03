@@ -1694,6 +1694,12 @@ class DeviceModule:
                     "netbox_face": match.device.face or "",
                     "netbox_position": normalize_for_compare(match.device.position),
                     "netbox_rack_name": match.device.rack.name if match.device.rack_id else "",
+                    # A row refused for an identity conflict states no change, so it needs this here.
+                    "_placement_state": {
+                        "rack_id": match.device.rack_id,
+                        "position": normalize_for_compare(match.device.position),
+                        "face": match.device.face or "",
+                    },
                 },
             }
             if not batch.profile.adapter_settings.update_existing:

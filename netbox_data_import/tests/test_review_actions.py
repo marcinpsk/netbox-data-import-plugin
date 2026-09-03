@@ -487,3 +487,103 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.assertEqual(review_client.post(endpoint, data).status_code, 302)
         self.assertTrue(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
         self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+
+
+class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
+    """A row refused for an unplaced name match must still let the operator place the Device."""
+
+    def setUp(self):
+        """Create one unplaced Device that a row matches by name and wants to place."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        self.actor = get_user_model().objects.create_superuser(
+            username="unplaced-operator",
+            email="unplaced@example.invalid",
+            password="testpass",
+        )
+        self.client = Client()
+        self.client.force_login(self.actor)
+        self.site = Site.objects.create(name="Unplaced Site", slug="unplaced-site")
+        manufacturer = Manufacturer.objects.create(name="Unplaced Make", slug="unplaced-make")
+        self.device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Unplaced Model",
+            slug="unplaced-make-unplaced-model",
+            u_height=1,
+        )
+        self.role = DeviceRole.objects.create(name="Unplaced Role", slug="unplaced-role")
+        self.rack = Rack.objects.create(name="Unplaced Rack", site=self.site, u_height=42)
+        # The stored Device carries no placement, which is what makes the row an unplaced name match.
+        self.device = Device.objects.create(
+            name="unplaced-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            status="active",
+        )
+        self.profile = ImportProfile.objects.create(
+            name="Unplaced Profile",
+            adapter_config={"update_existing": True, "create_missing_device_types": False},
+        )
+        ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="Server",
+            role_slug=self.role.slug,
+        )
+        self.rows = [
+            {
+                "_row_number": 1,
+                "source_id": "UNPLACED-ROW",
+                "device_name": self.device.name,
+                "device_class": "Server",
+                "rack_name": self.rack.name,
+                "make": manufacturer.name,
+                "model": self.device_type.model,
+                "u_height": 1,
+                "u_position": 2,
+                "face": "front",
+                "status": "active",
+                "serial": "",
+                "asset_tag": "",
+            }
+        ]
+        workspace = plan_source_rows(self.rows, self.profile, self.site, actor=self.actor)
+        self.device_unit = next(unit for unit in workspace.units if unit.object_type == "device")
+        session = self.client.session
+        record_recalculated_preview(session, workspace.plan)
+        session["import_rows"] = workspace.source_rows
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+        }
+        session["import_preview_pending"] = True
+        session.save()
+
+    def test_the_refused_row_still_carries_its_placement_baseline(self):
+        """The unit states only a diagnostic, so the baseline has to reach the row another way."""
+        self.assertEqual(self.device_unit.action, "error")
+        self.assertEqual(self.device_unit.extra_data["identity_conflict"], "name_placement_conflict")
+        self.assertEqual(self.device_unit.extra_data["netbox_device_id"], self.device.pk)
+
+        baseline = self.device_unit.extra_data.get("_placement_state")
+
+        self.assertEqual(baseline, {"rack_id": None, "position": "", "face": ""})
+
+    def test_placement_sync_places_the_device_the_row_matched_by_name(self):
+        """Nothing in NetBox changed, so the refusal must not claim that it did."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            {
+                "row_number": 1,
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.rack_id, self.rack.pk)
+        self.assertEqual(self.device.position, 2)
+        self.assertEqual(self.device.face, "front")
