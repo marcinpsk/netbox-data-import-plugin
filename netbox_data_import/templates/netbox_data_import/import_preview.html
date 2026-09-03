@@ -585,7 +585,7 @@
                 {% elif row.action == 'error' and row.object_type == 'device' and profile_id %}
                   {# Device error — show class mapping button if we have source_class #}
                   {% if row.source_id %}
-                  {% if 'duplicate_serial' in row.extra_data.identity_conflicts %}
+                  {% if 'ignore_serial' in row.extra_data.offered_actions %}
                   {# Two rows cannot both claim one serial, so one of them gives it up. #}
                   <form method="post" action="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
                         hx-post="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
@@ -607,8 +607,7 @@
                   </form>
                   {% endif %}
                   {% endif %}
-                  {% if 'duplicate_name' in row.extra_data.identity_conflicts or 'name_placement_conflict' in row.extra_data.identity_conflicts %}
-                  {% if row.extra_data.suggested_name and row.source_id %}
+                  {% if 'use_name' in row.extra_data.offered_actions %}
                   <form method="post" action="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}"
                         hx-post="{% url 'plugins:netbox_data_import:resolve_duplicate_name' %}"
                         hx-target="#page-content"
@@ -634,7 +633,6 @@
                       <i class="mdi mdi-loading mdi-spin" aria-hidden="true"></i> Updating preview&hellip;
                     </span>
                   </form>
-                  {% endif %}
                   {% endif %}
                   {% if row.extra_data.source_class %}
                   <button type="button" class="btn btn-sm btn-outline-warning"
@@ -921,7 +919,7 @@
                             </td>
                             <td class="text-nowrap">
                               {% if conflict_row.source_id and profile_id %}
-                              {% if 'duplicate_serial' in conflict_row.identity_conflicts %}
+                              {% if 'ignore_serial' in conflict_row.offered_actions %}
                               {# The operator picks which of the colliding rows gives the serial up. #}
                               <form method="post" action="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
                                     hx-post="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"

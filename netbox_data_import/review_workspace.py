@@ -97,6 +97,31 @@ _IDENTITY_CONFLICTS = {
 }
 
 
+# One table: the action each identity conflict offers, and the extra_data keys that action runs on.
+_CONFLICT_ACTIONS = MappingProxyType(
+    {
+        "duplicate_name": ("use_name", ("suggested_name",)),
+        "duplicate_serial": ("ignore_serial", ("duplicate_serial",)),
+        "name_placement_conflict": ("use_name", ("suggested_name",)),
+    }
+)
+
+
+def _offered_actions(extra_data, source_id) -> list[str]:
+    """Return the row actions the preview can run for one unit, in the order the table states them."""
+    if not source_id:
+        return []
+    offered: list[str] = []
+    for conflict in extra_data.get("identity_conflicts") or ():
+        entry = _CONFLICT_ACTIONS.get(conflict)
+        if entry is None:
+            continue
+        action, required = entry
+        if action not in offered and all(extra_data.get(key) for key in required):
+            offered.append(action)
+    return offered
+
+
 def _operation(unit: SynchronizationUnit) -> str:
     """Return the preview action one unit displays."""
     if unit.disposition == Disposition.ACTIONABLE:
@@ -215,6 +240,7 @@ class WorkspaceUnit:
                         extra_data.setdefault(key, value)
                 for key, value in (secondary.get("extra_data") or {}).items():
                     extra_data.setdefault(key, value)
+        extra_data["offered_actions"] = _offered_actions(extra_data, source_id)
         return cls(
             identity=unit.identity,
             disposition=unit.disposition,

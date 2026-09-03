@@ -21,7 +21,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from netbox_data_import.plan import Disposition, Severity
-from netbox_data_import.review_workspace import WorkspaceUnit
+from netbox_data_import.review_workspace import _CONFLICT_ACTIONS, WorkspaceUnit
 from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed, _DeviceBatch
 
 
@@ -1919,6 +1919,47 @@ class DeviceModuleTargetStateIsWorkTest(DeviceModulePlanTestBase):
         units = self._plan(self._row(2, "D-1", "srv-01"))
 
         self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+
+class PreviewActionContractTest(DeviceModulePlanTestBase):
+    """Every conflict the preview offers an action for has to carry what that action needs.
+
+    The preview decided which action to offer from the conflict alone, while the payload each
+    action runs on was attached to one diagnostic. Two refusals reached an action with nothing to
+    act on: one drew a control with an empty value, the other hid itself. This pins the table
+    against the planner, so a conflict added to it has to prove the action it offers.
+    """
+
+    def _rows_for(self, conflict):
+        """Return the rows that make one real plan raise *conflict*."""
+        if conflict == "duplicate_name":
+            return (self._row(2, "D-1", "srv-dup"), self._row(3, "D-2", "srv-dup"))
+        if conflict == "duplicate_serial":
+            return (
+                self._row(2, "D-1", "srv-01", serial="SN-1"),
+                self._row(3, "D-2", "srv-02", serial="SN-1"),
+            )
+        if conflict == "name_placement_conflict":
+            self._device("srv-placed", rack=self.rack, position=10, face="front")
+            return (self._row(2, "D-1", "srv-placed", rack_name="dm-rack", u_position="20", face="Front"),)
+        raise AssertionError(f"add a planned row that raises {conflict!r} before listing its action")
+
+    def test_every_conflict_the_preview_acts_on_offers_its_action(self):
+        """A conflict in the table without its payload is the defect this test exists to catch."""
+        for conflict, (action, required) in _CONFLICT_ACTIONS.items():
+            with self.subTest(conflict=conflict):
+                units = self._plan(*self._rows_for(conflict))
+                rows = [WorkspaceUnit.from_unit(unit) for unit in units]
+                carrying = [row for row in rows if conflict in row.extra_data.get("identity_conflicts", ())]
+
+                self.assertTrue(carrying, f"no planned row raised {conflict}")
+                for row in carrying:
+                    for key in required:
+                        self.assertTrue(
+                            row.extra_data.get(key),
+                            f"{conflict} offers {action}, which needs extra_data[{key!r}]",
+                        )
+                    self.assertIn(action, row.extra_data["offered_actions"])
 
 
 class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):
