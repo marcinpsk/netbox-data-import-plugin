@@ -524,12 +524,11 @@ def _linearity_error(
                 "Consecutive Segment Evidence rows do not share a device and cards label.",
                 following.row_number,
             )
-    # One segment that ends where it starts is a self-connection, which the Cable module names.
-    if len(segments) > 1 and summary.from_termination.identity_key == summary.to_termination.identity_key:
+    if summary.from_termination.identity_key == summary.to_termination.identity_key:
         return _error(
             block,
             "trace.non_linear_path",
-            "The From and To lines name one termination, so the path closes a loop.",
+            "The From and To lines name one termination, so the path does not join two terminations.",
             segments[-1].row_number,
         )
     return None
