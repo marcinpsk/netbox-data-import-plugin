@@ -213,6 +213,16 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
             self.assertIn("CablePath", _referenced_names(path))
 
+    def test_the_cable_path_guard_reads_an_attribute_reference(self):
+        """A module that never imports the name still reads it through the package it imports."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "attribute_writer.py"
+            path.write_text(
+                '"""Reach it through the module."""\nfrom dcim import models\n\nmodels.CablePath.objects.all()\n'
+            )
+
+            self.assertIn("CablePath", _referenced_names(path))
+
     def test_the_interpreter_guard_reads_a_package_root_import(self):
         """`from netbox_data_import import models` names the module in the imported names."""
         with TemporaryDirectory() as directory:

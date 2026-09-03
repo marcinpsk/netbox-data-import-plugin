@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The seam every Target Module implements and the coordinator calls.
 
-Section 2.1 fixes these call shapes. The seam lives apart from the implementations so a Target
-Module can depend on it without depending on another Target Module.
+It lives apart from the implementations so one Target Module can depend on it without depending
+on another.
 """
 
 from __future__ import annotations
