@@ -5,6 +5,7 @@
 import ast
 import pathlib
 import secrets
+from threading import Event
 
 from core.models import ObjectType
 from dcim.choices import CableProfileChoices, CableTypeChoices
@@ -12,7 +13,7 @@ from dcim.models import Cable, Device, Interface
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.test import Client, SimpleTestCase, TestCase
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.adapters import UnknownSourceAdapter
@@ -29,13 +30,18 @@ from netbox_data_import.field_keys import (
 from netbox_data_import.forms import CableClassMappingForm
 from netbox_data_import.models import (
     index_digest,
+    locked_profile_policy,
     CableClassMapping,
     ImportProfile,
     SourceDocument,
     TerminationResolution,
 )
 from netbox_data_import.object_permissions import ObjectPermissionDenied
-from netbox_data_import.tests.helpers import make_dcim_objects
+from netbox_data_import.tests.helpers import (
+    make_dcim_objects,
+    run_on_separate_connection,
+    wait_until_a_lock_is_blocked,
+)
 from netbox_data_import.review_workspace import save_termination_resolution_and_replan
 
 User = get_user_model()
@@ -244,6 +250,14 @@ class TracePolicyModelTest(TestCase):
             duplicate.full_clean()
 
         self.assertIn("__all__", caught.exception.message_dict)
+
+    def test_the_database_itself_refuses_a_duplicate_task_and_field_key(self):
+        """`full_clean` reads model metadata, so only a write proves the constraint reached the table."""
+        self._resolution(TERMINATION_ROLE).save()
+        duplicate = self._resolution(TERMINATION_ROLE)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            duplicate.save()
 
     def _long_resolution(self, port):
         """Build one unsaved resolution whose field key exceeds the btree entry limit."""
@@ -594,6 +608,61 @@ class TerminationResolutionPersistenceTest(TestCase):
             )
 
         self.assertFalse(TerminationResolution.objects.filter(profile=flat_profile).exists())
+
+
+class TerminationResolutionLockOrderingTest(TransactionTestCase):
+    """The manual selection must read the profile after it holds the policy lock, not before."""
+
+    def setUp(self):
+        """Build one trace profile whose adapter a second connection can change under the lock."""
+        self.actor = User.objects.create_superuser("lock-decider", "lock-decider@example.com", "testpass")
+        self.profile = ImportProfile.objects.create(
+            name="Trace Lock Order",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        self.document = SourceDocument.store(profile=self.profile, content=b"Trace source content")
+        site, manufacturer, device_type, role = make_dcim_objects("TraceLockOrder")
+        del manufacturer
+        device = Device.objects.create(name="Lock Device", site=site, device_type=device_type, role=role)
+        self.interface = Interface.objects.create(device=device, name="Ethernet 1/3")
+        self.interface_type = ObjectType.objects.get_for_model(self.interface)
+        self.field_key = termination_field_key(
+            device=device.name,
+            cards="",
+            port=self.interface.name,
+            kind="interface",
+            role=TERMINATION_ROLE,
+        )
+        self.planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+
+    def test_an_adapter_change_under_the_lock_refuses_the_trace_only_write(self):
+        """A profile read before the lock still looks like a trace profile, so the row would persist."""
+        holder_ready = Event()
+
+        def hold_the_lock_then_change_the_adapter():
+            """Hold the policy lock until the save waits for it, then store a flat adapter."""
+            with locked_profile_policy(self.profile.pk):
+                holder_ready.set()
+                wait_until_a_lock_is_blocked(self)
+                ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="flat_workbook")
+
+        with run_on_separate_connection(hold_the_lock_then_change_the_adapter):
+            self.assertTrue(holder_ready.wait(timeout=10), "the holder never took the policy lock")
+            with self.assertRaisesMessage(ValidationError, "do not apply"):
+                save_termination_resolution_and_replan(
+                    profile=self.profile,
+                    source_document=self.document,
+                    actor=self.actor,
+                    planning_context=self.planning_context,
+                    task_type=SELECT_TERMINATION_TASK,
+                    field_key=self.field_key,
+                    selected_object_type=self.interface_type,
+                    selected_object_id=self.interface.pk,
+                    selected_display_name=str(self.interface),
+                )
+
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
 
 class CableClassMappingFormTest(TestCase):
