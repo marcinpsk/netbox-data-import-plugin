@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Preview row actions consume target-neutral Import Plans."""
 
+import time
+from threading import Event
+
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.test import Client, TransactionTestCase
 from django.urls import reverse
 
@@ -429,6 +433,30 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         response = self._sync_placement()
         self.assertEqual(response.status_code, 409)
         self.assertIn("placement changed", response.json()["error"])
+
+    def test_inline_placement_sync_cannot_overwrite_a_concurrent_move(self):
+        """The unlocked baseline check is stale by the time the write runs, so recheck under the lock."""
+        from dcim.models import Device
+
+        moved = Event()
+
+        def move_the_device_and_hold_the_lock():
+            # Hold the row lock while the request reads the old placement and blocks on the write.
+            with transaction.atomic():
+                locked = Device.objects.select_for_update().get(pk=self.device.pk)
+                locked.position = 21
+                locked.save(update_fields=["position"])
+                moved.set()
+                time.sleep(1)
+
+        with run_on_separate_connection(move_the_device_and_hold_the_lock):
+            self.assertTrue(moved.wait(timeout=10), "the concurrent move never started")
+            response = self._sync_placement()
+
+        self.assertEqual(response.status_code, 409, response.content[:300])
+        self.assertIn("placement changed", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, 21, "the sync overwrote a placement another writer had moved")
 
     def test_inline_placement_sync_rejects_an_absent_preview_row(self):
         """A cleared preview cannot authorize placement from client-supplied data."""

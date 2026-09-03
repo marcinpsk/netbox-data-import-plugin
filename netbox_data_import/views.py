@@ -2080,6 +2080,20 @@ def _placement_matches_preview(device, row) -> bool:
     )
 
 
+def _locked_placement_device(request, device_pk):
+    """Return the Device row locked for update, or None when it is gone or not permitted."""
+    from dcim.models import Device
+
+    # PostgreSQL refuses FOR UPDATE on a nullable outer join, so `of` locks the Device row alone.
+    return (
+        Device.objects.restrict(request.user, "change")
+        .select_for_update(of=("self",))
+        .select_related("site", "location", "rack", "device_type")
+        .filter(pk=device_pk)
+        .first()
+    )
+
+
 def _placement_action_intent(request):
     """Return authoritative placement inputs for preview and direct actions."""
     from dcim.models import Device
@@ -2772,31 +2786,55 @@ class SyncPlacementView(_AjaxPermissionView):
         u_position = intent["u_position"]
         face = intent["face"]
 
-        rack, err = _lookup_rack_for_device(device, rack_name)
-        if err:
-            return JsonResponse({"ok": False, "error": err})
+        with transaction.atomic():
+            # The baseline check above read the Device unlocked, so recheck it under the row lock.
+            device = _locked_placement_device(request, device.pk)
+            if device is None:
+                # atomic-exit-safe: device-gone-before-write
+                return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
+            if row is not None and not _placement_matches_preview(device, row):
+                # atomic-exit-safe: baseline-moved-before-write
+                return JsonResponse(
+                    {
+                        "ok": False,
+                        "error": "The matched NetBox placement changed. Recalculate the preview and try again.",
+                    },
+                    status=409,
+                )
 
-        device.rack = rack
-        # NetBox rejects a rack position on a zero-U device type, so sync the rack alone.
-        zero_u_type = _zero_u_device_type(device)
-        placement_fields, skipped, error = _set_rack_placement(device, u_position, face, zero_u_type)
-        if error:
-            return JsonResponse({"ok": False, "error": error})
-        update_fields = ["rack", *placement_fields]
+            rack, err = _lookup_rack_for_device(device, rack_name)
+            if err:
+                # atomic-exit-safe: rack-unresolved-before-write
+                return JsonResponse({"ok": False, "error": err})
 
-        try:
-            _validate_device_placement(device)
-        except ValidationError as exc:
-            return JsonResponse({"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400)
-        except Exception:
-            logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
-            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+            device.rack = rack
+            # NetBox rejects a rack position on a zero-U device type, so sync the rack alone.
+            zero_u_type = _zero_u_device_type(device)
+            placement_fields, skipped, error = _set_rack_placement(device, u_position, face, zero_u_type)
+            if error:
+                # atomic-exit-safe: placement-value-refused-before-write
+                return JsonResponse({"ok": False, "error": error})
+            update_fields = ["rack", *placement_fields]
 
-        try:
-            device.save(update_fields=update_fields)
-        except Exception:
-            logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
-            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+            try:
+                _validate_device_placement(device)
+            except ValidationError as exc:
+                # atomic-exit-safe: placement-invalid-before-write
+                return JsonResponse(
+                    {"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400
+                )
+            except Exception:
+                logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
+                # atomic-exit-safe: validation-failed-before-write
+                return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+
+            try:
+                device.save(update_fields=update_fields)
+            except Exception:
+                logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
+                # A receiver raising after the UPDATE would otherwise commit a write reported as failed.
+                transaction.set_rollback(True)
+                return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         parts = [f"rack={rack.name}"]
         if "position" in update_fields and device.position is not None:
