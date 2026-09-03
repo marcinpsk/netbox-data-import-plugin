@@ -792,6 +792,11 @@ class AdapterRuntimeSupportTest(TestCase):
         updating = ImportProfileSerializer(instance=self.trace)
 
         self.assertEqual(set(creating.fields["source_adapter"].choices), {"flat_workbook"})
+        self.assertEqual(
+            creating.fields["source_adapter"].choices,
+            dict(selectable_adapter_choices()),
+            "the create schema must state each adapter's label, not repeat its key",
+        )
         self.assertIn(
             "trace_workbook",
             set(updating.fields["source_adapter"].choices),

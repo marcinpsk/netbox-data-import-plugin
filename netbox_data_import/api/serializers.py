@@ -97,7 +97,7 @@ class ImportProfileSerializer(NetBoxModelSerializer):
         super().__init__(*args, **kwargs)
         # An update keeps the full registry, so an existing trace profile still round-trips.
         if self.instance is None:
-            self.fields["source_adapter"].choices = dict(selectable_adapter_choices())
+            self.fields["source_adapter"].choices = selectable_adapter_choices()
 
     def validate(self, attrs):
         """Validate the adapter configuration and keep the Source Adapter immutable."""
