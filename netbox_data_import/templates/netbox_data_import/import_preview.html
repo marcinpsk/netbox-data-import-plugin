@@ -641,6 +641,8 @@
                           data-ndi-modal="#classMappingModal"
                           data-source-class="{{ row.extra_data.source_class}}"
                           data-profile-id="{{ profile_id }}"
+                          data-initial-action="{{ row.extra_data.class_mapping_action }}"
+                          data-current-role-slug="{{ row.extra_data.class_mapping_role_slug }}"
                           title="Configure how to handle devices with class '{{ row.extra_data.source_class }}'">
                     <i class="mdi mdi-cog"></i> Configure class
                   </button>
@@ -1372,7 +1374,7 @@ var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : 
     document.getElementById('cm_profile_id').value = btn.dataset.profileId || '';
     document.getElementById('cm_source_class_display').textContent = sourceClass;
     document.getElementById('cm_title_class').textContent = sourceClass;
-    document.getElementById('cm_role_slug').value = '';
+    document.getElementById('cm_role_slug').value = btn.dataset.currentRoleSlug || '';
     document.getElementById('cm_role_row').style.display = 'none';
     document.getElementById('cm_rack_type_row').style.display = 'none';
     document.getElementById('cm_creates_rack').value = '0';

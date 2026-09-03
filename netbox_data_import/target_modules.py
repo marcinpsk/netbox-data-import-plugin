@@ -146,6 +146,19 @@ def _unit_display(row, object_type: str, name: str, rack_name: str = "") -> dict
     }
 
 
+def _class_mapping_display(mapping) -> dict:
+    """Return the stored class policy, so its editor reopens on what the operator saved."""
+    if mapping is None:
+        return {"class_mapping_action": "", "class_mapping_role_slug": ""}
+    if mapping.ignore:
+        action = "ignore"
+    elif mapping.creates_rack:
+        action = "rack"
+    else:
+        action = "role"
+    return {"class_mapping_action": action, "class_mapping_role_slug": _text(mapping.role_slug)}
+
+
 def _ignored_source_ids(profile) -> frozenset[str]:
     """Return the source identities the operator has chosen to skip."""
     return frozenset(_source_text(value) for value in profile.ignored_devices.values_list("source_id", flat=True))
@@ -1537,6 +1550,7 @@ class DeviceModule:
         ):
             identity = f"{identity}:row:{row.get('_row_number')}"
         display = _unit_display(row, self.key, name, _source_text(row.get("rack_name")))
+        display["extra_data"].update(_class_mapping_display(batch._mappings.get(_source_text(row.get("device_class")))))
         display["device_name"] = name
         display["source_id"] = source_id
 
@@ -1858,7 +1872,11 @@ class DeviceModule:
                 "extra_data": {**display["extra_data"], "placement_sync_writes_nothing": True},
             }
         if match.method == "name" and self._placement_differs(match.device, payload):
-            problem(Disposition.INVALID, "device.name_placement_conflict")
+            # A stored Device with no placement has none to sit at, so it reads as a different refusal.
+            if self._device_is_unplaced(match.device):
+                problem(Disposition.INVALID, "device.name_unplaced_match")
+            else:
+                problem(Disposition.INVALID, "device.name_placement_conflict")
         if (
             not issues
             and not self._differs(match.device, payload)
@@ -1918,6 +1936,11 @@ class DeviceModule:
             or normalize_for_compare(device.position) != normalize_for_compare(payload["u_position"])
             or (device.face or "") != payload["face"]
         )
+
+    @staticmethod
+    def _device_is_unplaced(device) -> bool:
+        """Return whether the stored Device records no placement for the source to move it from."""
+        return device.location_id is None and device.rack_id is None and device.position is None and not device.face
 
     @staticmethod
     def _validation_error(device, payload) -> str:
