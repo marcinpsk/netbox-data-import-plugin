@@ -226,6 +226,37 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             ],
         )
 
+    def test_a_panel_that_names_its_front_and_rear_port_alike_plans_each_kind(self):
+        """A shared port label is a real panel shape, and each segment still takes its own kind."""
+        panel = self.make_device("PANEL-3")
+        rear = RearPort.objects.create(device=panel, name="P1", type="8p8c", positions=1)
+        front = FrontPort.objects.create(device=panel, name="P1", type="8p8c")
+        PortMapping.objects.create(front_port=front, rear_port=rear, front_port_position=1, rear_port_position=1)
+        shared_front = trace_termination("PANEL-3", "", "P1", "Position Front")
+        shared_rear = trace_termination("PANEL-3", "", "P1", "Punch-Down")
+        block = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (
+                trace_segment(DEVICE_A, "Patch", shared_front),
+                trace_segment(shared_rear, "Trunk", PANEL_2_REAR),
+                trace_segment(PANEL_2_FRONT, "Patch", DEVICE_B),
+            ),
+        )
+
+        unit = self.unit(block)
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        creations = [change for change in unit.changes if change.operation == "create"]
+        self.assertEqual(
+            [self.termination_pairs(change) for change in creations],
+            [
+                sorted([("dcim.interface", self.eth0.pk), ("dcim.frontport", front.pk)]),
+                sorted([("dcim.rearport", rear.pk), ("dcim.rearport", self.panel_2_rear.pk)]),
+                sorted([("dcim.frontport", self.panel_2_fronts[0].pk), ("dcim.interface", self.eth1.pk)]),
+            ],
+        )
+
     def test_logical_cable_deletion_review_carries_description_and_sorted_tags(self):
         """The operator reviews the Logical Cable description and tags before approving deletion."""
         logical = self.connect(self.eth0, self.eth1, description="Temporary logical path")
