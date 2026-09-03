@@ -895,7 +895,10 @@ class _ProfileChildEditView(generic.ObjectEditView):
 
     def alter_object(self, obj, request, url_args, url_kwargs):
         if not obj.pk and "profile_pk" in url_kwargs:
-            obj.profile = get_object_or_404(ImportProfile, pk=url_kwargs["profile_pk"])
+            # The URL names the parent, so the add scope has to cover the profile as well as the row.
+            obj.profile = get_object_or_404(
+                ImportProfile.objects.restrict(request.user, "view"), pk=url_kwargs["profile_pk"]
+            )
         return obj
 
     def get_return_url(self, request, obj=None):
@@ -908,7 +911,7 @@ class _ProfileChildEditView(generic.ObjectEditView):
             return {"profile": instance.profile}
         profile_pk = self.kwargs.get("profile_pk")
         if profile_pk:
-            return {"profile": get_object_or_404(ImportProfile, pk=profile_pk)}
+            return {"profile": get_object_or_404(ImportProfile.objects.restrict(request.user, "view"), pk=profile_pk)}
         return {}
 
     def post(self, request, *args, **kwargs):

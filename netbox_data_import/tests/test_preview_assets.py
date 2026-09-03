@@ -66,6 +66,22 @@ class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
         missing = [trigger for trigger in triggers if "data-initial-action" not in trigger]
         self.assertEqual(missing, [], "every class editor trigger must carry data-initial-action")
 
+    def test_the_device_class_trigger_carries_the_stored_role_slug(self):
+        """The handler reads this attribute, so losing it silently reopens the editor with no role."""
+        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+        triggers = re.findall(r'<button[^>]*data-ndi-modal="#classMappingModal"[^>]*>', html)
+        device_triggers = [trigger for trigger in triggers if 'data-initial-action="rack"' not in trigger]
+
+        self.assertTrue(device_triggers, "the preview must offer the class editor on a device row")
+        missing = [trigger for trigger in device_triggers if "data-current-role-slug" not in trigger]
+        self.assertEqual(missing, [], "every device class editor trigger must carry data-current-role-slug")
+
+    def test_the_class_editor_restores_the_role_slug_it_is_given(self):
+        """A handler that clears the field instead would pass the trigger checks above."""
+        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+
+        self.assertIn("document.getElementById('cm_role_slug').value = btn.dataset.currentRoleSlug", html)
+
 
 class PreviewAssetsSurviveABoostedSwapTest(PreviewSessionMixin, BaseViewTestCase):
     """The rendered preview must carry its assets in the part htmx keeps."""

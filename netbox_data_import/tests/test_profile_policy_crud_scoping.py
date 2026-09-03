@@ -20,6 +20,51 @@ def _profile(name):
     )
 
 
+class ProfileChildAddScopesItsParentTest(TestCase):
+    """An add names its parent profile in the URL, so that profile has to be in scope too."""
+
+    def setUp(self):
+        """Grant every ColumnMapping action, but let the operator see only one profile."""
+        self.mine = _profile("AddScopeMine")
+        self.theirs = _profile("AddScopeTheirs")
+        self.user = user_with_object_permission(
+            "add-scoped-operator",
+            [
+                (ColumnMapping, SCOPED_ACTIONS, {}),
+                (ImportProfile, ["view"], {"pk": self.mine.pk}),
+            ],
+        )
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def test_adding_a_row_under_an_invisible_profile_is_refused(self):
+        """Otherwise the URL alone attaches policy to a profile the operator cannot read."""
+        url = reverse("plugins:netbox_data_import:columnmapping_add", kwargs={"profile_pk": self.theirs.pk})
+
+        response = self.client.post(url, {"source_column": "Sneak", "target_field": "serial"})
+
+        self.assertIn(response.status_code, (403, 404), response.status_code)
+        self.assertFalse(ColumnMapping.objects.filter(profile=self.theirs).exists())
+
+    def test_the_add_form_does_not_disclose_an_invisible_profile(self):
+        """The form renders its parent, so an unrestricted read hands over that profile's name."""
+        url = reverse("plugins:netbox_data_import:columnmapping_add", kwargs={"profile_pk": self.theirs.pk})
+
+        response = self.client.get(url)
+
+        self.assertIn(response.status_code, (403, 404), response.status_code)
+        self.assertNotContains(response, "AddScopeTheirs", status_code=response.status_code)
+
+    def test_adding_a_row_under_a_visible_profile_still_works(self):
+        """The scope must refuse the hidden parent only, not every add."""
+        url = reverse("plugins:netbox_data_import:columnmapping_add", kwargs={"profile_pk": self.mine.pk})
+
+        response = self.client.post(url, {"source_column": "Serial Number", "target_field": "serial"})
+
+        self.assertIn(response.status_code, (200, 302), response.status_code)
+        self.assertTrue(ColumnMapping.objects.filter(profile=self.mine, source_column="Serial Number").exists())
+
+
 class ProfileChildObjectScopeTest(TestCase):
     """An operator scoped to one profile must not reach another profile's policy rows."""
 
@@ -62,7 +107,7 @@ class ProfileChildObjectScopeTest(TestCase):
         self.assertEqual(self.their_mapping.source_column, "Serial Number")
 
     def test_deleting_a_row_in_another_profile_is_refused(self):
-        """Delete reads the same unrestricted queryset the edit view does."""
+        """Delete reads the same scoped queryset the edit view does."""
         url = reverse("plugins:netbox_data_import:columnmapping_delete", kwargs={"pk": self.their_mapping.pk})
 
         response = self.client.post(url, {"confirm": "true"})
