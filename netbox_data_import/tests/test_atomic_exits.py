@@ -58,12 +58,6 @@ AUDITED_EXITS = {
     ("SyncPlacementView.post", "placement-value-refused-before-write"): (
         "_set_rack_placement changes the in-memory Device alone; device.save() has not run."
     ),
-    ("SyncPlacementView.post", "placement-invalid-before-write"): (
-        "full_clean only reads, so a rejected placement leaves nothing to roll back."
-    ),
-    ("SyncPlacementView.post", "validation-failed-before-write"): (
-        "Same as the ValidationError exit: full_clean runs before device.save()."
-    ),
     ("ImportProfile.delete", "locked-cascade-committed"): (
         "The success path: the lock only orders the cascade, so committing the delete is the point."
     ),

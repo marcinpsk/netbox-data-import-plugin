@@ -434,25 +434,51 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("placement changed", response.json()["error"])
 
+    def _wait_for_a_backend_blocked_on_a_lock(self, timeout=15):
+        """Return whether another backend on this database is waiting for a lock."""
+        from django.db import connection
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                    "AND wait_event_type = 'Lock'"
+                )
+                if cursor.fetchone()[0]:
+                    return True
+            time.sleep(0.05)
+        return False
+
     def test_inline_placement_sync_cannot_overwrite_a_concurrent_move(self):
         """The unlocked baseline check is stale by the time the write runs, so recheck under the lock."""
         from dcim.models import Device
 
         moved = Event()
+        release = Event()
+        answered = {}
 
         def move_the_device_and_hold_the_lock():
-            # Hold the row lock while the request reads the old placement and blocks on the write.
             with transaction.atomic():
                 locked = Device.objects.select_for_update().get(pk=self.device.pk)
                 locked.position = 21
                 locked.save(update_fields=["position"])
                 moved.set()
-                time.sleep(1)
+                # Commit only once the request waits on this row, so its baseline read is already stale.
+                release.wait(timeout=15)
+
+        def sync_the_previewed_placement():
+            answered["response"] = self._sync_placement()
 
         with run_on_separate_connection(move_the_device_and_hold_the_lock):
-            self.assertTrue(moved.wait(timeout=10), "the concurrent move never started")
-            response = self._sync_placement()
+            self.assertTrue(moved.wait(timeout=15), "the concurrent move never started")
+            with run_on_separate_connection(sync_the_previewed_placement):
+                blocked = self._wait_for_a_backend_blocked_on_a_lock()
+                release.set()
+                self.assertTrue(blocked, "the sync never blocked on the moved device's row lock")
 
+        response = answered["response"]
         self.assertEqual(response.status_code, 409, response.content[:300])
         self.assertIn("placement changed", response.json()["error"])
         self.device.refresh_from_db()

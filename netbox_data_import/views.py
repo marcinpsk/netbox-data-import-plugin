@@ -2819,13 +2819,14 @@ class SyncPlacementView(_AjaxPermissionView):
             try:
                 _validate_device_placement(device)
             except ValidationError as exc:
-                # atomic-exit-safe: placement-invalid-before-write
+                # full_clean sends post_clean, whose receivers may write before raising.
+                transaction.set_rollback(True)
                 return JsonResponse(
                     {"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400
                 )
             except Exception:
                 logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
-                # atomic-exit-safe: validation-failed-before-write
+                transaction.set_rollback(True)
                 return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
             try:
