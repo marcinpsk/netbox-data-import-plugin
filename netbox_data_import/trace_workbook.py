@@ -621,15 +621,17 @@ def _enrich_termination(
     corroboration: Iterable[TerminationReference],
 ) -> TerminationReference:
     """Return the termination with the corroboration values the source states for it."""
+    enriched = termination
+    # A path row is read before a Trace List visit, so an empty cell there must not hide a later one.
     for candidate in corroboration:
         if candidate.identity_key == termination.identity_key:
-            return replace(
-                termination,
-                u_position=candidate.u_position,
-                rack=candidate.rack,
-                location=candidate.location,
+            enriched = replace(
+                enriched,
+                u_position=enriched.u_position or candidate.u_position,
+                rack=enriched.rack or candidate.rack,
+                location=enriched.location or candidate.location,
             )
-    return termination
+    return enriched
 
 
 def _enrich_summary(
@@ -867,22 +869,24 @@ def interpret(content: bytes) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiag
         book = openpyxl.load_workbook(BytesIO(content), data_only=True)
     except Exception as exc:
         raise SourceUnreadable(f"Cannot open Excel file: {exc}") from exc
-    recognized = [name for name in (TRACE_PATH_SHEET, TRACE_LIST_SHEET) if name in book.sheetnames]
-    if not recognized:
-        book.close()
-        diagnostic = SourceDiagnostic(
-            code="trace.no_recognized_sheet",
-            message=f"Workbook has neither '{TRACE_PATH_SHEET}' nor '{TRACE_LIST_SHEET}'.",
+    try:
+        recognized = [name for name in (TRACE_PATH_SHEET, TRACE_LIST_SHEET) if name in book.sheetnames]
+        if not recognized:
+            diagnostic = SourceDiagnostic(
+                code="trace.no_recognized_sheet",
+                message=f"Workbook has neither '{TRACE_PATH_SHEET}' nor '{TRACE_LIST_SHEET}'.",
+            )
+            return (), (diagnostic,)
+        workbook_fingerprint = sha256(content).hexdigest()
+        path_blocks = (
+            _extract_blocks(book[TRACE_PATH_SHEET], workbook_fingerprint) if TRACE_PATH_SHEET in recognized else ()
         )
-        return (), (diagnostic,)
-    workbook_fingerprint = sha256(content).hexdigest()
-    path_blocks = (
-        _extract_blocks(book[TRACE_PATH_SHEET], workbook_fingerprint) if TRACE_PATH_SHEET in recognized else ()
-    )
-    list_blocks = (
-        _extract_blocks(book[TRACE_LIST_SHEET], workbook_fingerprint) if TRACE_LIST_SHEET in recognized else ()
-    )
-    book.close()
+        list_blocks = (
+            _extract_blocks(book[TRACE_LIST_SHEET], workbook_fingerprint) if TRACE_LIST_SHEET in recognized else ()
+        )
+    finally:
+        # openpyxl holds the zip archive of the BytesIO until close(), including on a raise.
+        book.close()
     lists_by_pair: dict[tuple[str, str], list[_Block]] = defaultdict(list)
     for block in list_blocks:
         lists_by_pair[block.pair_key].append(block)

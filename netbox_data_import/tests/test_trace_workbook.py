@@ -5,6 +5,7 @@
 from io import BytesIO
 import json
 from pathlib import Path
+from unittest import mock
 
 from django.test import SimpleTestCase
 import openpyxl
@@ -12,6 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from netbox_data_import.adapters import SourceBatch, SourceUnreadable, TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
+from netbox_data_import import trace_workbook
 from netbox_data_import.trace_workbook import parse_endpoint_line
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -316,6 +318,72 @@ class TraceWorkbookIdentityTest(SimpleTestCase):
         identities = {trace.identity for trace in batch.rows}
         self.assertEqual(len(identities), 2)
         self.assertTrue(all(isinstance(json.loads(identity), list) for identity in identities))
+
+
+class TraceWorkbookCorroborationTest(SimpleTestCase):
+    """Corroboration reaches a termination from a path row and from a Trace List visit."""
+
+    def _pair(self):
+        """Return the two endpoints and the From/To lines both sheets share."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        return endpoint_a, endpoint_b, (_endpoint_line(endpoint_a), _endpoint_line(endpoint_b))
+
+    def test_a_trace_list_visit_fills_what_the_path_row_left_empty(self):
+        """The path row is read first, so its empty cells must not hide what the list states."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        path_block = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b),))
+        stated = ("Site Q", "RACK-Q", "7", "DEVICE-A", "", "PORT-A", "Port", "Ignored")
+        list_block = (*lines, (stated, _visit(endpoint_b)))
+
+        batch = _interpret(_workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True))
+        stated_end = batch.rows[0].endpoint_summary.from_termination
+
+        self.assertEqual(stated_end.location, "Site Q")
+        self.assertEqual(stated_end.rack, "RACK-Q")
+        self.assertEqual(stated_end.u_position, "7")
+
+    def test_a_path_row_value_survives_a_later_empty_visit(self):
+        """The first non-empty value wins, so a blank list row cannot clear a stated one."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        path_block = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b, ("9", "RACK-Z", "Site Z")),))
+        list_block = (*lines, (_visit(endpoint_a), _visit(endpoint_b)))
+
+        batch = _interpret(_workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True))
+        stated_end = batch.rows[0].endpoint_summary.from_termination
+
+        self.assertEqual(stated_end.rack, "RACK-Z")
+        self.assertEqual(stated_end.location, "Site Z")
+        self.assertEqual(stated_end.u_position, "9")
+
+
+class TraceWorkbookHandleReleaseTest(SimpleTestCase):
+    """openpyxl holds the archive of the BytesIO until close()."""
+
+    def test_the_workbook_is_closed_when_block_extraction_raises(self):
+        """Without a finally the archive stays open for every unreadable sheet."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (_endpoint_line(endpoint_a), _endpoint_line(endpoint_b), (_segment(endpoint_a, "Cable A", endpoint_b),))
+        content = _workbook(path_blocks=(block,))
+        closed = []
+        real_load = openpyxl.load_workbook
+
+        def recording_load(*args, **kwargs):
+            """Return the real workbook, with its close recorded."""
+            book = real_load(*args, **kwargs)
+            original_close = book.close
+            book.close = lambda: (closed.append(True), original_close())[1]
+            return book
+
+        with (
+            mock.patch.object(trace_workbook.openpyxl, "load_workbook", recording_load),
+            mock.patch.object(trace_workbook, "_extract_blocks", side_effect=RuntimeError("unreadable sheet")),
+            self.assertRaises(RuntimeError),
+        ):
+            _interpret(content)
+
+        self.assertTrue(closed, "interpret must close the workbook when extraction raises")
 
 
 class TraceWorkbookTaxonomyTest(SimpleTestCase):
