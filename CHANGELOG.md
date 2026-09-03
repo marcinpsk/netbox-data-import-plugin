@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.11.3 (2026-09-03)
+
+### Bug Fixes
+
+- Refuse an out-of-scope add before it takes the policy lock
+  ([`c9230e8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c9230e84d7f889ad4083c7740ba5b0475ae5a7fb))
+
+- Scope the parent profile an add view attaches its row to
+  ([`a81fd76`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a81fd768f1e0aa769a6f13f87ccda3b8dc72ab03))
+
+
 ## v1.11.2 (2026-09-02)
 
 ### Bug Fixes
