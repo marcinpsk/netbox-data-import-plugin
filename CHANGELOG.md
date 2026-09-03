@@ -2,6 +2,50 @@
 
 <!-- version list -->
 
+## v1.11.2 (2026-09-02)
+
+### Bug Fixes
+
+- Check the wording table by its keys, and let the test own its expectations
+  ([`4eddd15`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4eddd15bcee1dad46b26021e1779c59fbfb34730))
+
+- Keep a failed sync row disabled once another write made the preview stale
+  ([`ea0fd7f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ea0fd7f75df2a735503d4d7a67be0c3b3011ba40))
+
+- Keep a refused row's Contact off the Device it named
+  ([`d1d41d9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d1d41d996769b2e4a23abb35dda59d4c9c6841af))
+
+- Keep the Contact a save created linked to its row
+  ([`6944c4e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6944c4e7f8d57177752602391a65d14a6df879f6))
+
+- Recalculate the preview when the last pending sync fails
+  ([`30ddb81`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/30ddb81ad406c6edb749482c4b4c6c09cf02fe45))
+
+- Refuse a selected Contact whose lookup value moved
+  ([`85f6b87`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/85f6b878c30035481fa98ffe7a2e0665751bf3f1))
+
+- Report a Contact write by what it changed, not by whether one ran
+  ([`fa4906c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/fa4906cb15f512607c1c7499c30dcd5c957c8a36))
+
+### Chores
+
+- **deps**: Bump the github-actions group with 2 updates
+  ([`8873f62`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/8873f62ffd1b513f878121e2ce4f1c5c7134316b))
+
+- **deps-dev**: Bump ruff from 0.16.3 to 0.16.4
+  ([`a98c65f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a98c65fecaa230fe283070a35a298b992180a300))
+
+### Documentation
+
+- State the profile ownership contract the forms actually have, and widen two assertions
+  ([`6523863`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/652386382b6c348c839ff050c0abc7edc2e90669))
+
+### Testing
+
+- State the current constraint in the device module test docstring
+  ([`a0f22b5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a0f22b5c44b6fb852d45bc0338b4a009071d774a))
+
+
 ## v1.11.1 (2026-09-01)
 
 
