@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Exercise the trace Source Adapter with no database access."""
 
+from collections import Counter
 from io import BytesIO
 import json
 from pathlib import Path
-from unittest import mock
 
 from django.test import SimpleTestCase
 import openpyxl
@@ -319,6 +319,34 @@ class TraceWorkbookIdentityTest(SimpleTestCase):
         self.assertEqual(len(identities), 2)
         self.assertTrue(all(isinstance(json.loads(identity), list) for identity in identities))
 
+    def test_a_front_and_a_rear_port_that_share_a_label_stay_two_terminations(self):
+        """PortClass names the claimed termination kind, so a shared port label is not one port."""
+        front = _termination("PANEL-A", "CARD-A", "01", "Position Front")
+        rear = _termination("PANEL-A", "CARD-A", "01", "Punch-Down")
+        endpoint = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (_endpoint_line(front), _endpoint_line(endpoint), (_segment(rear, "Cable A", endpoint),))
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+
+    def test_two_traces_that_differ_only_by_claimed_kind_stay_apart(self):
+        """A shared port label on a front and a rear port is not one identity to collapse."""
+        front = _termination("PANEL-A", "CARD-A", "01", "Position Front")
+        rear = _termination("PANEL-A", "CARD-A", "01", "Punch-Down")
+        endpoint = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        blocks = tuple(
+            (_endpoint_line(termination), _endpoint_line(endpoint), (_segment(termination, "Cable A", endpoint),))
+            for termination in (front, rear)
+        )
+
+        batch = _interpret(_workbook(path_blocks=blocks))
+
+        self.assertEqual(len(batch.rows), 2)
+        self.assertEqual(len({trace.identity for trace in batch.rows}), 2)
+        self.assertNotIn("trace.duplicate_conflict", _codes(batch))
+
 
 class TraceWorkbookCorroborationTest(SimpleTestCase):
     """Corroboration reaches a termination from a path row and from a Trace List visit."""
@@ -356,34 +384,33 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
         self.assertEqual(stated_end.location, "Site Z")
         self.assertEqual(stated_end.u_position, "9")
 
+    def test_a_visit_under_other_cards_contradicts_its_segment(self):
+        """A visit naming the stated device and port under other cards is not corroboration."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        panel_in = _termination("PANEL-A", "CARD-A", "FRONT", "Position Front")
+        panel_out = _termination("PANEL-A", "CARD-A", "REAR", "Punch-Down")
+        path_block = (*lines, (_segment(endpoint_a, "Cable A", panel_in), _segment(panel_out, "Cable B", endpoint_b)))
+        other_cards = _termination("PANEL-A", "CARD-Z", "FRONT", "Position Front")
+        list_block = (*lines, (_visit(endpoint_a), _visit(other_cards), _visit(endpoint_b)))
 
-class TraceWorkbookHandleReleaseTest(SimpleTestCase):
-    """openpyxl holds the archive of the BytesIO until close()."""
+        batch = _interpret(_workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True))
 
-    def test_the_workbook_is_closed_when_block_extraction_raises(self):
-        """Without a finally the archive stays open for every unreadable sheet."""
-        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
-        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
-        block = (_endpoint_line(endpoint_a), _endpoint_line(endpoint_b), (_segment(endpoint_a, "Cable A", endpoint_b),))
-        content = _workbook(path_blocks=(block,))
-        closed = []
-        real_load = openpyxl.load_workbook
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.corroboration_mismatch"])
 
-        def recording_load(*args, **kwargs):
-            """Return the real workbook, with its close recorded."""
-            book = real_load(*args, **kwargs)
-            original_close = book.close
-            book.close = lambda: (closed.append(True), original_close())[1]
-            return book
+    def test_a_visit_under_another_port_class_contradicts_its_segment(self):
+        """The front port a visit states is not the rear port its Segment Evidence names."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        panel_in = _termination("PANEL-A", "CARD-A", "FRONT", "Position Front")
+        panel_out = _termination("PANEL-A", "CARD-A", "REAR", "Punch-Down")
+        path_block = (*lines, (_segment(endpoint_a, "Cable A", panel_in), _segment(panel_out, "Cable B", endpoint_b)))
+        other_class = _termination("PANEL-A", "CARD-A", "FRONT", "Punch-Down")
+        list_block = (*lines, (_visit(endpoint_a), _visit(other_class), _visit(endpoint_b)))
 
-        with (
-            mock.patch.object(trace_workbook.openpyxl, "load_workbook", recording_load),
-            mock.patch.object(trace_workbook, "_extract_blocks", side_effect=RuntimeError("unreadable sheet")),
-            self.assertRaises(RuntimeError),
-        ):
-            _interpret(content)
+        batch = _interpret(_workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True))
 
-        self.assertTrue(closed, "interpret must close the workbook when extraction raises")
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.corroboration_mismatch"])
 
 
 class TraceWorkbookTaxonomyTest(SimpleTestCase):
@@ -654,6 +681,64 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertEqual(batch.rows[0].segments, ())
         self.assertEqual(batch.rows[0].pass_through_claims, ())
         self.assertEqual(batch.rows[0].provenance[0].sheet, "Trace List")
+
+    def test_a_reversed_segment_repeats_one_cable(self):
+        """A segment and its reverse state one physical cable, so the path is not linear."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        panel = _termination("PANEL-A", "CARD-A", "01", "Position Front")
+        lines = _endpoint_line(endpoint_a), _endpoint_line(endpoint_a)
+        block = (*lines, (_segment(endpoint_a, "Cable A", panel), _segment(panel, "Cable A", endpoint_a)))
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+
+    def test_a_path_that_returns_to_its_start_is_not_linear(self):
+        """Three segments that close a loop reuse the entry termination at both ends."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        panel_b = _termination("PANEL-B", "CARD-B", "01", "Position Front")
+        panel_c = _termination("PANEL-C", "CARD-C", "01", "Position Front")
+        lines = _endpoint_line(endpoint_a), _endpoint_line(endpoint_a)
+        block = (
+            *lines,
+            (
+                _segment(endpoint_a, "Cable A", panel_b),
+                _segment(panel_b, "Cable B", panel_c),
+                _segment(panel_c, "Cable C", endpoint_a),
+            ),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+
+
+class TraceWorkbookRowReadTest(SimpleTestCase):
+    """Block extraction reads each row of a sheet once."""
+
+    def test_extraction_reads_each_block_row_once(self):
+        """openpyxl builds a cell on first access, so a repeated read costs a whole sheet pass."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        rows = tuple(_segment(endpoint_a, f"Cable {index}", endpoint_b) for index in range(4))
+        block = (_endpoint_line(endpoint_a), _endpoint_line(endpoint_b), rows)
+        book = openpyxl.load_workbook(BytesIO(_workbook(path_blocks=(block,))), data_only=True)
+        sheet = book["Trace From To"]
+        reads: Counter[int] = Counter()
+        real_cell = sheet.cell
+
+        def counting_cell(*args, **kwargs):
+            """Count every cell the parser reads from the real worksheet."""
+            reads[kwargs.get("row", args[0] if args else 0)] += 1
+            return real_cell(*args, **kwargs)
+
+        sheet.cell = counting_cell
+        extracted = trace_workbook._extract_blocks(sheet, "fingerprint")
+
+        self.assertEqual(len(extracted[0].rows), len(rows))
+        self.assertEqual(max(reads.values()), len(PATH_HEADER))
 
 
 class TraceWorkbookExportArtifactTest(SimpleTestCase):

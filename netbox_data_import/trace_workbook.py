@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from io import BytesIO
 import json
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import openpyxl
 
@@ -23,6 +23,18 @@ INTERFACE_PORT_CLASSES = frozenset({"NIC", "Switch Port", "Port"})
 FRONT_PORT_CLASSES = frozenset({"Position Front", "Fiber Pair Front"})
 REAR_PORT_CLASSES = frozenset({"Punch-Down", "Fiber Pair Back"})
 PORT_CLASSES = INTERFACE_PORT_CLASSES | FRONT_PORT_CLASSES | REAR_PORT_CLASSES
+
+INTERFACE_KIND = "interface"
+FRONT_PORT_KIND = "front_port"
+REAR_PORT_KIND = "rear_port"
+
+PORT_CLASS_CLAIMED_KINDS = {
+    **dict.fromkeys(INTERFACE_PORT_CLASSES, INTERFACE_KIND),
+    **dict.fromkeys(FRONT_PORT_CLASSES, FRONT_PORT_KIND),
+    **dict.fromkeys(REAR_PORT_CLASSES, REAR_PORT_KIND),
+}
+
+IdentityKey = tuple[str, str, str, str]
 
 _PATH_HEADER = (
     "Port",
@@ -58,9 +70,15 @@ class TerminationReference:
     location: str = ""
 
     @property
-    def identity_key(self) -> tuple[str, str, str]:
-        """Return the normalized device, cards, and port identity triple."""
-        return identity_text(self.device), identity_text(self.cards), identity_text(self.port)
+    def identity_key(self) -> IdentityKey:
+        """Return the normalized device, cards, port, and claimed-kind identity."""
+        return (
+            identity_text(self.device),
+            identity_text(self.cards),
+            identity_text(self.port),
+            # An unrecognized PortClass keeps its own text, so two unknown values stay apart.
+            PORT_CLASS_CLAIMED_KINDS.get(self.port_class, identity_text(self.port_class)),
+        )
 
 
 @dataclass(frozen=True)
@@ -177,10 +195,7 @@ class _ParsedVisit:
     row_number: int
 
 
-_SegmentClaim = tuple[
-    tuple[tuple[str, str, str], tuple[str, str, str]],
-    str,
-]
+_SegmentClaim = tuple[tuple[IdentityKey, IdentityKey], str]
 
 
 def parse_endpoint_line(line: str) -> TerminationReference:
@@ -280,10 +295,10 @@ def _row_values(sheet, row_number: int, width: int) -> tuple[object, ...]:
     return tuple(sheet.cell(row=row_number, column=column).value for column in range(1, width + 1))
 
 
-def _last_data_row(sheet, start: int, stop: int, width: int) -> int:
+def _last_data_row(values_by_row: Mapping[int, tuple[object, ...]], start: int, stop: int) -> int:
     """Return the last row in the range that carries data."""
     for row_number in range(stop, start - 1, -1):
-        if _row_has_data(_row_values(sheet, row_number, width)):
+        if _row_has_data(values_by_row[row_number]):
             return row_number
     return start
 
@@ -291,34 +306,29 @@ def _last_data_row(sheet, start: int, stop: int, width: int) -> int:
 def _extract_blocks(sheet, workbook_fingerprint: str) -> tuple[_Block, ...]:
     """Return every block on one sheet, including visits the next block's lines overwrite."""
     width = len(_PATH_HEADER) if sheet.title == TRACE_PATH_SHEET else len(_LIST_HEADER)
-    starts = [
-        row_number
-        for row_number in range(1, sheet.max_row + 1)
-        if source_text(sheet.cell(row=row_number, column=1).value) == "From"
-    ]
-    export_timestamp = (
-        source_text(sheet.cell(row=1, column=2).value)
-        if source_text(sheet.cell(row=1, column=1).value) == "Executed"
-        else ""
-    )
+    # openpyxl builds a cell object on first access, so the sheet is read once and every step reuses it.
+    values_by_row = {row: _row_values(sheet, row, width) for row in range(1, sheet.max_row + 1)}
+    starts = [row for row, values in values_by_row.items() if source_text(values[0]) == "From"]
+    first_row = values_by_row.get(1, ())
+    export_timestamp = source_text(first_row[1]) if first_row and source_text(first_row[0]) == "Executed" else ""
     blocks = []
     for index, start in enumerate(starts):
         boundary = starts[index + 1] if index + 1 < len(starts) else sheet.max_row + 1
         to_row = start + 1
-        has_to_line = to_row < boundary and source_text(sheet.cell(row=to_row, column=1).value) == "To"
+        has_to_line = to_row < boundary and source_text(values_by_row[to_row][0]) == "To"
         header_row = start + 2
-        header = _normalized_header(_row_values(sheet, header_row, width)) if header_row < boundary else ()
+        header = _normalized_header(values_by_row[header_row]) if header_row < boundary else ()
         rows = [
-            _RawRow(row_number, _row_values(sheet, row_number, width))
+            _RawRow(row_number, values_by_row[row_number])
             for row_number in range(start + 3, boundary)
-            if _row_has_data(_row_values(sheet, row_number, width))
+            if _row_has_data(values_by_row[row_number])
         ]
-        row_end = _last_data_row(sheet, start, boundary - 1, width)
+        row_end = _last_data_row(values_by_row, start, boundary - 1)
         # A block that fills its separator row keeps its last rows under the next block's lines.
         for carry_row in (boundary, boundary + 1):
             if carry_row > sheet.max_row:
                 continue
-            values = _row_values(sheet, carry_row, width)
+            values = values_by_row[carry_row]
             if source_text(values[0]) not in _BLOCK_LINE_MARKERS:
                 continue
             if _row_has_data(values[2:]):
@@ -330,8 +340,8 @@ def _extract_blocks(sheet, workbook_fingerprint: str) -> tuple[_Block, ...]:
                 ordinal=index + 1,
                 row_start=start,
                 row_end=row_end,
-                from_text=_cell_text(sheet.cell(row=start, column=2).value),
-                to_text=_cell_text(sheet.cell(row=to_row, column=2).value) if has_to_line else "",
+                from_text=_cell_text(values_by_row[start][1]),
+                to_text=_cell_text(values_by_row[to_row][1]) if has_to_line else "",
                 has_to_line=has_to_line,
                 header=header,
                 rows=tuple(rows),
@@ -490,12 +500,13 @@ def _linearity_error(
             segments[-1].row_number,
         )
     seen_segments = set()
-    left_destinations: dict[tuple[str, str, str], set[tuple[str, str, str]]] = defaultdict(set)
-    right_sources: dict[tuple[str, str, str], set[tuple[str, str, str]]] = defaultdict(set)
+    left_destinations: dict[IdentityKey, set[IdentityKey]] = defaultdict(set)
+    right_sources: dict[IdentityKey, set[IdentityKey]] = defaultdict(set)
     for parsed in segments:
         left_key = parsed.evidence.left.identity_key
         right_key = parsed.evidence.right.identity_key
-        pair = left_key, right_key
+        # One cable has no direction, so a reversed row restates the segment rather than adding one.
+        pair = tuple(sorted((left_key, right_key)))
         if pair in seen_segments:
             return _error(
                 block,
@@ -521,6 +532,14 @@ def _linearity_error(
                 "Consecutive Segment Evidence rows do not share a device and cards label.",
                 following.row_number,
             )
+    # One segment that ends where it starts is a self-connection, which the Cable module names.
+    if len(segments) > 1 and summary.from_termination.identity_key == summary.to_termination.identity_key:
+        return _error(
+            block,
+            "trace.non_linear_path",
+            "The From and To lines name one termination, so the path closes a loop.",
+            segments[-1].row_number,
+        )
     return None
 
 
@@ -600,17 +619,12 @@ def _corroboration_error(
             actual[0][0].row_number,
         )
     for actual_group, expected_group in zip(actual, expected, strict=True):
-        expected_device = identity_text(expected_group[0].device)
-        allowed_ports = {identity_text(termination.port) for termination in expected_group}
-        if any(
-            identity_text(visit.termination.device) != expected_device
-            or identity_text(visit.termination.port) not in allowed_ports
-            for visit in actual_group
-        ):
+        allowed = {termination.identity_key for termination in expected_group}
+        if any(visit.termination.identity_key not in allowed for visit in actual_group):
             return _error(
                 block,
                 "trace.corroboration_mismatch",
-                "A Trace List device or port contradicts its Segment Evidence visit.",
+                "A Trace List termination contradicts its Segment Evidence visit.",
                 actual_group[0].row_number,
             )
     return None
@@ -812,16 +826,10 @@ def _location_from_provenance(provenance: TraceProvenance) -> str:
 
 def _cross_trace_conflicts(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ...]:
     """Flag every trace that shares a termination or disagrees about a CableClass."""
-    termination_claims: dict[
-        tuple[str, str, str],
-        dict[int, set[_SegmentClaim]],
-    ] = defaultdict(lambda: defaultdict(set))
-    segment_classes: dict[
-        tuple[tuple[str, str, str], tuple[str, str, str]],
-        dict[str, set[int]],
-    ] = defaultdict(lambda: defaultdict(set))
+    termination_claims: dict[IdentityKey, dict[int, set[_SegmentClaim]]] = defaultdict(lambda: defaultdict(set))
+    segment_classes: dict[tuple[IdentityKey, IdentityKey], dict[str, set[int]]] = defaultdict(lambda: defaultdict(set))
     for index, trace in enumerate(traces):
-        claims: dict[tuple[str, str, str], set[_SegmentClaim]] = defaultdict(set)
+        claims: dict[IdentityKey, set[_SegmentClaim]] = defaultdict(set)
         for segment in trace.segments:
             ordered_pair = sorted((segment.left.identity_key, segment.right.identity_key))
             segment_pair = ordered_pair[0], ordered_pair[1]
@@ -885,7 +893,7 @@ def interpret(content: bytes) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiag
             _extract_blocks(book[TRACE_LIST_SHEET], workbook_fingerprint) if TRACE_LIST_SHEET in recognized else ()
         )
     finally:
-        # openpyxl holds the zip archive of the BytesIO until close(), including on a raise.
+        # close() releases an archive only in read-only mode, but it stays paired with the load.
         book.close()
     lists_by_pair: dict[tuple[str, str], list[_Block]] = defaultdict(list)
     for block in list_blocks:
