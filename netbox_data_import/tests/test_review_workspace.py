@@ -130,6 +130,7 @@ class ReviewWorkspacePresentationTest(TestCase):
             "device.already_bound": "Another source row is already linked to this device.",
             "device.duplicate_name": "The device name appears more than once in this import.",
             "device.name_placement_conflict": "The name matches a device at another placement.",
+            "device.name_unplaced_match": "The name matches a device with no recorded placement.",
             "device.rack_ambiguous": "Multiple racks have this name at the import target.",
             "device.role_unconfigured": "No device role is configured for this source class.",
             "device.zero_u_review_conflict": "A saved review keeps a rack position on a 0U device type.",

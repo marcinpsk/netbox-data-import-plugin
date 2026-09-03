@@ -12,6 +12,7 @@ from django.utils import timezone
 from core.choices import JobStatusChoices
 from core.models import Job
 from netbox.models import NetBoxModel
+from utilities.querysets import RestrictedQuerySet
 
 from .adapters import (
     DEFAULT_ADAPTER_KEY,
@@ -410,6 +411,9 @@ class PolicySectionModel(models.Model):
     """A profile policy table scoped to the adapter output kinds its catalog section declares."""
 
     POLICY_SECTION = ""
+
+    # NetBox's generic views scope a queryset with `restrict()`, which only this manager provides.
+    objects = RestrictedQuerySet.as_manager()
 
     class Meta:
         abstract = True

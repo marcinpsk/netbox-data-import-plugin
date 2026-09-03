@@ -34,8 +34,8 @@ class PermissionScopedSaveResult:
 def enforce_saved_object_permission(obj, user, action):
     """Reject a saved object whose final state is outside the user's scope.
 
-    ``has_perm`` rather than ``restrict()``: the policy models derive from plain
-    ``django.db.models.Model``, whose manager has no ``restrict()``.
+    ``has_perm`` rather than ``restrict()``: this decides one already-saved instance, and it holds
+    for any model rather than only those whose manager is a ``RestrictedQuerySet``.
     """
     if user is None:
         return

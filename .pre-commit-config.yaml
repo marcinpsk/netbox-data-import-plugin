@@ -58,6 +58,13 @@ repos:
         pass_filenames: false
         files: ^netbox_data_import/(target_modules|review_workspace)\.py$
 
+      - id: gen-compatibility
+        name: Compatibility metadata follows the version and the test matrix
+        entry: python3 scripts/gen_compatibility.py
+        language: system
+        pass_filenames: false
+        files: ^(netbox_data_import/__init__\.py|\.github/workflows/test\.yaml|scripts/gen_compatibility\.py|netbox-plugin\.yaml|COMPATIBILITY\.md)$
+
 # Configuration
 default_install_hook_types: [pre-commit, commit-msg]
 default_stages: [pre-commit]

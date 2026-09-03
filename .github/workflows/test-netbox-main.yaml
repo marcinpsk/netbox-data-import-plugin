@@ -19,7 +19,7 @@ jobs:
 
     services:
       redis:
-        image: redis:7
+        image: redis:8-alpine
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 10s
@@ -29,7 +29,7 @@ jobs:
           - 6379:6379
 
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: netbox
           POSTGRES_PASSWORD: netbox

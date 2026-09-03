@@ -49,6 +49,13 @@ AUDITED_EXITS = {
     ("ImportProfile.delete", "locked-cascade-committed"): (
         "The success path: the lock only orders the cascade, so committing the delete is the point."
     ),
+    ("_ProfileChildEditView.post", "locked-policy-write-committed"): (
+        "The generic view either committed its own write or re-rendered the form; the lock only "
+        "orders it against a replan."
+    ),
+    ("_ProfileChildDeleteView.post", "locked-policy-delete-committed"): (
+        "Same as the edit view: the generic delete has already decided, and the lock only orders it."
+    ),
     ("SourceResolutionDeleteView.post", "locked-delete-committed"): (
         "The success path: NetBox's delete view runs under the lock, so committing it is the point."
     ),
