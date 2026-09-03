@@ -765,10 +765,21 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
     def test_a_segment_that_ends_on_its_own_termination_is_blocked(self):
         """NetBox refuses a Cable carrying one termination on both ends, so planning must catch it."""
-        unit = self.unit(direct_path(DEVICE_A, DEVICE_A))
+        # Two references the source keeps apart: resolution matches device, name and kind, not Cards.
+        same_port_other_cards = trace_termination("DEV-A", "SLOT-1", "eth0", "NIC")
+
+        unit = self.unit(direct_path(DEVICE_A, same_port_other_cards))
 
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
         self.assertIn("cable.segment_self_connection", self.codes(unit))
+        self.assertEqual(unit.changes, ())
+
+    def test_a_source_path_from_a_termination_to_itself_never_reaches_planning(self):
+        """The Source Adapter refuses the identical-endpoint form before the Cable module sees it."""
+        unit = self.unit(direct_path(DEVICE_A, DEVICE_A))
+
+        self.assertEqual(unit.disposition, Disposition.INVALID)
+        self.assertIn("trace.non_linear_path", self.codes(unit))
         self.assertEqual(unit.changes, ())
 
     def test_a_blocked_trace_still_contributes_its_policy_to_a_shared_segment(self):
