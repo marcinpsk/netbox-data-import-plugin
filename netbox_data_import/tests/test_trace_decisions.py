@@ -68,13 +68,16 @@ def _runtime_cable_profile_choices():
     return _flatten_choices(CableProfileChoices.CHOICES)
 
 
+def _accepts_one_termination_per_side(value):
+    """Return whether one running Cable Profile carries a single connector on each side."""
+    profile_class = Cable(profile=value).profile_class
+    return profile_class is not None and len(profile_class.a_connectors) == 1 and len(profile_class.b_connectors) == 1
+
+
 def _compatible_profile_choices():
     """Return the running Cable Profiles that accept one termination on each side."""
     return [
-        (value, label)
-        for value, label in _runtime_cable_profile_choices()
-        if len(Cable(profile=value).profile_class.a_connectors) == 1
-        and len(Cable(profile=value).profile_class.b_connectors) == 1
+        (value, label) for value, label in _runtime_cable_profile_choices() if _accepts_one_termination_per_side(value)
     ]
 
 
