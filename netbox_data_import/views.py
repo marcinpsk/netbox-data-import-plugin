@@ -1127,6 +1127,9 @@ def _other_conflict_row_identities(row, source_object_types_by_number):
     conflict_row_number = row.extra_data.get("conflict_row_number")
     if conflict_row_number is not None:
         identities.append((conflict_row_number, row.object_type))
+    claimed_by_row = row.extra_data.get("claimed_by_row")
+    if claimed_by_row is not None:
+        identities.append((claimed_by_row, row.object_type))
     return tuple(dict.fromkeys(identity for identity in identities if identity != (row.row_number, row.object_type)))
 
 

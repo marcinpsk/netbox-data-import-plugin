@@ -21,6 +21,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from netbox_data_import.plan import Disposition, Severity
+from netbox_data_import.review_workspace import WorkspaceUnit
 from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed, _DeviceBatch
 
 
@@ -663,6 +664,19 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.name_unplaced_match")
 
+    def test_a_name_only_unplaced_match_carries_the_name_the_preview_offers(self):
+        """The preview offers the rename for this refusal, so the row has to state the name it would use."""
+        self._device("srv-01")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack"))
+
+        row = WorkspaceUnit.from_unit(units[0])
+        self.assertIn("name_placement_conflict", row.extra_data["identity_conflicts"])
+        self.assertTrue(
+            row.extra_data.get("suggested_name"),
+            "the preview offers 'Use name' for this conflict, but the row carries no name to use",
+        )
+
     def test_a_name_only_match_at_another_placement_reports_the_conflict(self):
         """A stored Device the source would move keeps the wording that states it sits elsewhere."""
         self._device("srv-01", rack=self.rack, position=10, face="front")
@@ -671,6 +685,19 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.name_placement_conflict")
+
+    def test_a_name_only_placement_conflict_carries_the_name_the_preview_offers(self):
+        """The reported case: the row names a stored Device placed elsewhere and offers no rename."""
+        self._device("srv-01", rack=self.rack, position=10, face="front")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack", u_position="20", face="Front"))
+
+        row = WorkspaceUnit.from_unit(units[0])
+        self.assertIn("name_placement_conflict", row.extra_data["identity_conflicts"])
+        self.assertTrue(
+            row.extra_data.get("suggested_name"),
+            "the preview offers 'Use name' for this conflict, but the row carries no name to use",
+        )
 
     def test_an_explicit_binding_outranks_every_other_identifier(self):
         """The operator linked this row to this device, which is the strongest statement there is."""
@@ -864,6 +891,19 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.name_unplaced_match")
         self.assertEqual(units[1].disposition, Disposition.ACTIONABLE, units[1].diagnostics)
+
+    def test_a_claimed_slot_names_the_row_that_took_it(self):
+        """The refused row has to name the row that claimed the slot, the way a duplicate serial does."""
+        from netbox_data_import.views import _other_conflict_row_identities
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", u_position="5", face="Front"),
+            self._row(7, "D-2", "srv-02", u_position="5", face="Front"),
+        )
+
+        refused = WorkspaceUnit.from_unit(units[1])
+        self.assertEqual(refused.extra_data.get("claimed_by_row"), 2)
+        self.assertEqual(_other_conflict_row_identities(refused, {}), ((2, "device"),))
 
     def test_two_rows_still_cannot_claim_one_slot_in_a_batch_created_rack(self):
         """The batch claim works before the new rack has an ORM identity."""
