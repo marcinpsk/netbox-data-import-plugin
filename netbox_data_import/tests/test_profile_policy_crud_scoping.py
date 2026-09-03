@@ -4,11 +4,13 @@
 
 from django.db import DatabaseError, transaction
 from django.db.models.signals import post_save
-from django.test import Client, TestCase, TransactionTestCase
+from django.http import Http404
+from django.test import Client, RequestFactory, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ColumnMapping, DeviceTypeMapping, ImportProfile
 from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission
+from netbox_data_import.views import ColumnMappingAddView, _profile_pk_for_policy_write
 
 SCOPED_ACTIONS = ["view", "add", "change", "delete"]
 
@@ -54,6 +56,25 @@ class ProfileChildAddScopesItsParentTest(TestCase):
 
         self.assertIn(response.status_code, (403, 404), response.status_code)
         self.assertNotContains(response, "AddScopeTheirs", status_code=response.status_code)
+
+    def test_an_invisible_profile_is_refused_before_the_policy_lock(self):
+        """`post()` evaluates this before it enters the lock, so an unscoped add locks nothing."""
+        request = RequestFactory().post("/")
+        request.user = self.user
+        view = ColumnMappingAddView()
+        view.setup(request, profile_pk=self.theirs.pk)
+
+        with self.assertRaises(Http404):
+            _profile_pk_for_policy_write(view, {"profile_pk": self.theirs.pk})
+
+    def test_a_visible_profile_still_reaches_the_policy_lock(self):
+        """The refusal must be the scope, not every add, or no policy write could take the lock."""
+        request = RequestFactory().post("/")
+        request.user = self.user
+        view = ColumnMappingAddView()
+        view.setup(request, profile_pk=self.mine.pk)
+
+        self.assertEqual(_profile_pk_for_policy_write(view, {"profile_pk": self.mine.pk}), self.mine.pk)
 
     def test_adding_a_row_under_a_visible_profile_still_works(self):
         """The scope must refuse the hidden parent only, not every add."""

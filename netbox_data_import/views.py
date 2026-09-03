@@ -854,13 +854,17 @@ class ImportProfileBulkImportView(generic.BulkImportView):
 def _profile_pk_for_policy_write(view, url_kwargs):
     """Return the ImportProfile whose policy this write changes.
 
-    An add names it in the URL. An edit or delete reads it off the row, through the already-scoped
-    queryset, so a row outside the operator's grant raises here rather than locking someone else's
-    profile.
+    An edit or delete reads it off the row, through the already-scoped queryset. An add names it in
+    the URL and reads it through the same scope. Either way a target outside the operator's grant
+    raises here, which `post()` reaches before it enters the lock, so it never holds a row the
+    operator cannot see.
     """
     if "pk" in url_kwargs:
         return get_object_or_404(view.queryset, pk=url_kwargs["pk"]).profile_id
-    return url_kwargs.get("profile_pk")
+    profile_pk = url_kwargs.get("profile_pk")
+    if profile_pk is None:
+        return None
+    return get_object_or_404(ImportProfile.objects.restrict(view.request.user, "view"), pk=profile_pk).pk
 
 
 class _ProfileChildEditView(generic.ObjectEditView):
