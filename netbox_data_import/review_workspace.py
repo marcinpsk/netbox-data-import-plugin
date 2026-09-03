@@ -182,9 +182,6 @@ class WorkspaceUnit:
             object_id = change.preconditions.get(f"{object_type}_id")
             if object_id is not None:
                 extra_data.setdefault(f"netbox_{object_type}_id", object_id)
-            state = change.preconditions.get("state")
-            if state is not None:
-                extra_data.setdefault("_identity_state", dict(state))
         if unit.diagnostics:
             diagnostic = unit.diagnostics[0]
             diagnostic_display = diagnostic.to_dict()["display"]

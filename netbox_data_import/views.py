@@ -2070,7 +2070,7 @@ def _preview_field_intent(request, target_field):
 
 def _placement_matches_preview(device, row) -> bool:
     """Return whether placement fields still match the materialized preview."""
-    state = row.extra_data.get("_identity_state")
+    state = row.extra_data.get("_placement_state")
     if not isinstance(state, dict):
         return False
     return (
