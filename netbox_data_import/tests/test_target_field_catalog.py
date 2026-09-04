@@ -3,6 +3,7 @@
 """The target-field catalog, the Source Adapter registry, and the Import Profile cutover."""
 
 import dataclasses
+from contextvars import Context
 import json
 import os
 
@@ -774,6 +775,10 @@ WITHOUT_CABLE_MODULE = tuple(
     dataclasses.replace(module, implemented=False) if module.key == TargetModuleKey.CABLE else module
     for module in catalog_module.TARGET_MODULES
 )
+WITHOUT_DEVICE_MODULE = tuple(
+    dataclasses.replace(module, implemented=False) if module.key == TargetModuleKey.DEVICE else module
+    for module in catalog_module.TARGET_MODULES
+)
 
 
 class RuntimeGateTest(SimpleTestCase):
@@ -781,17 +786,13 @@ class RuntimeGateTest(SimpleTestCase):
 
     def test_an_output_kind_with_no_implemented_module_is_not_runnable(self):
         """This is the condition the selectable-adapter tests below stand an override up for."""
-        self.assertFalse(
-            catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE}), modules=WITHOUT_CABLE_MODULE)
-        )
+        with catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE):
+            self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
 
     def test_the_gate_still_answers_for_a_kind_a_stated_module_implements(self):
         """The table is read, not ignored, so an implemented kind stays runnable."""
-        self.assertTrue(
-            catalog_module.has_implemented_module(
-                frozenset({OutputKind.DEVICE_SOURCE_ROW}), modules=WITHOUT_CABLE_MODULE
-            )
-        )
+        with catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE):
+            self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
 
     def test_a_stated_table_lasts_for_its_block_only(self):
         """The gate reads the stated table with no argument, and the real one returns after it."""
@@ -803,6 +804,23 @@ class RuntimeGateTest(SimpleTestCase):
     def test_the_real_table_runs_every_declared_kind(self):
         """The release implements every declared module, which is why the override exists at all."""
         self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+
+    def test_nested_stated_tables_restore_within_their_own_context(self):
+        """Nested declaration blocks restore without changing an isolated execution context."""
+        isolated = Context()
+
+        with catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE):
+            self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+            self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
+            self.assertTrue(isolated.run(catalog_module.has_implemented_module, frozenset({OutputKind.SOURCE_TRACE})))
+            with catalog_module.declared_modules_override(WITHOUT_DEVICE_MODULE):
+                self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+                self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
+            self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+            self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
+
+        self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+        self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
 
 
 class AdapterRuntimeSupportTest(TestCase):

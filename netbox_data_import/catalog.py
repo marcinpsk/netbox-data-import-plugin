@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 
@@ -275,12 +276,13 @@ def policy_section(key: str) -> PolicySection | None:
     return _SECTIONS_BY_KEY.get(key)
 
 
-_declared_override: tuple[TargetModule, ...] | None = None
+_declared_override: ContextVar[tuple[TargetModule, ...] | None] = ContextVar("declared_modules", default=None)
 
 
 def declared_modules() -> tuple[TargetModule, ...]:
     """Return the Target Module declarations in force."""
-    return TARGET_MODULES if _declared_override is None else _declared_override
+    override = _declared_override.get()
+    return TARGET_MODULES if override is None else override
 
 
 @contextmanager
@@ -290,32 +292,21 @@ def declared_modules_override(modules: Sequence[TargetModule]) -> Iterator[None]
     Every entry point reaches the runtime gate through `ImportProfile.clean`, far below its own
     signature, so a declaration table cannot be passed down to it as an argument.
     """
-    global _declared_override
-
-    previous = _declared_override
-    _declared_override = tuple(modules)
+    token = _declared_override.set(tuple(modules))
     try:
         yield
     finally:
-        _declared_override = previous
+        _declared_override.reset(token)
 
 
-def consuming_modules(
-    output_kinds: frozenset[str], modules: Sequence[TargetModule] | None = None
-) -> tuple[TargetModule, ...]:
+def consuming_modules(output_kinds: frozenset[str]) -> tuple[TargetModule, ...]:
     """Return the Target Modules that consume any of *output_kinds*."""
-    return tuple(
-        module for module in (declared_modules() if modules is None else modules) if module.consumes & output_kinds
-    )
+    return tuple(module for module in declared_modules() if module.consumes & output_kinds)
 
 
-def has_implemented_module(output_kinds: frozenset[str], modules: Sequence[TargetModule] | None = None) -> bool:
-    """Return True when a Target Module this release implements consumes any of *output_kinds*.
-
-    *modules* states the declaration table to read, so the gate is answerable without the caller
-    replacing the real one.
-    """
-    return any(module.implemented for module in consuming_modules(output_kinds, modules))
+def has_implemented_module(output_kinds: frozenset[str]) -> bool:
+    """Return True when a Target Module this release implements consumes any of *output_kinds*."""
+    return any(module.implemented for module in consuming_modules(output_kinds))
 
 
 __all__ = (
