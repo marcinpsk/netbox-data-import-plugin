@@ -170,6 +170,14 @@ class _ExistingCable:
         )
 
 
+def _delete_identity(cable_pk: int) -> str:
+    """Return the Planned Change identity that removes one Logical Cable.
+
+    The unit's dependency graph and the deletion change both name it, so one helper states it.
+    """
+    return f"cable:delete:{cable_pk}"
+
+
 @dataclass
 class _TraceAnalysis:
     """What one Source Trace contributes, built in planning order."""
@@ -199,7 +207,7 @@ class _TraceAnalysis:
     @property
     def delete_identity(self) -> str | None:
         """Return the Planned Change identity that removes this trace's Logical Cable."""
-        return None if self.logical_cable is None else f"cable:delete:{self.logical_cable.cable.pk}"
+        return None if self.logical_cable is None else _delete_identity(self.logical_cable.cable.pk)
 
     def error(self, code: str, display: dict, identities=()) -> None:
         """Record one blocking or invalidating finding."""
@@ -1084,7 +1092,7 @@ class _CableBatch:
     def _delete_change(logical: _ExistingCable) -> PlannedChange:
         """Return the one deletion a Patched Path Replacement ever performs."""
         return PlannedChange(
-            identity=f"cable:delete:{logical.cable.pk}",
+            identity=_delete_identity(logical.cable.pk),
             target_module=CableModule.key,
             operation="delete",
             payload={

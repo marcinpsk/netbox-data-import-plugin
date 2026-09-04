@@ -544,9 +544,10 @@ blank-row layout, empty-string cells, and sheet dimensions.
 
 ## 6. Patched Path Replacement planning and transaction behavior
 
-The Cable Target Module requires NetBox 4.6 or later, because it verifies pass-throughs against the
-PortMapping model. The plugin's minimum NetBox version is 4.6.0 for this feature and for the plugin as
-a whole.
+The Cable Target Module verifies pass-throughs against the PortMapping model, which NetBox 4.5
+introduced in place of the single rear-port reference on a front port. The plugin's minimum NetBox
+version is 4.6.0, for this feature and for the plugin as a whole, because 4.6 is the oldest release
+the test matrix covers.
 
 ### 6.1 Port resolution
 
