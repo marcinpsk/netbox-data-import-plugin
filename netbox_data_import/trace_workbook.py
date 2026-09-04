@@ -789,7 +789,8 @@ def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ..
         by_identity.setdefault(trace.identity, []).append(trace)
     collapsed = []
     for occurrences in by_identity.values():
-        selected = occurrences[0]
+        # Segment evidence outranks an endpoint-only fallback, whatever order the blocks were read in.
+        selected = next((trace for trace in occurrences if trace.segments), occurrences[0])
         provenance = tuple(dict.fromkeys(item for trace in occurrences for item in trace.provenance))
         # The fingerprint excludes Trace List data, so a later occurrence can state its own finding.
         errors = _first_of_each_code(occurrences)

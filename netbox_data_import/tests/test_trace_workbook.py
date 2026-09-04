@@ -385,6 +385,29 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
         self.assertTrue(batch.rows[0].valid, _codes(batch))
         self.assertEqual(len(batch.rows[0].segments), 1)
 
+    def test_the_collapsed_occurrence_keeps_the_segments_whatever_the_order(self):
+        """Path blocks happen to be read first, so the kept occurrence must not rely on that."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        path_block = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b),))
+        reversed_lines = (_endpoint_line(endpoint_b), _endpoint_line(endpoint_a))
+        list_block = (*reversed_lines, (_visit(endpoint_b), _visit(endpoint_a)))
+        content = _workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True)
+        book = openpyxl.load_workbook(BytesIO(content), data_only=True)
+        path_trace, _ = trace_workbook._path_trace(
+            trace_workbook._extract_blocks(book["Trace From To"], "fingerprint")[0], None
+        )
+        fallback, _ = trace_workbook._fallback_trace(
+            trace_workbook._extract_blocks(book["Trace List"], "fingerprint")[0]
+        )
+
+        self.assertEqual(path_trace.identity, fallback.identity)
+        self.assertEqual(fallback.segments, ())
+
+        collapsed = trace_workbook._collapse_duplicates((fallback, path_trace))
+
+        self.assertEqual(len(collapsed), 1)
+        self.assertEqual(len(collapsed[0].segments), 1, "the collapsed occurrence dropped its segments")
+
     def test_a_path_row_value_survives_a_later_empty_visit(self):
         """The first non-empty value wins, so a blank list row cannot clear a stated one."""
         endpoint_a, endpoint_b, lines = self._pair()
