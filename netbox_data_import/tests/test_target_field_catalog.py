@@ -5,7 +5,6 @@
 import dataclasses
 import json
 import os
-from unittest.mock import patch
 
 from dcim.models import Site
 from django.core.exceptions import ValidationError
@@ -794,15 +793,28 @@ class RuntimeGateTest(SimpleTestCase):
             )
         )
 
+    def test_a_stated_table_lasts_for_its_block_only(self):
+        """The gate reads the stated table with no argument, and the real one returns after it."""
+        with catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE):
+            self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+
+        self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+
     def test_the_real_table_runs_every_declared_kind(self):
         """The release implements every declared module, which is why the override exists at all."""
         self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
 
 
-# The refusals below reach the gate through module state, so they still need the override.
-@patch.object(catalog_module, "TARGET_MODULES", WITHOUT_CABLE_MODULE)
 class AdapterRuntimeSupportTest(TestCase):
-    """An adapter is selectable only when this release implements a Target Module that consumes it."""
+    """An adapter is selectable only when this release implements a Target Module that consumes it.
+
+    Every entry point below reaches the gate through `ImportProfile.clean`, so the declaration table
+    is stated for the block rather than passed to each call.
+    """
+
+    def setUp(self):
+        """State a table that leaves the Cable module unimplemented, the way T5 found it."""
+        self.enterContext(catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE))
 
     @classmethod
     def setUpTestData(cls):

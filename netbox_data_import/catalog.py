@@ -9,7 +9,8 @@ nothing from NetBox, so every other layer may depend on it.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 
@@ -274,12 +275,37 @@ def policy_section(key: str) -> PolicySection | None:
     return _SECTIONS_BY_KEY.get(key)
 
 
+_declared_override: tuple[TargetModule, ...] | None = None
+
+
+def declared_modules() -> tuple[TargetModule, ...]:
+    """Return the Target Module declarations in force."""
+    return TARGET_MODULES if _declared_override is None else _declared_override
+
+
+@contextmanager
+def declared_modules_override(modules: Sequence[TargetModule]) -> Iterator[None]:
+    """Run the block against *modules*, so a caller can state a table this release does not ship.
+
+    Every entry point reaches the runtime gate through `ImportProfile.clean`, far below its own
+    signature, so a declaration table cannot be passed down to it as an argument.
+    """
+    global _declared_override
+
+    previous = _declared_override
+    _declared_override = tuple(modules)
+    try:
+        yield
+    finally:
+        _declared_override = previous
+
+
 def consuming_modules(
     output_kinds: frozenset[str], modules: Sequence[TargetModule] | None = None
 ) -> tuple[TargetModule, ...]:
     """Return the Target Modules that consume any of *output_kinds*."""
     return tuple(
-        module for module in (TARGET_MODULES if modules is None else modules) if module.consumes & output_kinds
+        module for module in (declared_modules() if modules is None else modules) if module.consumes & output_kinds
     )
 
 
@@ -307,6 +333,8 @@ __all__ = (
     "TargetModuleKey",
     "ValueKind",
     "consuming_modules",
+    "declared_modules",
+    "declared_modules_override",
     "has_implemented_module",
     "policy_section",
     "target_module",
