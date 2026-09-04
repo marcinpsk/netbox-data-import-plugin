@@ -141,7 +141,6 @@ urlpatterns = [
     path("check-device/", views.CheckDeviceNameView.as_view(), name="check_device"),
     path("search-objects/", views.SearchNetBoxObjectsView.as_view(), name="search_objects"),
     # Quick-resolve views (POST from preview inline fix buttons)
-    path("quick-create-manufacturer/", views.QuickCreateManufacturerView.as_view(), name="quick_create_manufacturer"),
     path(
         "quick-resolve-manufacturer/", views.QuickResolveManufacturerView.as_view(), name="quick_resolve_manufacturer"
     ),

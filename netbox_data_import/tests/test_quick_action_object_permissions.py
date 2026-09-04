@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Preview quick actions enforce constrained ObjectPermission rows at their write seam."""
 
-from dcim.models import DeviceRole, Manufacturer
-from django.contrib.messages import get_messages
+from dcim.models import DeviceRole
 from django.test import Client, TestCase
 from django.urls import reverse
 
@@ -47,21 +46,6 @@ class QuickActionObjectPermissionTest(TestCase):
     def _assert_preview_redirect(self, response):
         self.assertRedirects(response, self.preview_url, fetch_redirect_response=False)
 
-    def test_a_constrained_manufacturer_slug_is_refused(self):
-        client = self._client_with(
-            "quick-mfg-scope",
-            (Manufacturer, ["add"], {"slug": "allowed-manufacturer"}),
-        )
-
-        response = self._post(
-            client,
-            "quick_create_manufacturer",
-            {"mfg_name": "Refused Manufacturer", "mfg_slug": "refused-manufacturer"},
-        )
-
-        self._assert_preview_redirect(response)
-        self.assertFalse(Manufacturer.objects.filter(slug="refused-manufacturer").exists())
-
     def test_a_constrained_device_role_slug_is_refused_with_json_403(self):
         client = self._client_with(
             "quick-role-scope",
@@ -76,6 +60,19 @@ class QuickActionObjectPermissionTest(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertFalse(DeviceRole.objects.filter(slug="refused-role").exists())
+
+    def test_a_refusal_does_not_echo_the_permission_name(self):
+        """CodeQL caught the exception text reaching the response; the operator log keeps it.
+
+        The permission names an object the caller may not be allowed to know exists.
+        """
+        client = self._client_with("scope-leak-user")
+
+        response = self._post(client, "quick_create_role", {"name": "Acme", "slug": "acme"})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn("dcim.add_devicerole", response.content.decode().lower())
+        self.assertFalse(DeviceRole.objects.filter(slug="acme").exists())
 
     def test_a_constrained_ignored_device_source_id_is_refused(self):
         client = self._client_with(
@@ -241,21 +238,3 @@ class QuickActionObjectPermissionTest(TestCase):
         )
 
         self._assert_preview_redirect(response)
-
-    def test_a_refusal_does_not_echo_the_permission_name(self):
-        """CodeQL caught the exception text reaching the response; the operator log keeps it.
-
-        The permission names an object the caller may not be allowed to know exists.
-        """
-        client = self._client_with("scope-leak-user")
-
-        response = client.post(
-            reverse("plugins:netbox_data_import:quick_create_manufacturer"),
-            {"profile_id": self.profile.pk, "mfg_name": "Acme", "mfg_slug": "acme"},
-        )
-
-        # The refusal rides on a Django message, so it is only visible once the redirect renders.
-        shown = " ".join(str(message) for message in get_messages(response.wsgi_request))
-        self.assertIn("Permission denied", shown)
-        self.assertNotIn("dcim.add_manufacturer", shown)
-        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())

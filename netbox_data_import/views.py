@@ -3604,55 +3604,6 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 
 
-class QuickCreateManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Immediately create a Manufacturer in NetBox from the preview page."""
-
-    permission_required = "netbox_data_import.change_importprofile"
-
-    def post(self, request):
-        """Create the manufacturer in NetBox and report the pending preview change."""
-        from dcim.models import Manufacturer
-
-        next_url = reverse("plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "A valid import profile is required. Reload the preview and try again.",
-                status=400,
-            )
-        get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            return _preview_action_error(request, next_url, stale_reason, status=409)
-        mfg_name = request.POST.get("mfg_name", "").strip()
-        mfg_slug = request.POST.get("mfg_slug", "").strip()
-        if not mfg_name or not mfg_slug:
-            return _preview_action_error(request, next_url, "Manufacturer name and slug are required.", status=400)
-        mfg = _get_or_init(Manufacturer, slug=mfg_slug)
-        if mfg.pk is None:
-            mfg.name = mfg_name
-            try:
-                _validate_model_instance(mfg, f"manufacturer '{mfg_name}'")
-            except PreviewActionInvalid as exc:
-                return _preview_action_error(request, next_url, str(exc), status=400)
-        result = save_permission_scoped_object(
-            request.user,
-            Manufacturer,
-            {"slug": mfg_slug},
-            {"name": mfg_name},
-            on_existing="keep",
-        )
-        mfg = result.instance
-        created = result.created
-        if created:
-            saved_message = f"Manufacturer '{mfg.name}' created."
-        else:
-            saved_message = f"Manufacturer '{mfg.name}' already existed."
-        return _saved_preview_action_response(request, next_url, saved_message)
-
-
 class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page."""
 

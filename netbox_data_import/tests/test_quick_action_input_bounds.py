@@ -35,10 +35,6 @@ OVERLENGTH_PAYLOADS = {
         {"source_column": LONG, "target_field": "serial"},
         {"source_column": "Depth", "target_field": "extra_json:" + LONG},
     ],
-    "quick_create_manufacturer": [
-        {"mfg_name": LONG, "mfg_slug": "acme"},
-        {"mfg_name": "Acme", "mfg_slug": LONG_SLUG},
-    ],
     "quick_create_role": [
         {"name": LONG, "slug": "role-slug"},
         {"name": "Role", "slug": LONG_SLUG},

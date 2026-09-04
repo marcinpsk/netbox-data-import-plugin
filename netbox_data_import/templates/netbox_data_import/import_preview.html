@@ -517,28 +517,7 @@
               </td>
               <td class="text-end" style="white-space:nowrap; min-width:180px;">
 
-                {% if row.object_type == 'manufacturer' and row.action == 'create' and profile_id %}
-                  {# Manufacturer: create now OR map to existing #}
-                  <form method="post" action="{% url 'plugins:netbox_data_import:quick_create_manufacturer' %}"
-                        class="d-inline ndi-deferred-preview-form">
-                    {% csrf_token %}
-                    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
-                    <input type="hidden" name="profile_id" value="{{ profile_id }}">
-                    <input type="hidden" name="mfg_name" value="{{ row.name }}">
-                    <input type="hidden" name="mfg_slug" value="{{ row.extra_data.mfg_slug }}">
-                    <button type="submit" class="btn btn-sm btn-outline-success" title="Create this manufacturer in NetBox now">
-                      <i class="mdi mdi-plus"></i> Create
-                    </button>
-                  </form>
-                  <button type="button" class="btn btn-sm btn-outline-warning ms-1"
-                          data-ndi-modal="#manufacturerMappingModal"
-                          data-source-make="{{ row.name }}"
-                          data-profile-id="{{ profile_id }}"
-                          title="Map this source manufacturer name to an existing NetBox manufacturer">
-                    <i class="mdi mdi-link-variant"></i> Map
-                  </button>
-
-                {% elif row.object_type == 'device_type' and row.action in 'create,error' and profile_id %}
+                {% if row.object_type == 'device_type' and row.action in 'create,error' and profile_id %}
                   {# Device Type rows can map only to an existing NetBox type. #}
                   <button type="button" class="btn btn-sm btn-outline-warning"
                           data-ndi-modal="#deviceTypeMappingModal"

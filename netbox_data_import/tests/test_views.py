@@ -1459,41 +1459,6 @@ manufacturer_mappings:
         self.assertEqual(resp.status_code, 200)
 
 
-class QuickCreateManufacturerViewTest(BaseViewTestCase):
-    """Tests for QuickCreateManufacturerView."""
-
-    def setUp(self):
-        super().setUp()
-        self.profile = ImportProfile.objects.create(name="Quick Manufacturer Profile")
-
-    def _post(self, payload):
-        return self.client.post(
-            reverse("plugins:netbox_data_import:quick_create_manufacturer"),
-            {"profile_id": self.profile.pk, **payload},
-        )
-
-    def test_creates_manufacturer(self):
-        """POST creates a new Manufacturer in NetBox."""
-        from dcim.models import Manufacturer
-
-        resp = self._post({"mfg_name": "AcmeCorp", "mfg_slug": "acmecorp"})
-        self.assertIn(resp.status_code, [200, 302])
-        self.assertTrue(Manufacturer.objects.filter(slug="acmecorp").exists())
-
-    def test_creates_manufacturer_idempotent(self):
-        """POSTing the same manufacturer twice does not create a duplicate."""
-        from dcim.models import Manufacturer
-
-        for _ in range(2):
-            self._post({"mfg_name": "AcmeCorp2", "mfg_slug": "acmecorp2"})
-        self.assertEqual(Manufacturer.objects.filter(slug="acmecorp2").count(), 1)
-
-    def test_missing_slug_redirects(self):
-        """POST without slug redirects with error (does not crash)."""
-        resp = self._post({"mfg_name": "NoSlug"})
-        self.assertIn(resp.status_code, [200, 302])
-
-
 class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
     """Tests for QuickCreateDeviceRoleView."""
 
