@@ -30,6 +30,18 @@ TERMINATION_ROLES = frozenset({TERMINATION_ROLE, MAPPED_PEER_ROLE})
 SELECT_TERMINATION_TASK = "select_termination"
 
 
+def same_device_and_cards(first, second) -> bool:
+    """Return whether two Termination References name one device and one cards label.
+
+    The Source Adapter reads it to claim a pass-through, and the Cable Target Module reads it to
+    place one, so the rule has one definition.
+    """
+    return (identity_text(first.device), identity_text(first.cards)) == (
+        identity_text(second.device),
+        identity_text(second.cards),
+    )
+
+
 def claimed_termination_kind(port_class: str) -> str:
     """Return the NetBox termination kind claimed by one fixed PortClass value."""
     try:
@@ -58,6 +70,22 @@ def termination_field_key(*, device, cards, port, kind: str, role: str = TERMINA
     )
 
 
+def parse_termination_field_key(value: str) -> dict[str, str]:
+    """Parse an exact canonical termination field key."""
+    try:
+        data = json.loads(value)
+        if not isinstance(data, dict) or set(data) != {"cards", "device", "kind", "port", "role"}:
+            raise ValueError
+        if not all(isinstance(data[name], str) for name in data):
+            raise ValueError
+        canonical = termination_field_key(**data)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"'{value}' is not a canonical termination field key.") from exc
+    if canonical != value:
+        raise ValueError(f"'{value}' is not a canonical termination field key.")
+    return data
+
+
 __all__ = (
     "FRONT_PORT_CLASSES",
     "FRONT_PORT_KIND",
@@ -72,5 +100,7 @@ __all__ = (
     "TERMINATION_ROLE",
     "TERMINATION_ROLES",
     "claimed_termination_kind",
+    "parse_termination_field_key",
+    "same_device_and_cards",
     "termination_field_key",
 )

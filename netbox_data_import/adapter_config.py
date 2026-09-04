@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Project stored Import Profile policy into plain Source Adapter configuration."""
 
-from .adapters import FlatWorkbookAdapter, UnknownSourceAdapter
+from .adapters import FlatWorkbookAdapter, TraceWorkbookAdapter, UnknownSourceAdapter
 from .flat_workbook import FlatWorkbookConfig, TransformRule
 
 
@@ -24,7 +24,16 @@ def _flat_workbook_config(profile) -> FlatWorkbookConfig:
     )
 
 
-_CONFIG_PROJECTORS = {FlatWorkbookAdapter.key: _flat_workbook_config}
+def _trace_workbook_config(profile) -> dict:
+    """Return the empty configuration the trace-workbook adapter declares."""
+    del profile
+    return {}
+
+
+_CONFIG_PROJECTORS = {
+    FlatWorkbookAdapter.key: _flat_workbook_config,
+    TraceWorkbookAdapter.key: _trace_workbook_config,
+}
 
 
 def interpreter_config_for(profile):

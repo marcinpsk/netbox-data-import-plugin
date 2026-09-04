@@ -30,6 +30,9 @@ Currently supports importing from Excel (`.xlsx`) files in the CANS format, with
 - NetBox ≥ 4.6.0
 - Python ≥ 3.12
 
+Cable trace import needs NetBox 4.6 or later. It verifies each pass-through against the
+`PortMapping` model, which replaced the single rear-port reference on a front port in 4.6.
+
 ## Installation
 
 ```bash

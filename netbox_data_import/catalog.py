@@ -67,7 +67,7 @@ TARGET_MODULES: tuple[TargetModule, ...] = (
         key=TargetModuleKey.CABLE,
         label="Cable",
         consumes=frozenset({OutputKind.SOURCE_TRACE}),
-        implemented=False,
+        implemented=True,
     ),
 )
 

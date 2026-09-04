@@ -20,7 +20,7 @@ from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import Diagnostic, Disposition, ImportPlan, PlanInvalid, Severity, executable_units, merge_changes
 from .source_resolution import derive_effective_rows
-from .target_modules import ExecutionContext, PreconditionFailed
+from .target_runtime import DeletedObject, ExecutionContext, PreconditionFailed
 
 
 _RESOLUTION_SECTION = "source_resolutions"
@@ -77,8 +77,13 @@ class ImportEngine:
     """Coordinate source interpretation and Target Module planning."""
 
     @classmethod
-    def plan(cls, profile, source_document, actor, planning_context) -> ImportPlan:
-        """Return the deterministic Import Plan for one stored source."""
+    def plan(
+        cls, profile, source_document, actor, planning_context, *, lock_plan_references: bool = False
+    ) -> ImportPlan:
+        """Return the plan and optionally lock read-only target references for execution.
+
+        The caller must open a transaction before it requests locks.
+        """
         document = cls._stored_source(profile, source_document)
         adapter = adapters.get_adapter(profile.source_adapter)
         if adapter is None:
@@ -112,7 +117,15 @@ class ImportEngine:
                 continue
             runtime = target_modules.runtime_for(declaration.key)
             if runtime is not None:
-                units.extend(runtime.plan(source_batch, profile, catalog.CATALOG, reader))
+                units.extend(
+                    runtime.plan(
+                        source_batch,
+                        profile,
+                        catalog.CATALOG,
+                        reader,
+                        lock_plan_references=lock_plan_references,
+                    )
+                )
 
         # Section 4.4 makes the merged graph the coordinator's, so a bad one fails here, not at a write.
         merge_changes(executable_units(units))
@@ -211,7 +224,13 @@ class ImportEngine:
         progress_callback,
     ) -> None:
         """Compare the selection against a fresh plan and apply it, inside the caller's transaction."""
-        current = cls.plan(profile, source_document, actor, accepted.planning_context)
+        current = cls.plan(
+            profile,
+            source_document,
+            actor,
+            accepted.planning_context,
+            lock_plan_references=True,
+        )
         units = cls._selected_units(accepted, current, selected_identities)
         try:
             changes = merge_changes(units)
@@ -227,12 +246,13 @@ class ImportEngine:
             profile=profile,
         )
         completed: list[str] = []
+        deleted: list[dict] = []
         for index, change in enumerate(changes):
             runtime = target_modules.runtime_for(change.target_module)
             if runtime is None:
                 raise EngineConfigurationError(f"No Target Module runtime is registered for '{change.target_module}'.")
             try:
-                runtime.apply(change, context)
+                applied = runtime.apply(change, context)
             except (PreconditionFailed, ObjectPermissionDenied, ValidationError, DatabaseError) as exc:
                 raise _ExecutionFailed(
                     cause=exc,
@@ -242,10 +262,12 @@ class ImportEngine:
                     not_attempted=[later.identity for later in changes[index + 1 :]],
                 ) from exc
             completed.append(change.identity)
+            if isinstance(applied, DeletedObject):
+                deleted.append(applied.to_dict())
             if progress_callback is not None:
                 progress_callback(len(units) + index + 1, total)
         execution.mark_succeeded(
-            applied_changes={"changes": completed, "deleted": []},
+            applied_changes={"changes": completed, "deleted": deleted},
             result_counts=cls._result_counts(changes),
         )
 

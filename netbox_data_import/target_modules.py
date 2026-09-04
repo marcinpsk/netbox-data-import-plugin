@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Target Module runtime protocol, and the Rack module that implements it.
+"""The Rack, Device and Cable Target Modules, and the registry the coordinator resolves them through.
 
 Section 2.3 gives a Target Module target-specific matching, ORM queries, permission checks,
 preconditions, locking and writes. It plans against the complete relevant Source Batch and applies
@@ -18,11 +18,12 @@ import re
 from copy import copy
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any
 
 from django.core.exceptions import ValidationError
 
 from . import ip_assignment
+from .cable_target import CableModule
 from .catalog import OutputKind
 from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
 from .device_field_review import DeviceFieldReviewer
@@ -30,6 +31,7 @@ from .device_identity import DeviceTypeIdentityResolver, normalize_mapping_text
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
+from .target_runtime import ExecutionContext, PreconditionFailed, TargetModuleRuntime
 from .values import (
     effective_device_name,
     identity_text,
@@ -40,34 +42,6 @@ from .values import (
 )
 
 DEFAULT_RACK_HEIGHT = 42
-
-
-class PreconditionFailed(Exception):
-    """Target state moved between planning and the write, so the change no longer applies."""
-
-
-@dataclass(frozen=True)
-class ExecutionContext:
-    """What a Target Module needs while the coordinator's transaction is open."""
-
-    actor: Any
-    reader: Any
-    profile: Any
-
-
-class TargetModuleRuntime(Protocol):
-    """What the coordinator may call on a Target Module."""
-
-    key: str
-    consumes: frozenset[str]
-
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
-        """Return the Synchronization Units this module owns for the whole batch."""
-        ...
-
-    def apply(self, planned_change: PlannedChange, execution_context) -> Any:
-        """Apply one Planned Change inside the coordinator's transaction."""
-        ...
 
 
 def _text(value) -> str:
@@ -251,8 +225,18 @@ class RackModule:
     key = "rack"
     consumes = frozenset({OutputKind.RACK_SOURCE_ROW})
 
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
+    def plan(
+        self,
+        source_batch,
+        profile,
+        catalog,
+        netbox_reader,
+        *,
+        lock_plan_references: bool = False,
+    ) -> list[SynchronizationUnit]:
         """Return one Synchronization Unit per rack row, with the disposition its state earns."""
+        # Planned Change preconditions carry every target row this module depends on, so no read-only reference remains.
+        del lock_plan_references
         rows = self._rack_rows(source_batch, profile)
         if not rows:
             return []
@@ -1502,8 +1486,18 @@ class DeviceModule:
     key = "device"
     consumes = frozenset({OutputKind.DEVICE_SOURCE_ROW})
 
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
+    def plan(
+        self,
+        source_batch,
+        profile,
+        catalog,
+        netbox_reader,
+        *,
+        lock_plan_references: bool = False,
+    ) -> list[SynchronizationUnit]:
         """Return one Synchronization Unit per device row, with the disposition its state earns."""
+        # Planned Change preconditions carry every target row this module depends on, so no read-only reference remains.
+        del lock_plan_references
         rows = self._device_rows(source_batch, profile)
         if not rows:
             return []
@@ -2331,6 +2325,7 @@ class DeviceModule:
 MODULE_RUNTIMES: dict[str, Any] = {
     RackModule.key: RackModule(),
     DeviceModule.key: DeviceModule(),
+    CableModule.key: CableModule(),
 }
 
 
@@ -2341,6 +2336,7 @@ def runtime_for(key: str) -> Any | None:
 
 __all__ = (
     "DEFAULT_RACK_HEIGHT",
+    "CableModule",
     "DeviceModule",
     "ExecutionContext",
     "MODULE_RUNTIMES",

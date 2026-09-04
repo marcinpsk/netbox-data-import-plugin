@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import hashlib
-import json
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -24,7 +23,7 @@ from .adapters import (
 )
 from . import plan
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
-from .field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -392,6 +391,15 @@ class AdapterSettings:
         self._fields = adapter.config_form_class().base_fields if adapter is not None else None
         self._config = _require_adapter_config_mapping(config)
 
+    def get(self, name, default):
+        """Return one setting, or *default* when this profile's adapter declares none.
+
+        Only a caller that serves every adapter may ask this way. Adapter-specific code reads the
+        attribute, so a setting it depends on cannot go missing quietly.
+        """
+        fields = object.__getattribute__(self, "_fields")
+        return getattr(self, name) if fields is not None and name in fields else default
+
     def __getattr__(self, name):
         fields = object.__getattribute__(self, "_fields")
         if fields is None:
@@ -695,22 +703,12 @@ def index_digest(value: str) -> str:
 def _canonical_termination_field_key(value):
     """Return *value* when it is an exact canonical termination field key."""
     try:
-        data = json.loads(value)
-        if not isinstance(data, dict) or set(data) != {"cards", "device", "kind", "port", "role"}:
-            raise ValueError
-        if not all(isinstance(data[name], str) for name in data):
-            raise ValueError
-        canonical = termination_field_key(**data)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        parse_termination_field_key(value)
+    except (TypeError, ValueError) as exc:
         raise ValidationError(
             "Enter the canonical JSON termination field key.",
             code="invalid",
         ) from exc
-    if canonical != value:
-        raise ValidationError(
-            "Enter the canonical JSON termination field key.",
-            code="invalid",
-        )
     return value
 
 
@@ -1465,6 +1463,75 @@ class DeviceImportSource(models.Model):
 
     def __str__(self):
         return f"{self.source_id or '(no source ID)'} → Device #{self.device_id}"
+
+
+class CableImportSource(models.Model):
+    """Import provenance the plugin keeps for one Cable and one contributing Source Trace.
+
+    Two Source Traces that state one identical segment share one created Cable, so the Cable
+    reference is a plain foreign key and the row is keyed by the trace as well (section 5.7).
+    """
+
+    cable = models.ForeignKey(
+        to="dcim.Cable",
+        on_delete=models.CASCADE,
+        related_name="data_import_sources",
+    )
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="cable_sources",
+    )
+    trace_identity = models.TextField(
+        help_text="Canonical JSON identity of the Source Trace that states this segment",
+    )
+    trace_key = models.CharField(
+        max_length=64,
+        blank=True,
+        editable=False,
+        help_text="Fixed-width digest of trace_identity, which is what the index and constraint carry",
+    )
+    segment_index = models.PositiveIntegerField(
+        help_text="Position of this segment in the Source Trace, in canonical order",
+    )
+    from_text = models.CharField(max_length=500, blank=True, default="")
+    to_text = models.CharField(max_length=500, blank=True, default="")
+    direction = models.CharField(max_length=20, blank=True, default="")
+    workbook_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    sheet = models.CharField(max_length=100, blank=True, default="")
+    block_ordinal = models.PositiveIntegerField(null=True, blank=True)
+    row_start = models.PositiveIntegerField(null=True, blank=True)
+    row_end = models.PositiveIntegerField(null=True, blank=True)
+    export_timestamp = models.CharField(max_length=100, blank=True, default="")
+
+    def clean(self):
+        """Derive the index key before validate_unique reads the constraint's own fields."""
+        super().clean()
+        self.trace_key = index_digest(self.trace_identity)
+
+    def save(self, *args, **kwargs):
+        """Derive the index key, so no caller can store one that disagrees with the identity."""
+        self.trace_key = index_digest(self.trace_identity)
+        update_fields = kwargs.get("update_fields")
+        # A partial save of the identity alone would leave the constraint on the digest it replaced.
+        if update_fields is not None and "trace_identity" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "trace_key"}
+        super().save(*args, **kwargs)
+
+    class Meta:
+        ordering = ["cable", "profile", "trace_identity"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cable", "profile", "trace_key"],
+                name="ndi_cableimportsource_cable_profile_trace",
+            ),
+        ]
+        indexes = [models.Index(fields=["profile", "trace_key"])]
+        verbose_name = "Cable Import Source"
+        verbose_name_plural = "Cable Import Sources"
+
+    def __str__(self):
+        return f"segment {self.segment_index} of {self.from_text} to {self.to_text} \u2192 Cable #{self.cable_id}"
 
 
 def stored_import_source(obj):

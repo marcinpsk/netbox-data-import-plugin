@@ -1342,7 +1342,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_serial": device.serial,
             }
 
-        view_mode = parse_qs(urlsplit(preview_url).query).get("view", [profile.adapter_settings.preview_view_mode])[-1]
+        # The preview serves every adapter, and only the flat one declares a stored view mode.
+        stored_view_mode = profile.adapter_settings.get("preview_view_mode", "rows")
+        view_mode = parse_qs(urlsplit(preview_url).query).get("view", [stored_view_mode])[-1]
 
         # Build unused columns list: filter out any that are now mapped
         mapped_source_cols = set(profile.column_mappings.values_list("source_column", flat=True))
