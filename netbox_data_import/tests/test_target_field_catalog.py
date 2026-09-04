@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from dcim.models import Site
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from tenancy.models import ContactRole
 
@@ -777,13 +777,32 @@ WITHOUT_CABLE_MODULE = tuple(
 )
 
 
+class RuntimeGateTest(SimpleTestCase):
+    """The gate itself answers from a stated declaration table, so no test has to replace one."""
+
+    def test_an_output_kind_with_no_implemented_module_is_not_runnable(self):
+        """This is the condition the selectable-adapter tests below stand an override up for."""
+        self.assertFalse(
+            catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE}), modules=WITHOUT_CABLE_MODULE)
+        )
+
+    def test_the_gate_still_answers_for_a_kind_a_stated_module_implements(self):
+        """The table is read, not ignored, so an implemented kind stays runnable."""
+        self.assertTrue(
+            catalog_module.has_implemented_module(
+                frozenset({OutputKind.DEVICE_SOURCE_ROW}), modules=WITHOUT_CABLE_MODULE
+            )
+        )
+
+    def test_the_real_table_runs_every_declared_kind(self):
+        """The release implements every declared module, which is why the override exists at all."""
+        self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+
+
+# The refusals below reach the gate through module state, so they still need the override.
 @patch.object(catalog_module, "TARGET_MODULES", WITHOUT_CABLE_MODULE)
 class AdapterRuntimeSupportTest(TestCase):
-    """An adapter is selectable only when this release implements a Target Module that consumes it.
-
-    The release implements every declared module, so the gate is driven by an override that puts
-    the Cable module back where T5 found it.
-    """
+    """An adapter is selectable only when this release implements a Target Module that consumes it."""
 
     @classmethod
     def setUpTestData(cls):

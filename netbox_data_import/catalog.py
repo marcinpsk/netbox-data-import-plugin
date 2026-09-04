@@ -9,6 +9,7 @@ nothing from NetBox, so every other layer may depend on it.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 
@@ -273,14 +274,22 @@ def policy_section(key: str) -> PolicySection | None:
     return _SECTIONS_BY_KEY.get(key)
 
 
-def consuming_modules(output_kinds: frozenset[str]) -> tuple[TargetModule, ...]:
+def consuming_modules(
+    output_kinds: frozenset[str], modules: Sequence[TargetModule] | None = None
+) -> tuple[TargetModule, ...]:
     """Return the Target Modules that consume any of *output_kinds*."""
-    return tuple(module for module in TARGET_MODULES if module.consumes & output_kinds)
+    return tuple(
+        module for module in (TARGET_MODULES if modules is None else modules) if module.consumes & output_kinds
+    )
 
 
-def has_implemented_module(output_kinds: frozenset[str]) -> bool:
-    """Return True when a Target Module this release implements consumes any of *output_kinds*."""
-    return any(module.implemented for module in consuming_modules(output_kinds))
+def has_implemented_module(output_kinds: frozenset[str], modules: Sequence[TargetModule] | None = None) -> bool:
+    """Return True when a Target Module this release implements consumes any of *output_kinds*.
+
+    *modules* states the declaration table to read, so the gate is answerable without the caller
+    replacing the real one.
+    """
+    return any(module.implemented for module in consuming_modules(output_kinds, modules))
 
 
 __all__ = (
