@@ -2073,10 +2073,12 @@ def _preview_field_intent(request, target_field):
 def _placement_matches_preview(device, row) -> bool:
     """Return whether placement fields still match the materialized preview."""
     state = row.extra_data.get("_placement_state")
-    if not isinstance(state, dict):
+    # A baseline that states no location cannot prove the Device stayed in one, so it fails closed.
+    if not isinstance(state, dict) or "location_id" not in state:
         return False
     return (
-        device.rack_id == state.get("rack_id")
+        device.location_id == state["location_id"]
+        and device.rack_id == state.get("rack_id")
         and normalize_for_compare(device.position) == state.get("position", "")
         and (device.face or "") == state.get("face", "")
     )
@@ -2663,7 +2665,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             raise PreviewActionInvalid(_placement_error_text(exc)) from exc
 
 
-def _lookup_rack_for_device(device, value):
+def _lookup_rack_for_device(request, device, value):
     """Look up a Rack by name within ``device.site``, honoring ``device.location``.
 
     If the device has a location set, the rack must be in the same location. If the
@@ -2681,7 +2683,7 @@ def _lookup_rack_for_device(device, value):
         return None, "Rack name is empty"
     if device.site_id is None:
         return None, "Device has no site; cannot resolve rack"
-    qs = Rack.objects.filter(site=device.site, name=name)
+    qs = Rack.objects.restrict(request.user, "view").filter(site=device.site, name=name)
     if device.location_id is not None:
         qs = qs.filter(location=device.location)
         loc_str = f" / location '{device.location}'"
@@ -2804,7 +2806,7 @@ class SyncPlacementView(_AjaxPermissionView):
                     status=409,
                 )
 
-            rack, err = _lookup_rack_for_device(device, rack_name)
+            rack, err = _lookup_rack_for_device(request, device, rack_name)
             if err:
                 # atomic-exit-safe: rack-unresolved-before-write
                 return JsonResponse({"ok": False, "error": err})

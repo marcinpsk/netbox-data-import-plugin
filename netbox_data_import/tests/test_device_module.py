@@ -686,6 +686,19 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.name_placement_conflict")
 
+    def test_the_placement_snapshot_records_the_location_it_compares(self):
+        """`_placement_differs` reads location as placement, so the locked baseline has to carry it."""
+        from dcim.models import Location, Rack
+
+        location = Location.objects.create(name="Snapshot Hall", slug="snapshot-hall", site=self.site)
+        rack = Rack.objects.create(name="snapshot-rack", site=self.site, location=location, u_height=42)
+        self._device("srv-01", location=location, rack=rack, position=10, face="front")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack", u_position="20", face="Front"))
+
+        state = WorkspaceUnit.from_unit(units[0]).extra_data["_placement_state"]
+        self.assertEqual(state["location_id"], location.pk)
+
     def test_a_name_only_placement_conflict_carries_the_name_the_preview_offers(self):
         """The reported case: the row names a stored Device placed elsewhere and offers no rename."""
         self._device("srv-01", rack=self.rack, position=10, face="front")

@@ -371,6 +371,20 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
         self.assertEqual(stated_end.rack, "RACK-Q")
         self.assertEqual(stated_end.u_position, "7")
 
+    def test_a_reversed_trace_list_block_does_not_invalidate_the_path_trace(self):
+        """An unpaired Trace List block states no segments, so it cannot contradict segment evidence."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        path_block = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b),))
+        # `pair_key` keeps the From/To order while the identity sorts it, so this block never pairs.
+        reversed_lines = (_endpoint_line(endpoint_b), _endpoint_line(endpoint_a))
+        list_block = (*reversed_lines, (_visit(endpoint_b), _visit(endpoint_a)))
+
+        batch = _interpret(_workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True))
+
+        self.assertNotIn("trace.duplicate_conflict", _codes(batch))
+        self.assertTrue(batch.rows[0].valid, _codes(batch))
+        self.assertEqual(len(batch.rows[0].segments), 1)
+
     def test_a_path_row_value_survives_a_later_empty_visit(self):
         """The first non-empty value wins, so a blank list row cannot clear a stated one."""
         endpoint_a, endpoint_b, lines = self._pair()
@@ -715,6 +729,22 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertEqual(_codes(batch), ["trace.non_linear_path"])
 
 
+class _CountingSheet:
+    """Count the cell reads the parser makes, leaving the worksheet's own attributes alone."""
+
+    def __init__(self, sheet, reads):
+        self._sheet = sheet
+        self._reads = reads
+
+    def cell(self, *args, **kwargs):
+        """Record the row this read touches, then return the worksheet's own cell."""
+        self._reads[kwargs.get("row", args[0] if args else 0)] += 1
+        return self._sheet.cell(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._sheet, name)
+
+
 class TraceWorkbookRowReadTest(SimpleTestCase):
     """Block extraction reads each row of a sheet once."""
 
@@ -727,15 +757,7 @@ class TraceWorkbookRowReadTest(SimpleTestCase):
         book = openpyxl.load_workbook(BytesIO(_workbook(path_blocks=(block,))), data_only=True)
         sheet = book["Trace From To"]
         reads: Counter[int] = Counter()
-        real_cell = sheet.cell
-
-        def counting_cell(*args, **kwargs):
-            """Count every cell the parser reads from the real worksheet."""
-            reads[kwargs.get("row", args[0] if args else 0)] += 1
-            return real_cell(*args, **kwargs)
-
-        sheet.cell = counting_cell
-        extracted = trace_workbook._extract_blocks(sheet, "fingerprint")
+        extracted = trace_workbook._extract_blocks(_CountingSheet(sheet, reads), "fingerprint")
 
         self.assertEqual(len(extracted[0].rows), len(rows))
         self.assertEqual(max(reads.values()), len(PATH_HEADER))

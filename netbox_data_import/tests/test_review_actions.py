@@ -7,7 +7,7 @@ from threading import Event
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.test import Client, TransactionTestCase
+from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
@@ -543,6 +543,56 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
 
 
+class PlacementRackScopeTest(TestCase):
+    """The placement write resolves a Rack by name, so it has to honour the operator's view scope."""
+
+    def setUp(self):
+        """Create one Rack the operator may see and one it may not."""
+        from dcim.models import Rack, Site
+
+        self.site = Site.objects.create(name="Rack Scope Site", slug="rack-scope-site")
+        self.visible = Rack.objects.create(name="scope-visible", site=self.site, u_height=42)
+        self.hidden = Rack.objects.create(name="scope-hidden", site=self.site, u_height=42)
+        self.user = user_with_object_permission(
+            "rack-scope-operator",
+            [(Rack, ("view",), {"name": "scope-visible"})],
+        )
+
+    def _device(self):
+        """Return an unsaved Device at the site, which is all the rack lookup reads."""
+        from dcim.models import Device
+
+        return Device(site=self.site)
+
+    def test_the_rack_lookup_honours_the_actor_view_scope(self):
+        """A Rack outside the operator's scope must not be bound, and its name must not leak."""
+        from django.test import RequestFactory
+
+        from netbox_data_import.views import _lookup_rack_for_device
+
+        request = RequestFactory().post("/")
+        request.user = self.user
+
+        found, error = _lookup_rack_for_device(request, self._device(), "scope-hidden")
+
+        self.assertIsNone(found, "the lookup bound a Rack the operator cannot see")
+        self.assertIn("not found", error)
+
+    def test_the_rack_lookup_still_finds_a_rack_in_scope(self):
+        """The scoping must not refuse the Rack the operator is allowed to use."""
+        from django.test import RequestFactory
+
+        from netbox_data_import.views import _lookup_rack_for_device
+
+        request = RequestFactory().post("/")
+        request.user = self.user
+
+        found, error = _lookup_rack_for_device(request, self._device(), "scope-visible")
+
+        self.assertIsNone(error)
+        self.assertEqual(found, self.visible)
+
+
 class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
     """A row refused for an unplaced name match must still let the operator place the Device."""
 
@@ -623,7 +673,30 @@ class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
 
         baseline = self.device_unit.extra_data.get("_placement_state")
 
-        self.assertEqual(baseline, {"rack_id": None, "position": "", "face": ""})
+        self.assertEqual(baseline, {"location_id": None, "rack_id": None, "position": "", "face": ""})
+
+    def test_placement_sync_refuses_a_device_that_moved_to_another_location(self):
+        """Location is placement state, so a Device that moved has to fail the locked recheck."""
+        from dcim.models import Device, Location, Rack
+
+        other = Location.objects.create(name="Other Hall", slug="other-hall", site=self.site)
+        decoy = Rack.objects.create(name=self.rack.name, site=self.site, location=other, u_height=42)
+        self.device.location = other
+        self.device.save(update_fields=["location"])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            {
+                "row_number": 1,
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409, response.content[:300])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.rack_id, "the sync placed the Device in another location's rack")
+        self.assertFalse(Device.objects.filter(rack=decoy).exists())
 
     def test_placement_sync_places_the_device_the_row_matched_by_name(self):
         """Nothing in NetBox changed, so the refusal must not claim that it did."""

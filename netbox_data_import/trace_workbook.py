@@ -793,8 +793,10 @@ def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ..
         provenance = tuple(dict.fromkeys(item for trace in occurrences for item in trace.provenance))
         # The fingerprint excludes Trace List data, so a later occurrence can state its own finding.
         errors = _first_of_each_code(occurrences)
-        if len({trace.content_fingerprint for trace in occurrences}) > 1:
-            locations = "; ".join(_location_from_provenance(trace.provenance[0]) for trace in occurrences)
+        # An endpoint-only fallback states no segments, so it contradicts no segment evidence.
+        compared = [trace for trace in occurrences if trace.segments] or list(occurrences)
+        if len({trace.content_fingerprint for trace in compared}) > 1:
+            locations = "; ".join(_location_from_provenance(trace.provenance[0]) for trace in compared)
             errors.append(
                 SourceDiagnostic(
                     code="trace.duplicate_conflict",

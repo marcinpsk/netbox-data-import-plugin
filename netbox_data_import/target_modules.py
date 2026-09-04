@@ -1696,6 +1696,8 @@ class DeviceModule:
                     "netbox_rack_name": match.device.rack.name if match.device.rack_id else "",
                     # A row refused for an identity conflict states no change, so it needs this here.
                     "_placement_state": {
+                        # `_placement_differs` reads location as placement, so the baseline states it.
+                        "location_id": match.device.location_id,
                         "rack_id": match.device.rack_id,
                         "position": normalize_for_compare(match.device.position),
                         "face": match.device.face or "",
