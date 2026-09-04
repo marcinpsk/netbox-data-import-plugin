@@ -1430,6 +1430,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "resolved_contact_source_ids": [
                     source_id for source_id, columns in existing_resolutions.items() if "candidate:contact" in columns
                 ],
+                "configured_source_classes": set(profile.class_role_mappings.values_list("source_class", flat=True)),
                 "can_create_role": request.user.has_perm("dcim.add_devicerole"),
                 "unused_columns": unused_columns,
                 "target_field_choices": CATALOG.choices(output_kinds=profile.output_kinds),

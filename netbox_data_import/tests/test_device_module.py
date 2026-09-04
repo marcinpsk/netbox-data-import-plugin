@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Verify Device Target Module planning and execution behavior."""
 
+from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
@@ -9,8 +10,10 @@ from django.test.utils import CaptureQueriesContext
 from netbox_data_import.adapters import SourceBatch
 from netbox_data_import.catalog import CATALOG, OutputKind
 from netbox_data_import.device_identity import DeviceTypeIdentityResolver
+from netbox_data_import.import_engine import ImportEngine
 from netbox_data_import.models import (
     ClassRoleMapping,
+    ColumnMapping,
     DeviceExistingMatch,
     DeviceImportSource,
     DeviceTypeMapping,
@@ -18,11 +21,13 @@ from netbox_data_import.models import (
     IgnoredFieldDifference,
     ImportProfile,
     ManufacturerMapping,
+    SourceDocument,
 )
 from netbox_data_import.netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from netbox_data_import.plan import Disposition, Severity
 from netbox_data_import.review_workspace import _CONFLICT_ACTIONS, WorkspaceUnit
 from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed, _DeviceBatch
+from netbox_data_import.tests.helpers import workbook_bytes
 
 
 class DeviceModulePlanTestBase(TestCase):
@@ -70,6 +75,47 @@ class DeviceModulePlanTestBase(TestCase):
 
     def _plan(self, *rows):
         return DeviceModule().plan(self._batch(*rows), self.profile, CATALOG, self.reader)
+
+    def _engine_plan(self, *rows):
+        """Plan stored workbook rows through the public Import Engine seam."""
+        columns = (
+            ("Source ID", "source_id", "source_id"),
+            ("Class", "device_class", "device_class"),
+            ("Name", "device_name", "device_name"),
+            ("Rack", "rack_name", "rack_name"),
+            ("Make", "make", "make"),
+            ("Model", "model", "model"),
+            ("Height", "u_height", "u_height"),
+            ("Position", "u_position", "u_position"),
+            ("Face", "face", "face"),
+        )
+        for source_column, target_field, _row_key in columns:
+            ColumnMapping.objects.get_or_create(
+                profile=self.profile,
+                source_column=source_column,
+                defaults={"target_field": target_field},
+            )
+        actor = get_user_model().objects.create_superuser(
+            username="device-engine-operator",
+            email="device-engine@example.invalid",
+            password="testpass",
+        )
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=workbook_bytes(
+                [source_column for source_column, _target_field, _row_key in columns],
+                [[row.get(row_key, "") for _source_column, _target_field, row_key in columns] for row in rows],
+            ),
+            filename="device-module.xlsx",
+            uploaded_by=actor,
+        )
+        plan = ImportEngine.plan(
+            self.profile,
+            document,
+            actor,
+            {"site_id": self.site.pk, "location_id": None, "tenant_id": None},
+        )
+        return [unit for unit in plan.units if unit.identity.startswith("device:")]
 
     def _with_provenance(self, device, source_id="D-1", asset_tag="", extra_columns=None):
         """Record the provenance a previous import of this row would have left behind."""
@@ -129,7 +175,9 @@ class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
         from dcim.models import DeviceRole, DeviceType, Manufacturer
 
         rows = [
-            self._row(number, f"D-{number}", f"srv-{number:02d}", make="Example Make", model="Example Model")
+            self._row(
+                number, f"D-{number}", f"srv-{number:02d}", make="Example Make", model="Example Model", u_height="1"
+            )
             for number in (1, 2)
         ]
 
@@ -401,14 +449,54 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
     """The module plans the relation objects the legacy device pass created."""
 
     def test_a_missing_device_type_is_an_executable_dependency(self):
-        """The default profile creates the Manufacturer and Device Type before the Device."""
-        units = self._plan(self._row(2, "D-1", "srv-01", make="Acme", model="Widget"))
+        """A stated height lets the engine create the Manufacturer and Device Type before the Device."""
+        units = self._engine_plan(self._row(2, "D-1", "srv-01", make="Acme", model="Widget", u_height="2"))
 
         self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
         self.assertEqual(
             [change.operation for change in units[0].changes],
             ["create_manufacturer", "create_device_type", "create"],
         )
+        type_change = next(change for change in units[0].changes if change.operation == "create_device_type")
+        self.assertEqual(type_change.payload["u_height"], 2)
+
+    def test_a_missing_device_type_without_a_usable_height_is_blocked(self):
+        """The operator must add a missing Device Type when its height cannot be read from the row."""
+        unit = self._engine_plan(self._row(2, "D-1", "srv-01", make="Acme", model="Widget", u_height=""))[0]
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.diagnostics[0].code, "device.device_type_height_missing")
+        self.assertIn("Acme / Widget", unit.diagnostics[0].display["message"])
+        self.assertEqual(unit.changes, ())
+
+    def test_stated_zero_and_half_unit_heights_are_preserved(self):
+        """Device Type heights can occupy zero or one half-unit without being rounded to one."""
+        units = self._engine_plan(
+            self._row(2, "D-1", "pdu-01", make="Acme", model="Rack PDU", u_height="0"),
+            self._row(3, "D-2", "shelf-01", make="Acme", model="Half Shelf", u_height="0.5"),
+        )
+
+        type_changes = [
+            next(change for change in unit.changes if change.operation == "create_device_type") for unit in units
+        ]
+        self.assertEqual([change.payload["u_height"] for change in type_changes], [0, 0.5])
+
+    def test_two_rows_at_different_positions_do_not_claim_each_other(self):
+        """A row blocked on its missing type must not reserve any rack units."""
+        low = self._row(2, "D-1", "low-device", make="Acme", model="Widget", u_height="", u_position="18", face="front")
+        high = self._row(3, "D-2", "high-device", u_position="32", face="front")
+
+        units = self._engine_plan(low, high)
+
+        claimed = [
+            diagnostic.code
+            for unit in units
+            for diagnostic in unit.diagnostics
+            if diagnostic.code == "device.rack_position_claimed"
+        ]
+        self.assertEqual(claimed, [], [u.diagnostics for u in units])
+        self.assertEqual([unit.disposition for unit in units], [Disposition.BLOCKED, Disposition.ACTIONABLE])
+        self.assertEqual(units[0].diagnostics[0].code, "device.device_type_height_missing")
 
     def test_a_missing_role_is_an_executable_dependency(self):
         """The class mapping supplies enough information to create its Device Role."""
@@ -1065,7 +1153,7 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
             profile=self.profile, source_class="Appliance", creates_rack=False, role_slug="appliance"
         )
         unit = self._plan(
-            self._row(2, "D-AUTO", "appliance-01", device_class="Appliance", make="Example", model="Unit")
+            self._row(2, "D-AUTO", "appliance-01", device_class="Appliance", make="Example", model="Unit", u_height="1")
         )[0]
         actor = get_user_model().objects.create_superuser(
             username="dependency-writer", email="dependency-writer@example.invalid", password="testpass"

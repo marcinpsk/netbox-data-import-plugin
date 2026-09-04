@@ -76,6 +76,9 @@ _DIAGNOSTIC_MESSAGES = {
     "device.class_ignored": "Ignored source class",
     "device.class_unmapped": "No class-to-role mapping exists for this source class.",
     "device.cross_site_match": "A strong identity matches a device at another site.",
+    "device.device_type_height_missing": (
+        "Add the named Device Type to NetBox because the source row does not state a usable U height."
+    ),
     "device.device_type_missing": "The device type does not exist. Map or create it before importing.",
     "device.device_type_permission": "Permission denied: dcim.add_devicetype",
     "device.device_type_slug_collision": "A stored device type already uses the slug this model derives.",

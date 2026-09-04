@@ -344,6 +344,56 @@ class ResolvedContactRowIsMarkedTest(BaseViewTestCase):
         self.assertIn("btn-outline-success", classes)
 
 
+class ConfiguredClassRowIsMarkedTest(PreviewSessionMixin, BaseViewTestCase):
+    """A class editor must distinguish configured policy from policy that still needs a decision."""
+
+    def _class_button(self, cells):
+        """Return the class editor button from one rendered Device row."""
+        match = re.search(
+            r'(<button[^>]*data-ndi-modal="#classMappingModal"[^>]*>.*?</button>)',
+            cells,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match, "an errored Device row must offer the class editor")
+        return match.group(1)
+
+    def test_configured_and_unconfigured_classes_render_different_actions(self):
+        """A configured class stays reviewable but does not look like unresolved policy."""
+
+        def add_errors(worksheet):
+            worksheet["G4"] = "10"
+            worksheet.append(
+                [
+                    "4",
+                    "Rack-01",
+                    "unmapped-01",
+                    "Unmapped",
+                    "Front",
+                    "Front to Back",
+                    "30",
+                    "Live",
+                    "Example Make",
+                    "Example Model",
+                    "1",
+                    "SN003",
+                    "AT003",
+                ]
+            )
+
+        self._setup_session(mutate_workbook=add_errors)
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertIn("configured_source_classes", response.context)
+        configured = self._class_button(self._device_row_cells(response.content.decode(), 4))
+        unresolved = self._class_button(self._device_row_cells(response.content.decode(), 5))
+        self.assertIn("btn-outline-success", configured)
+        self.assertIn("mdi-cog-check", configured)
+        self.assertIn("Class configured", configured)
+        self.assertIn("btn-outline-warning", unresolved)
+        self.assertIn("mdi-cog", unresolved)
+        self.assertIn("Configure class", unresolved)
+
+
 class ConflictJumpTargetsOneRowTest(SimpleTestCase):
     """The conflict jump has to name the row it means, not a row number several rows share."""
 

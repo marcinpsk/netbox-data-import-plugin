@@ -162,12 +162,18 @@ def _translate(value, table) -> str:
     return text if text in set(table.values()) else ""
 
 
-def _coerce_height(value) -> int:
+def _coerce_rack_height(value) -> int:
     """Return the rack height the row asks for, never below one unit."""
     try:
         return max(1, int(float(_source_text(value) or DEFAULT_RACK_HEIGHT)))
     except (OverflowError, TypeError, ValueError):
         return DEFAULT_RACK_HEIGHT
+
+
+def _source_device_type_height(value) -> int | float | None:
+    """Return a non-negative Device Type height stated by the source, or None."""
+    height = source_position(value)
+    return height if height is not None and height >= 0 else None
 
 
 def rack_row_name(row) -> str:
@@ -304,7 +310,7 @@ class RackModule:
                 )
             return _refused(identity, code, display)
 
-        height = _coerce_height(row.get("u_height"))
+        height = _coerce_rack_height(row.get("u_height"))
         serial = _source_text(row.get("serial"))
         rack_type_id = mapping.rack_type_id
         matches = existing.get(identity_text(name), ())
@@ -617,7 +623,7 @@ class _Match:
 class _PlannedDeviceType:
     """The placement facts of a Device Type this unit will create."""
 
-    u_height: int
+    u_height: int | float
     is_full_depth: bool
     pk: None = None
 
@@ -1183,7 +1189,21 @@ class _DeviceBatch:
                 changes.append(self._manufacturer_change(mfg_slug, make))
             if actor is not None and not actor.has_perm("dcim.add_devicetype"):
                 return _Dependencies(missing=("device.device_type_permission", {"dt_slug": dt_slug}))
-            u_height = _coerce_height(row.get("u_height"))
+            u_height = _source_device_type_height(row.get("u_height"))
+            if u_height is None:
+                return _Dependencies(
+                    missing=(
+                        "device.device_type_height_missing",
+                        {
+                            "message": (
+                                f"Add Device Type '{make} / {model}' to NetBox because this source row does not "
+                                "state a usable U height."
+                            ),
+                            "source_make": make,
+                            "source_model": model,
+                        },
+                    )
+                )
             changes.append(
                 self._device_type_change(
                     mfg_slug,
