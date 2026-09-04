@@ -24,6 +24,7 @@ from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet
 from .forms import (
+    CableClassMappingForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
@@ -33,7 +34,7 @@ from .forms import (
     ImportProfileImportForm,
     ImportSetupForm,
 )
-from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
+from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS
 from .values import (
     effective_device_name,
     identity_text,
@@ -45,6 +46,7 @@ from .values import (
 )
 from . import __version__ as _plugin_version
 from .models import (
+    CableClassMapping,
     locked_profile_policy,
     locked_resolution_policy,
     ClassRoleMapping,
@@ -64,6 +66,7 @@ from .models import (
     validate_source_resolution_fields,
 )
 from .tables import (
+    CableClassMappingTable,
     ClassRoleMappingTable,
     ColumnMappingTable,
     ColumnTransformRuleTable,
@@ -432,7 +435,12 @@ class ImportProfileListView(generic.ObjectListView):
 class ImportProfileView(generic.ObjectView):
     """Detail view for a single import profile, with inline mapping tables."""
 
-    queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
+    queryset = ImportProfile.objects.prefetch_related(
+        "column_mappings",
+        "class_role_mappings",
+        "device_type_mappings",
+        "cable_class_mappings",
+    )
 
     def get_extra_context(self, request, instance):
         """Inject inline mapping tables into the template context."""
@@ -440,11 +448,17 @@ class ImportProfileView(generic.ObjectView):
         class_role_table = ClassRoleMappingTable(instance.class_role_mappings.all())
         device_type_table = DeviceTypeMappingTable(instance.device_type_mappings.all())
         transform_table = ColumnTransformRuleTable(instance.column_transform_rules.all())
+        cable_class_table = CableClassMappingTable(instance.cable_class_mappings.all())
+        applicable_policy_sections = frozenset(
+            section.key for section in POLICY_SECTIONS if section.applies_to(instance.output_kinds)
+        )
         return {
             "column_table": column_table,
             "class_role_table": class_role_table,
             "device_type_table": device_type_table,
             "transform_table": transform_table,
+            "cable_class_table": cable_class_table,
+            "applicable_policy_sections": applicable_policy_sections,
         }
 
 
@@ -1003,6 +1017,31 @@ class ClassRoleMappingDeleteView(_ProfileChildDeleteView):
     """Delete a class→role mapping."""
 
     queryset = ClassRoleMapping.objects.all()
+
+
+class CableClassMappingAddView(_ProfileChildEditView):
+    """Add a CableClass mapping to an existing ImportProfile."""
+
+    queryset = CableClassMapping.objects.all()
+    form = CableClassMappingForm
+    template_name = "netbox_data_import/cableclassmapping_edit.html"
+    permission_required = "netbox_data_import.add_cableclassmapping"
+
+
+class CableClassMappingEditView(_ProfileChildEditView):
+    """Edit an existing CableClass mapping."""
+
+    queryset = CableClassMapping.objects.all()
+    form = CableClassMappingForm
+    template_name = "netbox_data_import/cableclassmapping_edit.html"
+    permission_required = "netbox_data_import.change_cableclassmapping"
+
+
+class CableClassMappingDeleteView(_ProfileChildDeleteView):
+    """Delete a CableClass mapping."""
+
+    queryset = CableClassMapping.objects.all()
+    permission_required = "netbox_data_import.delete_cableclassmapping"
 
 
 # ---------------------------------------------------------------------------

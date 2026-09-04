@@ -731,6 +731,17 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertFalse(batch.rows[0].valid)
         self.assertEqual(_codes(batch), ["trace.non_linear_path"])
 
+    def test_one_segment_that_ends_where_it_starts_is_not_linear(self):
+        """A cable from a termination to itself is unrepresentable, so the source refuses it."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        lines = _endpoint_line(endpoint_a), _endpoint_line(endpoint_a)
+        block = (*lines, (_segment(endpoint_a, "Cable A", endpoint_a),))
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+
     def test_a_path_that_returns_to_its_start_is_not_linear(self):
         """Three segments that close a loop reuse the entry termination at both ends."""
         endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")

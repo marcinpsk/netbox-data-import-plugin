@@ -130,6 +130,7 @@ class KeyFamily:
 
 _FLAT_ROW_KINDS = frozenset({OutputKind.DEVICE_SOURCE_ROW, OutputKind.RACK_SOURCE_ROW})
 _DEVICE_ONLY = frozenset({OutputKind.DEVICE_SOURCE_ROW})
+_TRACE_ONLY = frozenset({OutputKind.SOURCE_TRACE})
 
 EXTRA_JSON_PREFIX = "extra_json:"
 CANDIDATE_TARGET_PREFIX = "candidate:"
@@ -255,6 +256,8 @@ POLICY_SECTIONS: tuple[PolicySection, ...] = (
     PolicySection("source_resolutions", "Source Resolutions", _DEVICE_ONLY),
     PolicySection("device_existing_matches", "Device Existing Matches", _DEVICE_ONLY),
     PolicySection("ignored_field_differences", "Ignored Field Differences", _DEVICE_ONLY),
+    PolicySection("termination_resolutions", "Termination Resolutions", _TRACE_ONLY),
+    PolicySection("cable_class_mappings", "CableClass Mappings", _TRACE_ONLY),
 )
 
 _SECTIONS_BY_KEY = {section.key: section for section in POLICY_SECTIONS}
