@@ -471,6 +471,14 @@ def _linearity_error(
     block: _Block, summary: EndpointSummary, segments: Sequence[_ParsedSegment]
 ) -> SourceDiagnostic | None:
     """Return the first structural break in a path, or None when the path is linear."""
+    # A path states two terminations whether or not it states the segments between them.
+    if summary.from_termination.identity_key == summary.to_termination.identity_key:
+        return _error(
+            block,
+            "trace.non_linear_path",
+            "The From and To lines name one termination, so the path does not join two terminations.",
+            segments[-1].row_number if segments else block.row_start,
+        )
     if not segments:
         return None
     if segments[0].evidence.left.identity_key != summary.from_termination.identity_key:
@@ -520,13 +528,6 @@ def _linearity_error(
                 "Consecutive Segment Evidence rows do not share a device and cards label.",
                 following.row_number,
             )
-    if summary.from_termination.identity_key == summary.to_termination.identity_key:
-        return _error(
-            block,
-            "trace.non_linear_path",
-            "The From and To lines name one termination, so the path does not join two terminations.",
-            segments[-1].row_number,
-        )
     return None
 
 
@@ -752,6 +753,9 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
     unknown = _unknown_port_class_error(block, terms)
     if unknown is not None:
         errors.append(unknown)
+    loop = _linearity_error(block, summary, ())
+    if loop is not None:
+        errors.append(loop)
     corroboration = tuple(visit.termination for visit in visits)
     summary = _enrich_summary(summary, corroboration)
     return (

@@ -292,6 +292,17 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
         self.assertEqual(stated_end.rack, "RACK-Q")
         self.assertEqual(stated_end.u_position, "7")
 
+    def test_an_endpoint_only_fallback_refuses_one_termination(self):
+        """A fallback states no segments, so the linearity check never saw its endpoints."""
+        endpoint_a, _endpoint_b, _lines = self._pair()
+        lines = (_endpoint_line(endpoint_a), _endpoint_line(endpoint_a))
+        list_block = (*lines, (_visit(endpoint_a),))
+
+        batch = _interpret(_workbook(path_blocks=(), list_blocks=(list_block,), include_list=True))
+
+        self.assertIn("trace.non_linear_path", _codes(batch))
+        self.assertFalse(batch.rows[0].valid, _codes(batch))
+
     def test_a_reversed_trace_list_block_does_not_invalidate_the_path_trace(self):
         """An unpaired Trace List block states no segments, so it cannot contradict segment evidence."""
         endpoint_a, endpoint_b, lines = self._pair()

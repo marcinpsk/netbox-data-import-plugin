@@ -411,10 +411,13 @@ class _CableBatch:
                 field_keys.add(_field_key(reference, MAPPED_PEER_ROLE))
         if not field_keys:
             return {}
+        from .models import index_digest
+
+        # The unique constraint indexes the digest, and nothing indexes the unbounded field key.
         rows = TerminationResolution.objects.filter(
             profile=self.profile,
             task_type=SELECT_TERMINATION_TASK,
-            field_key__in=sorted(field_keys),
+            field_key_digest__in=sorted(index_digest(key) for key in field_keys),
         ).select_related("selected_object_type")
         return {row.field_key: row for row in rows}
 
@@ -763,7 +766,8 @@ class _CableBatch:
         pending = self._writing()
         for analysis in pending:
             for segment in analysis.segments:
-                proven = next((item for item in self._existing.values() if item.satisfies(segment)), None)
+                candidate = self._occupied.get(segment.left.key)
+                proven = candidate if candidate is not None and candidate.satisfies(segment) else None
                 if proven is not None:
                     analysis.proven[segment.index] = proven
                     self._note_reuse(analysis, segment, proven)
@@ -778,9 +782,9 @@ class _CableBatch:
     def _logical_cable(self, analysis: _TraceAnalysis, proven_ids) -> _ExistingCable | None:
         """Return the direct endpoint-to-endpoint Cable that proves no desired segment."""
         first, second = analysis.endpoints
-        for existing in self._existing.values():
-            if existing.cable.pk not in proven_ids and existing.connects(first, second):
-                return existing
+        existing = self._occupied.get(first.key)
+        if existing is not None and existing.cable.pk not in proven_ids and existing.connects(first, second):
+            return existing
         return None
 
     def _classify_endpoint_evidence(self, analysis: _TraceAnalysis) -> None:

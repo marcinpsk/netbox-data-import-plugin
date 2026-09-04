@@ -425,12 +425,17 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         table = TerminationResolution._meta.db_table
         table_queries = [query["sql"] for query in captured.captured_queries if f'FROM "{table}"' in query["sql"]]
         # The profile fingerprint reads every policy row by design, so select the batch planner query.
-        planner_queries = [query for query in table_queries if f'"{table}"."field_key" IN' in query]
+        planner_queries = [query for query in table_queries if f'"{table}"."field_key_digest" IN' in query]
         self.assertEqual(len(planner_queries), 1, table_queries)
         planner_query = planner_queries[0]
         self.assertIn(f'JOIN "{ObjectType._meta.db_table}"', planner_query)
-        self.assertIn(f'"role":"{TERMINATION_ROLE}"', planner_query)
-        self.assertIn(f'"role":"{MAPPED_PEER_ROLE}"', planner_query)
+        # The constraint indexes the digest, so each role is asserted through the digest it carries.
+        for role in (TERMINATION_ROLE, MAPPED_PEER_ROLE):
+            asked = termination_field_key(device="DEV-A", cards="", port="source-port", kind="interface", role=role)
+            self.assertIn(index_digest(asked), planner_query)
+        for index in range(12):
+            unused = termination_field_key(device=f"UNUSED-{index}", cards="", port="not-in-workbook", kind="interface")
+            self.assertNotIn(index_digest(unused), planner_query)
         self.assertNotIn("UNUSED-", planner_query)
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
 
