@@ -2,6 +2,67 @@
 
 <!-- version list -->
 
+## v1.12.0 (2026-09-04)
+
+### Bug Fixes
+
+- Close four review findings on the preview and the trace reader
+  ([`e09c963`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e09c963d1b100d84db4470decffc23324c3664c0))
+
+- Close the CodeRabbit findings on the trace adapter
+  ([`f71fa12`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f71fa12b1d34cd386abc16874e9300e0788aa12d))
+
+- Close the trace adapter review findings
+  ([`e063d63`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e063d63a5301b7bcfb876ce6237867d6fa8bdf60))
+
+- Identify a trace termination by the kind its PortClass claims
+  ([`f801f44`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f801f4422da11e9515460253114a0884fbec888b))
+
+- Keep corroboration a later sheet states, and release the workbook on a raise
+  ([`cd92e45`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cd92e45d67c898facea43fd8c2877c3bfd3353b9))
+
+- Keep the placement baseline on a row refused for an identity conflict
+  ([`0c10665`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0c10665c822c0cfb120a8e87a4277a90d755fcea))
+
+- Offer only runnable adapters in the REST schema
+  ([`5d98524`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5d985245b49c45d290f3f2ce4a3b8bf5efaf8b83))
+
+- Recheck the placement baseline under a row lock
+  ([`cfa9954`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cfa995468b3db670f5b3f7ed2cebe577e511615c))
+
+- Roll back the placement transaction when validation fails
+  ([`6bf2b83`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6bf2b83da3a4fe7cc2625143cce80649ffb10949))
+
+- State each adapter label in the REST create schema
+  ([`b958e3d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b958e3daaabd1f1e292b09c3a84255d9ec5da249))
+
+- Two preview refusals that state less than they know
+  ([`846055b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/846055b4a5cf95f7c27f875c40f557a039d166c0))
+
+### Documentation
+
+- State the sheet-pairing rule the adapter implements
+  ([`584526d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/584526d78e83a45346478ead7ba0423b72719a57))
+
+### Features
+
+- Add the trace workbook Source Adapter
+  ([`ce10724`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ce1072497259c2be9d5cef0848df4ca1abade37a))
+
+### Refactoring
+
+- Offer a preview row action from one table
+  ([`5e59946`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5e59946c54785a39087fed2eba9528e692f61e83))
+
+### Testing
+
+- Guard the Source Adapter import boundary
+  ([`ebfda81`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ebfda8163fa24a0556f5bb562d94237f2ad289d6))
+
+- Pin the adapter the REST write-back must preserve
+  ([`2a3b1f9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2a3b1f9ca75444dda65413f759c0a2f4083b7837))
+
+
 ## v1.11.3 (2026-09-03)
 
 ### Bug Fixes
