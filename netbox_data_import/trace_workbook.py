@@ -802,10 +802,12 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
 def _trace_selection_key(trace: SourceTrace) -> tuple[bool, bool, str]:
     """Rank Segment Evidence first, then canonical direction and serialized occurrence content."""
     summary = trace.endpoint_summary
+    # Provenance and errors carry the block position, which states where a trace was read, not what it says.
+    content = replace(trace, provenance=(), errors=())
     return (
         not bool(trace.segments),
         summary.from_termination.identity_key > summary.to_termination.identity_key,
-        json.dumps(asdict(trace), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        json.dumps(asdict(content), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
     )
 
 
