@@ -48,9 +48,6 @@ OVERLENGTH_PAYLOADS = {
         {"source_make": "Acme", "source_model": LONG},
         {"source_make": "Acme", "source_model": "Widget", "netbox_mfg_slug": LONG_SLUG},
         {"source_make": "Acme", "source_model": "Widget", "netbox_dt_slug": LONG_SLUG},
-        # The mapping holds 200 characters, but the NetBox manufacturer name holds 100.
-        {"source_make": "M" * 150, "netbox_mfg_slug": "acme", "source_model": "Widget", "action": "create_now"},
-        {"source_make": "Acme", "source_model": "Widget", "netbox_dt_name": "D" * 150, "action": "create_now"},
     ],
     "quick_resolve_manufacturer": [
         {"source_make": LONG, "netbox_mfg_slug": "acme"},
@@ -278,7 +275,6 @@ class QuickActionInputBoundsTest(TransactionTestCase):
                 "sheet_name": "Data",
                 "source_id_column": "Id",
                 "update_existing": True,
-                "create_missing_device_types": False,
             },
         )
         ClassRoleMapping.objects.create(

@@ -31,7 +31,6 @@ class DeviceTypeIdentityResolver:
         for mapping in self.manufacturer_mappings:
             normalized_make = normalize_mapping_text(mapping.source_make).casefold()
             self._manufacturers_exact.setdefault(normalized_make, mapping)
-        self.mapped_source_makes = frozenset(self._manufacturers_exact)
 
     @classmethod
     def for_profile(cls, profile):

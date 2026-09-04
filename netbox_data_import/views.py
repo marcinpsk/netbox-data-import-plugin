@@ -3703,16 +3703,12 @@ class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequir
 
 
 class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page.
-
-    Optionally also creates the manufacturer and/or device type in NetBox right now.
-    """
+    """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Save the device type mapping and report the pending preview change."""
-        from dcim.models import DeviceType, Manufacturer
         from django.utils.text import slugify
 
         next_url = reverse("plugins:netbox_data_import:import_preview")
@@ -3732,81 +3728,49 @@ class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequired
         source_model = " ".join(request.POST.get("source_model", "").split())
         netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
         netbox_dt_slug = request.POST.get("netbox_dt_slug", "").strip()
-        action = request.POST.get("action", "map")  # "map" or "create_now"
+        action = request.POST.get("action", "map")
 
         if not source_make or not source_model:
             return _preview_action_error(request, next_url, "Source make and model are required.", status=400)
+        if action != "map":
+            return _preview_action_error(
+                request, next_url, "The requested Device Type action is not supported.", status=400
+            )
 
         if not netbox_mfg_slug:
             netbox_mfg_slug = slugify(source_make)
         if not netbox_dt_slug:
             netbox_dt_slug = slugify(source_model)
 
-        # Every name and slug below is posted directly, so validate each write before it happens.
         try:
-            with transaction.atomic():
-                mapping = _get_or_init(
-                    DeviceTypeMapping,
-                    profile=profile,
-                    source_make=source_make,
-                    source_model=source_model,
-                )
-                mapping.netbox_manufacturer_slug = netbox_mfg_slug
-                mapping.netbox_device_type_slug = netbox_dt_slug
-                _validate_model_instance(
-                    mapping,
-                    f"device type mapping '{source_make} / {source_model}'",
-                )
-                mapping_result = save_permission_scoped_object(
-                    request.user,
-                    DeviceTypeMapping,
-                    {"profile": profile, "source_make": source_make, "source_model": source_model},
-                    {
-                        "netbox_manufacturer_slug": netbox_mfg_slug,
-                        "netbox_device_type_slug": netbox_dt_slug,
-                    },
-                )
-                created = mapping_result.created
-
-                if action == "create_now":
-                    mfg_candidate = _get_or_init(Manufacturer, slug=netbox_mfg_slug)
-                    if mfg_candidate.pk is None:
-                        mfg_candidate.name = source_make
-                        _validate_model_instance(mfg_candidate, f"manufacturer '{source_make}'")
-                    mfg = save_permission_scoped_object(
-                        request.user,
-                        Manufacturer,
-                        {"slug": netbox_mfg_slug},
-                        {"name": source_make},
-                        on_existing="keep",
-                    ).instance
-                    dt_name = request.POST.get("netbox_dt_name", source_model).strip() or source_model
-                    try:
-                        u_height = max(1, int(request.POST.get("u_height", "1")))
-                    except ValueError:
-                        u_height = 1
-                    device_type_candidate = _get_or_init(DeviceType, manufacturer=mfg, slug=netbox_dt_slug)
-                    if device_type_candidate.pk is None:
-                        device_type_candidate.model = dt_name
-                        device_type_candidate.u_height = u_height
-                        _validate_model_instance(device_type_candidate, f"device type '{dt_name}'")
-                    save_permission_scoped_object(
-                        request.user,
-                        DeviceType,
-                        {"manufacturer": mfg, "slug": netbox_dt_slug},
-                        {"model": dt_name, "u_height": u_height},
-                        on_existing="keep",
-                    )
+            mapping = _get_or_init(
+                DeviceTypeMapping,
+                profile=profile,
+                source_make=source_make,
+                source_model=source_model,
+            )
+            mapping.netbox_manufacturer_slug = netbox_mfg_slug
+            mapping.netbox_device_type_slug = netbox_dt_slug
+            _validate_model_instance(
+                mapping,
+                f"device type mapping '{source_make} / {source_model}'",
+            )
+            mapping_result = save_permission_scoped_object(
+                request.user,
+                DeviceTypeMapping,
+                {"profile": profile, "source_make": source_make, "source_model": source_model},
+                {
+                    "netbox_manufacturer_slug": netbox_mfg_slug,
+                    "netbox_device_type_slug": netbox_dt_slug,
+                },
+            )
         except PreviewActionInvalid as exc:
             return _preview_action_error(request, next_url, str(exc), status=400)
 
-        if action == "create_now":
-            saved_message = f"Mapping saved and device type '{source_make} / {source_model}' created in NetBox."
-        else:
-            verb = "created" if created else "updated"
-            saved_message = (
-                f"DeviceType mapping {verb}: '{source_make} / {source_model}' → {netbox_mfg_slug}/{netbox_dt_slug}"
-            )
+        verb = "created" if mapping_result.created else "updated"
+        saved_message = (
+            f"DeviceType mapping {verb}: '{source_make} / {source_model}' → {netbox_mfg_slug}/{netbox_dt_slug}"
+        )
 
         return _saved_preview_action_response(request, next_url, saved_message)
 

@@ -98,11 +98,6 @@ class FlatWorkbookConfigForm(AdapterConfigForm):
         initial=True,
         help_text="Update existing NetBox objects when a match is found",
     )
-    create_missing_device_types = forms.BooleanField(
-        required=False,
-        initial=True,
-        help_text="Auto-create manufacturers and device types that don't exist in NetBox",
-    )
     capture_extra_data = forms.BooleanField(
         required=False,
         initial=False,

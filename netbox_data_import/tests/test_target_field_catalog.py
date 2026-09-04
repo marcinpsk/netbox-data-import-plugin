@@ -239,7 +239,6 @@ class ImportProfileAdapterTest(TestCase):
                 "source_id_column": "",
                 "custom_field_name": "",
                 "update_existing": True,
-                "create_missing_device_types": True,
                 "capture_extra_data": False,
                 "primary_contact_role": None,
                 "primary_contact_lookup_field": "email",
@@ -254,7 +253,6 @@ class ImportProfileAdapterTest(TestCase):
                 "source_id_column": "",
                 "custom_field_name": "",
                 "update_existing": False,
-                "create_missing_device_types": False,
                 "capture_extra_data": False,
                 "primary_contact_role": None,
                 "primary_contact_lookup_field": "name",
@@ -266,7 +264,6 @@ class ImportProfileAdapterTest(TestCase):
         self.assertEqual(profile.adapter_config["source_id_column"], "")
         self.assertEqual(profile.adapter_config["custom_field_name"], "")
         self.assertFalse(profile.adapter_config["update_existing"])
-        self.assertFalse(profile.adapter_config["create_missing_device_types"])
         self.assertFalse(profile.adapter_config["capture_extra_data"])
         self.assertIsNone(profile.adapter_config["primary_contact_role"])
 

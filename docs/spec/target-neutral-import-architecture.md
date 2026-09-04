@@ -1123,7 +1123,7 @@ no secret value.
 3. A generated schema migration that drops the moved columns.
 
 The moved columns are: `sheet_name`, `source_id_column`, `custom_field_name`, `update_existing`,
-`create_missing_device_types`, `capture_extra_data`, `primary_contact_role`,
+`capture_extra_data`, `primary_contact_role`,
 `primary_contact_lookup_field`, and `preview_view_mode`. Dropping `primary_contact_role` removes the
 database-level PROTECT relationship. Forms, REST, and YAML switch to the new shape in the same
 release. There is no compatibility path between the three steps and no dual read path after them.

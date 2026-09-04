@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""A profile YAML exported by v1.5.2 still imports after the adapter cutover."""
+"""Supported legacy profile YAML still imports after adapter setting removal."""
 
 from io import BytesIO
 
@@ -10,7 +10,7 @@ from django.urls import reverse
 
 from netbox_data_import.models import ImportProfile
 
-# The scalar keys v1.5.2 wrote at the top level of the `profile` mapping, in its own order.
+# The supported scalar keys stay at the top level of the `profile` mapping.
 LEGACY_YAML = b"""profile:
   name: Legacy Export Profile
   description: Exported by 1.5.2
@@ -18,7 +18,6 @@ LEGACY_YAML = b"""profile:
   source_id_column: Id
   custom_field_name: cans_id
   update_existing: true
-  create_missing_device_types: false
   preview_view_mode: racks
   capture_extra_data: true
   primary_contact_role: legacy-owner
@@ -67,7 +66,7 @@ class LegacyProfileYamlImportTest(TestCase):
             {"yaml_file": yaml_file},
         )
 
-    def test_a_v152_export_imports_into_the_adapter_configuration(self):
+    def test_supported_legacy_scalars_import_into_the_adapter_configuration(self):
         """The legacy scalars land in adapter_config under the flat_workbook adapter."""
         response = self._upload(LEGACY_YAML)
         self.assertIn(response.status_code, [200, 302])
@@ -82,7 +81,6 @@ class LegacyProfileYamlImportTest(TestCase):
                 "source_id_column": "Id",
                 "custom_field_name": "cans_id",
                 "update_existing": True,
-                "create_missing_device_types": False,
                 "capture_extra_data": True,
                 "preview_view_mode": "racks",
                 # The slug in the file resolves to the name adapter_config stores.
@@ -92,7 +90,7 @@ class LegacyProfileYamlImportTest(TestCase):
         )
         self.assertEqual(profile.resolved_primary_contact_role, self.role)
 
-    def test_a_v152_export_still_creates_its_child_rows(self):
+    def test_supported_legacy_yaml_still_creates_its_child_rows(self):
         """Translating the profile scalars must not disturb the nested sections."""
         self._upload(LEGACY_YAML)
 
@@ -143,6 +141,18 @@ class LegacyProfileYamlImportTest(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "nonsense_key")
+        self.assertFalse(ImportProfile.objects.filter(name="Legacy Export Profile").exists())
+
+    def test_the_retired_device_type_creation_setting_is_refused(self):
+        """A YAML file cannot restore the removed adapter setting."""
+        payload = LEGACY_YAML.replace(
+            b"  update_existing: true\n",
+            b"  update_existing: true\n  create_missing_device_types: false\n",
+        )
+        response = self._upload(payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "create_missing_device_types")
         self.assertFalse(ImportProfile.objects.filter(name="Legacy Export Profile").exists())
 
     def test_a_current_export_is_unaffected(self):

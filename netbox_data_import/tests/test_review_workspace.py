@@ -129,6 +129,9 @@ class ReviewWorkspacePresentationTest(TestCase):
             "device.change_permission": "Permission denied: dcim.change_device",
             "device.already_bound": "Another source row is already linked to this device.",
             "device.duplicate_name": "The device name appears more than once in this import.",
+            "device.device_type_missing": (
+                "Add the Device Type in NetBox, or map the source make and model to an existing Device Type."
+            ),
             "device.name_placement_conflict": "The name matches a device at another placement.",
             "device.name_unplaced_match": "The name matches a device with no recorded placement.",
             "device.rack_ambiguous": "Multiple racks have this name at the import target.",

@@ -87,7 +87,6 @@ class ContactResolutionSessionMixin:
             "Class": "device_class",
             "Make": "make",
             "Model": "model",
-            "UHeight": "u_height",
             "Contact": "candidate:contact",
             "Contact Number": "candidate:contact",
         }.items():
@@ -123,7 +122,7 @@ class ContactResolutionSessionMixin:
 
         self.document = store_workbook_document(
             self.profile,
-            ["Id", "Name", "Class", "Make", "Model", "UHeight", "Contact", "Contact Number"],
+            ["Id", "Name", "Class", "Make", "Model", "Contact", "Contact Number"],
             [
                 [
                     self.row["source_id"],
@@ -131,7 +130,6 @@ class ContactResolutionSessionMixin:
                     self.row["device_class"],
                     self.row["make"],
                     self.row["model"],
-                    "1",
                     self.row["_candidate_values"]["contact"]["Contact"],
                     self.row["_candidate_values"]["contact"]["Contact Number"],
                 ]

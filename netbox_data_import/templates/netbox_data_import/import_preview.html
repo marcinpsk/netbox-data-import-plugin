@@ -244,9 +244,8 @@
                           data-source-model="{{ row.extra_data.source_model }}"
                           data-mfg-slug="{{ row.extra_data.mfg_slug }}"
                           data-dt-slug="{{ row.extra_data.dt_slug }}"
-                          data-u-height="{{ row.extra_data.u_height|default:1 }}"
                           data-profile-id="{{ profile_id }}">
-                    <i class="mdi mdi-link-variant"></i> Map / Create
+                    <i class="mdi mdi-link-variant"></i> Map
                   </button>
                 {% elif row.object_type == 'manufacturer' and profile_id %}
                   <button type="button" class="btn btn-sm btn-outline-warning"
@@ -398,11 +397,7 @@
                     <div class="small mt-1" style="font-weight:normal;">
                       <span class="text-muted">→</span>
                       <code class="small">{{ row.extra_data.mfg_slug }} / {{ row.extra_data.dt_slug }}</code>
-                      {% if row.extra_data.dt_exists %}
-                        <span class="badge bg-success" title="This device type already exists in NetBox — no action needed">type exists</span>
-                      {% else %}
-                        <span class="badge bg-warning text-dark" title="This device type does not yet exist in NetBox — it will be created during import">type missing</span>
-                      {% endif %}
+                      <span class="badge bg-success" title="This Device Type already exists in NetBox">type exists</span>
                     </div>
                   {% endif %}
                 {% endif %}
@@ -544,16 +539,15 @@
                   </button>
 
                 {% elif row.object_type == 'device_type' and row.action in 'create,error' and profile_id %}
-                  {# Device type: map to existing OR create now (both open same modal) #}
+                  {# Device Type rows can map only to an existing NetBox type. #}
                   <button type="button" class="btn btn-sm btn-outline-warning"
                           data-ndi-modal="#deviceTypeMappingModal"
                           data-source-make="{{ row.extra_data.source_make}}"
                           data-source-model="{{ row.extra_data.source_model}}"
                           data-mfg-slug="{{ row.extra_data.mfg_slug}}"
                           data-dt-slug="{{ row.extra_data.dt_slug}}"
-                          data-u-height="{{ row.extra_data.u_height|default:1 }}"
                           data-profile-id="{{ profile_id }}">
-                    <i class="mdi mdi-link-variant"></i> Map / Create
+                    <i class="mdi mdi-link-variant"></i> Map
                   </button>
 
                 {% elif row.action == 'error' and row.object_type == 'rack' and profile_id %}
@@ -744,9 +738,8 @@
                           data-source-model="{{ row.extra_data.source_model }}"
                           data-mfg-slug="{{ row.extra_data.mfg_slug|default:'' }}"
                           data-dt-slug="{{ row.extra_data.dt_slug|default:'' }}"
-                          data-u-height="{{ row.extra_data.u_height|default:1 }}"
                           data-profile-id="{{ profile_id }}"
-                          title="Map or create device type for '{{ row.extra_data.source_make }} / {{ row.extra_data.source_model }}'">
+                          title="Map '{{ row.extra_data.source_make }} / {{ row.extra_data.source_model }}' to an existing Device Type">
                     <i class="mdi mdi-chip"></i> Map DT
                   </button>
                 {% endif %}
@@ -1370,11 +1363,7 @@ var DEVICE_MATCH_INFO = scriptElement ? JSON.parse(scriptElement.textContent) : 
     document.getElementById('dtm_source_display').textContent = (btn.dataset.sourceMake || '') + ' / ' + (btn.dataset.sourceModel || '');
     document.getElementById('dtm_netbox_mfg_slug').value = btn.dataset.mfgSlug || '';
     document.getElementById('dtm_netbox_dt_slug').value = btn.dataset.dtSlug || '';
-    document.getElementById('dtm_netbox_dt_name').value = btn.dataset.sourceModel || '';
-    document.getElementById('dtm_u_height').value = btn.dataset.uHeight || '1';
     document.getElementById('dtm_search_results').innerHTML = '';
-    document.getElementById('dtm_action').value = 'map';
-    _dtmSetMapped(false);
   });
 
   onModalShow('classMappingModal', function(event) {
@@ -1499,12 +1488,9 @@ function dtmSearch() {
         btn.onclick = function() {
           document.getElementById('dtm_netbox_mfg_slug').value = dt.mfg_slug || '';
           document.getElementById('dtm_netbox_dt_slug').value = dt.slug;
-          document.getElementById('dtm_netbox_dt_name').value = dt.name.split(' / ')[1] || dt.name;
-          document.getElementById('dtm_action').value = 'map';
           container.querySelectorAll('button').forEach(function(b) { b.classList.remove('btn-primary'); b.classList.add('btn-outline-secondary'); });
           btn.classList.remove('btn-outline-secondary');
           btn.classList.add('btn-primary');
-          _dtmSetMapped(true);
         };
         container.appendChild(btn);
       });
@@ -1512,26 +1498,6 @@ function dtmSearch() {
     .catch(function() {
       container.innerHTML = '<p class="text-muted small">Search failed. Please try again.</p>';
     });
-}
-
-// When an existing DT is selected: force action=map, disable create-only fields and the Create button
-function _dtmSetMapped(isMapped) {
-  var uH = document.getElementById('dtm_u_height');
-  var dtName = document.getElementById('dtm_netbox_dt_name');
-  var createNote = document.getElementById('dtm_create_note');
-  var createBtn = document.getElementById('dtm_create_btn');
-  if (isMapped) {
-    document.getElementById('dtm_action').value = 'map';
-    if (uH) uH.disabled = true;
-    if (dtName) dtName.disabled = true;
-    if (createNote) createNote.style.display = '';
-    if (createBtn) createBtn.disabled = true;
-  } else {
-    if (uH) uH.disabled = false;
-    if (dtName) dtName.disabled = false;
-    if (createNote) createNote.style.display = 'none';
-    if (createBtn) createBtn.disabled = false;
-  }
 }
 
 // ---- Class Mapping modal ----
@@ -1887,7 +1853,6 @@ function unlinkFromModal(btn) {
           <input type="hidden" name="profile_id" id="dtm_profile_id">
           <input type="hidden" name="source_make" id="dtm_source_make">
           <input type="hidden" name="source_model" id="dtm_source_model">
-          <input type="hidden" name="action" id="dtm_action" value="map">
 
           <div class="mb-3">
             <label class="form-label text-muted">Source (from file)</label>
@@ -1909,17 +1874,6 @@ function unlinkFromModal(btn) {
               <label class="form-label">NetBox device type slug</label>
               <input type="text" name="netbox_dt_slug" id="dtm_netbox_dt_slug" class="form-control" placeholder="e.g. 8201-sys">
             </div>
-            <div class="col-md-6">
-              <label class="form-label">Device type name <small class="text-muted">(for Create)</small></label>
-              <input type="text" name="netbox_dt_name" id="dtm_netbox_dt_name" class="form-control" placeholder="e.g. 8201-SYS">
-            </div>
-            <div class="col-md-3">
-              <label class="form-label">U-height <small class="text-muted">(for Create)</small></label>
-              <input type="number" name="u_height" id="dtm_u_height" class="form-control" value="1" min="1">
-            </div>
-          </div>
-          <div id="dtm_create_note" class="alert alert-info py-1 small" style="display:none;">
-            <i class="mdi mdi-information"></i> Existing device type selected — will <strong>map only</strong> (no create needed).
           </div>
 
           <div class="mb-3">
@@ -1935,16 +1889,9 @@ function unlinkFromModal(btn) {
         </div>
         <div class="modal-footer justify-content-between">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <div class="d-flex gap-2">
-            <button type="submit" class="btn btn-outline-success" id="dtm_create_btn"
-                    onclick="document.getElementById('dtm_action').value='create_now'">
-              <i class="mdi mdi-plus"></i> Save mapping + Create in NetBox
-            </button>
-            <button type="submit" class="btn btn-primary"
-                    onclick="document.getElementById('dtm_action').value='map'">
-              <i class="mdi mdi-link-variant"></i> Save mapping only
-            </button>
-          </div>
+          <button type="submit" class="btn btn-primary">
+            <i class="mdi mdi-link-variant"></i> Save mapping
+          </button>
         </div>
       </form>
     </div>

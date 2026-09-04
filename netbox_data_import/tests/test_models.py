@@ -23,7 +23,6 @@ class ImportProfileModelTest(TestCase):
         self.assertEqual(str(profile), "Test Profile")
         self.assertEqual(profile.adapter_settings.sheet_name, "Data")
         self.assertTrue(profile.adapter_settings.update_existing)
-        self.assertTrue(profile.adapter_settings.create_missing_device_types)
         self.assertIsNone(profile.resolved_primary_contact_role)
         self.assertEqual(profile.adapter_settings.primary_contact_lookup_field, "email")
 

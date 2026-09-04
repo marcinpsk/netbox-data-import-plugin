@@ -7,7 +7,6 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_data_import.models import ColumnMapping, DeviceTypeMapping, ImportProfile
-from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.views import _fuzzy_match_netbox_field
 
 User = get_user_model()
@@ -20,7 +19,6 @@ def _make_profile(name="QMapTest") -> ImportProfile:
             "sheet_name": "Data",
             "source_id_column": "Id",
             "update_existing": False,
-            "create_missing_device_types": False,
         },
     )
 
@@ -321,24 +319,6 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
     def _post(self, **overrides):
         return self.client.post(self.url, self._payload(**overrides))
 
-    def _client_holding_only_the_mapping_permission(self, username, *, also_add_manufacturer=False):
-        """Log in a user who may save the mapping but may not create every NetBox object.
-
-        NetBox runs only ObjectPermissionBackend, so a Django user_permissions row grants nothing.
-        """
-        from dcim.models import Manufacturer
-
-        granted = [
-            (ImportProfile, ["change"], {"pk": self.profile.pk}),
-            (DeviceTypeMapping, ["add"], None),
-        ]
-        if also_add_manufacturer:
-            granted.append((Manufacturer, ["add"], None))
-        user_with_object_permission(username, granted)
-        client = Client()
-        self.assertTrue(client.login(username=username, password="testpass"))
-        return client
-
     def test_an_overlength_device_type_slug_is_refused(self):
         """The slug is posted directly and the mapping column holds 100 characters."""
         response = self._post(netbox_dt_slug="d" * 300)
@@ -359,55 +339,6 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
 
         self.assertRedirects(response, self.preview, fetch_redirect_response=False)
         self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
-
-    def test_creating_now_refuses_a_make_the_manufacturer_name_cannot_hold(self):
-        """The mapping accepts 200 characters, but the NetBox manufacturer name holds 100."""
-        from dcim.models import Manufacturer
-
-        response = self._post(source_make="M" * 150, action="create_now")
-
-        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
-        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
-        self.assertFalse(
-            DeviceTypeMapping.objects.filter(profile=self.profile).exists(),
-            "a refused create_now must not leave the mapping behind",
-        )
-
-    def test_creating_now_refuses_a_model_the_device_type_cannot_hold(self):
-        """The posted device type name is never bounded and the NetBox model holds 100."""
-        from dcim.models import DeviceType, Manufacturer
-
-        response = self._post(netbox_dt_name="D" * 150, action="create_now")
-
-        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
-        self.assertFalse(DeviceType.objects.filter(slug="widget").exists())
-        # The manufacturer is written first, so the refusal has to take it back too.
-        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
-        self.assertFalse(
-            DeviceTypeMapping.objects.filter(profile=self.profile).exists(),
-            "a refused create_now must not leave the mapping behind",
-        )
-
-    def test_a_missing_manufacturer_permission_leaves_no_mapping_behind(self):
-        """The refusal must not commit the mapping the same request already wrote."""
-        client = self._client_holding_only_the_mapping_permission("qdt-no-mfg")
-
-        response = client.post(self.url, self._payload(action="create_now"))
-
-        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
-        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
-
-    def test_a_missing_device_type_permission_leaves_no_mapping_behind(self):
-        """The second permission sits behind the first, so it needs its own refusal."""
-        from dcim.models import Manufacturer
-
-        client = self._client_holding_only_the_mapping_permission("qdt-no-dt", also_add_manufacturer=True)
-
-        response = client.post(self.url, self._payload(action="create_now"))
-
-        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
-        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
-        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
 
     def test_a_valid_mapping_is_still_saved(self):
         """The guard must not refuse the values the preview page actually posts."""

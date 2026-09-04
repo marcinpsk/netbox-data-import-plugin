@@ -17,7 +17,7 @@ def _build_profile(name):
     """Return a profile that maps the three columns the rows below carry."""
     profile = ImportProfile.objects.create(
         name=name,
-        adapter_config={"sheet_name": "Data", "source_id_column": "Id", "create_missing_device_types": True},
+        adapter_config={"sheet_name": "Data", "source_id_column": "Id"},
     )
     ColumnMapping.objects.create(profile=profile, source_column="Name", target_field="device_name")
     ColumnMapping.objects.create(profile=profile, source_column="Tag", target_field="asset_tag")
@@ -43,7 +43,7 @@ class UploadStoresPristineSourceTest(TestCase):
         self.site = Site.objects.create(name="Upload Site", slug="upload-site")
         self.profile = ImportProfile.objects.create(
             name="Upload Profile",
-            adapter_config={"sheet_name": "Data", "source_id_column": "Id", "create_missing_device_types": True},
+            adapter_config={"sheet_name": "Data", "source_id_column": "Id"},
         )
         for source_column, target_field in {
             "Id": "source_id",

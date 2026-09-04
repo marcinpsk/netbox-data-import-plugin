@@ -261,7 +261,8 @@ def make_dcim_objects(name_prefix=""):
     device_type = DeviceType.objects.create(
         manufacturer=manufacturer,
         model=f"{name_prefix}Model",
-        slug=f"{slug_prefix}model",
+        # The importer derives a Device Type slug from make and model, so the fixture must match it.
+        slug=f"{slug_prefix}mfg-{slug_prefix}model",
         u_height=1,
     )
     role = DeviceRole.objects.create(name=f"{name_prefix}Role", slug=f"{slug_prefix}role")

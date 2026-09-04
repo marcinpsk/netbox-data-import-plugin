@@ -46,7 +46,6 @@ class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
             "source_id_column": "Source ID",
             "custom_field_name": "",
             "update_existing": True,
-            "create_missing_device_types": True,
             "preview_view_mode": "rows",
             "capture_extra_data": False,
             "primary_contact_lookup_field": "email",

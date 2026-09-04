@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Preview quick actions enforce constrained ObjectPermission rows at their write seam."""
 
-from dcim.models import DeviceRole, DeviceType, Manufacturer
+from dcim.models import DeviceRole, Manufacturer
 from django.contrib.messages import get_messages
 from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
     ColumnMapping,
-    DeviceTypeMapping,
     IgnoredDevice,
     ImportProfile,
     ManufacturerMapping,
@@ -203,56 +202,6 @@ class QuickActionObjectPermissionTest(TestCase):
         self._assert_preview_redirect(response)
         self.assertTrue(ColumnMapping.objects.filter(pk=displaced.pk).exists())
         self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, source_column="New Serial").exists())
-
-    def test_a_denied_manufacturer_rolls_back_the_create_now_composite(self):
-        client = self._client_with(
-            "quick-device-type-mfg-denied",
-            (DeviceTypeMapping, ["add"], None),
-            (Manufacturer, ["add"], {"slug": "allowed-manufacturer"}),
-            (DeviceType, ["add"], None),
-        )
-
-        response = self._post(
-            client,
-            "quick_resolve_device_type",
-            {
-                "source_make": "Refused Manufacturer",
-                "source_model": "Widget",
-                "netbox_mfg_slug": "refused-manufacturer",
-                "netbox_dt_slug": "widget",
-                "action": "create_now",
-            },
-        )
-
-        self._assert_preview_redirect(response)
-        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
-        self.assertFalse(Manufacturer.objects.filter(slug="refused-manufacturer").exists())
-        self.assertFalse(DeviceType.objects.filter(slug="widget").exists())
-
-    def test_a_denied_device_type_rolls_back_the_create_now_composite(self):
-        client = self._client_with(
-            "quick-device-type-denied",
-            (DeviceTypeMapping, ["add"], None),
-            (Manufacturer, ["add"], None),
-            (DeviceType, ["add"], {"slug": "allowed-device-type"}),
-        )
-
-        response = self._post(
-            client,
-            "quick_resolve_device_type",
-            {
-                "source_make": "Acme",
-                "source_model": "Refused Widget",
-                "netbox_mfg_slug": "acme",
-                "netbox_dt_slug": "refused-widget",
-                "action": "create_now",
-            },
-        )
-
-        self._assert_preview_redirect(response)
-        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
-        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
-        self.assertFalse(DeviceType.objects.filter(slug="refused-widget").exists())
 
     def test_a_constrained_ignored_device_delete_leaves_the_row(self):
         ignored = IgnoredDevice.objects.create(

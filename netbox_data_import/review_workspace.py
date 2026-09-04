@@ -76,15 +76,10 @@ _DIAGNOSTIC_MESSAGES = {
     "device.class_ignored": "Ignored source class",
     "device.class_unmapped": "No class-to-role mapping exists for this source class.",
     "device.cross_site_match": "A strong identity matches a device at another site.",
-    "device.device_type_height_missing": (
-        "Add the named Device Type to NetBox because the source row does not state a usable U height."
+    "device.device_type_missing": (
+        "Add the Device Type in NetBox, or map the source make and model to an existing Device Type."
     ),
-    "device.device_type_missing": "The device type does not exist. Map or create it before importing.",
-    "device.device_type_permission": "Permission denied: dcim.add_devicetype",
     "device.device_type_slug_collision": "A stored device type already uses the slug this model derives.",
-    "device.manufacturer_permission": "Permission denied: dcim.add_manufacturer",
-    "device.manufacturer_slug_collision": "A stored manufacturer already uses the slug this make derives.",
-    "device.derived_slug_collision": "Different source identities derive the same dependency slug.",
     "device.duplicate_asset_tag": "The asset tag appears more than once in this import.",
     "device.duplicate_name": "The device name appears more than once in this import.",
     "device.duplicate_serial": "The serial number appears more than once in this import.",
@@ -125,7 +120,6 @@ _IDENTITY_CONFLICTS = {
     "device.ambiguous_serial": "ambiguous_serial",
     "device.ambiguous_stored_source_id": "ambiguous_source_id",
     "device.cross_site_match": "cross_site_match",
-    "device.derived_slug_collision": "derived_slug_collision",
     "device.duplicate_asset_tag": "duplicate_asset_tag",
     "device.duplicate_name": "duplicate_name",
     "device.duplicate_serial": "duplicate_serial",

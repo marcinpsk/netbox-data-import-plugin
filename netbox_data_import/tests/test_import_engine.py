@@ -77,9 +77,6 @@ class ImportEngineTestDataMixin:
         from dcim.models import Rack
 
         self.site, self.manufacturer, self.device_type, self.role = make_dcim_objects("Coordinator")
-        # The identity resolver derives '<manufacturer>-<model>', so a row only resolves to that slug.
-        self.device_type.slug = f"{self.manufacturer.slug}-{self.device_type.slug}"
-        self.device_type.save(update_fields=["slug"])
         self.rack = Rack.objects.create(name="rack-a", site=self.site, u_height=42)
         self.profile = ImportProfile.objects.create(
             name="Coordinator Profile",

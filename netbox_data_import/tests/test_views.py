@@ -43,7 +43,6 @@ def _make_profile(name="ViewTest") -> ImportProfile:
             "sheet_name": "Data",
             "source_id_column": "Id",
             "update_existing": True,
-            "create_missing_device_types": True,
         },
     )
     for src, tgt in {
@@ -108,6 +107,28 @@ def _store_workspace_rows(client, user, profile, site, rows):
     }
     session["import_preview_pending"] = True
     session.save()
+
+
+def _ensure_source_device_types(content):
+    """Create the Device Types the sample workbook names, because the importer never creates one."""
+    from dcim.models import DeviceType, Manufacturer
+    from django.utils.text import slugify
+    from openpyxl import load_workbook
+
+    worksheet = load_workbook(BytesIO(content))["Data"]
+    headings = {cell.value: cell.column for cell in worksheet[1]}
+    make_column, model_column = headings.get("Make"), headings.get("Model")
+    if not make_column or not model_column:
+        return
+    for row in worksheet.iter_rows(min_row=2):
+        make = row[make_column - 1].value
+        model = row[model_column - 1].value
+        if not make or not model:
+            continue
+        manufacturer, _ = Manufacturer.objects.get_or_create(name=make, defaults={"slug": slugify(make)[:50]})
+        DeviceType.objects.get_or_create(
+            manufacturer=manufacturer, model=model, defaults={"slug": slugify(f"{make}-{model}")[:50]}
+        )
 
 
 class BaseViewTestCase(TestCase):
@@ -245,7 +266,6 @@ class ImportProfileEditViewTest(BaseViewTestCase):
             "sheet_name": "Data",
             "source_id_column": "Id",
             "update_existing": "on",
-            "create_missing_device_types": "on",
             "primary_contact_lookup_field": "email",
             "preview_view_mode": "rows",
             "_create": "1",
@@ -593,6 +613,7 @@ class PreviewSessionMixin:
             output = BytesIO()
             workbook.save(output)
             content = output.getvalue()
+        _ensure_source_device_types(content)
         document = SourceDocument.store(
             profile=profile,
             content=content,
@@ -1261,7 +1282,6 @@ class ImportProfileYamlViewTest(BaseViewTestCase):
     sheet_name: Data
     source_id_column: Id
     update_existing: true
-    create_missing_device_types: true
 column_mappings:
   - source_column: Name
     target_field: device_name
@@ -1718,12 +1738,12 @@ class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
             DeviceTypeMapping.objects.filter(profile=self.profile, source_make="Cisco", source_model="C9500").exists()
         )
 
-    def test_create_now_action_creates_objects(self):
-        """POST with action=create_now creates the Manufacturer and DeviceType."""
-        from dcim.models import Manufacturer, DeviceType
+    def test_an_unsupported_action_creates_nothing(self):
+        """The mapping action cannot create a Manufacturer or Device Type in NetBox."""
+        from dcim.models import DeviceType, Manufacturer
 
         url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
-        self.client.post(
+        response = self.client.post(
             url,
             {
                 "profile_id": self.profile.pk,
@@ -1731,13 +1751,14 @@ class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
                 "source_model": "QFX5100",
                 "netbox_mfg_slug": "juniper",
                 "netbox_dt_slug": "juniper-qfx5100",
-                "netbox_dt_name": "QFX5100",
-                "u_height": "1",
-                "action": "create_now",
+                "action": "unsupported",
             },
+            HTTP_ACCEPT="application/json",
         )
-        self.assertTrue(Manufacturer.objects.filter(slug="juniper").exists())
-        self.assertTrue(DeviceType.objects.filter(slug="juniper-qfx5100").exists())
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Manufacturer.objects.filter(slug="juniper").exists())
+        self.assertFalse(DeviceType.objects.filter(slug="juniper-qfx5100").exists())
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
 
 
 class DeviceTypeAnalysisViewTest(BaseViewTestCase):
@@ -3212,27 +3233,6 @@ class QuickResolveDeviceTypeMissingFieldsTest(BaseViewTestCase):
             ).exists()
         )
 
-    def test_create_now_invalid_u_height_defaults_to_one(self):
-        """POST action=create_now with invalid u_height defaults to 1."""
-        from dcim.models import DeviceType
-
-        url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
-        self.client.post(
-            url,
-            {
-                "profile_id": self.profile.pk,
-                "source_make": "UHMfg2",
-                "source_model": "UHModel2",
-                "netbox_mfg_slug": "uh-mfg2",
-                "netbox_dt_slug": "uh-model2",
-                "u_height": "not-a-number",
-                "action": "create_now",
-            },
-        )
-        dt = DeviceType.objects.filter(slug="uh-model2").first()
-        self.assertIsNotNone(dt)
-        self.assertEqual(dt.u_height, 1)
-
 
 class AutoMatchNameScopeTest(BaseViewTestCase):
     """The Review Workspace scopes name matching to the active target site."""
@@ -3369,7 +3369,6 @@ class ImportProfileBulkImportViewTest(BaseViewTestCase):
     sheet_name: Data
     source_id_column: Id
     update_existing: true
-    create_missing_device_types: true
 column_mappings:
   - source_column: Name
     target_field: device_name

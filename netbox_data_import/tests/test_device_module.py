@@ -20,7 +20,6 @@ from netbox_data_import.models import (
     IgnoredDevice,
     IgnoredFieldDifference,
     ImportProfile,
-    ManufacturerMapping,
     SourceDocument,
 )
 from netbox_data_import.netbox_reader import NetBoxReader, PlanningTargetUnavailable
@@ -115,7 +114,7 @@ class DeviceModulePlanTestBase(TestCase):
             actor,
             {"site_id": self.site.pk, "location_id": None, "tenant_id": None},
         )
-        return [unit for unit in plan.units if unit.identity.startswith("device:")]
+        return plan, document, actor
 
     def _with_provenance(self, device, source_id="D-1", asset_tag="", extra_columns=None):
         """Record the provenance a previous import of this row would have left behind."""
@@ -172,21 +171,16 @@ class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
 
     def test_dependencies_are_loaded_once_for_the_batch(self):
         """Repeated dependency identities do not issue one ORM query per Device row."""
-        from dcim.models import DeviceRole, DeviceType, Manufacturer
+        from dcim.models import DeviceRole, DeviceType
 
-        rows = [
-            self._row(
-                number, f"D-{number}", f"srv-{number:02d}", make="Example Make", model="Example Model", u_height="1"
-            )
-            for number in (1, 2)
-        ]
+        rows = [self._row(number, f"D-{number}", f"srv-{number:02d}") for number in (1, 2)]
 
         with CaptureQueriesContext(connection) as captured:
             batch = _DeviceBatch(self._batch(*rows), rows, self.profile, self.reader)
             dependencies = [batch.dependencies(row) for row in rows]
 
         self.assertTrue(all(dependency.missing is None for dependency in dependencies))
-        for model in (DeviceType, Manufacturer, DeviceRole):
+        for model in (DeviceType, DeviceRole):
             table = connection.ops.quote_name(model._meta.db_table)
             queries = [query["sql"] for query in captured.captured_queries if f"FROM {table}" in query["sql"]]
             self.assertEqual(len(queries), 1, queries)
@@ -446,47 +440,80 @@ class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):
 
 
 class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
-    """The module plans the relation objects the legacy device pass created."""
+    """The module refuses missing Device Types and plans supported relation dependencies."""
 
-    def test_a_missing_device_type_is_an_executable_dependency(self):
-        """A stated height lets the engine create the Manufacturer and Device Type before the Device."""
-        units = self._engine_plan(self._row(2, "D-1", "srv-01", make="Acme", model="Widget", u_height="2"))
-
-        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
-        self.assertEqual(
-            [change.operation for change in units[0].changes],
-            ["create_manufacturer", "create_device_type", "create"],
+    def test_a_missing_device_type_with_a_stated_height_is_blocked(self):
+        """A source height does not let the Import Engine create a missing Device Type."""
+        plan, _document, _actor = self._engine_plan(
+            self._row(2, "D-1", "srv-01", make="Acme", model="Widget", u_height="2")
         )
-        type_change = next(change for change in units[0].changes if change.operation == "create_device_type")
-        self.assertEqual(type_change.payload["u_height"], 2)
-
-    def test_a_missing_device_type_without_a_usable_height_is_blocked(self):
-        """The operator must add a missing Device Type when its height cannot be read from the row."""
-        unit = self._engine_plan(self._row(2, "D-1", "srv-01", make="Acme", model="Widget", u_height=""))[0]
+        unit = plan.unit("device:source:D-1")
 
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
-        self.assertEqual(unit.diagnostics[0].code, "device.device_type_height_missing")
-        self.assertIn("Acme / Widget", unit.diagnostics[0].display["message"])
+        self.assertEqual(unit.diagnostics[0].code, "device.device_type_missing")
         self.assertEqual(unit.changes, ())
 
-    def test_stated_zero_and_half_unit_heights_are_preserved(self):
-        """Device Type heights can occupy zero or one half-unit without being rounded to one."""
-        units = self._engine_plan(
-            self._row(2, "D-1", "pdu-01", make="Acme", model="Rack PDU", u_height="0"),
-            self._row(3, "D-2", "shelf-01", make="Acme", model="Half Shelf", u_height="0.5"),
+    def test_a_missing_device_type_without_a_stated_height_is_blocked(self):
+        """A missing Device Type always blocks the row before the Import Engine plans writes."""
+        plan, _document, _actor = self._engine_plan(
+            self._row(2, "D-1", "srv-01", make="Acme", model="Widget", u_height="")
         )
+        unit = plan.unit("device:source:D-1")
 
-        type_changes = [
-            next(change for change in unit.changes if change.operation == "create_device_type") for unit in units
-        ]
-        self.assertEqual([change.payload["u_height"] for change in type_changes], [0, 0.5])
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.diagnostics[0].code, "device.device_type_missing")
+        self.assertEqual(unit.changes, ())
+
+    def test_an_existing_device_type_plans_and_imports_normally(self):
+        """The Import Engine can create a Device when its Device Type already exists."""
+
+        plan, document, actor = self._engine_plan(self._row(2, "D-1", "srv-01", u_height="1"))
+        unit = plan.unit("device:source:D-1")
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        self.assertEqual([change.operation for change in unit.changes], ["create"])
+        self.assertEqual(unit.changes[0].payload["device_type_id"], self.device_type.pk)
+
+    def test_a_device_type_mapping_to_an_existing_type_plans_and_imports(self):
+        """A DeviceTypeMapping can resolve a source identity to an existing Device Type."""
+        from dcim.models import DeviceType, Manufacturer
+
+        manufacturer = Manufacturer.objects.create(name="Mapped Make", slug="mapped-make")
+        mapped_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Mapped Type",
+            slug="mapped-type",
+            u_height=2,
+        )
+        DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="Acme",
+            source_model="Widget",
+            netbox_manufacturer_slug=manufacturer.slug,
+            netbox_device_type_slug=mapped_type.slug,
+        )
+        plan, document, actor = self._engine_plan(self._row(2, "D-1", "mapped-device", make="Acme", model="Widget"))
+        unit = plan.unit("device:source:D-1")
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        self.assertEqual(unit.changes[0].payload["device_type_id"], mapped_type.pk)
 
     def test_two_rows_at_different_positions_do_not_claim_each_other(self):
         """A row blocked on its missing type must not reserve any rack units."""
-        low = self._row(2, "D-1", "low-device", make="Acme", model="Widget", u_height="", u_position="18", face="front")
+        low = self._row(
+            2,
+            "D-1",
+            "low-device",
+            make="Acme",
+            model="Widget",
+            u_height="42",
+            u_position="18",
+            face="front",
+        )
         high = self._row(3, "D-2", "high-device", u_position="32", face="front")
 
-        units = self._engine_plan(low, high)
+        plan, _document, _actor = self._engine_plan(low, high)
+        units = [unit for unit in plan.units if unit.identity.startswith("device:")]
 
         claimed = [
             diagnostic.code
@@ -496,7 +523,7 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
         ]
         self.assertEqual(claimed, [], [u.diagnostics for u in units])
         self.assertEqual([unit.disposition for unit in units], [Disposition.BLOCKED, Disposition.ACTIONABLE])
-        self.assertEqual(units[0].diagnostics[0].code, "device.device_type_height_missing")
+        self.assertEqual(units[0].diagnostics[0].code, "device.device_type_missing")
 
     def test_a_missing_role_is_an_executable_dependency(self):
         """The class mapping supplies enough information to create its Device Role."""
@@ -522,48 +549,6 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
 
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
         self.assertEqual(unit.changes[-1].payload["role_id"], role.pk)
-
-    def test_disabled_device_type_creation_leaves_the_unit_blocked(self):
-        """The explicit profile policy can require the operator to create or map the type."""
-        self.profile.adapter_config = {**self.profile.adapter_config, "create_missing_device_types": False}
-        self.profile.save(update_fields=["adapter_config"])
-
-        units = self._plan(self._row(2, "D-1", "srv-01", make="Acme", model="Widget"))
-
-        self.assertEqual(units[0].disposition, Disposition.BLOCKED)
-        self.assertEqual(units[0].diagnostics[0].code, "device.device_type_missing")
-
-    def test_derived_dependency_slug_collision_refuses_each_source_row(self):
-        """Different source identities cannot silently share one generated dependency identity."""
-        units = self._plan(
-            self._row(2, "D-1", "srv-01", make="Acme!", model="Widget"),
-            self._row(3, "D-2", "srv-02", make="Acme?", model="Widget"),
-        )
-
-        self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
-        self.assertTrue(all(unit.diagnostics[0].code == "device.derived_slug_collision" for unit in units))
-
-    def test_normalized_manufacturer_mappings_make_a_shared_slug_explicit(self):
-        """Escaped source labels remain explicit when collision detection checks their normalized rows."""
-        ManufacturerMapping.objects.create(
-            profile=self.profile,
-            source_make=r"Acme\u0021",
-            netbox_manufacturer_slug="acme",
-        )
-        ManufacturerMapping.objects.create(
-            profile=self.profile,
-            source_make=r"Acme\u003f",
-            netbox_manufacturer_slug="acme",
-        )
-
-        units = self._plan(
-            self._row(2, "D-1", "srv-01", make="Acme!", model="Widget One"),
-            self._row(3, "D-2", "srv-02", make="Acme?", model="Widget Two"),
-        )
-
-        self.assertFalse(
-            any(diagnostic.code == "device.derived_slug_collision" for unit in units for diagnostic in unit.diagnostics)
-        )
 
     def test_device_type_mapping_normalizes_the_source_make_before_lookup(self):
         """Escaped whitespace in a mapping still selects its explicit Device Type."""
@@ -1144,17 +1129,15 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         self.assertEqual(device.device_type_id, self.device_type.pk)
         self.assertEqual(device.role_id, self.role.pk)
 
-    def test_dependency_changes_create_the_type_and_role_before_the_device(self):
-        """Applying the complete unit preserves the legacy automatic dependency behavior."""
+    def test_a_role_dependency_is_created_before_the_device(self):
+        """Applying the complete unit creates its missing Device Role before its Device."""
         from django.contrib.auth import get_user_model
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
+        from dcim.models import Device, DeviceRole
 
         ClassRoleMapping.objects.create(
             profile=self.profile, source_class="Appliance", creates_rack=False, role_slug="appliance"
         )
-        unit = self._plan(
-            self._row(2, "D-AUTO", "appliance-01", device_class="Appliance", make="Example", model="Unit", u_height="1")
-        )[0]
+        unit = self._plan(self._row(2, "D-AUTO", "appliance-01", device_class="Appliance"))[0]
         actor = get_user_model().objects.create_superuser(
             username="dependency-writer", email="dependency-writer@example.invalid", password="testpass"
         )
@@ -1163,8 +1146,6 @@ class DeviceModuleApplyTest(DeviceModulePlanTestBase):
         for change in unit.changes:
             DeviceModule().apply(change, context)
 
-        self.assertTrue(Manufacturer.objects.filter(slug="example").exists())
-        self.assertTrue(DeviceType.objects.filter(manufacturer__slug="example", slug="example-unit").exists())
         self.assertTrue(DeviceRole.objects.filter(slug="appliance").exists())
         self.assertTrue(Device.objects.filter(name="appliance-01", site=self.site).exists())
 
@@ -2094,9 +2075,6 @@ class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):
 
     def test_a_blocked_dependency_keeps_its_own_disposition(self):
         """The first problem sets the disposition, so a blocked row is not turned invalid."""
-        self.profile.adapter_config = {**self.profile.adapter_config, "create_missing_device_types": False}
-        self.profile.save(update_fields=["adapter_config"])
-
         units = self._plan(self._row(2, "D-1", "srv-same", make="Nope", model="Nothing"))
 
         self.assertEqual(units[0].disposition, Disposition.BLOCKED)
@@ -2104,9 +2082,6 @@ class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):
 
     def test_a_row_blocked_on_its_device_type_still_reports_its_identity_clash(self):
         """The two are independent, so the operator can settle either one first."""
-        self.profile.adapter_config = {**self.profile.adapter_config, "create_missing_device_types": False}
-        self.profile.save(update_fields=["adapter_config"])
-
         units = self._plan(
             self._row(2, "D-1", "srv-01", serial="SN-1", make="Nope", model="Nothing"),
             self._row(3, "D-2", "srv-02", serial="SN-1", make="Nope", model="Nothing"),

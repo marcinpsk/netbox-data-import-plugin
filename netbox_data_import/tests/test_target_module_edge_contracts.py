@@ -128,8 +128,6 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             "name": "target-edge-device",
             "device_type_id": self.device_type.pk,
             "role_id": self.role.pk,
-            "manufacturer_slug": self.manufacturer.slug,
-            "device_type_slug": self.device_type.slug,
             "role_slug": self.role.slug,
             "rack_id": self.rack.pk,
             "rack_name": None,
@@ -182,39 +180,8 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
         return DeviceModule().plan(batch, self.profile, CATALOG, reader)[0]
 
-    def test_dependency_creates_reject_rows_that_appeared_after_planning(self):
-        """Manufacturer, DeviceType, and role dependencies never become silent no-ops."""
-        manufacturer_change = self._change(
-            "create_manufacturer",
-            {"name": self.manufacturer.name, "slug": self.manufacturer.slug},
-        )
-        with self.assertRaises(PreconditionFailed):
-            DeviceModule().apply(manufacturer_change, self.context)
-
-        missing_manufacturer = self._change(
-            "create_device_type",
-            {
-                "manufacturer_slug": "missing-target-edge-make",
-                "slug": "missing-target-edge-model",
-                "model": "Missing Model",
-                "u_height": 1,
-            },
-        )
-        with self.assertRaises(PreconditionFailed):
-            DeviceModule().apply(missing_manufacturer, self.context)
-
-        existing_type = self._change(
-            "create_device_type",
-            {
-                "manufacturer_slug": self.manufacturer.slug,
-                "slug": self.device_type.slug,
-                "model": self.device_type.model,
-                "u_height": 1,
-            },
-        )
-        with self.assertRaises(PreconditionFailed):
-            DeviceModule().apply(existing_type, self.context)
-
+    def test_role_dependency_create_rejects_a_row_that_appeared_after_planning(self):
+        """A Device Role dependency never becomes a silent no-op."""
         existing_role = self._change(
             "create_role",
             {"name": self.role.name, "slug": self.role.slug, "color": self.role.color},
@@ -222,19 +189,8 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         with self.assertRaises(PreconditionFailed):
             DeviceModule().apply(existing_role, self.context)
 
-    def test_device_create_rejects_dependencies_that_are_still_absent(self):
-        """A Device change cannot run before its planned DeviceType or role dependency."""
-        missing_type = self._change(
-            "create",
-            self._payload(
-                device_type_id=None,
-                manufacturer_slug="missing-target-edge-make",
-                device_type_slug="missing-target-edge-model",
-            ),
-        )
-        with self.assertRaises(PreconditionFailed):
-            DeviceModule().apply(missing_type, self.context)
-
+    def test_device_create_rejects_a_role_dependency_that_is_still_absent(self):
+        """A Device change cannot run before its planned Device Role dependency."""
         missing_role = self._change(
             "create",
             self._payload(role_id=None, role_slug="missing-target-edge-role"),
@@ -362,8 +318,8 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         self.assertEqual(unit.disposition, Disposition.INVALID)
         self.assertEqual(unit.diagnostics[0].code, "rack.change_permission")
 
-    def test_device_dependency_permissions_and_policy_are_explicit_diagnostics(self):
-        """Missing dependency policy and add permissions block the unit that needs them."""
+    def test_missing_device_type_and_role_dependencies_are_explicit_diagnostics(self):
+        """Missing Device Type and Device Role dependencies block the unit that needs them."""
         from dcim.models import Device, Rack
 
         viewer = user_with_object_permission(
@@ -372,13 +328,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         )
 
         unit = self._plan_device(viewer, self._device_row(make="Unseen Make", model="Unseen Model"))
-        self.assertEqual(unit.diagnostics[0].code, "device.manufacturer_permission")
-
-        from dcim.models import Manufacturer
-
-        Manufacturer.objects.create(name="Known Empty Make", slug="known-empty-make")
-        unit = self._plan_device(viewer, self._device_row(make="Known Empty Make", model="Unseen Model"))
-        self.assertEqual(unit.diagnostics[0].code, "device.device_type_permission")
+        self.assertEqual(unit.diagnostics[0].code, "device.device_type_missing")
 
         ClassRoleMapping.objects.create(profile=self.profile, source_class="No Role")
         unit = self._plan_device(viewer, self._device_row(device_class="No Role"))
@@ -416,16 +366,9 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         update = self._plan_device(viewer, self._device_row(serial="NEW"))
         self.assertEqual(update.diagnostics[0].code, "device.change_permission")
 
-    def test_dependency_slug_collisions_are_not_treated_as_existing_targets(self):
-        """A derived slug owned by a different make or model blocks implicit reuse."""
-        from dcim.models import DeviceType, Manufacturer
-
-        Manufacturer.objects.create(name="Different Make", slug="colliding-make")
-        manufacturer_collision = self._plan_device(
-            self.actor,
-            self._device_row(make="Colliding Make", model="New Model"),
-        )
-        self.assertEqual(manufacturer_collision.diagnostics[0].code, "device.manufacturer_slug_collision")
+    def test_a_device_type_slug_collision_is_not_treated_as_an_existing_target(self):
+        """A derived slug owned by a different model blocks implicit reuse."""
+        from dcim.models import DeviceType
 
         DeviceType.objects.create(
             manufacturer=self.manufacturer,
