@@ -121,7 +121,7 @@ class TraceProvenance:
 
 @dataclass(frozen=True)
 class SourceTrace:
-    """Carry one complete source path or Endpoint Summary fallback."""
+    """Carry canonical Segment Evidence for one path or an Endpoint Summary fallback."""
 
     endpoint_summary: EndpointSummary
     segments: tuple[SegmentEvidence, ...]
@@ -734,10 +734,13 @@ def _path_trace(
             )
             if mismatch is not None:
                 errors.append(mismatch)
-    segments = tuple(parsed.evidence for parsed in parsed_segments)
+    stated_segments = tuple(parsed.evidence for parsed in parsed_segments)
     visits = tuple(visit.termination for visit in parsed_visits)
-    path_corroboration = tuple(termination for segment in segments for termination in (segment.left, segment.right))
+    path_corroboration = tuple(
+        termination for segment in stated_segments for termination in (segment.left, segment.right)
+    )
     summary = _enrich_summary(summary, (*path_corroboration, *visits))
+    segments = canonical_orientation(summary.from_termination, summary.to_termination, stated_segments)
     provenance = [_provenance(path_block, summary)]
     if list_block is not None:
         provenance.append(_provenance(list_block, summary))
@@ -748,7 +751,11 @@ def _path_trace(
             pass_through_claims=_pass_through_claims(segments),
             corroboration=visits,
             identity=canonical_trace_identity(summary.from_termination, summary.to_termination),
-            content_fingerprint=content_fingerprint(summary.from_termination, summary.to_termination, segments),
+            content_fingerprint=content_fingerprint(
+                summary.from_termination,
+                summary.to_termination,
+                stated_segments,
+            ),
             provenance=tuple(provenance),
             errors=_deduplicate_errors(errors),
         ),

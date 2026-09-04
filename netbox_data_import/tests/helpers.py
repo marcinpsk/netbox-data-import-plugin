@@ -4,6 +4,7 @@
 
 import os
 import re
+from unittest import TestCase
 from contextlib import contextmanager
 from queue import Queue
 from threading import Thread
@@ -387,10 +388,11 @@ def action_link_tag(html: str, href: str) -> str:
     return match.group(0) if match else ""
 
 
-def assert_action_link_is_named(test, html: str, href: str, name: str) -> None:
+def assert_action_link_is_named(test: TestCase, html: str, href: str, name: str) -> None:
     """Fail unless the icon-only action link at *href* announces *name* to a screen reader."""
     tag = action_link_tag(html, href)
     test.assertNotEqual(tag, "", f"No action link renders for {href}.")
     match = re.search(r'aria-label="([^"]*)"', tag)
-    test.assertIsNotNone(match, f"The action link for {href} has no accessible name: {tag}")
+    if match is None:
+        test.fail(f"The action link for {href} has no accessible name: {tag}")
     test.assertIn(name, match.group(1))

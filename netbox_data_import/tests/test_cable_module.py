@@ -88,6 +88,19 @@ def direct_path(from_end=DEVICE_A, to_end=DEVICE_B):
     )
 
 
+def reversed_patched_path():
+    """Return the standard patched path stated from DEV-B back to DEV-A."""
+    return (
+        trace_endpoint_line(DEVICE_B),
+        trace_endpoint_line(DEVICE_A),
+        (
+            trace_segment(DEVICE_B, "Patch", PANEL_2_FRONT),
+            trace_segment(PANEL_2_REAR, "Trunk", PANEL_1_REAR),
+            trace_segment(PANEL_1_FRONT, "Patch", DEVICE_A),
+        ),
+    )
+
+
 def same_rear_port_path():
     """Return one path block that re-enters the trunk through the rear port it just left."""
     return (
@@ -196,6 +209,20 @@ class CableTopologyMixin:
     def termination_pairs(self, change):
         """Return the sorted termination pairs one create change writes."""
         return [(item[0], item[1]) for item in change.payload["terminations"]]
+
+    def provenance_positions(self):
+        """Return canonical stored provenance keyed by each Cable's physical terminations."""
+        positions = {}
+        for source in CableImportSource.objects.all():
+            terminations = CableTermination.objects.filter(cable=source.cable).select_related("termination_type")
+            key = tuple(
+                sorted(
+                    (f"{row.termination_type.app_label}.{row.termination_type.model}", row.termination_id)
+                    for row in terminations
+                )
+            )
+            positions[key] = (source.trace_identity, source.segment_index)
+        return positions
 
 
 class CablePlanningTest(CableTopologyMixin, TestCase):
@@ -368,7 +395,7 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             role=MAPPED_PEER_ROLE,
         )
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
-        result = eligible_terminations(field_key, reader)
+        result = eligible_terminations(field_key, reader, profile=self.profile)
         self.assertEqual(result.candidates, tuple(fronts))
         self.save_resolution(PANEL_1_REAR, result.candidates[1], role=MAPPED_PEER_ROLE)
 
@@ -877,6 +904,29 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
             self.assertEqual(unit.changes, ())
             self.assertIn("cable.resolved_segment_conflict", self.codes(unit))
 
+    def test_two_traces_claiming_one_free_termination_are_blocked_together(self):
+        """Target-side occupancy refuses both source traces before either Cable can be created."""
+        shared_a = trace_termination("DEV-A", "Card 1", "eth0", "Port")
+        shared_b = trace_termination("DEV-A", "Card 2", "eth0", "Port")
+        device_c = self.make_device("DEV-C")
+        Interface.objects.create(device=device_c, name="eth2", type="1000base-t")
+        endpoint_c = trace_termination("DEV-C", "", "eth2", "NIC")
+
+        plan = self.plan(direct_path(shared_a, DEVICE_B), direct_path(shared_b, endpoint_c))
+
+        self.assertEqual(
+            [unit.disposition for unit in plan.units],
+            [Disposition.BLOCKED, Disposition.BLOCKED],
+        )
+        expected_competitors = ["DEV-A Card 2 eth0 to DEV-C eth2", "DEV-A Card 1 eth0 to DEV-B eth1"]
+        for unit, competing_trace in zip(plan.units, expected_competitors, strict=True):
+            conflicts = [item for item in unit.diagnostics if item.code == "cable.planned_termination_conflict"]
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(conflicts[0].display["termination"], str(self.eth0))
+            self.assertEqual(conflicts[0].display["competing_trace"], competing_trace)
+            self.assertEqual(unit.changes, ())
+        self.assertEqual(Cable.objects.count(), 0)
+
     def test_a_segment_that_ends_on_its_own_termination_is_blocked(self):
         """NetBox refuses a Cable carrying one termination on both ends, so planning must catch it."""
         # Two references the source keeps apart: resolution matches device, name and kind, not Cards.
@@ -986,7 +1036,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         field_key = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader)
+        result = eligible_terminations(field_key, reader, profile=self.profile)
 
         self.assertEqual(result.candidates, tuple(FrontPort.objects.filter(device=self.panel_1).order_by("name", "pk")))
         self.assertEqual(result.total, 1)
@@ -998,7 +1048,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         field_key = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader, search="ELIGIBLE", limit=2)
+        result = eligible_terminations(field_key, reader, profile=self.profile, search="ELIGIBLE", limit=2)
 
         self.assertEqual([candidate.name for candidate in result.candidates], ["Eligible 1", "Eligible 2"])
         self.assertEqual(result.total, 3)
@@ -1023,10 +1073,53 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
                     role=MAPPED_PEER_ROLE,
                 )
 
-                result = eligible_terminations(field_key, reader)
+                result = eligible_terminations(field_key, reader, profile=self.profile)
 
                 self.assertEqual(result.candidates, expected)
                 self.assertEqual(result.total, len(expected))
+
+    def test_mapped_peer_candidates_follow_a_manual_base_resolution(self):
+        """A mapped-peer question starts from the visible RearPort selected for the base role."""
+        _panel, fronts, rear = self.rebuild_panel("PANEL-1", fronts=2)
+        source = trace_termination("PANEL-1", "Card A", "source-rear", "Punch-Down")
+        TerminationResolution.objects.create(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=termination_field_key(
+                device=source[0],
+                cards=source[1],
+                port=source[2],
+                kind="rear_port",
+                role=TERMINATION_ROLE,
+            ),
+            selected_object_type=ObjectType.objects.get_for_model(rear),
+            selected_object_id=rear.pk,
+            selected_display_name=str(rear),
+        )
+        field_key = termination_field_key(
+            device=source[0],
+            cards=source[1],
+            port=source[2],
+            kind="rear_port",
+            role=MAPPED_PEER_ROLE,
+        )
+        actor = user_with_object_permission(
+            "manual-base-mapped-peers",
+            [
+                (Device, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (FrontPort, ("view",), {}),
+            ],
+        )
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+
+        try:
+            result = eligible_terminations(field_key, reader, profile=self.profile)
+        except TypeError:
+            self.fail("The eligible-termination interface has no Import Profile decision context.")
+
+        self.assertEqual(result.candidates, tuple(fronts))
+        self.assertEqual(result.total, 2)
 
     def test_candidates_stay_inside_the_actor_view_scope(self):
         """An actor who may not view the front ports is offered none of them."""
@@ -1034,7 +1127,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         field_key = termination_field_key(device="PANEL-1", cards="", port="F1", kind="front_port")
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader)
+        result = eligible_terminations(field_key, reader, profile=self.profile)
 
         self.assertEqual(result.candidates, ())
         self.assertEqual(result.total, 0)
@@ -1059,7 +1152,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         )
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader)
+        result = eligible_terminations(field_key, reader, profile=self.profile)
 
         self.assertEqual(result.candidates, (fronts[1],))
         self.assertEqual(result.total, 1)
@@ -1069,7 +1162,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         field_key = termination_field_key(device="DEV-GONE", cards="", port="F1", kind="front_port")
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
-        result = eligible_terminations(field_key, reader)
+        result = eligible_terminations(field_key, reader, profile=self.profile)
 
         self.assertEqual(result.candidates, ())
         self.assertEqual(result.total, 0)
@@ -1079,7 +1172,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
 
         with self.assertRaises(ValueError):
-            eligible_terminations("device:source:7", reader)
+            eligible_terminations("device:source:7", reader, profile=self.profile)
 
     def test_a_noncanonical_json_key_is_refused(self):
         """A JSON object must contain every canonical termination field-key member."""
@@ -1087,7 +1180,7 @@ class EligibleTerminationTest(CableTopologyMixin, TestCase):
         key = json.dumps({"device": "PANEL-1", "kind": "front_port"}, sort_keys=True, separators=(",", ":"))
 
         with self.assertRaises(ValueError):
-            eligible_terminations(key, reader)
+            eligible_terminations(key, reader, profile=self.profile)
 
     def test_the_canonical_parser_refuses_an_unknown_termination_kind(self):
         """A five-member key is noncanonical when no candidate query exists for its kind."""
@@ -1275,6 +1368,32 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         )
         self.assertEqual({cable.status for cable in Cable.objects.all()}, {"connected"})
         self.assertEqual({cable.type for cable in Cable.objects.all()}, {"cat6"})
+
+    def test_reverse_import_keeps_creation_and_provenance_positions_canonical(self):
+        """Opposite workbook direction preserves each physical segment's plan and stored index."""
+        forward = self.plan(patched_path())
+        forward_order = [
+            self.termination_pairs(change) for change in forward.units[0].changes if change.operation == "create"
+        ]
+        self.execute(forward)
+        forward_positions = self.provenance_positions()
+        self.assertEqual({source.direction for source in CableImportSource.objects.all()}, {"canonical"})
+        forward_rows = list(CableImportSource.objects.order_by("pk").values())
+
+        existing_reverse = self.plan(reversed_patched_path())
+        self.assertEqual(existing_reverse.units[0].disposition, Disposition.NO_OP)
+        self.assertEqual(list(CableImportSource.objects.order_by("pk").values()), forward_rows)
+        Cable.objects.all().delete()
+
+        reverse = self.plan(reversed_patched_path())
+        reverse_order = [
+            self.termination_pairs(change) for change in reverse.units[0].changes if change.operation == "create"
+        ]
+        self.assertEqual(reverse_order, forward_order)
+        self.execute(reverse)
+
+        self.assertEqual(self.provenance_positions(), forward_positions)
+        self.assertEqual({source.direction for source in CableImportSource.objects.all()}, {"reversed"})
 
     def test_long_endpoint_evidence_is_stored_intact(self):
         """A valid From line is stored without truncation or a database failure."""

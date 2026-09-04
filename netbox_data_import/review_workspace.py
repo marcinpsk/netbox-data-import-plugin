@@ -60,6 +60,9 @@ def save_termination_resolution_and_replan(
 
 
 _DIAGNOSTIC_MESSAGES = {
+    "cable.planned_termination_conflict": (
+        "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
+    ),
     "device.add_permission": "Permission denied: dcim.add_device",
     "device.already_bound": "Another source row is already linked to this device.",
     "device.ambiguous_asset_tag": "Multiple devices have this asset tag.",

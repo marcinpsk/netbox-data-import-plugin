@@ -294,14 +294,16 @@ def eligible_terminations(
     field_key: str,
     netbox_reader,
     *,
+    profile,
     search: str = "",
     limit: int = ELIGIBLE_TERMINATION_LIMIT,
 ) -> EligibleTerminations:
     """Return one page of candidates for a canonical termination field key.
 
-    The termination role offers the claimed kind on the resolved Device. The mapped-peer role offers
-    the opposite ports linked to the resolved source port. The reader keeps both inside the actor's
-    view scope. The picker and a proposal request share this query.
+    The termination role offers the claimed kind on the resolved Device. The mapped-peer role starts
+    from the profile's saved base resolution or the exact-name match, then offers its opposite ports.
+    The reader keeps both inside the actor's view scope. The picker and a proposal request share this
+    query.
     """
     parsed = parse_termination_field_key(field_key)
     device_name, kind = parsed["device"], parsed["kind"]
@@ -312,7 +314,35 @@ def eligible_terminations(
     device = devices[0]
     candidates = getattr(netbox_reader, accessor)().filter(device_id=device.pk)
     if parsed["role"] == MAPPED_PEER_ROLE:
-        resolved = [candidate for candidate in candidates if identity_text(candidate.name) == parsed["port"]]
+        from .models import TerminationResolution, index_digest
+
+        base_field_key = termination_field_key(
+            device=parsed["device"],
+            cards=parsed["cards"],
+            port=parsed["port"],
+            kind=kind,
+            role=TERMINATION_ROLE,
+        )
+        stored = (
+            TerminationResolution.objects.filter(
+                profile=profile,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=base_field_key,
+                field_key_digest=index_digest(base_field_key),
+            )
+            .select_related("selected_object_type")
+            .first()
+        )
+        if stored is None:
+            resolved = [candidate for candidate in candidates if identity_text(candidate.name) == parsed["port"]]
+        else:
+            resolved = []
+            expected_label = _object_type_label(candidates.model)
+            selected_label = f"{stored.selected_object_type.app_label}.{stored.selected_object_type.model}"
+            if selected_label == expected_label:
+                selected = candidates.filter(pk=stored.selected_object_id).first()
+                if selected is not None:
+                    resolved.append(selected)
         if len(resolved) != 1 or kind == INTERFACE_KIND:
             return EligibleTerminations(candidates=(), total=0)
         if kind == FRONT_PORT_KIND:
@@ -365,6 +395,7 @@ class _CableBatch:
         self._load_existing_cables()
         self._classify()
         self._decide()
+        self._block_planned_termination_conflicts()
         self._refuse_conflicting_creations()
         self._deletes_by_segment = self._shared_deletes()
         self._sources_by_segment = self._shared_sources()
@@ -934,6 +965,31 @@ class _CableBatch:
                 {"permission": "dcim.delete_cable", **cable_display},
                 identities=cable_identities,
             )
+
+    def _block_planned_termination_conflicts(self) -> None:
+        """Block every actionable trace that competes for one free termination."""
+        claims: dict[tuple[str, int], list[tuple[_TraceAnalysis, _DesiredSegment, _Termination]]] = {}
+        for analysis in self._writing():
+            for segment in analysis.pending:
+                for termination in segment.terminations:
+                    claims.setdefault(termination.key, []).append((analysis, segment, termination))
+        for records in claims.values():
+            for analysis, segment, termination in records:
+                competitors = [
+                    other
+                    for other, other_segment, _other_termination in records
+                    if other is not analysis and other_segment.key != segment.key
+                ]
+                for competitor in competitors:
+                    analysis.block(
+                        "cable.planned_termination_conflict",
+                        {
+                            "segment_index": segment.index,
+                            "termination": termination.display,
+                            "competing_trace": competitor.display["name"],
+                        },
+                        identities=(termination.identity,),
+                    )
 
     def _refuse_conflicting_creations(self) -> None:
         """Invalidate traces that resolve one shared segment to different Cable policies."""

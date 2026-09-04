@@ -155,7 +155,7 @@ class TraceWorkbookIdentityTest(SimpleTestCase):
                 )
 
     def test_a_reversed_restatement_collapses_without_fingerprint_churn(self):
-        """Direction changes provenance but not trace identity or content."""
+        """Direction changes provenance but not canonical trace identity, segments, or content."""
         endpoint_a = _termination("DEVICE-A", "CARD-A", "PORT-A", "Port")
         panel_entry = _termination("PANEL-A", "CARD-P", "FRONT-A", "Position Front")
         panel_exit = _termination("PANEL-A", "CARD-P", "REAR-A", "Punch-Down")
@@ -177,6 +177,8 @@ class TraceWorkbookIdentityTest(SimpleTestCase):
 
         self.assertEqual(forward_trace.identity, reverse_trace.identity)
         self.assertEqual(forward_trace.content_fingerprint, reverse_trace.content_fingerprint)
+        self.assertEqual(forward_trace.segments, reverse_trace.segments)
+        self.assertEqual(forward_trace.pass_through_claims, reverse_trace.pass_through_claims)
         self.assertEqual(len(combined.rows), 1)
         self.assertEqual(len(combined.rows[0].provenance), 2)
         self.assertEqual({item.direction for item in combined.rows[0].provenance}, {"canonical", "reversed"})
