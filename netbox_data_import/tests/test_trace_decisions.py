@@ -38,6 +38,7 @@ from netbox_data_import.models import (
 from netbox_data_import.object_permissions import ObjectPermissionDenied
 from netbox_data_import.plan import Disposition
 from netbox_data_import.tests.helpers import (
+    assert_action_link_is_named,
     make_dcim_objects,
     run_on_separate_connection,
     trace_endpoint_line,
@@ -913,6 +914,19 @@ class CableClassMappingViewTest(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertFalse(CableClassMapping.objects.filter(pk=mapping.pk).exists())
+
+    def test_the_detail_table_action_links_announce_the_row_they_act_on(self):
+        """The actions are icon only, so a screen reader needs the accessible name to tell them apart."""
+        mapping = CableClassMapping.objects.create(profile=self.trace_profile, cable_class="Managed")
+
+        response = self.client.get(self.trace_profile.get_absolute_url())
+        html = response.content.decode()
+
+        for route, action in (("cableclassmapping_edit", "Edit"), ("cableclassmapping_delete", "Delete")):
+            with self.subTest(route=route):
+                href = reverse(f"plugins:netbox_data_import:{route}", kwargs={"pk": mapping.pk})
+                assert_action_link_is_named(self, html, href, action)
+                assert_action_link_is_named(self, html, href, str(mapping))
 
     def test_detail_table_links_to_edit_and_delete_views(self):
         """The inline table exposes both management actions for an existing row."""

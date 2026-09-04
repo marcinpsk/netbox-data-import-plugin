@@ -24,6 +24,7 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
 )
 from netbox_data_import.tests.helpers import (
+    assert_action_link_is_named,
     run_on_separate_connection,
     set_import_source,
     setup_preview_with_device_matches,
@@ -167,6 +168,27 @@ class ImportProfileDetailViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk})
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
+
+    def test_every_inline_mapping_action_link_announces_its_row(self):
+        """The inline actions are icon only, so each needs an accessible name to be usable."""
+        url = reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk})
+
+        html = self.client.get(url).content.decode()
+
+        rows = (
+            ("columnmapping", self.profile.column_mappings.first()),
+            ("classrolemapping", self.profile.class_role_mappings.first()),
+        )
+        for route_prefix, record in rows:
+            self.assertIsNotNone(record, f"No {route_prefix} row exists to render.")
+            for action in ("Edit", "Delete"):
+                with self.subTest(route_prefix=route_prefix, action=action):
+                    href = reverse(
+                        f"plugins:netbox_data_import:{route_prefix}_{action.lower()}",
+                        kwargs={"pk": record.pk},
+                    )
+                    assert_action_link_is_named(self, html, href, action)
+                    assert_action_link_is_named(self, html, href, str(record))
 
     def test_detail_contains_export_yaml_link(self):
         """Profile detail contains an export YAML link."""

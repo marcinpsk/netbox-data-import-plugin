@@ -3,6 +3,7 @@
 """Shared test helpers for netbox_data_import tests."""
 
 import os
+import re
 from contextlib import contextmanager
 from queue import Queue
 from threading import Thread
@@ -378,3 +379,18 @@ def wait_until_a_lock_is_blocked(test, timeout=10):
                 return
         sleep(0.05)
     test.fail("No other backend started waiting for a lock this connection holds.")
+
+
+def action_link_tag(html: str, href: str) -> str:
+    """Return the opening anchor tag that targets *href*, so a test can read its attributes."""
+    match = re.search(rf'<a[^>]*href="{re.escape(href)}"[^>]*>', html)
+    return match.group(0) if match else ""
+
+
+def assert_action_link_is_named(test, html: str, href: str, name: str) -> None:
+    """Fail unless the icon-only action link at *href* announces *name* to a screen reader."""
+    tag = action_link_tag(html, href)
+    test.assertNotEqual(tag, "", f"No action link renders for {href}.")
+    match = re.search(r'aria-label="([^"]*)"', tag)
+    test.assertIsNotNone(match, f"The action link for {href} has no accessible name: {tag}")
+    test.assertIn(name, match.group(1))
