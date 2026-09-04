@@ -8,7 +8,7 @@ from django.core.exceptions import ValidationError
 from netbox.api.serializers import NetBoxModelSerializer, ValidatedModelSerializer
 from rest_framework import serializers
 
-from ..adapters import DEFAULT_ADAPTER_KEY, get_adapter
+from ..adapters import DEFAULT_ADAPTER_KEY, get_adapter, selectable_adapter_choices
 from ..catalog import CATALOG
 from ..models import (
     ImportProfile,
@@ -91,6 +91,13 @@ class ImportProfileSerializer(NetBoxModelSerializer):
             "created",
             "last_updated",
         ]
+
+    def __init__(self, *args, **kwargs):
+        """Offer only the runnable adapters on create, so the schema states what REST accepts."""
+        super().__init__(*args, **kwargs)
+        # An update keeps the full registry, so an existing trace profile still round-trips.
+        if self.instance is None:
+            self.fields["source_adapter"].choices = selectable_adapter_choices()
 
     def validate(self, attrs):
         """Validate the adapter configuration and keep the Source Adapter immutable."""

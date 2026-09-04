@@ -14,8 +14,12 @@ the NetBox boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .catalog import OutputKind, has_implemented_module
+
+if TYPE_CHECKING:
+    from .trace_workbook import SourceTrace
 
 
 class UnknownSourceAdapter(Exception):
@@ -40,7 +44,7 @@ class SourceBatch:
     """The typed source items and source diagnostics from one file (section 1)."""
 
     output_kinds: frozenset[str]
-    rows: tuple[dict, ...] = ()
+    rows: tuple[dict | SourceTrace, ...] = ()
     diagnostics: tuple[SourceDiagnostic, ...] = ()
     unused_columns: dict[str, dict] = field(default_factory=dict)
 
@@ -99,6 +103,14 @@ class TraceWorkbookAdapter(SourceAdapter):
         from .adapter_forms import TraceWorkbookConfigForm
 
         return TraceWorkbookConfigForm
+
+    @classmethod
+    def interpret(cls, content, adapter_config, *, collect_unused: bool = False) -> SourceBatch:
+        """Interpret workbook bytes under the fixed trace-workbook format."""
+        from . import trace_workbook
+
+        rows, diagnostics = trace_workbook.interpret(content)
+        return SourceBatch(output_kinds=cls.output_kinds, rows=rows, diagnostics=diagnostics)
 
 
 ADAPTERS: tuple[type[SourceAdapter], ...] = (FlatWorkbookAdapter, TraceWorkbookAdapter)

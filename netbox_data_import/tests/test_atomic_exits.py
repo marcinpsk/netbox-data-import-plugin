@@ -46,6 +46,18 @@ AUDITED_EXITS = {
     ("UnignoreFieldDifferenceView.post", "binding-refused-before-delete"): (
         "The binding helper either wrote nothing or rolled back, and the delete has not run."
     ),
+    ("SyncPlacementView.post", "device-gone-before-write"): (
+        "The locked re-read found no Device, so the block has written nothing."
+    ),
+    ("SyncPlacementView.post", "baseline-moved-before-write"): (
+        "The locked baseline recheck refuses the sync before any placement field is applied."
+    ),
+    ("SyncPlacementView.post", "rack-unresolved-before-write"): (
+        "The rack lookup only reads, and the placement fields are not set yet."
+    ),
+    ("SyncPlacementView.post", "placement-value-refused-before-write"): (
+        "_set_rack_placement changes the in-memory Device alone; device.save() has not run."
+    ),
     ("ImportProfile.delete", "locked-cascade-committed"): (
         "The success path: the lock only orders the cascade, so committing the delete is the point."
     ),

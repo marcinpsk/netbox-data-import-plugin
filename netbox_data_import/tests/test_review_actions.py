@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Preview row actions consume target-neutral Import Plans."""
 
+import time
+from threading import Event
+
 from django.contrib.auth import get_user_model
-from django.test import Client, TransactionTestCase
+from django.db import transaction
+from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
@@ -430,6 +434,56 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("placement changed", response.json()["error"])
 
+    def _wait_for_a_backend_blocked_on_a_lock(self, timeout=15):
+        """Return whether another backend on this database is waiting for a lock."""
+        from django.db import connection
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                    "AND wait_event_type = 'Lock'"
+                )
+                if cursor.fetchone()[0]:
+                    return True
+            time.sleep(0.05)
+        return False
+
+    def test_inline_placement_sync_cannot_overwrite_a_concurrent_move(self):
+        """The unlocked baseline check is stale by the time the write runs, so recheck under the lock."""
+        from dcim.models import Device
+
+        moved = Event()
+        release = Event()
+        answered = {}
+
+        def move_the_device_and_hold_the_lock():
+            with transaction.atomic():
+                locked = Device.objects.select_for_update().get(pk=self.device.pk)
+                locked.position = 21
+                locked.save(update_fields=["position"])
+                moved.set()
+                # Commit only once the request waits on this row, so its baseline read is already stale.
+                release.wait(timeout=15)
+
+        def sync_the_previewed_placement():
+            answered["response"] = self._sync_placement()
+
+        with run_on_separate_connection(move_the_device_and_hold_the_lock):
+            self.assertTrue(moved.wait(timeout=15), "the concurrent move never started")
+            with run_on_separate_connection(sync_the_previewed_placement):
+                blocked = self._wait_for_a_backend_blocked_on_a_lock()
+                release.set()
+                self.assertTrue(blocked, "the sync never blocked on the moved device's row lock")
+
+        response = answered["response"]
+        self.assertEqual(response.status_code, 409, response.content[:300])
+        self.assertIn("placement changed", response.json()["error"])
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.position, 21, "the sync overwrote a placement another writer had moved")
+
     def test_inline_placement_sync_rejects_an_absent_preview_row(self):
         """A cleared preview cannot authorize placement from client-supplied data."""
         session = self.client.session
@@ -487,3 +541,176 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         self.assertEqual(review_client.post(endpoint, data).status_code, 302)
         self.assertTrue(DeviceExistingMatch.objects.filter(profile=self.profile).exists())
         self.assertTrue(IgnoredFieldDifference.objects.filter(profile=self.profile).exists())
+
+
+class PlacementRackScopeTest(TestCase):
+    """The placement write resolves a Rack by name, so it has to honour the operator's view scope."""
+
+    def setUp(self):
+        """Create one Rack the operator may see and one it may not."""
+        from dcim.models import Rack, Site
+
+        self.site = Site.objects.create(name="Rack Scope Site", slug="rack-scope-site")
+        self.visible = Rack.objects.create(name="scope-visible", site=self.site, u_height=42)
+        self.hidden = Rack.objects.create(name="scope-hidden", site=self.site, u_height=42)
+        self.user = user_with_object_permission(
+            "rack-scope-operator",
+            [(Rack, ("view",), {"name": "scope-visible"})],
+        )
+
+    def _device(self):
+        """Return an unsaved Device at the site, which is all the rack lookup reads."""
+        from dcim.models import Device
+
+        return Device(site=self.site)
+
+    def test_the_rack_lookup_honours_the_actor_view_scope(self):
+        """A Rack outside the operator's scope must not be bound, and its name must not leak."""
+        from django.test import RequestFactory
+
+        from netbox_data_import.views import _lookup_rack_for_device
+
+        request = RequestFactory().post("/")
+        request.user = self.user
+
+        found, error = _lookup_rack_for_device(request, self._device(), "scope-hidden")
+
+        self.assertIsNone(found, "the lookup bound a Rack the operator cannot see")
+        self.assertIn("not found", error)
+
+    def test_the_rack_lookup_still_finds_a_rack_in_scope(self):
+        """The scoping must not refuse the Rack the operator is allowed to use."""
+        from django.test import RequestFactory
+
+        from netbox_data_import.views import _lookup_rack_for_device
+
+        request = RequestFactory().post("/")
+        request.user = self.user
+
+        found, error = _lookup_rack_for_device(request, self._device(), "scope-visible")
+
+        self.assertIsNone(error)
+        self.assertEqual(found, self.visible)
+
+
+class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
+    """A row refused for an unplaced name match must still let the operator place the Device."""
+
+    def setUp(self):
+        """Create one unplaced Device that a row matches by name and wants to place."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+
+        self.actor = get_user_model().objects.create_superuser(
+            username="unplaced-operator",
+            email="unplaced@example.invalid",
+            password="testpass",
+        )
+        self.client = Client()
+        self.client.force_login(self.actor)
+        self.site = Site.objects.create(name="Unplaced Site", slug="unplaced-site")
+        manufacturer = Manufacturer.objects.create(name="Unplaced Make", slug="unplaced-make")
+        self.device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Unplaced Model",
+            slug="unplaced-make-unplaced-model",
+            u_height=1,
+        )
+        self.role = DeviceRole.objects.create(name="Unplaced Role", slug="unplaced-role")
+        self.rack = Rack.objects.create(name="Unplaced Rack", site=self.site, u_height=42)
+        # The stored Device carries no placement, which is what makes the row an unplaced name match.
+        self.device = Device.objects.create(
+            name="unplaced-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+            status="active",
+        )
+        self.profile = ImportProfile.objects.create(
+            name="Unplaced Profile",
+            adapter_config={"update_existing": True, "create_missing_device_types": False},
+        )
+        ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="Server",
+            role_slug=self.role.slug,
+        )
+        self.rows = [
+            {
+                "_row_number": 1,
+                "source_id": "UNPLACED-ROW",
+                "device_name": self.device.name,
+                "device_class": "Server",
+                "rack_name": self.rack.name,
+                "make": manufacturer.name,
+                "model": self.device_type.model,
+                "u_height": 1,
+                "u_position": 2,
+                "face": "front",
+                "status": "active",
+                "serial": "",
+                "asset_tag": "",
+            }
+        ]
+        workspace = plan_source_rows(self.rows, self.profile, self.site, actor=self.actor)
+        self.device_unit = next(unit for unit in workspace.units if unit.object_type == "device")
+        session = self.client.session
+        record_recalculated_preview(session, workspace.plan)
+        session["import_rows"] = workspace.source_rows
+        session["import_context"] = {
+            "profile_id": self.profile.pk,
+            "site_id": self.site.pk,
+            "location_id": None,
+            "tenant_id": None,
+        }
+        session["import_preview_pending"] = True
+        session.save()
+
+    def test_the_refused_row_still_carries_its_placement_baseline(self):
+        """The unit states only a diagnostic, so the baseline has to reach the row another way."""
+        self.assertEqual(self.device_unit.action, "error")
+        self.assertEqual(self.device_unit.extra_data["identity_conflict"], "name_placement_conflict")
+        self.assertEqual(self.device_unit.extra_data["netbox_device_id"], self.device.pk)
+
+        baseline = self.device_unit.extra_data.get("_placement_state")
+
+        self.assertEqual(baseline, {"location_id": None, "rack_id": None, "position": "", "face": ""})
+
+    def test_placement_sync_refuses_a_device_that_moved_to_another_location(self):
+        """Location is placement state, so a Device that moved has to fail the locked recheck."""
+        from dcim.models import Device, Location, Rack
+
+        other = Location.objects.create(name="Other Hall", slug="other-hall", site=self.site)
+        decoy = Rack.objects.create(name=self.rack.name, site=self.site, location=other, u_height=42)
+        self.device.location = other
+        self.device.save(update_fields=["location"])
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            {
+                "row_number": 1,
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409, response.content[:300])
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.rack_id, "the sync placed the Device in another location's rack")
+        self.assertFalse(Device.objects.filter(rack=decoy).exists())
+
+    def test_placement_sync_places_the_device_the_row_matched_by_name(self):
+        """Nothing in NetBox changed, so the refusal must not claim that it did."""
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:sync_placement"),
+            {
+                "row_number": 1,
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.rack_id, self.rack.pk)
+        self.assertEqual(self.device.position, 2)
+        self.assertEqual(self.device.face, "front")

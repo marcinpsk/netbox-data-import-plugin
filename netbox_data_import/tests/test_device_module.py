@@ -21,6 +21,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from netbox_data_import.plan import Disposition, Severity
+from netbox_data_import.review_workspace import _CONFLICT_ACTIONS, WorkspaceUnit
 from netbox_data_import.target_modules import DeviceModule, ExecutionContext, PreconditionFailed, _DeviceBatch
 
 
@@ -663,6 +664,19 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.name_unplaced_match")
 
+    def test_a_name_only_unplaced_match_carries_the_name_the_preview_offers(self):
+        """The preview offers the rename for this refusal, so the row has to state the name it would use."""
+        self._device("srv-01")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack"))
+
+        row = WorkspaceUnit.from_unit(units[0])
+        self.assertIn("name_placement_conflict", row.extra_data["identity_conflicts"])
+        self.assertTrue(
+            row.extra_data.get("suggested_name"),
+            "the preview offers 'Use name' for this conflict, but the row carries no name to use",
+        )
+
     def test_a_name_only_match_at_another_placement_reports_the_conflict(self):
         """A stored Device the source would move keeps the wording that states it sits elsewhere."""
         self._device("srv-01", rack=self.rack, position=10, face="front")
@@ -671,6 +685,32 @@ class DeviceModuleMatchTest(DeviceModulePlanTestBase):
 
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.name_placement_conflict")
+
+    def test_the_placement_snapshot_records_the_location_it_compares(self):
+        """`_placement_differs` reads location as placement, so the locked baseline has to carry it."""
+        from dcim.models import Location, Rack
+
+        location = Location.objects.create(name="Snapshot Hall", slug="snapshot-hall", site=self.site)
+        rack = Rack.objects.create(name="snapshot-rack", site=self.site, location=location, u_height=42)
+        self._device("srv-01", location=location, rack=rack, position=10, face="front")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack", u_position="20", face="Front"))
+
+        state = WorkspaceUnit.from_unit(units[0]).extra_data["_placement_state"]
+        self.assertEqual(state["location_id"], location.pk)
+
+    def test_a_name_only_placement_conflict_carries_the_name_the_preview_offers(self):
+        """The reported case: the row names a stored Device placed elsewhere and offers no rename."""
+        self._device("srv-01", rack=self.rack, position=10, face="front")
+
+        units = self._plan(self._row(2, "D-1", "srv-01", rack_name="dm-rack", u_position="20", face="Front"))
+
+        row = WorkspaceUnit.from_unit(units[0])
+        self.assertIn("name_placement_conflict", row.extra_data["identity_conflicts"])
+        self.assertTrue(
+            row.extra_data.get("suggested_name"),
+            "the preview offers 'Use name' for this conflict, but the row carries no name to use",
+        )
 
     def test_an_explicit_binding_outranks_every_other_identifier(self):
         """The operator linked this row to this device, which is the strongest statement there is."""
@@ -864,6 +904,19 @@ class DeviceModulePlacementTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.INVALID)
         self.assertEqual(units[0].diagnostics[0].code, "device.name_unplaced_match")
         self.assertEqual(units[1].disposition, Disposition.ACTIONABLE, units[1].diagnostics)
+
+    def test_a_claimed_slot_names_the_row_that_took_it(self):
+        """The refused row has to name the row that claimed the slot, the way a duplicate serial does."""
+        from netbox_data_import.views import _other_conflict_row_identities
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", u_position="5", face="Front"),
+            self._row(7, "D-2", "srv-02", u_position="5", face="Front"),
+        )
+
+        refused = WorkspaceUnit.from_unit(units[1])
+        self.assertEqual(refused.extra_data.get("claimed_by_row"), 2)
+        self.assertEqual(_other_conflict_row_identities(refused, {}), ((2, "device"),))
 
     def test_two_rows_still_cannot_claim_one_slot_in_a_batch_created_rack(self):
         """The batch claim works before the new rack has an ORM identity."""
@@ -1879,6 +1932,47 @@ class DeviceModuleTargetStateIsWorkTest(DeviceModulePlanTestBase):
         units = self._plan(self._row(2, "D-1", "srv-01"))
 
         self.assertEqual(units[0].disposition, Disposition.NO_OP, units[0].diagnostics)
+
+
+class PreviewActionContractTest(DeviceModulePlanTestBase):
+    """Every conflict the preview offers an action for has to carry what that action needs.
+
+    The preview decided which action to offer from the conflict alone, while the payload each
+    action runs on was attached to one diagnostic. Two refusals reached an action with nothing to
+    act on: one drew a control with an empty value, the other hid itself. This pins the table
+    against the planner, so a conflict added to it has to prove the action it offers.
+    """
+
+    def _rows_for(self, conflict):
+        """Return the rows that make one real plan raise *conflict*."""
+        if conflict == "duplicate_name":
+            return (self._row(2, "D-1", "srv-dup"), self._row(3, "D-2", "srv-dup"))
+        if conflict == "duplicate_serial":
+            return (
+                self._row(2, "D-1", "srv-01", serial="SN-1"),
+                self._row(3, "D-2", "srv-02", serial="SN-1"),
+            )
+        if conflict == "name_placement_conflict":
+            self._device("srv-placed", rack=self.rack, position=10, face="front")
+            return (self._row(2, "D-1", "srv-placed", rack_name="dm-rack", u_position="20", face="Front"),)
+        raise AssertionError(f"add a planned row that raises {conflict!r} before listing its action")
+
+    def test_every_conflict_the_preview_acts_on_offers_its_action(self):
+        """A conflict in the table without its payload is the defect this test exists to catch."""
+        for conflict, (action, required) in _CONFLICT_ACTIONS.items():
+            with self.subTest(conflict=conflict):
+                units = self._plan(*self._rows_for(conflict))
+                rows = [WorkspaceUnit.from_unit(unit) for unit in units]
+                carrying = [row for row in rows if conflict in row.extra_data.get("identity_conflicts", ())]
+
+                self.assertTrue(carrying, f"no planned row raised {conflict}")
+                for row in carrying:
+                    for key in required:
+                        self.assertTrue(
+                            row.extra_data.get(key),
+                            f"{conflict} offers {action}, which needs extra_data[{key!r}]",
+                        )
+                    self.assertIn(action, row.extra_data["offered_actions"])
 
 
 class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):

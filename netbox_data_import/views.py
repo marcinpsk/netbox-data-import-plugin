@@ -1127,6 +1127,9 @@ def _other_conflict_row_identities(row, source_object_types_by_number):
     conflict_row_number = row.extra_data.get("conflict_row_number")
     if conflict_row_number is not None:
         identities.append((conflict_row_number, row.object_type))
+    claimed_by_row = row.extra_data.get("claimed_by_row")
+    if claimed_by_row is not None:
+        identities.append((claimed_by_row, row.object_type))
     return tuple(dict.fromkeys(identity for identity in identities if identity != (row.row_number, row.object_type)))
 
 
@@ -1150,9 +1153,8 @@ def _conflict_comparison_row(row, source_rows_by_number, *, is_current):
         "face": extra_data.get("face", source_row.get("face", "")),
         "action": row.action,
         "detail": row.detail,
-        # The comparison offers the same action the row column does, so it carries the same facts.
-        "identity_conflict": extra_data.get("identity_conflict", ""),
-        "identity_conflicts": extra_data.get("identity_conflicts", []),
+        # The comparison offers the same action the row column does, so it reads the same list.
+        "offered_actions": extra_data.get("offered_actions", []),
         "duplicate_serial": extra_data.get("duplicate_serial", ""),
         "is_current": is_current,
     }
@@ -2070,13 +2072,29 @@ def _preview_field_intent(request, target_field):
 
 def _placement_matches_preview(device, row) -> bool:
     """Return whether placement fields still match the materialized preview."""
-    state = row.extra_data.get("_identity_state")
-    if not isinstance(state, dict):
+    state = row.extra_data.get("_placement_state")
+    # A baseline that states no location cannot prove the Device stayed in one, so it fails closed.
+    if not isinstance(state, dict) or "location_id" not in state:
         return False
     return (
-        device.rack_id == state.get("rack_id")
+        device.location_id == state["location_id"]
+        and device.rack_id == state.get("rack_id")
         and normalize_for_compare(device.position) == state.get("position", "")
         and (device.face or "") == state.get("face", "")
+    )
+
+
+def _locked_placement_device(request, device_pk):
+    """Return the Device row locked for update, or None when it is gone or not permitted."""
+    from dcim.models import Device
+
+    # PostgreSQL refuses FOR UPDATE on a nullable outer join, so `of` locks the Device row alone.
+    return (
+        Device.objects.restrict(request.user, "change")
+        .select_for_update(of=("self",))
+        .select_related("site", "location", "rack", "device_type")
+        .filter(pk=device_pk)
+        .first()
     )
 
 
@@ -2647,7 +2665,7 @@ class SyncDeviceFieldView(_AjaxPermissionView):
             raise PreviewActionInvalid(_placement_error_text(exc)) from exc
 
 
-def _lookup_rack_for_device(device, value):
+def _lookup_rack_for_device(request, device, value):
     """Look up a Rack by name within ``device.site``, honoring ``device.location``.
 
     If the device has a location set, the rack must be in the same location. If the
@@ -2665,7 +2683,7 @@ def _lookup_rack_for_device(device, value):
         return None, "Rack name is empty"
     if device.site_id is None:
         return None, "Device has no site; cannot resolve rack"
-    qs = Rack.objects.filter(site=device.site, name=name)
+    qs = Rack.objects.restrict(request.user, "view").filter(site=device.site, name=name)
     if device.location_id is not None:
         qs = qs.filter(location=device.location)
         loc_str = f" / location '{device.location}'"
@@ -2772,31 +2790,56 @@ class SyncPlacementView(_AjaxPermissionView):
         u_position = intent["u_position"]
         face = intent["face"]
 
-        rack, err = _lookup_rack_for_device(device, rack_name)
-        if err:
-            return JsonResponse({"ok": False, "error": err})
+        with transaction.atomic():
+            # The baseline check above read the Device unlocked, so recheck it under the row lock.
+            device = _locked_placement_device(request, device.pk)
+            if device is None:
+                # atomic-exit-safe: device-gone-before-write
+                return JsonResponse({"ok": False, "error": "Device not found"}, status=409)
+            if row is not None and not _placement_matches_preview(device, row):
+                # atomic-exit-safe: baseline-moved-before-write
+                return JsonResponse(
+                    {
+                        "ok": False,
+                        "error": "The matched NetBox placement changed. Recalculate the preview and try again.",
+                    },
+                    status=409,
+                )
 
-        device.rack = rack
-        # NetBox rejects a rack position on a zero-U device type, so sync the rack alone.
-        zero_u_type = _zero_u_device_type(device)
-        placement_fields, skipped, error = _set_rack_placement(device, u_position, face, zero_u_type)
-        if error:
-            return JsonResponse({"ok": False, "error": error})
-        update_fields = ["rack", *placement_fields]
+            rack, err = _lookup_rack_for_device(request, device, rack_name)
+            if err:
+                # atomic-exit-safe: rack-unresolved-before-write
+                return JsonResponse({"ok": False, "error": err})
 
-        try:
-            _validate_device_placement(device)
-        except ValidationError as exc:
-            return JsonResponse({"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400)
-        except Exception:
-            logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
-            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+            device.rack = rack
+            # NetBox rejects a rack position on a zero-U device type, so sync the rack alone.
+            zero_u_type = _zero_u_device_type(device)
+            placement_fields, skipped, error = _set_rack_placement(device, u_position, face, zero_u_type)
+            if error:
+                # atomic-exit-safe: placement-value-refused-before-write
+                return JsonResponse({"ok": False, "error": error})
+            update_fields = ["rack", *placement_fields]
 
-        try:
-            device.save(update_fields=update_fields)
-        except Exception:
-            logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
-            return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+            try:
+                _validate_device_placement(device)
+            except ValidationError as exc:
+                # full_clean sends post_clean, whose receivers may write before raising.
+                transaction.set_rollback(True)
+                return JsonResponse(
+                    {"ok": False, "error": f"Validation failed: {_placement_error_text(exc)}"}, status=400
+                )
+            except Exception:
+                logger.exception("SyncPlacementView full_clean failed for device_id=%s", device.pk)
+                transaction.set_rollback(True)
+                return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
+
+            try:
+                device.save(update_fields=update_fields)
+            except Exception:
+                logger.exception("SyncPlacementView save failed for device_id=%s", device.pk)
+                # A receiver raising after the UPDATE would otherwise commit a write reported as failed.
+                transaction.set_rollback(True)
+                return JsonResponse({"ok": False, "error": "An internal error occurred."}, status=500)
 
         parts = [f"rack={rack.name}"]
         if "position" in update_fields and device.position is not None:

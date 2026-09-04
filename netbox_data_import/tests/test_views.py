@@ -5120,6 +5120,8 @@ class SyncRackAndPlacementTests(TestCase):
 
     def test_lookup_rack_device_with_no_site(self):
         """_lookup_rack_for_device returns an error when device has no site."""
+        from django.test import RequestFactory
+
         from netbox_data_import.views import _lookup_rack_for_device
 
         class _Stub:
@@ -5128,7 +5130,9 @@ class SyncRackAndPlacementTests(TestCase):
             site = None
             location = None
 
-        rack, err = _lookup_rack_for_device(_Stub(), "R1")
+        request = RequestFactory().post("/")
+        request.user = self.user
+        rack, err = _lookup_rack_for_device(request, _Stub(), "R1")
         self.assertIsNone(rack)
         self.assertIn("no site", err.lower())
 

@@ -1694,6 +1694,14 @@ class DeviceModule:
                     "netbox_face": match.device.face or "",
                     "netbox_position": normalize_for_compare(match.device.position),
                     "netbox_rack_name": match.device.rack.name if match.device.rack_id else "",
+                    # A row refused for an identity conflict states no change, so it needs this here.
+                    "_placement_state": {
+                        # `_placement_differs` reads location as placement, so the baseline states it.
+                        "location_id": match.device.location_id,
+                        "rack_id": match.device.rack_id,
+                        "position": normalize_for_compare(match.device.position),
+                        "face": match.device.face or "",
+                    },
                 },
             }
             if not batch.profile.adapter_settings.update_existing:
@@ -1872,11 +1880,13 @@ class DeviceModule:
                 "extra_data": {**display["extra_data"], "placement_sync_writes_nothing": True},
             }
         if match.method == "name" and self._placement_differs(match.device, payload):
+            # The preview offers the rename for both refusals, so both state the name it would use.
+            rename = {"extra_data": {**display["extra_data"], "suggested_name": batch.suggest_name(row)}}
             # A stored Device with no placement has none to sit at, so it reads as a different refusal.
             if self._device_is_unplaced(match.device):
-                problem(Disposition.INVALID, "device.name_unplaced_match")
+                problem(Disposition.INVALID, "device.name_unplaced_match", rename)
             else:
-                problem(Disposition.INVALID, "device.name_placement_conflict")
+                problem(Disposition.INVALID, "device.name_placement_conflict", rename)
         if (
             not issues
             and not self._differs(match.device, payload)
