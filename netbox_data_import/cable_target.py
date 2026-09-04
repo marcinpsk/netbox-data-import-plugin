@@ -9,9 +9,10 @@ decisions and the Cable policy the Import Profile holds, and it writes Cables an
 It consumes Source Traces by output kind, so it imports no Source Adapter. It reads PortMapping
 rows and never writes one, and it never creates or mutates a CablePath.
 
-Live target state that no Planned Change carries, a reused Cable and a PortMapping row the path
-relies on, joins the unit through the identities of an `info` diagnostic. Execution replans inside
-its transaction, so a change to any of it makes the accepted unit stale and rolls the write back.
+Live target state that no Planned Change carries joins the unit through an `info` diagnostic.
+Visible reused Cables and PortMapping rows contribute identities. Hidden Cable drift contributes
+only its diagnostic code. Execution replans inside its transaction, so a material change makes the
+accepted unit stale and rolls the write back.
 """
 
 from __future__ import annotations
@@ -105,8 +106,8 @@ class _Termination:
         return _object_identity(self.object_type, self.object_id)
 
     def as_json(self) -> list:
-        """Return the serializable pair a payload and a precondition carry."""
-        return [self.object_type, self.object_id]
+        """Return the serializable object and resolved Device a creation precondition carries."""
+        return [self.object_type, self.object_id, self.device_id]
 
 
 @dataclass(frozen=True)
@@ -135,7 +136,7 @@ class _DesiredSegment:
         return self.left, self.right
 
     def as_json(self) -> list:
-        """Return the sorted termination pair a payload and a precondition carry."""
+        """Return the sorted termination records a payload and a precondition carry."""
         return sorted((self.left.as_json(), self.right.as_json()))
 
 
@@ -360,6 +361,7 @@ class _CableBatch:
         self._resolve_terminations()
         self._load_mappings()
         self._build_segments()
+        self._lock_segment_terminations()
         self._load_existing_cables()
         self._classify()
         self._decide()
@@ -736,7 +738,7 @@ class _CableBatch:
         if self.lock_plan_references:
             cables = cables.select_for_update(of=("self",))
             terminations = terminations.select_for_update(of=("self",))
-        # The Cable lock comes first, as the writes take it, so no retermination slips underneath.
+        # Each Cable lock precedes its CableTermination locks, as it does during deletion.
         locked = list(cables)
         sides: dict[int, dict[str, set]] = {}
         for row in terminations:
@@ -749,6 +751,25 @@ class _CableBatch:
             for key in existing.a_side | existing.b_side:
                 self._occupied[key] = existing
 
+    def _lock_segment_terminations(self) -> None:
+        """Lock every desired segment termination in global object-type and primary-key order."""
+        if not self.lock_plan_references:
+            return
+        ids_by_label: dict[str, set[int]] = {}
+        for analysis in self.analyses:
+            for segment in analysis.segments:
+                for termination in segment.terminations:
+                    ids_by_label.setdefault(termination.object_type, set()).add(termination.object_id)
+        for label in sorted(ids_by_label):
+            object_ids = sorted(ids_by_label[label])
+            for object_id in object_ids:
+                self._objects.pop((label, object_id), None)
+            components = (
+                _model_for_label(label).objects.filter(pk__in=object_ids).order_by("pk").select_for_update(of=("self",))
+            )
+            for component in components:
+                self._objects[(label, component.pk)] = component
+
     @staticmethod
     def _analysis_terminations(analysis: _TraceAnalysis) -> list[_Termination]:
         """Return every resolved termination one trace's plan depends on."""
@@ -756,6 +777,16 @@ class _CableBatch:
         for segment in analysis.segments:
             terminations.extend(segment.terminations)
         return terminations
+
+    def _cable_diagnostic_disclosure(self, cable: Any) -> tuple[dict[str, Any], tuple[str, ...]]:
+        """Return the diagnostic fields and identity the actor may see for one Cable."""
+        cable_visible = self.actor is None or self.actor.has_perm("dcim.view_cable", cable)
+        if not cable_visible:
+            return {"cable_visible": False}, ()
+        return (
+            {"cable_visible": True, "cable": str(cable)},
+            (_object_identity("dcim.cable", cable.pk),),
+        )
 
     def _classify(self) -> None:
         """Decide which segments already exist, then which Cable is each trace's Logical Cable.
@@ -797,30 +828,29 @@ class _CableBatch:
             )
             return
         # The stated endpoints are already joined, so the evidence is satisfied and nothing is removed.
+        cable_display, cable_identities = self._cable_diagnostic_disclosure(analysis.logical_cable.cable)
         analysis.note(
             "cable.segment_reused",
-            {"segment_index": 0, "cable": str(analysis.logical_cable.cable)},
-            identities=(_object_identity("dcim.cable", analysis.logical_cable.cable.pk),),
+            {"segment_index": 0, **cable_display},
+            identities=cable_identities,
         )
         analysis.logical_cable = None
 
     def _note_reuse(self, analysis: _TraceAnalysis, segment: _DesiredSegment, proven: _ExistingCable) -> None:
         """Record the proven physical segment, so its live state joins the unit fingerprint."""
+        cable_display, cable_identities = self._cable_diagnostic_disclosure(proven.cable)
         analysis.note(
             "cable.segment_reused",
-            {"segment_index": segment.index, "cable": str(proven.cable)},
-            identities=(
-                _object_identity("dcim.cable", proven.cable.pk),
-                segment.left.identity,
-                segment.right.identity,
-            ),
+            {"segment_index": segment.index, **cable_display},
+            identities=(*cable_identities, segment.left.identity, segment.right.identity),
         )
         drift = self._attribute_drift(segment, proven.cable)
         if drift:
+            drift_display = drift if cable_display["cable_visible"] else {}
             analysis.note(
                 "cable.attribute_drift",
-                {"segment_index": segment.index, "cable": str(proven.cable), **drift},
-                identities=(_object_identity("dcim.cable", proven.cable.pk),),
+                {"segment_index": segment.index, **cable_display, **drift_display},
+                identities=cable_identities,
             )
 
     def _attribute_drift(self, segment: _DesiredSegment, cable) -> dict:
@@ -848,13 +878,9 @@ class _CableBatch:
                 code = (
                     "cable.multi_termination_conflict" if occupying.multi_termination else "cable.termination_occupied"
                 )
-                display = {"segment_index": segment.index, "port": termination.display}
-                identities = [termination.identity]
-                cable_visible = self.actor is None or self.actor.has_perm("dcim.view_cable", occupying.cable)
-                display["cable_visible"] = cable_visible
-                if cable_visible:
-                    display["cable"] = str(occupying.cable)
-                    identities.append(_object_identity("dcim.cable", occupying.cable.pk))
+                cable_display, cable_identities = self._cable_diagnostic_disclosure(occupying.cable)
+                display = {"segment_index": segment.index, "port": termination.display, **cable_display}
+                identities = [termination.identity, *cable_identities]
                 analysis.block(code, display, identities=identities)
 
     def _cable_class_mapping(self, cable_class: str):
@@ -902,10 +928,11 @@ class _CableBatch:
             return
         logical = analysis.logical_cable
         if logical is not None and not self.actor.has_perm("dcim.delete_cable", logical.cable):
+            cable_display, cable_identities = self._cable_diagnostic_disclosure(logical.cable)
             analysis.block(
                 "cable.permission_denied",
-                {"permission": "dcim.delete_cable", "cable": str(logical.cable)},
-                identities=(_object_identity("dcim.cable", logical.cable.pk),),
+                {"permission": "dcim.delete_cable", **cable_display},
+                identities=cable_identities,
             )
 
     def _refuse_conflicting_creations(self) -> None:
@@ -1110,7 +1137,10 @@ class CableModule:
         from dcim.models import Cable
 
         payload = planned_change.payload
-        ends = [CableModule._free_termination(label, object_id) for label, object_id in payload["terminations"]]
+        ends = [
+            CableModule._free_termination(label, object_id, device_id)
+            for label, object_id, device_id in payload["terminations"]
+        ]
         cable = Cable(
             type=payload["cable_type"],
             profile=payload["cable_profile"] or "",
@@ -1125,11 +1155,13 @@ class CableModule:
         return cable
 
     @staticmethod
-    def _free_termination(label: str, object_id: int):
-        """Return one locked termination, refusing the write when it is gone or already cabled."""
+    def _free_termination(label: str, object_id: int, device_id: int):
+        """Return one locked termination that is still free and on its resolved Device."""
         component = _model_for_label(label).objects.filter(pk=object_id).select_for_update(of=("self",)).first()
         if component is None:
             raise PreconditionFailed(f"{label} {object_id} is gone, so the segment cannot be created.")
+        if component.device_id != device_id:
+            raise PreconditionFailed(f"{label} {object_id} moved to another Device after the plan was made.")
         if component.cable_id is not None:
             raise PreconditionFailed(f"{component} received a cable after the plan was made.")
         return component

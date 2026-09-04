@@ -317,28 +317,32 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
         self.assertTrue(batch.rows[0].valid, _codes(batch))
         self.assertEqual(len(batch.rows[0].segments), 1)
 
-    def test_the_collapsed_occurrence_keeps_the_segments_whatever_the_order(self):
-        """Path blocks happen to be read first, so the kept occurrence must not rely on that."""
+    def test_segment_evidence_is_selected_over_an_endpoint_summary_fallback(self):
+        """A collapsed Source Trace keeps Segment Evidence instead of its endpoint-only occurrence."""
         endpoint_a, endpoint_b, lines = self._pair()
         path_block = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b),))
         reversed_lines = (_endpoint_line(endpoint_b), _endpoint_line(endpoint_a))
         list_block = (*reversed_lines, (_visit(endpoint_b), _visit(endpoint_a)))
         content = _workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True)
-        book = openpyxl.load_workbook(BytesIO(content), data_only=True)
-        path_trace, _ = trace_workbook._path_trace(
-            trace_workbook._extract_blocks(book["Trace From To"], "fingerprint")[0], None
+
+        batch = _interpret(content)
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(len(batch.rows[0].segments), 1, "the collapsed occurrence dropped its segments")
+
+    def test_same_rank_duplicate_selection_does_not_depend_on_block_order(self):
+        """Equal Segment Evidence occurrences use source content instead of position as the tie-break."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        rack_a = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b, ("1", "RACK-A", "Site A")),))
+        rack_z = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b, ("9", "RACK-Z", "Site Z")),))
+
+        rack_z_first = _interpret(_workbook(path_blocks=(rack_z, rack_a)))
+        rack_a_first = _interpret(_workbook(path_blocks=(rack_a, rack_z)))
+
+        self.assertEqual(
+            [batch.rows[0].endpoint_summary.from_termination.rack for batch in (rack_z_first, rack_a_first)],
+            ["RACK-A", "RACK-A"],
         )
-        fallback, _ = trace_workbook._fallback_trace(
-            trace_workbook._extract_blocks(book["Trace List"], "fingerprint")[0]
-        )
-
-        self.assertEqual(path_trace.identity, fallback.identity)
-        self.assertEqual(fallback.segments, ())
-
-        collapsed = trace_workbook._collapse_duplicates((fallback, path_trace))
-
-        self.assertEqual(len(collapsed), 1)
-        self.assertEqual(len(collapsed[0].segments), 1, "the collapsed occurrence dropped its segments")
 
     def test_a_path_row_value_survives_a_later_empty_visit(self):
         """The first non-empty value wins, so a blank list row cannot clear a stated one."""
@@ -384,6 +388,21 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
 
 class TraceWorkbookTaxonomyTest(SimpleTestCase):
     """Small workbooks cover source-only validation conditions absent from the corpus."""
+
+    def test_an_overlength_export_timestamp_is_rejected_at_the_adapter(self):
+        """Raw export metadata cannot reach a shorter provenance database column."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (
+            _endpoint_line(endpoint_a),
+            _endpoint_line(endpoint_b),
+            (_segment(endpoint_a, "Cable", endpoint_b),),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,), export_timestamp="2" * 101))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.metadata_too_long"])
 
     def test_no_recognized_sheet_is_a_batch_error(self):
         """An unrelated workbook returns its diagnostic code without creating a unit."""

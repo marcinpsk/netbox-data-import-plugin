@@ -24,6 +24,7 @@ from .adapters import (
 from . import plan
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
+from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -1494,15 +1495,19 @@ class CableImportSource(models.Model):
     segment_index = models.PositiveIntegerField(
         help_text="Position of this segment in the Source Trace, in canonical order",
     )
-    from_text = models.CharField(max_length=500, blank=True, default="")
-    to_text = models.CharField(max_length=500, blank=True, default="")
+    from_text = models.TextField(blank=True, default="")
+    to_text = models.TextField(blank=True, default="")
     direction = models.CharField(max_length=20, blank=True, default="")
     workbook_fingerprint = models.CharField(max_length=64, blank=True, default="")
     sheet = models.CharField(max_length=100, blank=True, default="")
     block_ordinal = models.PositiveIntegerField(null=True, blank=True)
     row_start = models.PositiveIntegerField(null=True, blank=True)
     row_end = models.PositiveIntegerField(null=True, blank=True)
-    export_timestamp = models.CharField(max_length=100, blank=True, default="")
+    export_timestamp = models.CharField(
+        max_length=TRACE_EXPORT_TIMESTAMP_MAX_LENGTH,
+        blank=True,
+        default="",
+    )
 
     def clean(self):
         """Derive the index key before validate_unique reads the constraint's own fields."""

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -22,6 +22,7 @@ from .field_keys import (
     REAR_PORT_CLASSES,
     same_device_and_cards,
 )
+from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
 from .values import identity_text, source_text
 
 TRACE_PATH_SHEET = "Trace From To"
@@ -359,6 +360,22 @@ def _error(block: _Block, code: str, detail: str, row_number: int | None = None)
     )
 
 
+def _metadata_errors(blocks: Iterable[_Block | None]) -> list[SourceDiagnostic]:
+    """Return diagnostics for raw workbook metadata that cannot fit its stored representation."""
+    errors = []
+    for block in blocks:
+        if block is not None and len(block.export_timestamp) > TRACE_EXPORT_TIMESTAMP_MAX_LENGTH:
+            errors.append(
+                _error(
+                    block,
+                    "trace.metadata_too_long",
+                    f"The export timestamp exceeds {TRACE_EXPORT_TIMESTAMP_MAX_LENGTH} characters.",
+                    row_number=1,
+                )
+            )
+    return errors
+
+
 def _endpoint_summary(block: _Block) -> tuple[EndpointSummary | None, list[SourceDiagnostic]]:
     """Return the Endpoint Summary of one block, or the reason it has none."""
     errors = []
@@ -677,6 +694,7 @@ def _path_trace(
 ) -> tuple[SourceTrace | None, tuple[SourceDiagnostic, ...]]:
     """Return the Source Trace one path block states, with any block-level diagnostic."""
     summary, errors = _endpoint_summary(path_block)
+    errors.extend(_metadata_errors((path_block, list_block)))
     if summary is None:
         return None, tuple(errors)
     parsed_segments, segment_errors = _parse_segments(path_block)
@@ -741,6 +759,7 @@ def _path_trace(
 def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiagnostic, ...]]:
     """Return the Endpoint Summary fallback an unpaired Trace List block states."""
     summary, errors = _endpoint_summary(block)
+    errors.extend(_metadata_errors((block,)))
     visits, visit_errors = _parse_visits(block)
     errors.extend(visit_errors)
     if summary is None or not visits:
@@ -773,6 +792,16 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
     )
 
 
+def _trace_selection_key(trace: SourceTrace) -> tuple[bool, bool, str]:
+    """Rank Segment Evidence first, then canonical direction and serialized occurrence content."""
+    summary = trace.endpoint_summary
+    return (
+        not bool(trace.segments),
+        summary.from_termination.identity_key > summary.to_termination.identity_key,
+        json.dumps(asdict(trace), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+    )
+
+
 def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ...]:
     """Collapse occurrences that share an identity, and flag differing evidence."""
     by_identity: dict[str, list[SourceTrace]] = {}
@@ -780,13 +809,13 @@ def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ..
         by_identity.setdefault(trace.identity, []).append(trace)
     collapsed = []
     for occurrences in by_identity.values():
-        # Segment evidence outranks an endpoint-only fallback, whatever order the blocks were read in.
-        selected = next((trace for trace in occurrences if trace.segments), occurrences[0])
-        provenance = tuple(dict.fromkeys(item for trace in occurrences for item in trace.provenance))
+        ordered = sorted(occurrences, key=_trace_selection_key)
+        selected = ordered[0]
+        provenance = tuple(dict.fromkeys(item for trace in ordered for item in trace.provenance))
         # The fingerprint excludes Trace List data, so a later occurrence can state its own finding.
-        errors = _first_of_each_code(occurrences)
+        errors = _first_of_each_code(ordered)
         # An endpoint-only fallback states no segments, so it contradicts no segment evidence.
-        compared = [trace for trace in occurrences if trace.segments] or list(occurrences)
+        compared = [trace for trace in ordered if trace.segments] or ordered
         if len({trace.content_fingerprint for trace in compared}) > 1:
             locations = "; ".join(_location_from_provenance(trace.provenance[0]) for trace in compared)
             errors.append(

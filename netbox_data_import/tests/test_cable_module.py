@@ -195,7 +195,7 @@ class CableTopologyMixin:
 
     def termination_pairs(self, change):
         """Return the sorted termination pairs one create change writes."""
-        return [tuple(item) for item in change.payload["terminations"]]
+        return [(item[0], item[1]) for item in change.payload["terminations"]]
 
 
 class CablePlanningTest(CableTopologyMixin, TestCase):
@@ -568,6 +568,59 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertNotIn("cable", occupied.display)
         self.assertNotIn(f"dcim.cable:{foreign.pk}", occupied.identities)
 
+    def test_an_invisible_reused_cable_does_not_disclose_its_identity(self):
+        """A matching Cable stays hidden when the actor can view only its endpoint Interfaces."""
+        existing = self.connect(self.eth0, self.eth1)
+        actor = user_with_object_permission(
+            "cable-hidden-reuse",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+            ],
+        )
+        self.assertFalse(actor.has_perm("dcim.view_cable", existing))
+
+        unit = self.unit(direct_path(), actor=actor)
+
+        self.assertEqual(unit.disposition, Disposition.NO_OP)
+        reused = next(item for item in unit.diagnostics if item.code == "cable.segment_reused")
+        self.assertIs(reused.display["cable_visible"], False)
+        self.assertNotIn("cable", reused.display)
+        self.assertNotIn(f"dcim.cable:{existing.pk}", reused.identities)
+
+    def test_an_invisible_reused_cable_redacts_attribute_drift(self):
+        """A hidden reused Cable reports drift without exposing its attributes or identity."""
+        existing = self.connect(
+            self.eth0,
+            self.eth1,
+            type="cat5e",
+            status="planned",
+            profile="single-1c2p",
+            label="PATCH-9",
+        )
+        actor = user_with_object_permission(
+            "cable-hidden-drift",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+            ],
+        )
+        self.assertFalse(actor.has_perm("dcim.view_cable", existing))
+
+        unit = self.unit(direct_path(), actor=actor)
+
+        reused = next(item for item in unit.diagnostics if item.code == "cable.segment_reused")
+        self.assertIs(reused.display["cable_visible"], False)
+        self.assertNotIn("cable", reused.display)
+        self.assertNotIn(f"dcim.cable:{existing.pk}", reused.identities)
+        drifts = [item for item in unit.diagnostics if item.code == "cable.attribute_drift"]
+        self.assertEqual(len(drifts), 1)
+        drift = drifts[0]
+        self.assertEqual(dict(drift.display), {"segment_index": 0, "cable_visible": False})
+        self.assertNotIn(f"dcim.cable:{existing.pk}", drift.identities)
+
     def test_a_multi_termination_cable_touching_a_desired_port_blocks_the_unit(self):
         """A cable with two terminations on one side never matches a desired segment."""
         other = self.make_device("DEV-C")
@@ -658,6 +711,38 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(plan.units[0].changes, ())
         self.assertTrue(Cable.objects.filter(pk=existing.pk).exists())
 
+    def test_endpoint_evidence_does_not_disclose_an_invisible_reused_cable(self):
+        """An Endpoint Summary can prove a hidden Cable exists without naming it."""
+        existing = self.connect(self.eth0, self.eth1)
+        actor = user_with_object_permission(
+            "cable-hidden-endpoint-evidence",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+            ],
+        )
+        self.assertFalse(actor.has_perm("dcim.view_cable", existing))
+        content = trace_workbook_bytes(
+            include_path=False,
+            include_list=True,
+            list_blocks=(
+                (
+                    trace_endpoint_line(DEVICE_A),
+                    trace_endpoint_line(DEVICE_B),
+                    (("", "", "", "DEV-A", "", "eth0", "Port", "Ignored"),),
+                ),
+            ),
+        )
+        document = SourceDocument.store(profile=self.profile, content=content)
+
+        plan = ImportEngine.plan(self.profile, document, actor, self.planning_context)
+
+        reused = next(item for item in plan.units[0].diagnostics if item.code == "cable.segment_reused")
+        self.assertIs(reused.display["cable_visible"], False)
+        self.assertNotIn("cable", reused.display)
+        self.assertNotIn(f"dcim.cable:{existing.pk}", reused.identities)
+
     def test_an_operator_without_the_cable_permissions_is_blocked(self):
         """Planning refuses a write the actor could not make, with the permission named."""
         actor = user_with_object_permission(
@@ -697,6 +782,30 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
         denied = next(item for item in unit.diagnostics if item.code == "cable.permission_denied")
         self.assertEqual(denied.display["permission"], "dcim.delete_cable")
+
+    def test_denied_deletion_does_not_disclose_an_invisible_logical_cable(self):
+        """The delete-permission finding does not name a Logical Cable outside the actor's view scope."""
+        logical = self.connect(self.eth0, self.eth1)
+        actor = user_with_object_permission(
+            "cable-hidden-deletion",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("add",), {}),
+            ],
+        )
+        self.assertFalse(actor.has_perm("dcim.view_cable", logical))
+
+        unit = self.unit(patched_path(), actor=actor)
+
+        denied = next(item for item in unit.diagnostics if item.code == "cable.permission_denied")
+        self.assertEqual(denied.display["permission"], "dcim.delete_cable")
+        self.assertIs(denied.display["cable_visible"], False)
+        self.assertNotIn("cable", denied.display)
+        self.assertNotIn(f"dcim.cable:{logical.pk}", denied.identities)
 
     def test_an_invisible_mapped_peer_blocks_the_unit(self):
         """Planning cannot substitute a mapped peer outside the actor's FrontPort view scope."""
@@ -1167,6 +1276,24 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
         self.assertEqual({cable.status for cable in Cable.objects.all()}, {"connected"})
         self.assertEqual({cable.type for cable in Cable.objects.all()}, {"cat6"})
 
+    def test_long_endpoint_evidence_is_stored_intact(self):
+        """A valid From line is stored without truncation or a database failure."""
+        from django.db import DataError
+
+        long_endpoint = trace_termination("DEV-A", f"CARD-{'X' * 600}", "eth0", "Port")
+        from_text = trace_endpoint_line(long_endpoint)
+        plan = self.plan(direct_path(from_end=long_endpoint))
+
+        try:
+            execution = self.execute(plan)
+        except DataError:
+            self.fail("The public execution seam raised DataError for valid endpoint evidence.")
+
+        source = CableImportSource.objects.get()
+        self.assertEqual(execution.outcome, "succeeded")
+        self.assertGreater(len(from_text), 500)
+        self.assertEqual(source.from_text, from_text)
+
     def test_the_removed_logical_cable_is_recorded_only_in_the_execution_snapshot(self):
         """Provenance rows never record a deletion, so the audit row is where it lives."""
         logical = self.connect(self.eth0, self.eth1)
@@ -1281,6 +1408,164 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
             self.execute(plan)
 
         self.assertEqual(Cable.objects.count(), before)
+        self.assertEqual(CableImportSource.objects.count(), 0)
+
+    def test_a_termination_moved_after_replan_refuses_the_accepted_execution(self):
+        """The locked write recheck rejects an Interface that left its resolved Device."""
+        from django.db import connection
+
+        accepted = self.plan(patched_path())
+        other = self.make_device("DEV-C")
+        moved = []
+        interface_table = Interface._meta.db_table
+
+        def move_before_termination_lock(execute, sql, params, many, context):
+            if moved or f'FROM "{interface_table}"' not in sql or "FOR UPDATE" not in sql.upper():
+                return execute(sql, params, many, context)
+            moved.append(True)
+
+            with run_on_separate_connection(lambda: Interface.objects.filter(pk=self.eth0.pk).update(device=other)):
+                pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(move_before_termination_lock):
+            with self.assertRaises(PreconditionFailed):
+                self.execute(accepted)
+
+        self.eth0.refresh_from_db()
+        self.assertEqual(self.eth0.device_id, other.pk)
+        self.assertEqual(Cable.objects.count(), 0)
+        self.assertEqual(CableImportSource.objects.count(), 0)
+
+    def test_concurrent_multi_change_imports_do_not_deadlock_on_termination_locks(self):
+        """Concurrent imports acquire their shared termination rows in one global order."""
+        from queue import Queue
+        from threading import Barrier, BrokenBarrierError, Lock, Thread, get_ident
+
+        from django.db import connections
+        from django.db.models.signals import pre_save
+
+        from netbox_data_import.import_engine import StalePlan
+
+        device_c = self.make_device("DEV-C")
+        device_d = self.make_device("DEV-D")
+        Interface.objects.create(device=device_c, name="eth0", type="1000base-t")
+        Interface.objects.create(device=device_d, name="eth1", type="1000base-t")
+        device_c_end = trace_termination("DEV-C", "", "eth0", "Port")
+        device_d_end = trace_termination("DEV-D", "", "eth1", "NIC")
+        first_segment = direct_path()
+        second_segment = direct_path(device_c_end, device_d_end)
+        other_profile = ImportProfile.objects.create(
+            name="Concurrent Cable Traces",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        CableClassMapping.objects.create(
+            profile=other_profile,
+            cable_class="Patch",
+            cable_type_resolved=True,
+            cable_type="cat6",
+            cable_profile_resolved=True,
+            cable_profile="single-1c1p",
+        )
+        first_document = SourceDocument.store(
+            profile=self.profile,
+            content=trace_workbook_bytes(path_blocks=(first_segment, second_segment)),
+        )
+        second_document = SourceDocument.store(
+            profile=other_profile,
+            content=trace_workbook_bytes(path_blocks=(second_segment, first_segment)),
+        )
+        first_plan = ImportEngine.plan(self.profile, first_document, self.actor, self.planning_context)
+        second_plan = ImportEngine.plan(other_profile, second_document, self.actor, self.planning_context)
+        start = Barrier(3)
+        first_writes = Barrier(2)
+        observed_threads = set()
+        observed_lock = Lock()
+        outcomes = Queue()
+
+        def synchronize_first_writes(sender, instance, **kwargs):
+            thread_id = get_ident()
+            with observed_lock:
+                if thread_id in observed_threads:
+                    return
+                observed_threads.add(thread_id)
+            try:
+                first_writes.wait(timeout=2)
+            except BrokenBarrierError:
+                pass
+
+        def execute_plan(profile, document, plan):
+            connections["default"].close()
+            try:
+                start.wait(timeout=10)
+                execution = ImportEngine.execute(
+                    profile,
+                    document,
+                    plan.to_dict(),
+                    [unit.identity for unit in plan.units],
+                    str(uuid.uuid4()),
+                    self.actor,
+                )
+            except BaseException as exc:
+                outcomes.put(exc)
+            else:
+                outcomes.put(execution)
+            finally:
+                connections["default"].close()
+
+        pre_save.connect(synchronize_first_writes, sender=Cable, weak=False)
+        workers = (
+            Thread(target=execute_plan, args=(self.profile, first_document, first_plan), daemon=True),
+            Thread(target=execute_plan, args=(other_profile, second_document, second_plan), daemon=True),
+        )
+        try:
+            for worker in workers:
+                worker.start()
+            start.wait(timeout=10)
+            for worker in workers:
+                worker.join(timeout=20)
+        finally:
+            pre_save.disconnect(synchronize_first_writes, sender=Cable)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers), "a concurrent import did not finish")
+        results = [outcomes.get_nowait() for _worker in workers]
+        errors = [result for result in results if isinstance(result, BaseException)]
+        self.assertTrue(all(isinstance(error, (StalePlan, PreconditionFailed)) for error in errors), errors)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(Cable.objects.count(), 2)
+
+    def test_hidden_reused_cable_drift_makes_the_accepted_unit_stale(self):
+        """A redacted drift diagnostic still invalidates an accepted actionable unit."""
+        from netbox_data_import.import_engine import StalePlan
+
+        trunk = self.connect(self.panel_1_rear, self.panel_2_rear)
+        actor = user_with_object_permission(
+            "cable-hidden-stale-drift",
+            [
+                (Site, ("view",), {}),
+                (Device, ("view",), {}),
+                (Interface, ("view",), {}),
+                (FrontPort, ("view",), {}),
+                (RearPort, ("view",), {}),
+                (Cable, ("add",), {}),
+            ],
+        )
+        self.assertFalse(actor.has_perm("dcim.view_cable", trunk))
+        accepted = self.plan(patched_path(), actor=actor)
+        Cable.objects.filter(pk=trunk.pk).update(type="cat5e")
+
+        with self.assertRaises(StalePlan):
+            ImportEngine.execute(
+                self.profile,
+                self.document,
+                accepted.to_dict(),
+                [accepted.units[0].identity],
+                str(uuid.uuid4()),
+                actor,
+            )
+
+        self.assertEqual(Cable.objects.count(), 1)
         self.assertEqual(CableImportSource.objects.count(), 0)
 
     def test_execution_holds_a_reused_cable_through_the_remaining_writes(self):

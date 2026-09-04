@@ -562,11 +562,12 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         """An old executable plan writes neither a target object nor an audit row."""
         from dcim.models import Device
 
-        from netbox_data_import.plan import PlanSchemaMismatch
+        from netbox_data_import.plan import SCHEMA_VERSION, PlanSchemaMismatch
 
         accepted = self._plan()
         serialized = accepted.to_dict()
-        serialized["schema_version"] = 2
+        # Derive the incompatible version, so bumping the schema cannot make this test vacuous.
+        serialized["schema_version"] = SCHEMA_VERSION + 1
 
         with self.assertRaises(PlanSchemaMismatch):
             ImportEngine.execute(

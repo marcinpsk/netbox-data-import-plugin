@@ -93,10 +93,10 @@ def trace_visit(termination):
     return "", "", "", device, cards, port, port_class, "Ignored"
 
 
-def add_trace_sheet(book, name, header, blocks):
+def add_trace_sheet(book, name, header, blocks, export_timestamp):
     """Add one trace sheet with the supplied source blocks."""
     sheet = book.create_sheet(name)
-    sheet.append(("Executed", "2026-08-31 12:00:00+00:00"))
+    sheet.append(("Executed", export_timestamp))
     sheet.append(())
     for from_line, to_line, rows in blocks:
         sheet.append(("From", from_line))
@@ -107,7 +107,14 @@ def add_trace_sheet(book, name, header, blocks):
     return sheet
 
 
-def trace_workbook_bytes(*, path_blocks=(), list_blocks=(), include_path=True, include_list=False) -> bytes:
+def trace_workbook_bytes(
+    *,
+    path_blocks=(),
+    list_blocks=(),
+    include_path=True,
+    include_list=False,
+    export_timestamp="2026-08-31 12:00:00+00:00",
+) -> bytes:
     """Build trace workbook bytes with the fixed trace sheet names."""
     from io import BytesIO
 
@@ -119,9 +126,9 @@ def trace_workbook_bytes(*, path_blocks=(), list_blocks=(), include_path=True, i
     if isinstance(active, Worksheet):
         book.remove(active)
     if include_path:
-        add_trace_sheet(book, "Trace From To", TRACE_PATH_HEADER, path_blocks)
+        add_trace_sheet(book, "Trace From To", TRACE_PATH_HEADER, path_blocks, export_timestamp)
     if include_list:
-        add_trace_sheet(book, "Trace List", TRACE_LIST_HEADER, list_blocks)
+        add_trace_sheet(book, "Trace List", TRACE_LIST_HEADER, list_blocks, export_timestamp)
     buffer = BytesIO()
     book.save(buffer)
     return buffer.getvalue()
