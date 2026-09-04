@@ -68,10 +68,12 @@ class QuickActionObjectPermissionTest(TestCase):
         """
         client = self._client_with("scope-leak-user")
 
-        response = self._post(client, "quick_create_role", {"name": "Acme", "slug": "acme"})
+        with self.assertLogs("netbox_data_import.views", level="WARNING") as operator_log:
+            response = self._post(client, "quick_create_role", {"name": "Acme", "slug": "acme"})
 
         self.assertEqual(response.status_code, 403)
         self.assertNotIn("dcim.add_devicerole", response.content.decode().lower())
+        self.assertIn("dcim.add_devicerole", "\n".join(operator_log.output))
         self.assertFalse(DeviceRole.objects.filter(slug="acme").exists())
 
     def test_a_constrained_ignored_device_source_id_is_refused(self):
