@@ -2151,8 +2151,8 @@ spec (#78): the readable string keeps its role, but only as the display form.
 topology identity.</p>
 <h3 id="53-sheet-combination">5.3 Sheet combination</h3>
 <ul>
-<li>Blocks pair across sheets by exact From/To line text. A repeated block uses the ordinal as the
-  tiebreak.</li>
+<li>Blocks pair across sheets by From/To line text, ignoring surrounding whitespace. A repeated block
+  uses the ordinal as the tiebreak.</li>
 <li><code>Trace From To</code> path rows are authoritative.</li>
 <li>A non-empty <code>Trace List</code> block corroborates. The ordered device-label sequence must match the visit
   sequence. Consecutive duplicate device rows are tolerated. The final device may be omitted when the
@@ -2300,7 +2300,7 @@ blank-row layout, empty-string cells, and sheet dimensions.</p>
 </tr>
 <tr>
 <td>Fiber trace workbook</td>
-<td>20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, 8 valid with 4 to 9 segments, 4 ending at a rear port, every <code>Trace List</code> corroboration passing, 1 <code>trace.non_linear_path</code>, 1 <code>trace.pass_through_at_interface</code>, and one accepted legal same-rear-port continuation inside a valid trace</td>
+<td>20 blocks per sheet collapse to 10 Source Traces, zero duplicate conflicts, 8 valid with 4 to 9 segments, 4 ending at a rear port, every <code>Trace List</code> corroboration passing, 1 <code>trace.non_linear_path</code>, 1 <code>trace.pass_through_at_interface</code>, and one accepted legal same-rear-port continuation</td>
 </tr>
 <tr>
 <td>Both</td>
@@ -3695,8 +3695,9 @@ T5 registers the key.</p>
   row with no NetBox access.</li>
 <li>The adapter never emits <code>cable.unsupported_termination_kind</code>, <code>trace.device_unresolved</code>, or
   <code>trace.endpoint_evidence_only</code>, because all three depend on NetBox state.</li>
-<li>The <code>trace_workbook</code> key is absent from the profile form, REST, GraphQL, and YAML adapter choices
-  after this ticket merges.</li>
+<li>The <code>trace_workbook</code> key is absent from the profile form, REST creation, GraphQL, and YAML adapter
+  choices after this ticket merges. A REST update keeps the whole registry, so a client that reads a
+  stored profile the release cannot run can write it back unchanged.</li>
 <li>The copper fixture produces 10 Source Traces, all valid with 3 Segment Evidence entries each and
   zero duplicate conflicts.</li>
 <li>The fiber fixture produces 10 Source Traces, 8 valid with 4 to 9 segments and 4 ending at a rear
