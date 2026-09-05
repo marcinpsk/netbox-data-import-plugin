@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The Trace Review Workspace: its summary strip, its trace list, and its per-trace actions."""
 
+from io import BytesIO
+
 from dcim.models import Interface
 from django.test import TestCase
+from django.urls import reverse
 
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
@@ -11,7 +14,7 @@ from netbox_data_import.tests.test_cable_module import (
     direct_path,
     patched_path,
 )
-from netbox_data_import.tests.helpers import trace_termination
+from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes
 
 
 class TraceWorkspaceTest(CableTopologyMixin, TestCase):
@@ -108,3 +111,89 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
         open_terminations = [item for item in trace.terminations if item["state"] == "unresolved"]
         self.assertEqual([item["label"] for item in open_terminations], ["DEV-A absent-port"])
         self.assertTrue(open_terminations[0]["field_key"])
+
+
+class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
+    """The workspace page, reached through the real wizard for a trace profile."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def open_workspace(self, *blocks):
+        """Upload the given path blocks and return the rendered workspace response."""
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
+        upload.name = "traces.xlsx"
+        setup = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(setup.status_code, 200)
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def test_the_page_lists_every_trace_with_its_panels(self):
+        """One page per preview: the strip, the list, and the panels of the selected trace."""
+        response = self.open_workspace(patched_path())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["traces"]), 1)
+        self.assertEqual(response.context["summary"]["traces"], 1)
+        self.assertContains(response, "DEV-A eth0 to DEV-B eth1")
+        self.assertContains(response, "reuse existing", count=0, status_code=200)
+        self.assertContains(response, "automatically resolved")
+
+    def test_a_blocked_trace_renders_its_sync_action_disabled_with_its_reason(self):
+        """An illegal action stays on screen, disabled, with the reason underneath."""
+        Interface.objects.create(device=self.make_device("SRC-P"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("DST-P"), name="eth0", type="1000base-t")
+        blocked = direct_path(
+            from_end=trace_termination("SRC-P", "", "absent-port", "Port"),
+            to_end=trace_termination("DST-P", "", "eth0", "Port"),
+        )
+
+        response = self.open_workspace(blocked)
+
+        trace = response.context["traces"][0]
+        self.assertFalse(trace.actions[0].enabled)
+        self.assertContains(response, "disabled")
+        self.assertContains(response, trace.actions[0].reason)
+
+    def test_the_workspace_reports_no_drift_for_a_freshly_read_preview(self):
+        """The strip appears on a difference, so a preview just read must not show one."""
+        response = self.open_workspace(patched_path())
+
+        self.assertFalse(response.context["drift"])
+
+    def test_the_workspace_reports_drift_when_netbox_moved_under_the_preview(self):
+        """A live change since the reviewed plan is exactly what the strip is for."""
+        self.open_workspace(patched_path())
+
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertTrue(response.context["drift"])
+
+    def test_re_reading_clears_the_drift_strip(self):
+        """The re-read action adopts the live plan, so the difference it reported is gone."""
+        self.open_workspace(patched_path())
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session["import_preview_revision"]},
+        )
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertFalse(response.context["drift"])
+        statuses = [segment["status"] for segment in response.context["traces"][0].segments]
+        self.assertIn("reuse existing", statuses)
+
+    def test_the_workspace_refuses_a_session_that_holds_no_preview(self):
+        """Without a materialized preview there is nothing to review, so it sends the operator back."""
+        self.client.force_login(self.actor)
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertEqual(response.status_code, 302)

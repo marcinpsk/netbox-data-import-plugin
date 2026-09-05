@@ -374,6 +374,14 @@ def _device_placement_differs(device, source_location_id, rack_name, position, f
     )
 
 
+_SUMMARY_KEYS = {
+    Disposition.ACTIONABLE: "actionable",
+    Disposition.BLOCKED: "blocked",
+    Disposition.INVALID: "invalid",
+    Disposition.NO_OP: "no_change",
+}
+
+
 @dataclass(frozen=True)
 class TraceAction:
     """One review command, always visible, carrying its reason when it cannot run."""
@@ -493,13 +501,9 @@ class ReviewWorkspace:
             "unresolved_terminations": 0,
             "resolved_terminations": 0,
         }
-        for disposition in (
-            Disposition.ACTIONABLE,
-            Disposition.BLOCKED,
-            Disposition.INVALID,
-            Disposition.NO_OP,
-        ):
-            summary[disposition] = sum(1 for trace in traces if trace.disposition == disposition)
+        # A template cannot resolve a key with a hyphen, so the strip names each disposition itself.
+        for disposition, key in _SUMMARY_KEYS.items():
+            summary[key] = sum(1 for trace in traces if trace.disposition == disposition)
         for trace in traces:
             for termination in trace.terminations:
                 key = "unresolved_terminations" if termination["state"] == UNRESOLVED else "resolved_terminations"
