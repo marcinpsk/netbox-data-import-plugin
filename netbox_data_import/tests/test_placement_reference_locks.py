@@ -54,12 +54,14 @@ def _unlocked_loads(path: Path) -> list[str]:
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     unlocked = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not _loads_by_primary_key(node):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if not _loads_by_primary_key(node):
             continue
         model = _receiver_model(node.func.value)
         if model is None:
             continue
-        statement = node
+        statement: ast.AST | None = node
         while statement is not None and not isinstance(statement, ast.stmt):
             statement = parents.get(statement)
         if statement is None or not _statement_locks(statement):
@@ -87,6 +89,7 @@ class PlacementReferencesAreLoadedThroughOneLockedSeamTest(SimpleTestCase):
         source = "rack = Rack.objects.filter(pk=rack_id).first()\n"
         tree = ast.parse(source)
         call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and _loads_by_primary_key(node))
+        assert isinstance(call.func, ast.Attribute)
 
         self.assertEqual(_receiver_model(call.func.value), "Rack")
         self.assertFalse(_statement_locks(tree.body[0]))
