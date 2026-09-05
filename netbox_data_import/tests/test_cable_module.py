@@ -1255,6 +1255,138 @@ class CablePreconditionRecheckTest(CableTopologyMixin, TestCase):
             CableModule().apply(change, self.context())
 
 
+class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
+    """The workspace panels read the planner's own verdict; nothing recomputes the plan."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def workspace(self, unit):
+        """Return the trace workspace payload one unit carries."""
+        return unit.display["trace"]
+
+    def test_every_proposed_segment_states_create_when_nothing_exists(self):
+        """A path over empty terminations proposes one creation per stated segment."""
+        workspace = self.workspace(self.unit(patched_path()))
+
+        self.assertEqual(
+            [(segment["index"], segment["status"]) for segment in workspace["segments"]],
+            [(0, "create"), (1, "create"), (2, "create")],
+        )
+
+    def test_a_segment_an_existing_cable_proves_states_reuse_existing(self):
+        """A Cable that already proves a segment is reused, so the panel must not say create."""
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+
+        workspace = self.workspace(self.unit(patched_path()))
+
+        statuses = {segment["index"]: segment["status"] for segment in workspace["segments"]}
+        self.assertEqual(statuses[1], "reuse existing")
+        self.assertEqual(statuses[0], "create")
+
+    def test_a_segment_another_cable_holds_states_conflict(self):
+        """A termination an unrelated Cable holds is a conflict, not a creation.
+
+        The direct Cable between the two endpoints is this trace's Logical Cable, which the
+        replacement deletes, so only a third party's Cable can conflict.
+        """
+        outsider = Interface.objects.create(device=self.make_device("DEV-C"), name="eth9", type="1000base-t")
+        self.connect(self.panel_1_fronts[0], outsider)
+
+        workspace = self.workspace(self.unit(patched_path()))
+
+        statuses = {segment["index"]: segment["status"] for segment in workspace["segments"]}
+        self.assertEqual(statuses[0], "conflict")
+
+    def test_the_logical_cable_a_replacement_deletes_is_named(self):
+        """The proposed panel states the one deletion a Patched Path Replacement performs."""
+        self.connect(self.eth0, self.eth1)
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+        CableClassMapping.objects.filter(profile=self.profile).update(cable_type="cat6")
+
+        workspace = self.workspace(self.unit(patched_path()))
+
+        self.assertIsNotNone(workspace["logical_cable"])
+        self.assertTrue(workspace["logical_cable"]["visible"])
+
+    def test_an_exact_name_match_states_automatically_resolved(self):
+        """The operator has to see which terminations the exact-name rule matched without help."""
+        workspace = self.workspace(self.unit(direct_path()))
+
+        states = {item["label"]: item["state"] for item in workspace["terminations"]}
+        self.assertEqual(states["DEV-A eth0"], "automatically resolved")
+
+    def test_a_saved_decision_states_manually_resolved(self):
+        """A termination an operator chose is distinct from one the exact-name rule matched."""
+        renamed = trace_termination("DEV-A", "", "source-port", "Port")
+        TerminationResolution.objects.create(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=termination_field_key(device="DEV-A", cards="", port="source-port", kind="interface"),
+            selected_object_type=ObjectType.objects.get_for_model(Interface),
+            selected_object_id=self.eth0.pk,
+            selected_display_name=str(self.eth0),
+        )
+
+        workspace = self.workspace(self.unit(direct_path(from_end=renamed)))
+
+        states = {item["label"]: item["state"] for item in workspace["terminations"]}
+        self.assertEqual(states["DEV-A source-port"], "manually resolved")
+
+    def test_an_unresolved_termination_carries_the_field_key_its_picker_needs(self):
+        """The picker asks for candidates by canonical field key, so it must not rebuild one."""
+        missing = trace_termination("DEV-A", "", "absent-port", "Port")
+
+        workspace = self.workspace(self.unit(direct_path(from_end=missing)))
+
+        unresolved = [item for item in workspace["terminations"] if item["state"] == "unresolved"]
+        self.assertEqual([item["label"] for item in unresolved], ["DEV-A absent-port"])
+        self.assertEqual(
+            unresolved[0]["field_key"],
+            termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface"),
+        )
+        self.assertEqual(unresolved[0]["kind"], "interface")
+
+    def test_the_source_evidence_states_both_endpoints_and_every_segment_in_order(self):
+        """The source panel restates what the workbook said, in the order it said it."""
+        workspace = self.workspace(self.unit(patched_path()))
+
+        self.assertEqual(workspace["endpoints"]["from"], "DEV-A eth0")
+        self.assertEqual(workspace["endpoints"]["to"], "DEV-B eth1")
+        self.assertEqual(
+            [
+                (segment["source_left"], segment["cable_class"], segment["source_right"])
+                for segment in workspace["segments"]
+            ],
+            [
+                ("DEV-A eth0", "Patch", "PANEL-1 F1"),
+                ("PANEL-1 R1", "Trunk", "PANEL-2 R1"),
+                ("PANEL-2 F1", "Patch", "DEV-B eth1"),
+            ],
+        )
+
+    def test_the_proposed_panel_names_the_netbox_objects_the_segments_join(self):
+        """The proposed panel shows NetBox's own names, which the source words need not match."""
+        workspace = self.workspace(self.unit(patched_path()))
+
+        self.assertEqual(
+            [(segment["left"], segment["right"]) for segment in workspace["segments"]],
+            [("eth0", "F1"), ("R1", "R1"), ("F1", "eth1")],
+        )
+        self.assertEqual([segment["pass_through"] for segment in workspace["segments"]], [False, False, False])
+
+    def test_a_pass_through_claim_names_the_port_it_substituted(self):
+        """A path that enters and leaves one panel implies a claim the source never stated."""
+        workspace = self.workspace(self.unit(same_rear_port_path()))
+
+        substituted = [segment for segment in workspace["segments"] if segment["pass_through"]]
+        self.assertEqual([segment["index"] for segment in substituted], [1])
+        self.assertEqual(substituted[0]["source_left"], "PANEL-1 R1")
+        # The source re-entered the rear port it left, so planning claimed its mapped front port.
+        self.assertEqual(substituted[0]["left"], "F1")
+
+
 class TraceWizardRenderTest(CableTopologyMixin, TestCase):
     """A trace profile is selectable now, so the existing wizard has to survive one."""
 
