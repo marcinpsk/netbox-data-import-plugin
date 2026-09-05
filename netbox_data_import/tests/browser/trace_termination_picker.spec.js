@@ -99,18 +99,23 @@ test("the picker sends the preview revision, which the server checks before it a
 });
 
 test("the search that produced the offer travels with the saved decision", async ({ page }) => {
-  await serveCandidates(page, {
-    ok: true,
-    candidates: [{ id: 9, name: "mgmt0", display: "mgmt0" }],
-    shown: 1,
-    total: 1,
+  await page.route("**/trace-workspace/candidates/**", async (route) => {
+    // Each query answers differently, so waiting on the text proves which render is on screen.
+    const search = new URL(route.request().url()).searchParams.get("search") || "";
+    const candidate = search === "mgmt"
+      ? { id: 9, name: "mgmt0", display: "mgmt0" }
+      : { id: 1, name: "eth0", display: "eth0" };
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, candidates: [candidate], shown: 1, total: 1 }),
+    });
   });
   await page.setContent(fixture);
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
   await page.locator("#traceTerminationSearch").fill("mgmt");
-  await expect(page.locator("#traceTerminationCandidates button")).toHaveCount(1);
+  await expect(page.locator("#traceTerminationCandidates button")).toHaveText(["mgmt0"]);
   await page.locator("#traceTerminationCandidates button").first().click();
 
   await expect(page.locator("#traceTerminationOfferedSearch")).toHaveValue("mgmt");
@@ -154,4 +159,41 @@ test("a slower earlier search does not overwrite the answer to a later one", asy
 
   await expect(page.locator("#traceTerminationCount")).toHaveText("1 of 1 eligible");
   await expect(page.locator("#traceTerminationCandidates button")).toHaveText(["mgmt0"]);
+});
+
+test("the search that travels with a decision is the one that produced the offer", async ({ page }) => {
+  await page.route("**/trace-workspace/candidates/**", async (route) => {
+    const search = new URL(route.request().url()).searchParams.get("search") || "";
+    if (search === "zz") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          candidates: [{ id: 77, name: "zz-target", display: "zz-target" }],
+          shown: 1,
+          total: 1,
+        }),
+      });
+      return;
+    }
+    // The unfiltered page is slow and does not contain the target, exactly as on a real device.
+    await new Promise((done) => setTimeout(done, 3000));
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, candidates: [], shown: 0, total: 21 }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  await page.locator("[data-trace-picker]").click();
+  await page.locator("#traceTerminationSearch").fill("zz");
+  await expect(page.locator("#traceTerminationCandidates button")).toHaveText(["zz-target"]);
+
+  // Clearing the box starts a slower unfiltered request; the offer on screen is still the zz one.
+  await page.locator("#traceTerminationSearch").fill("");
+  await page.locator("#traceTerminationCandidates button").first().click();
+
+  await expect(page.locator("#traceTerminationObjectId")).toHaveValue("77");
+  await expect(page.locator("#traceTerminationOfferedSearch")).toHaveValue("zz");
 });

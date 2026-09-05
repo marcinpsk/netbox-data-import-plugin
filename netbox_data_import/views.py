@@ -1615,7 +1615,8 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
     from .jobs import ImportJobRunner
 
     if keep_preview:
-        idempotency_key = fingerprint_of({"plan": plan_data.get("revision", ""), "selection": sorted(selection)})
+        # `ImportPlan.revision` never advances, so the plan's own content is what tells two apart.
+        idempotency_key = fingerprint_of({"plan": plan_data, "selection": sorted(selection)})
     else:
         idempotency_key = request.session.get("import_idempotency_key") or uuid.uuid4().hex
         request.session["import_idempotency_key"] = idempotency_key
@@ -3772,6 +3773,10 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
             messages.warning(request, "No import preview in progress. Start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         profile, document, workspace, _planning_context = loaded
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            messages.warning(request, stale_reason)
+            return redirect(next_url)
         if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
             messages.warning(request, "Recalculate and review the saved preview changes before importing.")
             return redirect(next_url)
@@ -3842,6 +3847,9 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
             messages.warning(request, "No import preview in progress. Start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         profile, document, workspace, planning_context = loaded
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            return _preview_action_error(request, next_url, stale_reason, status=409)
         field_key = request.POST.get("field_key", "").strip()
         object_type = request.POST.get("object_type", "").strip()
         try:

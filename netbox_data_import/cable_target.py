@@ -54,6 +54,7 @@ _CONFLICT_CODES = frozenset(
         "cable.termination_occupied",
         "cable.multi_termination_conflict",
         "cable.planned_termination_conflict",
+        "cable.resolved_segment_conflict",
     }
 )
 
@@ -207,6 +208,7 @@ class _TraceAnalysis:
     proven: dict = field(default_factory=dict)
     policies: dict = field(default_factory=dict)
     terminations: dict = field(default_factory=dict)
+    topology_read: bool = False
     logical_cable: Any = None
     blocked: bool = False
     invalid: bool = False
@@ -883,6 +885,8 @@ class _CableBatch:
         """
         pending = self._writing()
         for analysis in pending:
+            # Only these analyses look at the live topology, so only they may report what is there.
+            analysis.topology_read = True
             for segment in analysis.segments:
                 candidate = self._occupied.get(segment.left.key)
                 proven = candidate if candidate is not None and candidate.satisfies(segment) else None
@@ -1168,6 +1172,7 @@ class _CableBatch:
             },
             "segments": segments,
             "logical_cable": self._logical_cable_display(analysis),
+            "topology_known": analysis.topology_read,
             # A unit with no changes proposes nothing, so the panel must not offer to delete one.
             "deletes_logical_cable": writes and analysis.logical_cable is not None,
             "terminations": list(analysis.terminations.values()),
@@ -1194,8 +1199,17 @@ class _CableBatch:
         """Return the one Logical Cable this trace would delete, as far as the actor may see it."""
         if analysis.logical_cable is None:
             return None
-        disclosure, _identities = self._cable_diagnostic_disclosure(analysis.logical_cable.cable)
-        return {"visible": disclosure["cable_visible"], "display": disclosure.get("cable", "")}
+        cable = analysis.logical_cable.cable
+        disclosure, _identities = self._cable_diagnostic_disclosure(cable)
+        if not disclosure["cable_visible"]:
+            return {"visible": False, "display": "", "description": "", "tags": []}
+        # Section 6.3 reviews what the deletion removes, which the deletion payload also carries.
+        return {
+            "visible": True,
+            "display": disclosure["cable"],
+            "description": cable.description,
+            "tags": sorted(cable.tags.values_list("name", flat=True)),
+        }
 
     def _changes(self, analysis: _TraceAnalysis) -> tuple[PlannedChange, ...]:
         """Return the deletion and the creations one actionable trace performs, in that order."""

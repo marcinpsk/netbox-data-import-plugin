@@ -117,11 +117,19 @@
               {% if trace.logical_cable %}
                 {% if trace.logical_cable.visible %}
                   <div>Logical Cable <strong>{{ trace.logical_cable.display }}</strong></div>
+                  {% if trace.logical_cable.description %}
+                    <div class="text-secondary">{{ trace.logical_cable.description }}</div>
+                  {% endif %}
+                  {% for tag in trace.logical_cable.tags %}
+                    <span class="badge ndi-trace-status-reuse">{{ tag }}</span>
+                  {% endfor %}
                 {% else %}
                   <div class="text-secondary">A Logical Cable exists that you may not view.</div>
                 {% endif %}
-              {% else %}
+              {% elif trace.topology_known %}
                 <div class="text-secondary">No direct Logical Cable joins these endpoints.</div>
+              {% else %}
+                <div class="text-secondary">Planning stopped before it read the current topology.</div>
               {% endif %}
               <hr>
               <div class="text-secondary small mb-1">Terminations</div>

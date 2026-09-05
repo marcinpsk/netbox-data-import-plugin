@@ -232,6 +232,21 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         statuses = [segment["status"] for segment in response.context["traces"][0].segments]
         self.assertIn("reuse existing", statuses)
 
+    def test_a_stale_form_post_is_refused_by_the_sync_command(self):
+        """Two tabs share one session, so a command from the older one must not queue its plan."""
+        from core.models import Job
+
+        response = self.open_workspace(patched_path())
+        chosen = response.context["traces"][0]
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": chosen.identity, "preview_revision": "an-older-tab"},
+        )
+
+        self.assertEqual(refused.status_code, 302)
+        self.assertFalse(Job.objects.filter(data__job_type="netbox_data_import.import").exists())
+
     def test_the_workspace_refuses_a_session_that_holds_no_preview(self):
         """Without a materialized preview there is nothing to review, so it sends the operator back."""
         self.client.force_login(self.actor)
@@ -398,6 +413,23 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(TerminationResolution.objects.filter(field_key=elsewhere).exists())
 
+    def test_a_stale_form_post_is_refused_by_the_resolve_command(self):
+        """A decision taken against a preview that has moved on is not the decision it looks like."""
+        field_key = self.open_blocked_workspace()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": "dcim.interface",
+                "object_id": self.eth0.pk,
+                "preview_revision": "an-older-tab",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
     def test_a_candidate_outside_the_eligible_set_is_refused(self):
         """The picker is the only legal source of a choice, so the endpoint rechecks it."""
         field_key = self.open_blocked_workspace()
@@ -563,3 +595,30 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         self.assertTrue(Cable.objects.filter(terminations__termination_id=self.eth0.pk).exists())
         self.assertTrue(Cable.objects.filter(terminations__termination_id=second.pk).exists())
         self.assertTrue(Cable.objects.filter(terminations__termination_id=other.pk).exists())
+
+    def test_a_replanned_trace_is_executed_again_rather_than_reported_done(self):
+        """One trace identity spans two workbooks, so the execution key cannot be the selection alone."""
+        self.client.force_login(self.actor)
+        for blocks in (direct_path(), patched_path()):
+            upload = BytesIO(trace_workbook_bytes(path_blocks=(blocks,)))
+            upload.name = "traces.xlsx"
+            self.client.post(
+                reverse("plugins:netbox_data_import:import_setup"),
+                {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+                follow=True,
+            )
+            workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+            chosen = workspace.context["traces"][0]
+            self.client.post(
+                reverse("plugins:netbox_data_import:trace_sync"),
+                {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            )
+            self.run_rq_jobs()
+
+        # The patched path replaces the direct Cable with its three physical segments.
+        self.assertFalse(
+            Cable.objects.filter(terminations__termination_id=self.eth0.pk)
+            .filter(terminations__termination_id=self.eth1.pk)
+            .exists()
+        )
+        self.assertTrue(Cable.objects.filter(terminations__termination_id=self.panel_1_rear.pk).exists())

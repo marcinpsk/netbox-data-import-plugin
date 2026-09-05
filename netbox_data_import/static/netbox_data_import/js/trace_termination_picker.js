@@ -35,7 +35,7 @@
     submit.disabled = true;
   }
 
-  function renderCandidates(payload) {
+  function renderCandidates(payload, offered) {
     list.replaceChildren();
     clearSelection();
     (payload.candidates || []).forEach(function (candidate) {
@@ -44,6 +44,8 @@
       item.className = 'list-group-item list-group-item-action';
       item.textContent = candidate.display || candidate.name;
       item.dataset.candidateId = candidate.id;
+      // The offer belongs to the query that produced it, not to whatever the box says on click.
+      item.dataset.offeredSearch = offered;
       item.addEventListener('click', function () {
         Array.prototype.forEach.call(list.children, function (row) {
           row.classList.remove('active');
@@ -52,7 +54,7 @@
         objectId.value = candidate.id;
         objectType.value = kindLabels[activeKind] || '';
         // The write rechecks the offer, so it needs the search that produced it.
-        offeredSearch.value = search.value;
+        offeredSearch.value = item.dataset.offeredSearch;
         submit.disabled = !objectType.value;
       });
       list.appendChild(item);
@@ -63,6 +65,7 @@
 
   function load() {
     var request = ++pending;
+    var asked = search.value;
     var url = candidatesUrl + '?field_key=' + encodeURIComponent(fieldKey.value)
       + '&search=' + encodeURIComponent(search.value)
       + '&preview_revision=' + encodeURIComponent(previewRevision.value);
@@ -83,7 +86,7 @@
           return;
         }
         show(error, false);
-        renderCandidates(result.payload);
+        renderCandidates(result.payload, asked);
       })
       .catch(function () {
         if (request !== pending) return;
