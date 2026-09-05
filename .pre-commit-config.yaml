@@ -70,7 +70,7 @@ repos:
         entry: python3 scripts/check_spec_diagnostics.py
         language: system
         pass_filenames: false
-        files: ^(netbox_data_import/(cable_target|models|trace_workbook)\.py|docs/spec/target-neutral-import-architecture\.md|scripts/check_spec_diagnostics\.py)$
+        files: ^(netbox_data_import/(cable_target|models|target_modules|trace_workbook)\.py|docs/spec/target-neutral-import-architecture\.md|scripts/check_spec_diagnostics\.py)$
 
       - id: gen-compatibility
         name: Compatibility metadata follows the version and the test matrix

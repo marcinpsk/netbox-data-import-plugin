@@ -3,9 +3,9 @@
 """Fail when a planner emits a diagnostic code the normative spec tables do not list.
 
 The tables state the conditions and dispositions as normative, so a condition the planner enforces
-without a row makes the spec wrong rather than incomplete. Two such rows were missing when this
-check was written. Codes are read as string constants, because a code can reach its diagnostic
-through a conditional expression or a keyword argument rather than a literal first argument.
+without a row makes the spec wrong rather than incomplete. Codes are read as string constants,
+because a code can reach its diagnostic through a conditional expression or a keyword argument
+rather than a literal first argument.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "netbox_data_import"
 SPEC = ROOT / "docs" / "spec" / "target-neutral-import-architecture.md"
-EMITTING_MODULES = ("cable_target.py", "models.py", "trace_workbook.py")
-CODE = re.compile(r"(cable|trace)\.[a-z_]+")
+EMITTING_MODULES = ("cable_target.py", "models.py", "target_modules.py", "trace_workbook.py")
+CODE = re.compile(r"(cable|profile|trace)\.[a-z_]+")
 TABLE_HEADER = re.compile(r"^\|\s*Condition\s*\|\s*Diagnostic code\s*\|")
-TABLE_CODE = re.compile(r"`((?:cable|trace)\.[a-z_]+)`")
+TABLE_CODE = re.compile(r"`((?:cable|profile|trace)\.[a-z_]+)`")
 
 
 def emitted_codes() -> set[str]:

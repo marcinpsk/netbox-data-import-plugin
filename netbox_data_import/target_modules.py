@@ -25,7 +25,13 @@ from django.core.exceptions import ValidationError
 from . import ip_assignment
 from .cable_target import CableModule
 from .catalog import OutputKind
-from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
+from .contact_resolution import (
+    ContactResolutionRequired,
+    ContactReview,
+    ContactSelection,
+    DanglingProfileReference,
+    PrimaryContactResolver,
+)
 from .device_field_review import DeviceFieldReviewer
 from .device_identity import DeviceTypeIdentityResolver
 from .netbox_reader import PlanningTargetUnavailable
@@ -1582,6 +1588,8 @@ class DeviceModule:
             contact = batch.contact_review(row, match.device)
         except ObjectPermissionDenied as exc:
             problem(Disposition.INVALID, "device.contact_permission", {"message": str(exc)})
+        except DanglingProfileReference as exc:
+            problem(Disposition.BLOCKED, "profile.dangling_reference", {"message": "; ".join(exc.messages)})
         except ContactResolutionRequired as exc:
             problem(
                 Disposition.INVALID,

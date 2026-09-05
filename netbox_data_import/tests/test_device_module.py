@@ -1751,6 +1751,29 @@ class DeviceModuleContactTest(DeviceModulePlanTestBase):
         self.assertEqual(units[0].changes[0].operation, "create")
         self.assertEqual(units[0].changes[0].payload["contact"]["values"]["email"], "owner@example.invalid")
 
+    def test_a_dangling_profile_contact_role_blocks_the_row(self):
+        """Section 3.3 blocks a dangling natural key, and the legacy contact seeds a candidate that hid it."""
+        self.contact_role.delete()
+
+        units = self._plan(self._row(2, "D-1", "srv-01", primary_contact="owner@example.invalid"))
+
+        self.assertEqual(units[0].disposition, Disposition.BLOCKED, units[0].diagnostics)
+        self.assertEqual(units[0].diagnostics[0].code, "profile.dangling_reference")
+        self.assertIn("Primary Contact", units[0].diagnostics[0].display["message"])
+        self.assertEqual(units[0].changes, ())
+
+    def test_a_dangling_role_leaves_a_row_that_names_no_contact_plannable(self):
+        """Section 3.3 blocks the affected units and does not fail the batch."""
+        self.contact_role.delete()
+
+        units = self._plan(
+            self._row(2, "D-1", "srv-01", primary_contact="owner@example.invalid"),
+            self._row(3, "D-2", "srv-02"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.BLOCKED, units[0].diagnostics)
+        self.assertEqual(units[1].disposition, Disposition.ACTIONABLE, units[1].diagnostics)
+
     def test_a_row_that_needs_a_contact_decision_is_refused(self):
         """Guessing which candidate column supplies a Contact field is the operator's call."""
         row = self._row(2, "D-1", "srv-01")
