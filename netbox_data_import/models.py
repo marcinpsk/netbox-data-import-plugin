@@ -12,6 +12,7 @@ from django.utils import timezone
 from core.choices import JobStatusChoices
 from core.models import Job
 from netbox.models import NetBoxModel
+from netbox.models.features import JobsMixin
 from utilities.querysets import RestrictedQuerySet
 
 from .adapters import (
@@ -1102,8 +1103,12 @@ class ManufacturerMapping(PolicySectionModel):
         return f"{self.source_make} → {self.netbox_manufacturer_slug}"
 
 
-class InferenceBackend(NetBoxModel):
-    """One named Inference Backend definition; the enabled row is the active backend (section 8.2)."""
+class InferenceBackend(JobsMixin, NetBoxModel):
+    """One named Inference Backend definition; the enabled row is the active backend (section 8.2).
+
+    JobsMixin attaches the connection test to the row, so its typed result is read where the
+    configuration lives.
+    """
 
     ADAPTER_TYPES = (("openai_compatible", "OpenAI compatible"),)
     AUTHENTICATION_METHODS = (("bearer", "Bearer token"),)

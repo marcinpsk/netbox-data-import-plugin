@@ -52,6 +52,17 @@ urlpatterns = [
         views.CableClassMappingDeleteView.as_view(),
         name="cableclassmapping_delete",
     ),
+    # AI backends (Inference Backend, specification 8.2)
+    path("ai-backends/", views.InferenceBackendListView.as_view(), name="inferencebackend_list"),
+    path("ai-backends/add/", views.InferenceBackendEditView.as_view(), name="inferencebackend_add"),
+    path("ai-backends/<int:pk>/", views.InferenceBackendView.as_view(), name="inferencebackend"),
+    path("ai-backends/<int:pk>/edit/", views.InferenceBackendEditView.as_view(), name="inferencebackend_edit"),
+    path("ai-backends/<int:pk>/delete/", views.InferenceBackendDeleteView.as_view(), name="inferencebackend_delete"),
+    path(
+        "ai-backends/<int:pk>/connection-test/",
+        views.InferenceBackendConnectionTestView.as_view(),
+        name="inferencebackend_connection_test",
+    ),
     # Device Type Mappings
     path(
         "profiles/<int:profile_pk>/device-types/add/",

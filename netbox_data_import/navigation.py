@@ -30,6 +30,18 @@ menu = PluginMenu(
             "Configuration",
             (
                 PluginMenuItem(
+                    link="plugins:netbox_data_import:inferencebackend_list",
+                    link_text="AI backends",
+                    permissions=("netbox_data_import.view_inferencebackend",),
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_data_import:inferencebackend_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
                     link="plugins:netbox_data_import:importprofile_list",
                     link_text="Import Profiles",
                     buttons=(

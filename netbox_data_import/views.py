@@ -25,6 +25,7 @@ from utilities.views import ConditionalLoginRequiredMixin
 from .filters import ImportProfileFilterSet
 from .forms import (
     CableClassMappingForm,
+    InferenceBackendForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
@@ -47,6 +48,7 @@ from .values import (
 from . import __version__ as _plugin_version
 from .models import (
     CableClassMapping,
+    InferenceBackend,
     locked_profile_policy,
     locked_resolution_policy,
     ClassRoleMapping,
@@ -68,6 +70,7 @@ from .models import (
 )
 from .tables import (
     CableClassMappingTable,
+    InferenceBackendTable,
     ClassRoleMappingTable,
     ColumnMappingTable,
     ColumnTransformRuleTable,
@@ -482,6 +485,51 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
     """Delete an ImportProfile and all its child mappings."""
 
     queryset = ImportProfile.objects.all()
+
+
+class InferenceBackendListView(generic.ObjectListView):
+    """List the configured AI backends."""
+
+    queryset = InferenceBackend.objects.all()
+    table = InferenceBackendTable
+
+
+class InferenceBackendView(generic.ObjectView):
+    """Detail view for one AI backend."""
+
+    queryset = InferenceBackend.objects.all()
+
+
+class InferenceBackendEditView(generic.ObjectEditView):
+    """Create or edit one AI backend."""
+
+    queryset = InferenceBackend.objects.all()
+    form = InferenceBackendForm
+
+
+class InferenceBackendDeleteView(generic.ObjectDeleteView):
+    """Delete one AI backend."""
+
+    queryset = InferenceBackend.objects.all()
+
+
+class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
+    """Queue the connection test. Specification 13.1 authorizes it with this one permission."""
+
+    permission_required = "netbox_data_import.change_inferencebackend"
+
+    def post(self, request, pk):
+        """Enqueue the worker Job, so no web process ever resolves a credential."""
+        from .jobs import InferenceBackendConnectionTestJob
+
+        backend = get_object_or_404(InferenceBackend, pk=pk)
+        job = InferenceBackendConnectionTestJob.enqueue(
+            name=InferenceBackendConnectionTestJob.Meta.name,
+            instance=backend,
+            user=request.user,
+        )
+        messages.success(request, f"Connection test queued as job {job.pk}.")
+        return redirect(backend.get_absolute_url())
 
 
 class ImportProfileBulkEditView(generic.BulkEditView):

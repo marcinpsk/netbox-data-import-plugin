@@ -149,4 +149,22 @@ class SourceDocumentRetentionJob(JobRunner):
         return self.purge()
 
 
-__all__ = ("ImportJobRunner", "SourceDocumentRetentionJob")
+class InferenceBackendConnectionTestJob(JobRunner):
+    """Resolve the active Inference Backend's credential on the worker (specification 8.6)."""
+
+    job_type = "netbox_data_import.inference_connection_test"
+
+    class Meta:
+        name = "AI backend connection test"
+
+    def run(self, *args, **kwargs):
+        """Run one connection test and record its typed category as job data."""
+        from .inference_connection_test import run_connection_test
+
+        result = run_connection_test()
+        self.job.data = {**(self.job.data or {}), **result.as_dict()}
+        self.job.save(update_fields=["data"])
+        return result.category
+
+
+__all__ = ("ImportJobRunner", "InferenceBackendConnectionTestJob", "SourceDocumentRetentionJob")
