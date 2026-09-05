@@ -197,3 +197,64 @@ test("the search that travels with a decision is the one that produced the offer
   await expect(page.locator("#traceTerminationObjectId")).toHaveValue("77");
   await expect(page.locator("#traceTerminationOfferedSearch")).toHaveValue("zz");
 });
+
+test("a refused lookup drops the candidate the previous search offered", async ({ page }) => {
+  await page.route("**/trace-workspace/candidates/**", async (route) => {
+    const search = new URL(route.request().url()).searchParams.get("search") || "";
+    if (search === "broken") {
+      await route.fulfill({
+        status: 400,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: false, error: "That termination cannot be resolved here." }),
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, candidates: [{ id: 5, name: "eth0", display: "eth0" }], shown: 1, total: 1 }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  await page.locator("[data-trace-picker]").click();
+  await page.locator("#traceTerminationCandidates button").first().click();
+  await expect(page.locator("#traceTerminationSubmit")).toBeEnabled();
+
+  await page.locator("#traceTerminationSearch").fill("broken");
+
+  // The offer is off the screen, so nothing is left to save.
+  await expect(page.locator("#traceTerminationError")).toHaveText("That termination cannot be resolved here.");
+  await expect(page.locator("#traceTerminationSubmit")).toBeDisabled();
+  await expect(page.locator("#traceTerminationObjectId")).toHaveValue("");
+  await expect(page.locator("#traceTerminationObjectType")).toHaveValue("");
+  await expect(page.locator("#traceTerminationOfferedSearch")).toHaveValue("");
+});
+
+test("a lookup that never answers drops the offer on screen", async ({ page }) => {
+  await page.route("**/trace-workspace/candidates/**", async (route) => {
+    const search = new URL(route.request().url()).searchParams.get("search") || "";
+    if (search === "gone") {
+      await route.abort("failed");
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, candidates: [{ id: 5, name: "eth0", display: "eth0" }], shown: 1, total: 4 }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  await page.locator("[data-trace-picker]").click();
+  await page.locator("#traceTerminationCandidates button").first().click();
+  await expect(page.locator("#traceTerminationSubmit")).toBeEnabled();
+
+  await page.locator("#traceTerminationSearch").fill("gone");
+
+  await expect(page.locator("#traceTerminationError")).toHaveText("The candidates could not be read.");
+  await expect(page.locator("#traceTerminationCandidates button")).toHaveCount(0);
+  await expect(page.locator("#traceTerminationCount")).toBeHidden();
+  await expect(page.locator("#traceTerminationSubmit")).toBeDisabled();
+  await expect(page.locator("#traceTerminationObjectId")).toHaveValue("");
+});
