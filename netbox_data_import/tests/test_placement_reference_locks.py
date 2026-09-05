@@ -43,15 +43,46 @@ def _loads_by_primary_key(call) -> bool:
     )
 
 
-def _statement_locks(statement) -> bool:
-    """Return whether the statement holding a load also takes the row lock."""
-    return any(isinstance(node, ast.Attribute) and node.attr == "select_for_update" for node in ast.walk(statement))
+def _parents_of(tree) -> dict:
+    """Return each node's parent, which an expression needs to find the rest of its own chain."""
+    return {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _chain_root(call, parents):
+    """Return the outermost expression of the one queryset chain a call belongs to."""
+    node: ast.AST = call
+    while True:
+        parent = parents.get(node)
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            node = parent
+        elif isinstance(parent, ast.Call) and parent.func is node:
+            node = parent
+        else:
+            return node
+
+
+def _chain_takes_lock(call, parents) -> bool:
+    """Return whether the queryset chain holding a load also takes the row lock.
+
+    Only the chain counts: a `select_for_update()` elsewhere in the same statement locks another
+    queryset, so it cannot clear this load.
+    """
+    node = _chain_root(call, parents)
+    while True:
+        if isinstance(node, ast.Attribute):
+            if node.attr == "select_for_update":
+                return True
+            node = node.value
+        elif isinstance(node, ast.Call):
+            node = node.func
+        else:
+            return False
 
 
 def _unlocked_loads(path: Path) -> list[str]:
     """Return one report line per primary-key load of a guarded model that takes no lock."""
     tree = ast.parse(path.read_text())
-    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    parents = _parents_of(tree)
     unlocked = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
@@ -61,10 +92,7 @@ def _unlocked_loads(path: Path) -> list[str]:
         model = _receiver_model(node.func.value)
         if model is None:
             continue
-        statement: ast.AST | None = node
-        while statement is not None and not isinstance(statement, ast.stmt):
-            statement = parents.get(statement)
-        if statement is None or not _statement_locks(statement):
+        if not _chain_takes_lock(node, parents):
             unlocked.append(f"{path.name}:{node.lineno}: {model} loaded by primary key without a lock")
     return unlocked
 
@@ -92,4 +120,20 @@ class PlacementReferencesAreLoadedThroughOneLockedSeamTest(SimpleTestCase):
         assert isinstance(call.func, ast.Attribute)
 
         self.assertEqual(_receiver_model(call.func.value), "Rack")
-        self.assertFalse(_statement_locks(tree.body[0]))
+        self.assertFalse(_chain_takes_lock(call, _parents_of(tree)))
+
+    def test_the_guard_reports_a_load_beside_an_unrelated_lock(self):
+        """A lock elsewhere in the statement locks another queryset, so it cannot clear this one."""
+        source = "rack, cable = Rack.objects.filter(pk=rack_id).first(), Cable.objects.select_for_update().first()\n"
+        tree = ast.parse(source)
+        call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and _loads_by_primary_key(node))
+
+        self.assertFalse(_chain_takes_lock(call, _parents_of(tree)))
+
+    def test_the_guard_accepts_a_lock_taken_before_the_load(self):
+        """`select_for_update()` may come first in the chain, and it still locks the rows loaded."""
+        source = 'rack = Rack.objects.select_for_update(of=("self",)).filter(pk=rack_id).first()\n'
+        tree = ast.parse(source)
+        call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and _loads_by_primary_key(node))
+
+        self.assertTrue(_chain_takes_lock(call, _parents_of(tree)))
