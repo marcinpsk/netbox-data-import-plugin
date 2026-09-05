@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
+from .cable_target import UNRESOLVED
 from .import_engine import ImportEngine
 from .models import ImportProfile, TerminationResolution, locked_profile_policy
 from .object_permissions import save_permission_scoped_object
@@ -373,6 +374,74 @@ def _device_placement_differs(device, source_location_id, rack_name, position, f
     )
 
 
+@dataclass(frozen=True)
+class TraceAction:
+    """One review command, always visible, carrying its reason when it cannot run."""
+
+    key: str
+    label: str
+    enabled: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class TraceWorkspaceUnit:
+    """One Source Trace as the review workspace shows it."""
+
+    identity: str
+    trace_identity: str
+    disposition: str
+    name: str
+    row_number: int | None
+    sheet: str
+    endpoints: dict[str, str]
+    segments: list[dict[str, Any]]
+    logical_cable: dict[str, Any] | None
+    terminations: list[dict[str, Any]]
+    findings: list[dict[str, str]]
+    actions: tuple[TraceAction, ...]
+
+    @property
+    def unresolved_terminations(self) -> list[dict[str, Any]]:
+        """Return the terminations still waiting for a decision."""
+        return [item for item in self.terminations if item["state"] == UNRESOLVED]
+
+    @classmethod
+    def from_unit(cls, unit: SynchronizationUnit) -> TraceWorkspaceUnit:
+        """Build the workspace entry one trace unit states, without recomputing its plan."""
+        display = unit.to_dict()["display"]
+        workspace = dict(display.get("trace") or {})
+        findings = [
+            {"code": item.code, "message": _diagnostic_message(item), "severity": item.severity}
+            for item in unit.diagnostics
+        ]
+        return cls(
+            identity=unit.identity,
+            trace_identity=str(workspace.get("identity") or ""),
+            disposition=unit.disposition,
+            name=str(display.get("name") or ""),
+            row_number=display.get("row_number"),
+            sheet=str(display.get("sheet") or ""),
+            endpoints=dict(workspace.get("endpoints") or {}),
+            segments=[dict(segment) for segment in workspace.get("segments") or ()],
+            logical_cable=workspace.get("logical_cable"),
+            terminations=[dict(item) for item in workspace.get("terminations") or ()],
+            findings=findings,
+            actions=cls._actions(unit, findings, str(display.get("detail") or "")),
+        )
+
+    @staticmethod
+    def _actions(unit: SynchronizationUnit, findings: list[dict[str, str]], detail: str) -> tuple[TraceAction, ...]:
+        """Return every review command, each stating why it cannot run when it cannot."""
+        blocking = next((item["message"] for item in findings if item["severity"] == Severity.ERROR), "")
+        if unit.disposition == Disposition.ACTIONABLE:
+            sync = TraceAction(key="sync", label="Sync with dependencies", enabled=True)
+        else:
+            reason = blocking or detail or f"This trace is {unit.disposition}."
+            sync = TraceAction(key="sync", label="Sync with dependencies", enabled=False, reason=reason)
+        return (sync,)
+
+
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
@@ -407,6 +476,35 @@ class ReviewWorkspace:
     def has_errors(self) -> bool:
         """Return whether any unit cannot execute."""
         return any(unit.action == "error" for unit in self.units)
+
+    @property
+    def traces(self) -> tuple[TraceWorkspaceUnit, ...]:
+        """Return one workspace entry per Source Trace, in plan order."""
+        return tuple(
+            TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if unit.display.get("trace") is not None
+        )
+
+    @property
+    def trace_summary(self) -> dict[str, int]:
+        """Return the summary strip: what the reviewer still has to work through."""
+        traces = self.traces
+        summary = {
+            "traces": len(traces),
+            "unresolved_terminations": 0,
+            "resolved_terminations": 0,
+        }
+        for disposition in (
+            Disposition.ACTIONABLE,
+            Disposition.BLOCKED,
+            Disposition.INVALID,
+            Disposition.NO_OP,
+        ):
+            summary[disposition] = sum(1 for trace in traces if trace.disposition == disposition)
+        for trace in traces:
+            for termination in trace.terminations:
+                key = "unresolved_terminations" if termination["state"] == UNRESOLVED else "resolved_terminations"
+                summary[key] += 1
+        return summary
 
     @property
     def rack_groups(self) -> dict:
