@@ -1422,6 +1422,43 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
         self.assertEqual(workspace["logical_cable"]["description"], "Temporary logical path")
         self.assertEqual(list(workspace["logical_cable"]["tags"]), ["Trace Review Tag"])
 
+    def test_an_ambiguous_mapped_peer_offers_its_own_picker(self):
+        """A pass-through NetBox maps two ways is an operator decision, so the workspace asks it."""
+        self.rebuild_panel("PANEL-1", fronts=2)
+
+        unit = self.unit(same_rear_port_path())
+        workspace = self.workspace(unit)
+
+        self.assertIn("cable.ambiguous_mapped_peer", self.codes(unit))
+        peer_key = termination_field_key(device="PANEL-1", cards="", port="R1", kind="rear_port", role=MAPPED_PEER_ROLE)
+        peer = next(item for item in workspace["terminations"] if item["field_key"] == peer_key)
+        self.assertEqual(peer["state"], "unresolved")
+        self.assertTrue(peer["selectable"])
+        # The picker offers the ports on the far side of the panel, which are front ports.
+        self.assertEqual(peer["kind"], "front_port")
+
+    def test_a_chosen_mapped_peer_states_that_an_operator_chose_it(self):
+        """The badge separates a decision from a match here too."""
+        _panel, fronts, rear = self.rebuild_panel("PANEL-1", fronts=2)
+        TerminationResolution.objects.create(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=termination_field_key(
+                device="PANEL-1", cards="", port="R1", kind="rear_port", role=MAPPED_PEER_ROLE
+            ),
+            selected_object_type=ObjectType.objects.get_for_model(FrontPort),
+            selected_object_id=fronts[0].pk,
+            selected_display_name=str(fronts[0]),
+        )
+
+        workspace = self.workspace(self.unit(same_rear_port_path()))
+
+        peer_key = termination_field_key(device="PANEL-1", cards="", port="R1", kind="rear_port", role=MAPPED_PEER_ROLE)
+        peer = next(item for item in workspace["terminations"] if item["field_key"] == peer_key)
+        self.assertEqual(peer["state"], "manually resolved")
+        self.assertEqual(peer["selected"], str(fronts[0]))
+        self.assertEqual(rear.name, "R1")
+
     def test_the_source_evidence_states_both_endpoints_and_every_segment_in_order(self):
         """The source panel restates what the workbook said, in the order it said it."""
         workspace = self.workspace(self.unit(patched_path()))
@@ -1448,17 +1485,29 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
             [(segment["left"], segment["right"]) for segment in workspace["segments"]],
             [("eth0", "F1"), ("R1", "R1"), ("F1", "eth1")],
         )
-        self.assertEqual([segment["pass_through"] for segment in workspace["segments"]], [False, False, False])
+        self.assertEqual([segment["substituted"] for segment in workspace["segments"]], [False, False, False])
 
-    def test_a_pass_through_claim_names_the_port_it_substituted(self):
-        """A path that enters and leaves one panel implies a claim the source never stated."""
+    def test_every_segment_that_re_enters_a_panel_states_its_implied_claim(self):
+        """Section 10.2: the source panel shows the ordered evidence with its Pass-Through Claims."""
+        workspace = self.workspace(self.unit(patched_path()))
+
+        self.assertEqual(
+            [segment["pass_through"] for segment in workspace["segments"]],
+            [False, True, True],
+        )
+
+    def test_a_pass_through_claim_names_the_port_planning_entered_through(self):
+        """A claim planning had to substitute names the port, because the source never stated it."""
         workspace = self.workspace(self.unit(same_rear_port_path()))
 
-        substituted = [segment for segment in workspace["segments"] if segment["pass_through"]]
-        self.assertEqual([segment["index"] for segment in substituted], [1])
-        self.assertEqual(substituted[0]["source_left"], "PANEL-1 R1")
+        claims = [segment for segment in workspace["segments"] if segment["pass_through"]]
+        self.assertEqual([segment["index"] for segment in claims], [1, 2])
+        substituted = claims[0]
+        self.assertEqual(substituted["source_left"], "PANEL-1 R1")
         # The source re-entered the rear port it left, so planning claimed its mapped front port.
-        self.assertEqual(substituted[0]["left"], "F1")
+        self.assertEqual(substituted["left"], "F1")
+        self.assertTrue(substituted["substituted"])
+        self.assertFalse(claims[1]["substituted"])
 
 
 class TraceWizardRenderTest(CableTopologyMixin, TestCase):

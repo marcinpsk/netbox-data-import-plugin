@@ -63,10 +63,38 @@
       <div class="text-secondary small">Terminations open</div>
       <div class="h2 mb-0">{{ summary.unresolved_terminations }}</div>
     </div>
+    <div>
+      <div class="text-secondary small">Saved decisions</div>
+      <div class="h2 mb-0">{{ summary.saved_decisions }}</div>
+    </div>
+    <div>
+      <div class="text-secondary small">Preview</div>
+      <div class="h2 mb-0">{{ summary.preview_state }}</div>
+    </div>
   </div>
 </div>
 
-{% for trace in traces %}
+<div class="row g-3">
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-header">Source Traces</div>
+      <div class="list-group list-group-flush">
+        {% for trace in traces %}
+          <a class="list-group-item list-group-item-action{% if trace.identity == selected_trace.identity %} active{% endif %}"
+             href="?trace={{ trace.identity|urlencode }}">
+            <span class="badge ndi-trace-disposition-{{ trace.disposition }}">{{ trace.disposition }}</span>
+            <div>{{ trace.name }}</div>
+          </a>
+        {% empty %}
+          <div class="list-group-item text-secondary">This preview planned no Source Trace.</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  <div class="col-md-9">
+
+{% with trace=selected_trace %}
+{% if trace %}
   <div class="card mb-3" data-trace-identity="{{ trace.trace_identity }}">
     <div class="card-header d-flex align-items-center justify-content-between">
       <div>
@@ -210,9 +238,12 @@
       {% endif %}
     </div>
   </div>
-{% empty %}
+{% else %}
   <div class="alert alert-info">This preview planned no Source Trace.</div>
-{% endfor %}
+{% endif %}
+{% endwith %}
+  </div>
+</div>
 
 <div class="modal" id="traceTerminationPicker" tabindex="-1">
   <div class="modal-dialog modal-lg" role="document">

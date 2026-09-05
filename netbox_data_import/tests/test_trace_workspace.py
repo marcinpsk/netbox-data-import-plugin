@@ -163,6 +163,47 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertContains(response, "reuse existing", count=0, status_code=200)
         self.assertContains(response, "automatically resolved")
 
+    def test_the_list_shows_every_trace_but_the_panels_show_one(self):
+        """Section 10.2 is a trace list plus the three panels of the selected trace."""
+        Interface.objects.create(device=self.make_device("SEL-A"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("SEL-B"), name="eth0", type="1000base-t")
+        second = direct_path(
+            from_end=trace_termination("SEL-A", "", "eth0", "Port"),
+            to_end=trace_termination("SEL-B", "", "eth0", "Port"),
+        )
+
+        response = self.open_workspace(patched_path(), second)
+
+        self.assertEqual(len(response.context["traces"]), 2)
+        self.assertEqual(response.context["selected_trace"].endpoints["from"], "DEV-A eth0")
+        # Both traces are listed, and only the selected one contributes a proposed-topology panel.
+        self.assertContains(response, "SEL-A eth0")
+        self.assertContains(response, "Proposed physical topology", count=1)
+
+    def test_the_list_selects_the_trace_the_query_names(self):
+        """The operator moves through the list, so the page has to follow the one they picked."""
+        Interface.objects.create(device=self.make_device("SEL-C"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("SEL-D"), name="eth0", type="1000base-t")
+        second = direct_path(
+            from_end=trace_termination("SEL-C", "", "eth0", "Port"),
+            to_end=trace_termination("SEL-D", "", "eth0", "Port"),
+        )
+        self.open_workspace(patched_path(), second)
+        listing = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        wanted = next(t for t in listing.context["traces"] if t.endpoints["from"] == "SEL-C eth0")
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), {"trace": wanted.identity})
+
+        self.assertEqual(response.context["selected_trace"].identity, wanted.identity)
+
+    def test_the_summary_states_the_saved_decisions_and_the_preview_state(self):
+        """Section 10.2 names both, and neither can be read off the plan alone."""
+        response = self.open_workspace(patched_path())
+
+        self.assertEqual(response.context["summary"]["saved_decisions"], 0)
+        self.assertEqual(response.context["summary"]["preview_state"], "current")
+        self.assertContains(response, "current")
+
     def test_a_blocked_trace_renders_its_sync_action_disabled_with_its_reason(self):
         """An illegal action stays on screen, disabled, with the reason underneath."""
         Interface.objects.create(device=self.make_device("SRC-P"), name="eth0", type="1000base-t")

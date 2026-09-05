@@ -550,15 +550,29 @@ class _CableBatch:
         return termination
 
     @staticmethod
-    def _record_resolution(analysis: _TraceAnalysis, reference, state: str, termination, reason: str = "") -> None:
+    def _record_resolution(
+        analysis: _TraceAnalysis,
+        reference,
+        state: str,
+        termination,
+        reason: str = "",
+        role: str = TERMINATION_ROLE,
+    ) -> None:
         """Record how one Termination Reference was settled, for its badge and its picker."""
-        key = _field_key(reference)
+        key = _field_key(reference, role)
+        claimed = claimed_termination_kind(reference.port_class)
+        if role == MAPPED_PEER_ROLE:
+            # The picker offers the ports on the far side of the panel, which are the opposite kind.
+            kind = REAR_PORT_KIND if claimed == FRONT_PORT_KIND else FRONT_PORT_KIND
+            label = f"{_endpoint_label(reference)} (mapped peer)"
+        else:
+            kind, label = claimed, _endpoint_label(reference)
         analysis.terminations.setdefault(
             key,
             {
                 "field_key": key,
-                "label": _endpoint_label(reference),
-                "kind": claimed_termination_kind(reference.port_class),
+                "label": label,
+                "kind": kind,
                 "state": state,
                 "selected": "" if termination is None else termination.display,
                 "selectable": not reason,
@@ -764,7 +778,9 @@ class _CableBatch:
             )
             if selected in peers:
                 peer, mapping = peers[selected]
+                self._record_resolution(analysis, reference, MANUALLY_RESOLVED, peer, role=MAPPED_PEER_ROLE)
                 return self._substituted(analysis, reference, exit_end, peer, mapping)
+        self._record_resolution(analysis, reference, UNRESOLVED, None, role=MAPPED_PEER_ROLE)
         analysis.block(
             "cable.ambiguous_mapped_peer",
             {
@@ -1146,7 +1162,8 @@ class _CableBatch:
             if diagnostic.code in _CONFLICT_CODES
         }
         segments = []
-        for index, stated in enumerate(analysis.trace.segments):
+        stated_segments = list(analysis.trace.segments)
+        for index, stated in enumerate(stated_segments):
             planned = resolved.get(index)
             source_left, source_right = _endpoint_label(stated.left), _endpoint_label(stated.right)
             left = source_left if planned is None else planned.left.display
@@ -1159,8 +1176,10 @@ class _CableBatch:
                     "source_right": source_right,
                     "left": left,
                     "right": right,
-                    # A pass-through claim is implied, so the panel says where planning entered.
-                    "pass_through": self._entered_through_claim(planned, by_reference.get(stated.left.identity_key)),
+                    # A path that re-enters one panel implies a claim the source never states.
+                    "pass_through": index > 0 and same_device_and_cards(stated_segments[index - 1].right, stated.left),
+                    # Planning substituted the entry port only where the source re-used one port.
+                    "substituted": self._entered_through_claim(planned, by_reference.get(stated.left.identity_key)),
                     "status": self._segment_status(analysis, index, conflicted, planned, writes),
                 }
             )
