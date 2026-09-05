@@ -393,6 +393,64 @@ class ProfileVanishedBeforeTheCreateLockTest(TransactionTestCase):
         self.assertFalse(SourceResolution.objects.filter(source_id="CREATE-RACE-1").exists())
 
 
+class PreviewWriteVanishedProfileTest(TransactionTestCase):
+    """A preview write whose profile is deleted before its lock answers, rather than crashing."""
+
+    def setUp(self):
+        """Create the profile the request names and the operator who posts the write."""
+        self.profile = _build_profile("Vanished Preview Profile")
+        self.user = get_user_model().objects.create_superuser("vanish-preview", "v@example.invalid", "testpass")
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def _post_while_the_profile_vanishes(self, url_name, data):
+        """POST *data*, deleting the profile the moment the policy lock statement runs."""
+        from django.db import connection
+
+        deleted = []
+
+        def delete_the_profile_when_the_lock_runs(execute, sql, params, many, context):
+            # Stand in for a profile deleted between the view's own lookup and its policy lock.
+            if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
+                deleted.append(True)
+
+                def delete_it():
+                    ImportProfile.objects.get(pk=self.profile.pk).delete()
+
+                with run_on_separate_connection(delete_it):
+                    pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(delete_the_profile_when_the_lock_runs):
+            response = self.client.post(reverse(f"plugins:netbox_data_import:{url_name}"), data)
+        self.assertEqual(deleted, [True], "the policy lock statement never ran")
+        return response
+
+    def test_unignoring_a_device_answers_a_deleted_profile(self):
+        """`UnignoreDeviceView` takes the policy lock, so it owes the same answer its lookup gives."""
+        from netbox_data_import.models import IgnoredDevice
+
+        IgnoredDevice.objects.create(profile=self.profile, source_id="IGN-1", device_name="srv-1")
+
+        response = self._post_while_the_profile_vanishes(
+            "unignore_device",
+            {"profile_id": self.profile.pk, "source_id": "IGN-1"},
+        )
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        self.assertFalse(ImportProfile.objects.filter(pk=self.profile.pk).exists())
+
+    def test_a_quick_column_mapping_answers_a_deleted_profile(self):
+        """The direct-mapping branch replaces a row under the lock, so it owes the same answer."""
+        response = self._post_while_the_profile_vanishes(
+            "quick_add_column_mapping",
+            {"profile_id": self.profile.pk, "source_column": "Hostname", "target_field": "device_name"},
+        )
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        self.assertFalse(ColumnMapping.objects.filter(source_column="Hostname").exists())
+
+
 class ConcurrentPartialUpdateTest(TransactionTestCase):
     """A PATCH holds the row it read, so the lock alone does not stop it overwriting a newer field."""
 

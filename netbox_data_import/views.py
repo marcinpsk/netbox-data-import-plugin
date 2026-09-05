@@ -1809,7 +1809,7 @@ class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
 
 
 class _PermissionScopedWriteMixin:
-    """Mark preview writers and render their object-scope refusals in one place."""
+    """Mark preview writers and render the refusals their policy writes raise in one place."""
 
     def dispatch(self, request, *args, **kwargs):
         try:
@@ -1817,11 +1817,21 @@ class _PermissionScopedWriteMixin:
         except ObjectPermissionDenied as exc:
             # The permission names an object the caller may not be allowed to know exists.
             logger.warning("%s: write refused outside the caller's object scope: %s", type(self).__name__, exc)
-            error = "Permission denied: this action is outside your NetBox object permissions."
-            if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
-                return JsonResponse({"ok": False, "error": error}, status=403)
-            messages.error(request, error)
-            return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
+            return self._refusal(
+                request,
+                "Permission denied: this action is outside your NetBox object permissions.",
+                403,
+            )
+        except ImportProfile.DoesNotExist:
+            # Every policy write locks its profile, which can be deleted after the view looked it up.
+            return self._refusal(request, "The import profile is no longer available.", 404)
+
+    def _refusal(self, request, error, status):
+        """Render one refused write the way this caller asked for its answer."""
+        if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
+            return JsonResponse({"ok": False, "error": error}, status=status)
+        messages.error(request, error)
+        return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
 
 
 class IgnoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
@@ -2190,7 +2200,7 @@ def _placement_action_intent(request):
     )
 
 
-class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
+class IgnoreFieldDifferenceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Ignore one exact current field difference for a matched Device."""
 
     permission_required = "netbox_data_import.add_ignoredfielddifference"
@@ -3901,7 +3911,7 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
         return _saved_preview_action_response(request, next_url, saved_message)
 
 
-class MatchExistingDeviceView(PermissionRequiredMixin, View):
+class MatchExistingDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Link a source row to an existing NetBox device (by device ID).
 
     Saves a DeviceExistingMatch; on next preview re-run the row shows action='update'.
@@ -4206,7 +4216,7 @@ class QuickCreateDeviceRoleView(_PermissionScopedWriteMixin, _AjaxPermissionView
         )
 
 
-class AutoMatchDevicesView(PermissionRequiredMixin, View):
+class AutoMatchDevicesView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Run the Review Workspace device auto-match command."""
 
     permission_required = (
