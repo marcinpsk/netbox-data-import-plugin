@@ -3660,7 +3660,7 @@ class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequired
 
     def post(self, request):
         """Save the device type mapping and report the pending preview change."""
-        from django.utils.text import slugify
+        from .device_identity import default_identity_slugs
 
         next_url = reverse("plugins:netbox_data_import:import_preview")
         profile_id = _parse_posted_profile_id(request)
@@ -3688,10 +3688,12 @@ class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequired
                 request, next_url, "The requested Device Type action is not supported.", status=400
             )
 
+        # The importer derives both slugs the same way, so a default that differs maps to nothing.
+        default_mfg_slug, default_dt_slug = default_identity_slugs(source_make, source_model)
         if not netbox_mfg_slug:
-            netbox_mfg_slug = slugify(source_make)
+            netbox_mfg_slug = default_mfg_slug
         if not netbox_dt_slug:
-            netbox_dt_slug = slugify(source_model)
+            netbox_dt_slug = default_dt_slug
 
         try:
             mapping = _get_or_init(

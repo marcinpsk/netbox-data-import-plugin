@@ -1046,6 +1046,7 @@ class _CableBatch:
         """Return, per desired segment, the provenance of every Source Trace that states it."""
         sources: dict[str, list] = {}
         for analysis in self.analyses:
+            # Unlike _shared_deletes: a repaired trace reuses the Cable, so creation records it or nothing does.
             if analysis.invalid:
                 continue
             for segment in analysis.pending:

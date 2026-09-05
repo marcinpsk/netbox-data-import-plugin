@@ -786,11 +786,12 @@ class _DeviceBatch:
         ("asset_tag", "device.duplicate_asset_tag", True),
     )
 
-    def __init__(self, source_batch, rows, profile, netbox_reader):
+    def __init__(self, source_batch, rows, profile, netbox_reader, *, lock_plan_references: bool = False):
         from dcim.models import Device
 
         self.profile = profile
         self.reader = netbox_reader
+        self.lock_plan_references = lock_plan_references
         self.ignored = _ignored_source_ids(profile)
         self._identity = DeviceTypeIdentityResolver.for_profile(profile)
         self._reviewer = DeviceFieldReviewer.for_profile(profile)
@@ -870,12 +871,15 @@ class _DeviceBatch:
             model = " ".join((_source_text(row.get("model")) or "Unknown").split())
             type_keys.add(self._identity.resolve(make, model)[:2])
 
+        referenced_types = DeviceType.objects.select_related("manufacturer").filter(
+            manufacturer__slug__in={mfg_slug for mfg_slug, _dt_slug in type_keys},
+            slug__in={dt_slug for _mfg_slug, dt_slug in type_keys},
+        )
+        if self.lock_plan_references:
+            # u_height and is_full_depth decide placement here, and Device.full_clean() reads them again.
+            referenced_types = referenced_types.select_for_update(of=("self",)).order_by("pk")
         device_types = {
-            (device_type.manufacturer.slug, device_type.slug): device_type
-            for device_type in DeviceType.objects.select_related("manufacturer").filter(
-                manufacturer__slug__in={mfg_slug for mfg_slug, _dt_slug in type_keys},
-                slug__in={dt_slug for _mfg_slug, dt_slug in type_keys},
-            )
+            (device_type.manufacturer.slug, device_type.slug): device_type for device_type in referenced_types
         }
         role_slugs = {role_slug for role_slug in self._roles.values() if role_slug}
         roles = {role.slug: role for role in DeviceRole.objects.filter(slug__in=role_slugs)}
@@ -1329,14 +1333,12 @@ class DeviceModule:
         lock_plan_references: bool = False,
     ) -> list[SynchronizationUnit]:
         """Return one Synchronization Unit per device row, with the disposition its state earns."""
-        # Planned Change preconditions carry every target row this module depends on, so no read-only reference remains.
-        del lock_plan_references
         rows = self._device_rows(source_batch, profile)
         if not rows:
             return []
         if netbox_reader.site is None:
             raise PlanningTargetUnavailable("Device planning needs an import target site.")
-        batch = _DeviceBatch(source_batch, rows, profile, netbox_reader)
+        batch = _DeviceBatch(source_batch, rows, profile, netbox_reader, lock_plan_references=lock_plan_references)
         return [self._unit(row, batch) for row in rows]
 
     @staticmethod

@@ -319,6 +319,18 @@ class QuickResolveDeviceTypeValidationTest(TestCase):
     def _post(self, **overrides):
         return self.client.post(self.url, self._payload(**overrides))
 
+    def test_an_omitted_slug_defaults_to_the_slug_the_importer_derives(self):
+        """The mapping this action saves must name the Device Type the importer looks for."""
+        from netbox_data_import.device_identity import DeviceTypeIdentityResolver
+
+        response = self._post(netbox_mfg_slug="", netbox_dt_slug="")
+
+        self.assertRedirects(response, self.preview, fetch_redirect_response=False)
+        mapping = DeviceTypeMapping.objects.get(profile=self.profile)
+        self.assertEqual(mapping.netbox_device_type_slug, "acme-widget")
+        derived = DeviceTypeIdentityResolver([], []).resolve("Acme", "Widget")
+        self.assertEqual((mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug), derived[:2])
+
     def test_an_overlength_device_type_slug_is_refused(self):
         """The slug is posted directly and the mapping column holds 100 characters."""
         response = self._post(netbox_dt_slug="d" * 300)
