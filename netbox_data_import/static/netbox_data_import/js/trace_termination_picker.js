@@ -32,6 +32,8 @@
   function clearSelection() {
     objectId.value = '';
     objectType.value = '';
+    // The offered search belongs to a selection, so it cannot outlive one.
+    offeredSearch.value = '';
     submit.disabled = true;
   }
 
@@ -80,6 +82,7 @@
         if (request !== pending) return;
         if (!result.ok || !result.payload.ok) {
           list.replaceChildren();
+          clearSelection();
           show(count, false);
           error.textContent = result.payload.error || 'The candidates could not be read.';
           show(error, true);
@@ -90,6 +93,9 @@
       })
       .catch(function () {
         if (request !== pending) return;
+        list.replaceChildren();
+        clearSelection();
+        show(count, false);
         error.textContent = 'The candidates could not be read.';
         show(error, true);
       });
