@@ -48,6 +48,7 @@ from netbox_data_import.plan import Disposition, PlannedChange
 from netbox_data_import.target_runtime import ExecutionContext, PreconditionFailed
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
+    competing_write_during,
     run_on_separate_connection,
     trace_endpoint_line,
     trace_segment,
@@ -1318,35 +1319,8 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
 
     def assert_competing_write_is_blocked(self, plan, competing_write, signal):
         """Assert that one write cannot move a row after the execution replan reads it."""
-        from threading import current_thread
-
-        from django.db import OperationalError, connection
-
-        execution_thread = current_thread()
-        observed = []
-        blocked = []
-
-        def contend_during_write(sender, instance, **kwargs):
-            if observed or current_thread() is not execution_thread:
-                return
-            observed.append(instance.pk)
-
-            def contend():
-                with connection.cursor() as cursor:
-                    cursor.execute("SET lock_timeout TO '750ms'")
-                try:
-                    competing_write()
-                except OperationalError:
-                    blocked.append(True)
-
-            with run_on_separate_connection(contend):
-                pass
-
-        signal.connect(contend_during_write, sender=Cable, weak=False)
-        try:
+        with competing_write_during(signal, Cable, competing_write) as (observed, blocked):
             self.execute(plan)
-        finally:
-            signal.disconnect(contend_during_write, sender=Cable)
 
         self.assertTrue(observed, "the execution reached no Cable write")
         self.assertEqual(blocked, [True], "the competing write did not wait for the execution")

@@ -211,6 +211,33 @@ class ImportProfileDetailViewTest(BaseViewTestCase):
                     assert_action_link_is_named(self, html, href, action)
                     assert_action_link_is_named(self, html, href, str(record))
 
+    def test_only_the_sections_a_profile_uses_reach_its_detail_page(self):
+        """Each policy action is gated by one membership test, so pin the applicable and the absent."""
+        trace_profile = ImportProfile.objects.create(
+            name="Trace Only Detail",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        gated_routes = ("bulk_yaml_import", "source_resolution_list", "device_type_analysis_profile")
+
+        flat_html = self.client.get(
+            reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk})
+        ).content.decode()
+        trace_html = self.client.get(
+            reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": trace_profile.pk})
+        ).content.decode()
+
+        for route in gated_routes:
+            with self.subTest(route=route):
+                self.assertIn(
+                    reverse(f"plugins:netbox_data_import:{route}", args=[self.profile.pk]),
+                    flat_html,
+                )
+                self.assertNotIn(
+                    reverse(f"plugins:netbox_data_import:{route}", args=[trace_profile.pk]),
+                    trace_html,
+                )
+
     def test_detail_contains_export_yaml_link(self):
         """Profile detail contains an export YAML link."""
         url = reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk})

@@ -25,6 +25,10 @@ PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 # (qualified function, marker id) -> why this exit commits nothing it should not.
 # A new exit fails the guard until it is audited and listed here.
 AUDITED_EXITS = {
+    ("save_termination_resolution_and_replan", "decision-saved-and-replanned"): (
+        "The selection cleared its permission check and is meant to commit, and the plan that "
+        "follows it inside the lock only reads."
+    ),
     ("save_permission_scoped_object", "existing-row-kept-unwritten"): (
         "on_existing is keep, so the row is returned untouched after its view check."
     ),

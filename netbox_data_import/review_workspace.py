@@ -56,7 +56,8 @@ def save_termination_resolution_and_replan(
             lookup,
             values,
         )
-    return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+        # atomic-exit-safe: decision-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
 
 
 _DIAGNOSTIC_MESSAGES = {

@@ -207,6 +207,48 @@ def apply_source_rows(rows, profile, site, *, actor=None, location=None, tenant=
     return workspace
 
 
+# One competing transaction gets this long to take the row before it is treated as blocked.
+COMPETING_WRITE_LOCK_TIMEOUT = "750ms"
+
+
+@contextmanager
+def competing_write_during(signal, sender, competing_write):
+    """Attempt *competing_write* on a second connection at the first *signal* this thread sends.
+
+    Yields the ``observed`` and ``blocked`` lists. ``blocked`` holds one entry when the competing
+    write waited for the lock the code under test holds, so an empty list means it landed.
+    """
+    from threading import current_thread
+
+    from django.db import OperationalError, connection
+
+    calling_thread = current_thread()
+    observed: list[bool] = []
+    blocked: list[bool] = []
+
+    def contend_during_write(sender, instance, **kwargs):
+        if observed or current_thread() is not calling_thread:
+            return
+        observed.append(True)
+
+        def contend():
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout TO %s", [COMPETING_WRITE_LOCK_TIMEOUT])
+            try:
+                competing_write()
+            except OperationalError:
+                blocked.append(True)
+
+        with run_on_separate_connection(contend):
+            pass
+
+    signal.connect(contend_during_write, sender=sender, weak=False)
+    try:
+        yield observed, blocked
+    finally:
+        signal.disconnect(contend_during_write, sender=sender)
+
+
 @contextmanager
 def run_on_separate_connection(target):
     """Run *target* in a thread with a fresh database connection."""

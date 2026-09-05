@@ -389,7 +389,8 @@ class _CableBatch:
         self._objects: dict[tuple[str, int], Any] = {}
         self._components: dict[tuple[int, str], dict[str, list]] = {}
         self._resolved: dict[str, dict[tuple, _Termination]] = {}
-        self._mappings: list = []
+        self._mappings_by_front: dict[int, list] = {}
+        self._mappings_by_rear: dict[int, list] = {}
         self._mapping_ports: dict[tuple[str, int], Any] = {}
         self._existing: dict[int, _ExistingCable] = {}
         self._occupied: dict[tuple[str, int], _ExistingCable] = {}
@@ -572,10 +573,13 @@ class _CableBatch:
             mappings = self.reader.port_mappings().filter(device_id__in=sorted(device_ids)).order_by("pk")
             if self.lock_plan_references:
                 mappings = mappings.select_for_update(of=("self",))
-            self._mappings = list(mappings)
+            # Indexed on load, because every pass-through end asks for the rows of one port.
+            for row in mappings:
+                self._mappings_by_front.setdefault(row.front_port_id, []).append(row)
+                self._mappings_by_rear.setdefault(row.rear_port_id, []).append(row)
             ids_by_kind = {
-                FRONT_PORT_KIND: {row.front_port_id for row in self._mappings},
-                REAR_PORT_KIND: {row.rear_port_id for row in self._mappings},
+                FRONT_PORT_KIND: set(self._mappings_by_front),
+                REAR_PORT_KIND: set(self._mappings_by_rear),
             }
             for kind, object_ids in ids_by_kind.items():
                 for component in getattr(self.reader, _READER_ACCESSOR_BY_KIND[kind])().filter(pk__in=object_ids):
@@ -584,9 +588,9 @@ class _CableBatch:
     def _peers_of(self, termination: _Termination) -> list:
         """Return the PortMapping rows that link one pass-through port to its opposite side."""
         if termination.kind == FRONT_PORT_KIND:
-            return [row for row in self._mappings if row.front_port_id == termination.object_id]
+            return self._mappings_by_front.get(termination.object_id, [])
         if termination.kind == REAR_PORT_KIND:
-            return [row for row in self._mappings if row.rear_port_id == termination.object_id]
+            return self._mappings_by_rear.get(termination.object_id, [])
         return []
 
     def _peer_termination(self, mapping, termination: _Termination) -> _Termination | None:
@@ -728,11 +732,7 @@ class _CableBatch:
         if {exit_end.kind, entry_end.kind} == {FRONT_PORT_KIND, REAR_PORT_KIND}:
             front, rear = (exit_end, entry_end) if exit_end.kind == FRONT_PORT_KIND else (entry_end, exit_end)
             mapping = next(
-                (
-                    row
-                    for row in self._mappings
-                    if row.front_port_id == front.object_id and row.rear_port_id == rear.object_id
-                ),
+                (row for row in self._peers_of(front) if row.rear_port_id == rear.object_id),
                 None,
             )
         if mapping is None:

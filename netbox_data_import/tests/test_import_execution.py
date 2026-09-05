@@ -19,7 +19,7 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.plan import Disposition
 from netbox_data_import.target_modules import PreconditionFailed
-from netbox_data_import.tests.helpers import run_on_separate_connection
+from netbox_data_import.tests.helpers import competing_write_during
 from netbox_data_import.tests.test_import_engine import ImportEngineTestDataMixin, _workbook
 
 
@@ -88,36 +88,14 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
     def test_execution_holds_the_device_type_that_sized_the_placement(self):
         """The replan reads u_height for placement, so it cannot move before Device.full_clean()."""
-        from threading import current_thread
-
         from dcim.models import Device, DeviceType
-        from django.db import OperationalError, connection
         from django.db.models.signals import pre_save
 
         accepted = self._plan()
         unit = accepted.unit("device:source:D-1")
-        execution_thread = current_thread()
-        observed = []
-        blocked = []
-
-        def contend_during_write(sender, instance, **kwargs):
-            if observed or current_thread() is not execution_thread:
-                return
-            observed.append(True)
-
-            def contend():
-                with connection.cursor() as cursor:
-                    cursor.execute("SET lock_timeout TO '750ms'")
-                try:
-                    DeviceType.objects.filter(pk=self.device_type.pk).update(u_height=42)
-                except OperationalError:
-                    blocked.append(True)
-
-            with run_on_separate_connection(contend):
-                pass
-
-        pre_save.connect(contend_during_write, sender=Device, weak=False)
-        try:
+        with competing_write_during(
+            pre_save, Device, lambda: DeviceType.objects.filter(pk=self.device_type.pk).update(u_height=42)
+        ) as (observed, blocked):
             ImportEngine.execute(
                 self.profile,
                 self.document,
@@ -126,8 +104,6 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
                 "hold-device-type",
                 self.actor,
             )
-        finally:
-            pre_save.disconnect(contend_during_write, sender=Device)
 
         self.assertTrue(observed, "the execution reached no Device write")
         self.assertEqual(blocked, [True], "the competing Device Type change did not wait for the execution")
@@ -135,10 +111,7 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
     def test_execution_holds_the_device_type_a_review_retained(self):
         """An ignored device_type keeps the matched Device's own type, which still sizes placement."""
-        from threading import current_thread
-
         from dcim.models import Device, DeviceType
-        from django.db import OperationalError, connection
         from django.db.models.signals import pre_save
 
         from netbox_data_import.models import IgnoredFieldDifference
@@ -167,28 +140,9 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         accepted = self._plan()
         unit = accepted.unit("device:source:D-1")
         self.assertEqual(unit.changes[0].payload["device_type_id"], retained_type.pk)
-        execution_thread = current_thread()
-        observed = []
-        blocked = []
-
-        def contend_during_write(sender, instance, **kwargs):
-            if observed or current_thread() is not execution_thread:
-                return
-            observed.append(True)
-
-            def contend():
-                with connection.cursor() as cursor:
-                    cursor.execute("SET lock_timeout TO '750ms'")
-                try:
-                    DeviceType.objects.filter(pk=retained_type.pk).update(u_height=42)
-                except OperationalError:
-                    blocked.append(True)
-
-            with run_on_separate_connection(contend):
-                pass
-
-        pre_save.connect(contend_during_write, sender=Device, weak=False)
-        try:
+        with competing_write_during(
+            pre_save, Device, lambda: DeviceType.objects.filter(pk=retained_type.pk).update(u_height=42)
+        ) as (observed, blocked):
             ImportEngine.execute(
                 self.profile,
                 self.document,
@@ -197,12 +151,33 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
                 "hold-retained-device-type",
                 self.actor,
             )
-        finally:
-            pre_save.disconnect(contend_during_write, sender=Device)
 
         self.assertTrue(observed, "the execution reached no Device write")
         self.assertEqual(blocked, [True], "the competing Device Type change did not wait for the execution")
         self.assertEqual(DeviceType.objects.get(pk=retained_type.pk).u_height, 1)
+
+    def test_execution_holds_the_rack_that_decides_the_placement(self):
+        """Two imports must not both read the same rack as free, so the replan holds it to the write."""
+        from dcim.models import Device, Rack
+        from django.db.models.signals import pre_save
+
+        accepted = self._plan()
+        unit = accepted.unit("device:source:D-1")
+        with competing_write_during(
+            pre_save, Device, lambda: Rack.objects.filter(pk=self.rack.pk).update(u_height=10)
+        ) as (observed, blocked):
+            ImportEngine.execute(
+                self.profile,
+                self.document,
+                accepted.to_dict(),
+                [unit.identity],
+                "hold-rack",
+                self.actor,
+            )
+
+        self.assertTrue(observed, "the execution reached no Device write")
+        self.assertEqual(blocked, [True], "the competing Rack change did not wait for the execution")
+        self.assertEqual(Rack.objects.get(pk=self.rack.pk).u_height, 42)
 
     def test_a_captured_extra_column_reaches_the_stored_provenance(self):
         """A created device stores the captured extra columns its plan carries."""

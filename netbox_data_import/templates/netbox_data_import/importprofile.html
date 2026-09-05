@@ -37,7 +37,6 @@
         <a href="{% url 'plugins:netbox_data_import:exportprofile_yaml' object.pk %}" class="btn btn-outline-primary">
           <i class="mdi mdi-download"></i> Export YAML
         </a>
-        {% if applicable_policy_sections %}
         {% if 'column_mappings' in applicable_policy_sections %}
         <a href="{% url 'plugins:netbox_data_import:bulk_yaml_import' object.pk %}" class="btn btn-outline-secondary">
           <i class="mdi mdi-file-upload"></i> Bulk YAML Import
@@ -53,7 +52,6 @@
           <i class="mdi mdi-magnify"></i> Device Type Analysis
         </a>
         {% endif %}
-        {% endif %}
       </div>
     </div>
   </div>
@@ -62,7 +60,6 @@
   <div class="col col-md-7">
 
     {# Column Mappings #}
-    {% if applicable_policy_sections %}
     {% if 'column_mappings' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -78,10 +75,8 @@
       {% endif %}
     </div>
     {% endif %}
-    {% endif %}
 
     {# Class → Role Mappings #}
-    {% if applicable_policy_sections %}
     {% if 'class_role_mappings' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -97,10 +92,8 @@
       {% endif %}
     </div>
     {% endif %}
-    {% endif %}
 
     {# Device Type Mappings #}
-    {% if applicable_policy_sections %}
     {% if 'device_type_mappings' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -116,10 +109,8 @@
       {% endif %}
     </div>
     {% endif %}
-    {% endif %}
 
     {# Column Transform Rules #}
-    {% if applicable_policy_sections %}
     {% if 'column_transform_rules' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -135,10 +126,8 @@
       {% endif %}
     </div>
     {% endif %}
-    {% endif %}
 
     {# CableClass Mappings #}
-    {% if applicable_policy_sections %}
     {% if 'cable_class_mappings' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
@@ -153,7 +142,6 @@
         <div class="card-body text-muted">No CableClass mappings configured.</div>
       {% endif %}
     </div>
-    {% endif %}
     {% endif %}
 
   </div>

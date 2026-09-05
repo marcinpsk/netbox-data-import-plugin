@@ -700,9 +700,11 @@ inside the transaction as the accepted plan's operator.
 | A foreign Cable occupies a desired termination | `cable.termination_occupied` | `blocked` |
 | A multi-termination Cable touches a desired port | `cable.multi_termination_conflict` | `blocked` |
 | Source Traces plan different Cables on one free termination | `cable.planned_termination_conflict` | `blocked` |
+| A segment whose two ends resolve to one termination | `cable.segment_self_connection` | `blocked` |
 | A CableClass dimension is unresolved | `cable.cableclass_unmapped` | `blocked` |
 | A stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.cableclass_stale_mapping` | `blocked` |
 | A stored Cable Profile is offered but is incompatible with one termination per side | `cable.profile_incompatible` | `blocked` |
+| Source Traces resolve one shared segment to different Cable policies | `cable.resolved_segment_conflict` | `invalid` |
 | The operator lacks a required Cable or view permission | `cable.permission_denied` | `blocked` |
 | A dangling natural-key reference in `adapter_config` | `profile.dangling_reference` | `blocked` |
 | Attribute drift on a reused Cable | `cable.attribute_drift` | `info` diagnostic, disposition unchanged |

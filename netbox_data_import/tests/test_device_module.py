@@ -464,6 +464,26 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
         self.assertEqual(unit.diagnostics[0].code, "device.device_type_missing")
         self.assertEqual(unit.changes, ())
 
+    def test_an_explicit_mapping_to_an_absent_device_type_states_no_type_exists(self):
+        """The preview badge reads is_explicit_mapping, so a mapping that resolves to nothing must not set it."""
+        DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="Acme",
+            source_model="Widget",
+            netbox_manufacturer_slug="acme",
+            netbox_device_type_slug="absent-widget",
+        )
+
+        plan, _document, _actor = self._engine_plan(
+            self._row(2, "D-1", "srv-01", make="Acme", model="Widget", u_height="1")
+        )
+        unit = plan.unit("device:source:D-1")
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.diagnostics[0].code, "device.device_type_missing")
+        self.assertNotIn("is_explicit_mapping", unit.display["extra_data"])
+        self.assertNotIn("dt_slug", unit.display["extra_data"])
+
     def test_an_existing_device_type_plans_and_imports_normally(self):
         """The Import Engine can create a Device when its Device Type already exists."""
 

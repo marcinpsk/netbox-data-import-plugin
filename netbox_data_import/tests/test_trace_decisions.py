@@ -696,6 +696,99 @@ class TerminationResolutionLockOrderingTest(TransactionTestCase):
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
 
+class ReplanUnderThePolicyLockTest(TransactionTestCase):
+    """The plan the operator receives must be built under the lock that saved the decision."""
+
+    def setUp(self):
+        """Build one trace profile whose real workbook the replan can interpret."""
+        self.actor = User.objects.create_superuser("replan-lock", "replan-lock@example.com", "testpass")
+        self.profile = ImportProfile.objects.create(
+            name="Replan Lock Order",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        CableClassMapping.objects.create(
+            profile=self.profile,
+            cable_class="Patch",
+            cable_type_resolved=True,
+            cable_type=CableTypeChoices.TYPE_CAT6,
+            cable_profile_resolved=True,
+            cable_profile=CableProfileChoices.SINGLE_1C1P,
+        )
+        site, manufacturer, device_type, role = make_dcim_objects("ReplanLock")
+        del manufacturer
+        device = Device.objects.create(name="Replan Lock Device", site=site, device_type=device_type, role=role)
+        peer = Device.objects.create(name="Replan Lock Peer", site=site, device_type=device_type, role=role)
+        self.interface = Interface.objects.create(device=device, name="Ethernet 1/2")
+        Interface.objects.create(device=peer, name="Ethernet 1/1", type="1000base-t")
+        near = trace_termination(device.name, "", "Ethernet 1/2", "Port")
+        far = trace_termination(peer.name, "", "Ethernet 1/1", "NIC")
+        self.document = SourceDocument.store(
+            profile=self.profile,
+            content=trace_workbook_bytes(
+                path_blocks=(
+                    (
+                        trace_endpoint_line(near),
+                        trace_endpoint_line(far),
+                        (trace_segment(near, "Patch", far),),
+                    ),
+                )
+            ),
+        )
+        self.interface_type = ObjectType.objects.get_for_model(self.interface)
+        self.field_key = termination_field_key(
+            device=device.name,
+            cards="",
+            port=self.interface.name,
+            kind="interface",
+            role=TERMINATION_ROLE,
+        )
+        self.planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+
+    def test_the_replan_still_holds_the_policy_lock(self):
+        """A plan built after the lock releases can mix this decision with the policy that follows it."""
+        from django.db import OperationalError, connection
+
+        from netbox_data_import.tests.helpers import run_on_separate_connection
+
+        contended = []
+        blocked = []
+
+        def contend_while_the_plan_reads(execute, sql, params, many, context):
+            """Attempt a policy write at the moment the plan reads the stored source."""
+            if not contended and 'FROM "netbox_data_import_sourcedocument"' in sql:
+                contended.append(True)
+
+                def contend():
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET lock_timeout TO '750ms'")
+                    try:
+                        ImportProfile.objects.filter(pk=self.profile.pk).update(name="Taken Mid Plan")
+                    except OperationalError:
+                        blocked.append(True)
+
+                with run_on_separate_connection(contend):
+                    pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(contend_while_the_plan_reads):
+            save_termination_resolution_and_replan(
+                profile=self.profile,
+                source_document=self.document,
+                actor=self.actor,
+                planning_context=self.planning_context,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=self.field_key,
+                selected_object_type=self.interface_type,
+                selected_object_id=self.interface.pk,
+                selected_display_name=str(self.interface),
+            )
+
+        self.assertTrue(contended, "the plan never read the stored source")
+        self.assertEqual(blocked, [True], "the policy write did not wait for the replan")
+        self.assertEqual(ImportProfile.objects.get(pk=self.profile.pk).name, "Replan Lock Order")
+
+
 class CableClassMappingFormTest(TestCase):
     """The operator form derives both dimensions from the running NetBox instance."""
 

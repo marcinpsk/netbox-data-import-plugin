@@ -861,6 +861,13 @@ class _DeviceBatch:
         self._claimed: dict[tuple[int | str, str | None, Any], int] = {}
         self._claimed_devices: dict[int, tuple[int | None, str]] = {}
 
+    def placement_reference(self, model, pk):
+        """Return one row the placement reads, locked when the replan must hold it until the write."""
+        queryset = model.objects.filter(pk=pk)
+        if self.lock_plan_references:
+            queryset = queryset.select_for_update(of=("self",))
+        return queryset.first()
+
     def _load_dependency_objects(self, rows: list[dict[str, Any]]) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
         """Load each Device Type and Device Role this batch can reference."""
         from dcim.models import DeviceRole, DeviceType
@@ -1094,6 +1101,11 @@ class _DeviceBatch:
         if len(rack_matches) > 1:
             return _Dependencies(missing=("device.rack_ambiguous", {"rack_name": rack_name}))
         rack = rack_matches[0] if rack_matches else None
+        if rack is not None:
+            from dcim.models import Rack
+
+            # The name scan above cannot lock, and this rack decides the placement claim.
+            rack = self.placement_reference(Rack, rack.pk)
         rack_identity = self._planned_racks.get(rack_key) if rack_name and rack is None else None
         if rack_name and rack is None and rack_identity is None:
             return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
@@ -1651,11 +1663,8 @@ class DeviceModule:
         if payload["device_type_id"] is not None and payload["device_type_id"] != dependencies.device_type.pk:
             from dcim.models import DeviceType
 
-            retained_types = DeviceType.objects.filter(pk=payload["device_type_id"])
-            if batch.lock_plan_references:
-                # A retained review value sizes the placement too, so the replan must hold it.
-                retained_types = retained_types.select_for_update(of=("self",))
-            effective_type = retained_types.first()
+            # A retained review value sizes the placement too, so the replan must hold it.
+            effective_type = batch.placement_reference(DeviceType, payload["device_type_id"])
             if effective_type is None:
                 # Every check below reads the device type this row would write.
                 problem(Disposition.INVALID, "device.device_type_missing")
@@ -1679,7 +1688,7 @@ class DeviceModule:
             if payload["rack_id"] != (dependencies.rack.pk if dependencies.rack is not None else None):
                 from dcim.models import Rack
 
-                effective_rack = Rack.objects.filter(pk=payload["rack_id"]).first() if payload["rack_id"] else None
+                effective_rack = batch.placement_reference(Rack, payload["rack_id"]) if payload["rack_id"] else None
         effective_placement = _Placement(
             position=payload["u_position"],
             face=payload["face"],
