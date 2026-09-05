@@ -153,6 +153,17 @@ urlpatterns = [
     # Trace Review Workspace (section 10.2)
     path("trace-workspace/", views.TraceReviewWorkspaceView.as_view(), name="trace_workspace"),
     path("trace-workspace/re-read/", views.TraceWorkspaceRereadView.as_view(), name="trace_workspace_reread"),
+    path(
+        "trace-workspace/candidates/",
+        views.TraceTerminationCandidatesView.as_view(),
+        name="trace_termination_candidates",
+    ),
+    path("trace-workspace/sync/", views.TraceSyncView.as_view(), name="trace_sync"),
+    path(
+        "trace-workspace/resolve-termination/",
+        views.TraceResolveTerminationView.as_view(),
+        name="trace_resolve_termination",
+    ),
     # Per-row sync
     path("sync-single-row/", views.SyncSingleRowView.as_view(), name="sync_single_row"),
     path("unlink-device/", views.UnlinkDeviceView.as_view(), name="unlink_device"),

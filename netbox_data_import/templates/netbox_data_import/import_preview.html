@@ -57,6 +57,14 @@
   .ndi-contact-value-row > .ndi-contact-role { width: 9.5rem; flex: 0 0 auto; }
 </style>
 <script src="{% static 'netbox_data_import/js/preview_row_controls.js' %}?v={{ plugin_version }}"></script>
+{% if trace_workspace_available %}
+  <div class="alert alert-info d-flex align-items-center justify-content-between">
+    <div>This preview planned Source Traces. The workspace shows their evidence, topology and decisions.</div>
+    <a class="btn btn-primary ms-3" href="{% url 'plugins:netbox_data_import:trace_workspace' %}">
+      Open Trace Review Workspace
+    </a>
+  </div>
+{% endif %}
 <input type="hidden" id="ndi-preview-revision" value="{{ preview_revision }}">
 <div class="row">
   <div class="col">

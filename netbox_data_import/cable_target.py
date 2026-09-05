@@ -49,7 +49,13 @@ MANUALLY_RESOLVED = "manually resolved"
 CREATE_SEGMENT = "create"
 REUSE_SEGMENT = "reuse existing"
 CONFLICT_SEGMENT = "conflict"
-_CONFLICT_CODES = frozenset({"cable.termination_occupied", "cable.multi_termination_conflict"})
+_CONFLICT_CODES = frozenset(
+    {
+        "cable.termination_occupied",
+        "cable.multi_termination_conflict",
+        "cable.planned_termination_conflict",
+    }
+)
 
 _KIND_BY_MODEL_NAME = {
     "interface": INTERFACE_KIND,
@@ -513,7 +519,14 @@ class _CableBatch:
         devices = self._devices.get(identity_text(reference.device), [])
         if len(devices) != 1:
             analysis.block("trace.device_unresolved", {**_reference_display(reference), "matches": len(devices)})
-            self._record_resolution(analysis, reference, UNRESOLVED, None)
+            # With no resolved Device there is nothing to pick from, so the picker cannot help here.
+            self._record_resolution(
+                analysis,
+                reference,
+                UNRESOLVED,
+                None,
+                reason=f"The source names {len(devices)} matching Devices, so no port list applies.",
+            )
             return None
         device = devices[0]
         stored = self._stored.get(_field_key(reference))
@@ -535,7 +548,7 @@ class _CableBatch:
         return termination
 
     @staticmethod
-    def _record_resolution(analysis: _TraceAnalysis, reference, state: str, termination) -> None:
+    def _record_resolution(analysis: _TraceAnalysis, reference, state: str, termination, reason: str = "") -> None:
         """Record how one Termination Reference was settled, for its badge and its picker."""
         key = _field_key(reference)
         analysis.terminations.setdefault(
@@ -546,6 +559,8 @@ class _CableBatch:
                 "kind": claimed_termination_kind(reference.port_class),
                 "state": state,
                 "selected": "" if termination is None else termination.display,
+                "selectable": not reason,
+                "reason": reason,
             },
         )
 
@@ -1112,11 +1127,11 @@ class _CableBatch:
             display={
                 **analysis.display,
                 "detail": self._detail(analysis, disposition),
-                "trace": self._workspace(analysis),
+                "trace": self._workspace(analysis, bool(changes)),
             },
         )
 
-    def _workspace(self, analysis: _TraceAnalysis) -> dict:
+    def _workspace(self, analysis: _TraceAnalysis, writes: bool) -> dict:
         """Return what the three review workspace panels show for one Source Trace."""
         summary = analysis.trace.endpoint_summary
         resolved = {segment.index: segment for segment in analysis.segments}
@@ -1142,7 +1157,7 @@ class _CableBatch:
                     "right": right,
                     # A pass-through claim is implied, so the panel says where planning entered.
                     "pass_through": self._entered_through_claim(planned, by_reference.get(stated.left.identity_key)),
-                    "status": "" if planned is None else self._segment_status(analysis, index, conflicted),
+                    "status": self._segment_status(analysis, index, conflicted, planned, writes),
                 }
             )
         return {
@@ -1153,6 +1168,8 @@ class _CableBatch:
             },
             "segments": segments,
             "logical_cable": self._logical_cable_display(analysis),
+            # A unit with no changes proposes nothing, so the panel must not offer to delete one.
+            "deletes_logical_cable": writes and analysis.logical_cable is not None,
             "terminations": list(analysis.terminations.values()),
         }
 
@@ -1162,13 +1179,16 @@ class _CableBatch:
         return planned is not None and stated is not None and planned.left.key != stated.key
 
     @staticmethod
-    def _segment_status(analysis: _TraceAnalysis, index: int, conflicted: set) -> str:
-        """Return the verdict the proposed panel shows for one planned segment."""
+    def _segment_status(analysis: _TraceAnalysis, index: int, conflicted: set, planned, writes: bool) -> str:
+        """Return the verdict the proposed panel shows for one segment, or none for an unplanned one."""
         if index in conflicted:
             return CONFLICT_SEGMENT
+        if planned is None:
+            return ""
         if index in analysis.proven:
             return REUSE_SEGMENT
-        return CREATE_SEGMENT
+        # A blocked unit contributes no change, so nothing here is going to be created.
+        return CREATE_SEGMENT if writes else ""
 
     def _logical_cable_display(self, analysis: _TraceAnalysis) -> dict | None:
         """Return the one Logical Cable this trace would delete, as far as the actor may see it."""

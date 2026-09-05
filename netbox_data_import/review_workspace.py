@@ -405,14 +405,10 @@ class TraceWorkspaceUnit:
     endpoints: dict[str, str]
     segments: list[dict[str, Any]]
     logical_cable: dict[str, Any] | None
+    deletes_logical_cable: bool
     terminations: list[dict[str, Any]]
     findings: list[dict[str, str]]
     actions: tuple[TraceAction, ...]
-
-    @property
-    def unresolved_terminations(self) -> list[dict[str, Any]]:
-        """Return the terminations still waiting for a decision."""
-        return [item for item in self.terminations if item["state"] == UNRESOLVED]
 
     @classmethod
     def from_unit(cls, unit: SynchronizationUnit) -> TraceWorkspaceUnit:
@@ -433,6 +429,7 @@ class TraceWorkspaceUnit:
             endpoints=dict(workspace.get("endpoints") or {}),
             segments=[dict(segment) for segment in workspace.get("segments") or ()],
             logical_cable=workspace.get("logical_cable"),
+            deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
             terminations=[dict(item) for item in workspace.get("terminations") or ()],
             findings=findings,
             actions=cls._actions(unit, findings, str(display.get("detail") or "")),
@@ -491,6 +488,31 @@ class ReviewWorkspace:
         return tuple(
             TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if unit.display.get("trace") is not None
         )
+
+    def sync_selection(self, identity: str) -> tuple[str, ...]:
+        """Return the unit and every unit owning a change it depends on, transitively.
+
+        `merge_changes` refuses a selection whose dependency is absent, so a review command that
+        synchronizes one trace has to carry the units its changes wait on.
+        """
+        units = {unit.identity: unit for unit in self.plan.units}
+        selected = units.get(identity)
+        if selected is None or selected.disposition != Disposition.ACTIONABLE:
+            return ()
+        owner_of = {change.identity: unit.identity for unit in self.plan.units for change in unit.changes}
+        chosen: list[str] = []
+        queue = [identity]
+        while queue:
+            current = queue.pop()
+            if current in chosen:
+                continue
+            chosen.append(current)
+            for change in units[current].changes:
+                for dependency in change.dependencies:
+                    owner = owner_of.get(dependency)
+                    if owner is not None and owner not in chosen:
+                        queue.append(owner)
+        return tuple(chosen)
 
     @property
     def trace_summary(self) -> dict[str, int]:
