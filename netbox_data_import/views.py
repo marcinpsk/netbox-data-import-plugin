@@ -3643,6 +3643,89 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 
 
+class _TraceWorkspaceMixin:
+    """Load the reviewed preview a trace workspace request acts on."""
+
+    def reviewed_preview(self, request):
+        """Return the profile, the stored document and the reviewed workspace, or None."""
+        preview = load_cached_preview(request)
+        if preview is None:
+            return None
+        profile, workspace = preview
+        context = request.session.get("import_context") or {}
+        document = SourceDocument.objects.filter(pk=context.get("source_document_id"), profile=profile).first()
+        if document is None:
+            return None
+        planning_context = {
+            "site_id": context.get("site_id"),
+            "location_id": context.get("location_id"),
+            "tenant_id": context.get("tenant_id"),
+        }
+        return profile, document, workspace, planning_context
+
+    @staticmethod
+    def live_plan(profile, document, request, planning_context):
+        """Return the plan live NetBox states right now, or None when the target is gone."""
+        try:
+            return ImportEngine.plan(profile, document, request.user, planning_context)
+        except PlanningTargetUnavailable:
+            return None
+
+
+class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Section 10.2: one review workspace page per preview, for the traces it planned."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def get(self, request):
+        """Render the reviewed traces and say whether live NetBox has moved under them."""
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        live = self.live_plan(profile, document, request, planning_context)
+        if live is None:
+            _discard_import_preview(request)
+            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        return render(
+            request,
+            "netbox_data_import/trace_workspace.html",
+            {
+                "profile": profile,
+                "traces": workspace.traces,
+                "summary": workspace.trace_summary,
+                # Section 10.2: compared on each full load and on the re-read action, never polled.
+                "drift": live.fingerprint != workspace.plan.fingerprint,
+                "preview_revision": current_preview_revision(request.session),
+            },
+        )
+
+
+class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Adopt the plan live NetBox states now, which is what clears the drift strip."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Replace the reviewed preview with a freshly read one."""
+        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, _workspace, planning_context = loaded
+        live = self.live_plan(profile, document, request, planning_context)
+        if live is None:
+            _discard_import_preview(request)
+            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        record_recalculated_preview(request.session, live)
+        messages.success(request, "The workspace was re-read from NetBox.")
+        return redirect(next_url)
+
+
 class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page."""
 
