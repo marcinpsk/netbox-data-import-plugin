@@ -41,6 +41,16 @@ from .values import identity_text, source_text
 CABLE_STATUS = "connected"
 ELIGIBLE_TERMINATION_LIMIT = 20
 
+# Section 10.2 badge vocabulary. T8 adds the proposal states to the same set.
+UNRESOLVED = "unresolved"
+AUTOMATICALLY_RESOLVED = "automatically resolved"
+MANUALLY_RESOLVED = "manually resolved"
+
+CREATE_SEGMENT = "create"
+REUSE_SEGMENT = "reuse existing"
+CONFLICT_SEGMENT = "conflict"
+_CONFLICT_CODES = frozenset({"cable.termination_occupied", "cable.multi_termination_conflict"})
+
 _KIND_BY_MODEL_NAME = {
     "interface": INTERFACE_KIND,
     "frontport": FRONT_PORT_KIND,
@@ -190,6 +200,7 @@ class _TraceAnalysis:
     segments: list = field(default_factory=list)
     proven: dict = field(default_factory=dict)
     policies: dict = field(default_factory=dict)
+    terminations: dict = field(default_factory=dict)
     logical_cable: Any = None
     blocked: bool = False
     invalid: bool = False
@@ -502,19 +513,41 @@ class _CableBatch:
         devices = self._devices.get(identity_text(reference.device), [])
         if len(devices) != 1:
             analysis.block("trace.device_unresolved", {**_reference_display(reference), "matches": len(devices)})
+            self._record_resolution(analysis, reference, UNRESOLVED, None)
             return None
         device = devices[0]
         stored = self._stored.get(_field_key(reference))
         if stored is not None:
-            return self._stored_termination(analysis, reference, device, stored)
+            termination = self._stored_termination(analysis, reference, device, stored)
+            state = UNRESOLVED if termination is None else MANUALLY_RESOLVED
+            self._record_resolution(analysis, reference, state, termination)
+            return termination
         kind = claimed_termination_kind(reference.port_class)
         candidates = self._components_for(device.pk, kind).get(identity_text(reference.port), [])
         if len(candidates) != 1:
             analysis.block(
                 "cable.termination_unresolved", {**_reference_display(reference), "matches": len(candidates)}
             )
+            self._record_resolution(analysis, reference, UNRESOLVED, None)
             return None
-        return self._termination(candidates[0])
+        termination = self._termination(candidates[0])
+        self._record_resolution(analysis, reference, AUTOMATICALLY_RESOLVED, termination)
+        return termination
+
+    @staticmethod
+    def _record_resolution(analysis: _TraceAnalysis, reference, state: str, termination) -> None:
+        """Record how one Termination Reference was settled, for its badge and its picker."""
+        key = _field_key(reference)
+        analysis.terminations.setdefault(
+            key,
+            {
+                "field_key": key,
+                "label": _endpoint_label(reference),
+                "kind": claimed_termination_kind(reference.port_class),
+                "state": state,
+                "selected": "" if termination is None else termination.display,
+            },
+        )
 
     def _stored_termination(self, analysis: _TraceAnalysis, reference, device, stored) -> _Termination | None:
         """Return the object one saved decision selected, rechecked against current target state."""
@@ -1076,8 +1109,73 @@ class _CableBatch:
             disposition=disposition,
             changes=changes,
             diagnostics=tuple(analysis.diagnostics),
-            display={**analysis.display, "detail": self._detail(analysis, disposition)},
+            display={
+                **analysis.display,
+                "detail": self._detail(analysis, disposition),
+                "trace": self._workspace(analysis),
+            },
         )
+
+    def _workspace(self, analysis: _TraceAnalysis) -> dict:
+        """Return what the three review workspace panels show for one Source Trace."""
+        summary = analysis.trace.endpoint_summary
+        resolved = {segment.index: segment for segment in analysis.segments}
+        by_reference = self._resolved.get(analysis.identity, {})
+        conflicted = {
+            diagnostic.display.get("segment_index")
+            for diagnostic in analysis.diagnostics
+            if diagnostic.code in _CONFLICT_CODES
+        }
+        segments = []
+        for index, stated in enumerate(analysis.trace.segments):
+            planned = resolved.get(index)
+            source_left, source_right = _endpoint_label(stated.left), _endpoint_label(stated.right)
+            left = source_left if planned is None else planned.left.display
+            right = source_right if planned is None else planned.right.display
+            segments.append(
+                {
+                    "index": index,
+                    "cable_class": source_text(stated.cable_class),
+                    "source_left": source_left,
+                    "source_right": source_right,
+                    "left": left,
+                    "right": right,
+                    # A pass-through claim is implied, so the panel says where planning entered.
+                    "pass_through": self._entered_through_claim(planned, by_reference.get(stated.left.identity_key)),
+                    "status": "" if planned is None else self._segment_status(analysis, index, conflicted),
+                }
+            )
+        return {
+            "identity": analysis.trace.identity,
+            "endpoints": {
+                "from": _endpoint_label(summary.from_termination),
+                "to": _endpoint_label(summary.to_termination),
+            },
+            "segments": segments,
+            "logical_cable": self._logical_cable_display(analysis),
+            "terminations": list(analysis.terminations.values()),
+        }
+
+    @staticmethod
+    def _entered_through_claim(planned: _DesiredSegment | None, stated: _Termination | None) -> bool:
+        """Return whether planning entered this segment through a port the source never stated."""
+        return planned is not None and stated is not None and planned.left.key != stated.key
+
+    @staticmethod
+    def _segment_status(analysis: _TraceAnalysis, index: int, conflicted: set) -> str:
+        """Return the verdict the proposed panel shows for one planned segment."""
+        if index in conflicted:
+            return CONFLICT_SEGMENT
+        if index in analysis.proven:
+            return REUSE_SEGMENT
+        return CREATE_SEGMENT
+
+    def _logical_cable_display(self, analysis: _TraceAnalysis) -> dict | None:
+        """Return the one Logical Cable this trace would delete, as far as the actor may see it."""
+        if analysis.logical_cable is None:
+            return None
+        disclosure, _identities = self._cable_diagnostic_disclosure(analysis.logical_cable.cable)
+        return {"visible": disclosure["cable_visible"], "display": disclosure.get("cable", "")}
 
     def _changes(self, analysis: _TraceAnalysis) -> tuple[PlannedChange, ...]:
         """Return the deletion and the creations one actionable trace performs, in that order."""
@@ -1274,4 +1372,10 @@ __all__ = (
     "CableModule",
     "EligibleTerminations",
     "eligible_terminations",
+    "AUTOMATICALLY_RESOLVED",
+    "CONFLICT_SEGMENT",
+    "CREATE_SEGMENT",
+    "MANUALLY_RESOLVED",
+    "REUSE_SEGMENT",
+    "UNRESOLVED",
 )
