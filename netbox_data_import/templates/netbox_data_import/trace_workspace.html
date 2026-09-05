@@ -1,6 +1,7 @@
 {# SPDX-License-Identifier: Apache-2.0 #}
-{# Copyright (C) 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
 {% extends 'base/layout.html' %}
+{% load static %}
 
 {% block title %}Trace Review Workspace{% endblock %}
 
@@ -28,19 +29,24 @@
 
 <h1 class="page-title mb-3">Trace Review Workspace</h1>
 
-{% if drift %}
-  <div class="alert alert-warning d-flex align-items-center justify-content-between" role="alert">
-    <div>
+<div class="{% if drift %}alert alert-warning{% else %}card mb-3 p-2{% endif %}
+            d-flex align-items-center justify-content-between" {% if drift %}role="alert"{% endif %}>
+  <div>
+    {% if drift %}
       <strong>NetBox has changed since this preview was read.</strong>
       The proposed topology below is the one you reviewed, not what NetBox holds now.
-    </div>
-    <form method="post" action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3">
-      {% csrf_token %}
-      <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
-      <button type="submit" class="btn btn-warning">Re-read from NetBox</button>
-    </form>
+    {% else %}
+      <span class="text-secondary">This workspace matches what NetBox holds now.</span>
+    {% endif %}
   </div>
-{% endif %}
+  <form method="post" action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3">
+    {% csrf_token %}
+    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+    <button type="submit" class="btn {% if drift %}btn-warning{% else %}btn-outline-secondary{% endif %}">
+      Re-read from NetBox
+    </button>
+  </form>
+</div>
 
 <div class="card mb-3">
   <div class="card-body d-flex flex-wrap gap-4">
@@ -70,8 +76,13 @@
       </div>
       <div class="text-end">
         {% for action in trace.actions %}
-          <button type="button" class="btn btn-primary" data-trace-action="{{ action.key }}"
-                  {% if not action.enabled %}disabled{% endif %}>{{ action.label }}</button>
+          <form method="post" action="{% url 'plugins:netbox_data_import:trace_sync' %}" class="d-inline">
+            {% csrf_token %}
+            <input type="hidden" name="identity" value="{{ trace.identity }}">
+            <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+            <button type="submit" class="btn btn-primary" data-trace-action="{{ action.key }}"
+                    {% if not action.enabled %}disabled{% endif %}>{{ action.label }}</button>
+          </form>
           {% if not action.enabled %}<div class="ndi-trace-reason mt-1">{{ action.reason }}</div>{% endif %}
         {% endfor %}
       </div>
@@ -131,7 +142,11 @@
                     <button type="button" class="btn btn-sm btn-outline-secondary ms-1"
                             data-trace-picker="{{ termination.field_key }}"
                             data-trace-kind="{{ termination.kind }}"
-                            data-trace-label="{{ termination.label }}">Choose termination</button>
+                            data-trace-label="{{ termination.label }}"
+                            {% if not termination.selectable %}disabled{% endif %}>Choose termination</button>
+                    {% if not termination.selectable %}
+                      <div class="ndi-trace-reason">{{ termination.reason }}</div>
+                    {% endif %}
                   </li>
                 {% empty %}
                   <li class="text-secondary">This trace resolved no termination.</li>
@@ -145,7 +160,7 @@
           <div class="card ndi-trace-panel">
             <div class="card-header">Proposed physical topology</div>
             <div class="card-body">
-              {% if trace.logical_cable %}
+              {% if trace.deletes_logical_cable %}
                 <div class="mb-2">
                   <span class="badge ndi-trace-status-conflict">delete Logical Cable</span>
                   {% if trace.logical_cable.visible %}{{ trace.logical_cable.display }}{% endif %}
@@ -190,4 +205,38 @@
 {% empty %}
   <div class="alert alert-info">This preview planned no Source Trace.</div>
 {% endfor %}
+
+<div class="modal" id="traceTerminationPicker" tabindex="-1">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <form id="traceTerminationForm" method="post"
+            action="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
+            data-candidates-url="{% url 'plugins:netbox_data_import:trace_termination_candidates' %}">
+        {% csrf_token %}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        <input type="hidden" name="search" id="traceTerminationOfferedSearch">
+        <input type="hidden" name="field_key" id="traceTerminationFieldKey">
+        <input type="hidden" name="object_type" id="traceTerminationObjectType">
+        <input type="hidden" name="object_id" id="traceTerminationObjectId">
+        <div class="modal-header">
+          <h5 class="modal-title">Choose the termination for <span id="traceTerminationLabel"></span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <input type="search" class="form-control mb-2" id="traceTerminationSearch"
+                 placeholder="Search the eligible terminations" autocomplete="off">
+          <div class="text-secondary small mb-2" id="traceTerminationCount" hidden></div>
+          <div class="alert alert-danger" id="traceTerminationError" hidden></div>
+          <div class="list-group" id="traceTerminationCandidates"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-link" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="traceTerminationSubmit" disabled>Save decision</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
 {% endblock %}
