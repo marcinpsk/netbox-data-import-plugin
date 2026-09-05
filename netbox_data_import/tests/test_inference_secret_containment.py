@@ -20,6 +20,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from netbox_data_import.inference_connection_test import run_connection_test
+from netbox_data_import.jobs import InferenceBackendConnectionTestJob
 from netbox_data_import.models import ImportProfile, InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
 
@@ -116,7 +117,11 @@ class SecretContainmentTest(TestCase):
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
                 self.client.post(url)
+                # The view only queues, so an unrun body would leave the payload empty to assert on.
+                InferenceBackendConnectionTestJob.handle(Job.objects.get())
 
+        job = Job.objects.get()
+        self.assertEqual(job.data.get("category"), "ok")
         payloads = json.dumps(list(Job.objects.values("data", "name", "error")), default=str)
         self.assertNotIn(SECRET, payloads)
 

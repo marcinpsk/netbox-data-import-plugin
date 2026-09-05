@@ -155,6 +155,11 @@ class VaultKvV2CredentialBackend:
         if reference.backend != self.name:
             raise InvalidCredentialReference(f"This backend resolves '{self.name}' references only.")
         response = self._read(reference)
+        if response.status_code in (301, 302, 303, 307, 308):
+            raise InvalidCredentialConfiguration(
+                f"The credential store redirected the read (HTTP {response.status_code}). "
+                f"Check the configured vault address."
+            )
         if response.status_code in (401, 403):
             raise CredentialDenied(f"The credential store refused the read (HTTP {response.status_code}).")
         if response.status_code == 404:

@@ -236,3 +236,35 @@ class PluginConfigStartupGateTest(SimpleTestCase):
         self.validate(config)
 
         self.assertEqual(config["inference_backend_origin_allowlist"], [])
+
+
+class VaultCaBundleTest(SimpleTestCase):
+    """`ca_bundle` names a CA file. It can never turn certificate verification off."""
+
+    def vault(self, **overrides):
+        """Return a vault mapping with the named keys replaced."""
+        mapping = {"address": "https://vault.example.invalid:8200", "auth_method": "proxy"}
+        mapping.update(overrides)
+        return mapping
+
+    def test_a_path_is_accepted(self):
+        validate_plugin_settings(settings_with(vault=self.vault(ca_bundle="/etc/ssl/certs/vault.pem")))
+
+    def test_false_is_rejected(self):
+        """requests reads verify=False as 'skip verification', which this setting must never mean."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(vault=self.vault(ca_bundle=False)))
+
+        self.assertIn("ca_bundle", str(caught.exception))
+
+    def test_true_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_plugin_settings(settings_with(vault=self.vault(ca_bundle=True)))
+
+    def test_an_empty_path_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_plugin_settings(settings_with(vault=self.vault(ca_bundle="")))
+
+    def test_a_non_string_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_plugin_settings(settings_with(vault=self.vault(ca_bundle=["/a/b.pem"])))

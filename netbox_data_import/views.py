@@ -522,7 +522,8 @@ class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
         """Enqueue the worker Job, so no web process ever resolves a credential."""
         from .jobs import InferenceBackendConnectionTestJob
 
-        backend = get_object_or_404(InferenceBackend, pk=pk)
+        # restrict() applies the ObjectPermission constraints a model-level check would ignore.
+        backend = get_object_or_404(InferenceBackend.objects.restrict(request.user, "change"), pk=pk)
         job = InferenceBackendConnectionTestJob.enqueue(
             name=InferenceBackendConnectionTestJob.Meta.name,
             instance=backend,

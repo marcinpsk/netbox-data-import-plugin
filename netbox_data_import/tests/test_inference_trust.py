@@ -9,7 +9,6 @@ from netbox_data_import.inference_trust import (
     assert_resolved_address_allowed,
     validate_api_root,
     validate_origin,
-    validate_redirect_target,
 )
 
 ALLOWLIST = ("https://backend.example.invalid:443",)
@@ -143,32 +142,3 @@ class ResolvedAddressTest(SimpleTestCase):
     def test_resolving_no_address_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration):
             assert_resolved_address_allowed("https://backend.example.invalid:443", allowlist=ALLOWLIST, addresses=())
-
-
-class RedirectTargetTest(SimpleTestCase):
-    """A redirect is revalidated against the same rules before it is followed."""
-
-    def test_a_redirect_inside_the_allowlist_is_accepted(self):
-        validate_redirect_target(
-            "https://backend.example.invalid:443/v1/chat/completions", allowlist=ALLOWLIST, authentication="bearer"
-        )
-
-    def test_a_redirect_outside_the_allowlist_is_rejected(self):
-        with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_redirect_target(
-                "https://attacker.example.invalid:443/collect", allowlist=ALLOWLIST, authentication="bearer"
-            )
-
-        self.assertIn("allowlist", str(caught.exception))
-
-    def test_a_redirect_downgraded_to_http_is_rejected(self):
-        with self.assertRaises(InvalidInferenceConfiguration):
-            validate_redirect_target(
-                "http://backend.example.invalid:80/v1", allowlist=ALLOWLIST, authentication="bearer"
-            )
-
-    def test_a_redirect_to_the_metadata_service_is_rejected(self):
-        with self.assertRaises(InvalidInferenceConfiguration):
-            validate_redirect_target(
-                "http://169.254.169.254/latest/meta-data/", allowlist=ALLOWLIST, authentication="bearer"
-            )

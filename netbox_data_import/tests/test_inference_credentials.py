@@ -266,3 +266,50 @@ class VaultFailureClassificationTest(SimpleTestCase):
             backend.resolve(CredentialReference.from_mapping(REFERENCE))
 
             self.assertNotIn(SECRET, repr(vars(backend)))
+
+
+class VaultRedirectTest(SimpleTestCase):
+    """A redirecting Vault names an address problem, not an unreadable secret."""
+
+    class Redirecting(RecordingVault):
+        """Answer with a redirect the client must not follow."""
+
+        def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler names the hook.
+            type(self).seen.append({"path": self.path, "headers": {}, "body": "", "method": "GET"})
+            self.send_response(307)
+            self.send_header("Location", "https://vault-active.example.invalid:8200/v1/secret/data/x")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            """Keep the test output quiet."""
+
+    def test_a_redirect_is_reported_as_a_configuration_problem(self):
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        class Handler(self.Redirecting):
+            pass
+
+        Handler.seen = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            settings = {
+                "address": f"http://127.0.0.1:{server.server_address[1]}",
+                "auth_method": "proxy",
+                "connect_timeout": 2,
+                "read_timeout": 2,
+            }
+            backend = VaultKvV2CredentialBackend(settings)
+
+            with self.assertRaises(CredentialFailure) as caught:
+                backend.resolve(CredentialReference.from_mapping(REFERENCE))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(caught.exception.category, "invalid_configuration")
+        self.assertIn("redirect", str(caught.exception))

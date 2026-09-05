@@ -17,7 +17,12 @@ from collections.abc import Sequence
 
 import requests
 
-from .inference_trust import InvalidInferenceConfiguration, assert_resolved_address_allowed, resolve_addresses
+from .inference_trust import (
+    InvalidInferenceConfiguration,
+    assert_resolved_address_allowed,
+    resolve_addresses,
+    validate_api_root,
+)
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 
@@ -124,6 +129,18 @@ class OpenAICompatibleAdapter:
         self.read_timeout = read_timeout
         self._session = session or requests.Session()
 
+    def _check_response_mode(self, request: InferenceRequest) -> None:
+        """Reject a request for a mode this backend is not configured to serve."""
+        if request.requested_response_mode != self.response_mode:
+            raise InvalidBackendConfiguration(
+                f"This backend is configured for '{self.response_mode}', "
+                f"but the request asked for '{request.requested_response_mode}'."
+            )
+        if self.response_mode == "json_schema":
+            raise InvalidBackendConfiguration(
+                "The json_schema response mode needs a schema to send, and this delivery stores none."
+            )
+
     def _body(self, request: InferenceRequest) -> dict:
         """Return the Chat Completions body: one choice, no streaming, no tools."""
         body = {
@@ -137,19 +154,19 @@ class OpenAICompatibleAdapter:
         }
         if self.response_mode == "json_object":
             body["response_format"] = {"type": "json_object"}
-        elif self.response_mode == "json_schema":
-            body["response_format"] = {"type": "json_schema"}
         return body
 
     def _check_destination(self) -> None:
         """Reject a destination the deployment has not approved, rechecked at request time."""
         try:
+            validate_api_root(self.api_root, self.allowlist, self.authentication)
             assert_resolved_address_allowed(self.api_root, self.allowlist, resolve_addresses(self.api_root))
         except InvalidInferenceConfiguration as exc:
             raise InvalidBackendConfiguration(str(exc)) from None
 
     def complete(self, request: InferenceRequest, api_key: str) -> InferenceCompletion:
         """Return one completion, or raise the typed error the backend condition maps to."""
+        self._check_response_mode(request)
         self._check_destination()
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.authentication == "bearer":
@@ -206,6 +223,9 @@ class OpenAICompatibleAdapter:
             raise MalformedEnvelope("The backend answered with an unreadable message.")
         content = message.get("content")
         refusal = message.get("refusal")
+        # Content parts are common on OpenAI-compatible servers, and this delivery reads text only.
+        if content is not None and not isinstance(content, str):
+            raise MalformedEnvelope("The backend answered with content this delivery cannot read as text.")
         # A refusal is a completed call that produced no answer, not a failure to call.
         is_refusal = bool(refusal) or not (content or "").strip()
         return InferenceCompletion(

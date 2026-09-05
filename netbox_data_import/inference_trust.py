@@ -170,12 +170,6 @@ def resolve_addresses(api_root: str, setting: str = "api_root") -> tuple[str, ..
     return tuple(dict.fromkeys(str(answer[4][0]) for answer in answers))
 
 
-def validate_redirect_target(location: str, allowlist: Sequence[str], authentication: str = "bearer") -> str:
-    """Return a redirect target whose origin the deployment approves, so it may be followed."""
-    _assert_origin_approved(location, allowlist, authentication, setting="redirect target")
-    return location
-
-
 __all__ = (
     "CLOUD_METADATA_ADDRESSES",
     "InvalidInferenceConfiguration",
@@ -184,5 +178,4 @@ __all__ = (
     "resolve_addresses",
     "validate_api_root",
     "validate_origin",
-    "validate_redirect_target",
 )

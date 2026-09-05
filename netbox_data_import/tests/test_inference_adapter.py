@@ -172,8 +172,14 @@ class ChatCompletionRequestTest(SimpleTestCase):
         self.assertEqual(messages[1]["content"], REQUEST.user_payload_json)
 
     def test_the_json_object_response_mode_is_sent_when_configured(self):
+        asked = InferenceRequest(
+            system_instruction=REQUEST.system_instruction,
+            user_payload_json=REQUEST.user_payload_json,
+            requested_response_mode="json_object",
+        )
+
         with serving() as (root, seen, allowlist):
-            adapter_for(root, allowlist, response_mode="json_object").complete(REQUEST, api_key=API_KEY)
+            adapter_for(root, allowlist, response_mode="json_object").complete(asked, api_key=API_KEY)
 
         self.assertEqual(json.loads(seen[0]["body"])["response_format"], {"type": "json_object"})
 
@@ -342,3 +348,70 @@ class AdapterIsolationTest(SimpleTestCase):
                 roots.update(alias.name.partition(".")[0] for alias in node.names)
 
         self.assertEqual(sorted(roots & self.FORBIDDEN), [])
+
+
+class RequestTimeTrustTest(SimpleTestCase):
+    """The allowlist is enforced again at request time, not only at the form boundary."""
+
+    def test_an_origin_outside_the_allowlist_is_refused_before_the_key_travels(self):
+        """A row saved before the allowlist changed must not keep calling the old destination."""
+        with serving() as (root, seen, _allowlist):
+            adapter = adapter_for(root, allowlist=[])
+
+            with self.assertRaises(InvalidBackendConfiguration) as caught:
+                adapter.complete(REQUEST, api_key=API_KEY)
+
+        # The precise phrase matters: the private-address rejection also says "allowlist".
+        self.assertIn("is not on the inference_backend_origin_allowlist", str(caught.exception))
+        self.assertEqual(seen, [])
+
+
+class ResponseModeAgreementTest(SimpleTestCase):
+    """The request states the mode it wants, so a backend configured for another one refuses."""
+
+    def test_a_request_for_another_mode_is_refused(self):
+        asked = InferenceRequest(system_instruction="s", user_payload_json="{}", requested_response_mode="json_object")
+
+        with serving() as (root, seen, allowlist):
+            adapter = adapter_for(root, allowlist, response_mode="prompt_json")
+
+            with self.assertRaises(InvalidBackendConfiguration):
+                adapter.complete(asked, api_key=API_KEY)
+
+        self.assertEqual(seen, [])
+
+    def test_the_json_schema_mode_is_refused_because_this_delivery_sends_no_schema(self):
+        """Section 8.2 offers the mode, but no schema field exists to make a valid request."""
+        asked = InferenceRequest(system_instruction="s", user_payload_json="{}", requested_response_mode="json_schema")
+
+        with serving() as (root, seen, allowlist):
+            adapter = adapter_for(root, allowlist, response_mode="json_schema")
+
+            with self.assertRaises(InvalidBackendConfiguration) as caught:
+                adapter.complete(asked, api_key=API_KEY)
+
+        self.assertIn("schema", str(caught.exception))
+        self.assertEqual(seen, [])
+
+
+class NonStringContentTest(SimpleTestCase):
+    """Content parts are common on OpenAI-compatible servers, and must stay inside the taxonomy."""
+
+    def complete(self, payload):
+        """Return whatever one envelope produces."""
+        with serving(payload=payload) as (root, _seen, allowlist):
+            return adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+    def test_a_content_parts_array_raises_a_typed_error(self):
+        envelope = completion()
+        envelope["choices"][0]["message"]["content"] = [{"type": "text", "text": "{}"}]
+
+        with self.assertRaises(MalformedEnvelope):
+            self.complete(envelope)
+
+    def test_a_numeric_content_raises_a_typed_error(self):
+        envelope = completion()
+        envelope["choices"][0]["message"]["content"] = 7
+
+        with self.assertRaises(MalformedEnvelope):
+            self.complete(envelope)

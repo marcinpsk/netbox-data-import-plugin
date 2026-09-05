@@ -71,6 +71,12 @@ def validate_vault_settings(value: Any) -> Mapping[str, Any]:
         raise InvalidInferenceConfiguration(f"Unknown '{VAULT_SETTING}' key(s): {', '.join(unknown)}.")
     if not mapping.get("address"):
         raise InvalidInferenceConfiguration(f"'{VAULT_SETTING}.address' is required.")
+    bundle = mapping.get("ca_bundle")
+    if "ca_bundle" in mapping and (not isinstance(bundle, str) or not bundle.strip()):
+        # requests reads a bool here as "skip verification", which this setting must never mean.
+        raise InvalidInferenceConfiguration(
+            f"'{VAULT_SETTING}.ca_bundle' must be a path to a CA bundle, got {type(bundle).__name__}."
+        )
     method = mapping.get("auth_method", "proxy")
     if method not in VAULT_AUTH_METHODS:
         raise InvalidInferenceConfiguration(

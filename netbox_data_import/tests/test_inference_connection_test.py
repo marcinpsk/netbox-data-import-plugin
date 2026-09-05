@@ -213,3 +213,52 @@ class ConnectionTestAuthorizationTest(TestCase):
 
         self.assertNotIn("is_superuser", source)
         self.assertNotIn("is_staff", source)
+
+    def test_a_constrained_user_cannot_test_a_backend_outside_its_scope(self):
+        """A model-level check would let a scoped user reach any row, so the queryset is restricted."""
+        other = InferenceBackend.objects.create(
+            backend_key="other",
+            display_name="Other",
+            api_root="https://backend.example.invalid:443",
+            model="m",
+            credential_reference=REFERENCE,
+        )
+        scoped = user_with_object_permission("scoped", [(InferenceBackend, ["change"], {"backend_key": "primary"})])
+        self.client.force_login(scoped)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[other.pk])
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+
+class BackendDetailPageTest(TestCase):
+    """Every redirect target in this feature has to render, or a save ends on a 500."""
+
+    def setUp(self):
+        """Create one row and a user allowed to view it."""
+        self.row = make_row()
+        self.viewer = user_with_object_permission("viewer", [(InferenceBackend, ["view", "change"], {})])
+        self.client.force_login(self.viewer)
+
+    def test_the_detail_page_renders(self):
+        response = self.client.get(self.row.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "primary")
+
+    def test_the_detail_page_shows_no_secret_bearing_field(self):
+        """The reference is restricted metadata, so the page names its parts and no value."""
+        response = self.client.get(self.row.get_absolute_url())
+
+        self.assertContains(response, "inference/backend")
+        self.assertNotContains(response, "api_key_value")
+
+    def test_the_connection_test_redirect_lands_on_a_page_that_renders(self):
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
