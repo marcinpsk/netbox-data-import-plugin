@@ -14,97 +14,18 @@ from openpyxl.worksheet.worksheet import Worksheet
 from netbox_data_import.adapters import SourceBatch, SourceUnreadable, TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import import trace_workbook
+from netbox_data_import.tests.helpers import (
+    TRACE_LIST_HEADER as LIST_HEADER,
+    TRACE_PATH_HEADER as PATH_HEADER,
+    trace_endpoint_line as _endpoint_line,
+    trace_segment as _segment,
+    trace_termination as _termination,
+    trace_visit as _visit,
+    trace_workbook_bytes as _workbook,
+)
 from netbox_data_import.trace_workbook import parse_endpoint_line
 
 FIXTURES = Path(__file__).parent / "fixtures"
-
-PATH_HEADER = (
-    "Port",
-    "PortClass",
-    "Cards",
-    "Device",
-    "UPos",
-    "Rack",
-    "Location",
-    "CableClass",
-    "Port",
-    "PortClass",
-    "Cards",
-    "Device",
-    "UPos",
-    "Rack",
-    "Location",
-)
-LIST_HEADER = ("Location", "Rack", "UPos", "Device", "Cards", "Port", "PortClass", "Cable")
-
-
-def _termination(device, cards, port, port_class):
-    """Return one compact termination tuple for an in-memory workbook."""
-    return device, cards, port, port_class
-
-
-def _endpoint_line(termination):
-    """Render one endpoint line in the source format."""
-    device, cards, port, port_class = termination
-    parts = [device]
-    if cards:
-        parts.append(cards)
-    parts.append(f"{port} ({port_class})")
-    return " > ".join(parts)
-
-
-def _segment(left, cable_class, right, corroboration=("", "", "")):
-    """Render one Segment Evidence row in the source column order."""
-    left_device, left_cards, left_port, left_class = left
-    right_device, right_cards, right_port, right_class = right
-    return (
-        left_port,
-        left_class,
-        left_cards,
-        left_device,
-        *corroboration,
-        cable_class,
-        right_port,
-        right_class,
-        right_cards,
-        right_device,
-        *corroboration,
-    )
-
-
-def _visit(termination):
-    """Render one Trace List visit row."""
-    device, cards, port, port_class = termination
-    return "", "", "", device, cards, port, port_class, "Ignored"
-
-
-def _add_sheet(book, name, header, blocks):
-    """Add one trace sheet with the supplied source blocks."""
-    sheet = book.create_sheet(name)
-    sheet.append(("Executed", "2026-08-31 12:00:00"))
-    sheet.append(())
-    for from_line, to_line, rows in blocks:
-        sheet.append(("From", from_line))
-        sheet.append(("To", to_line))
-        sheet.append(header)
-        for row in rows:
-            sheet.append(row)
-    return sheet
-
-
-def _workbook(*, path_blocks=(), list_blocks=(), include_path=True, include_list=False):
-    """Build workbook bytes with fixed trace sheet names."""
-    book = openpyxl.Workbook()
-    active = book.active
-    if isinstance(active, Worksheet):
-        book.remove(active)
-    if include_path:
-        _add_sheet(book, "Trace From To", PATH_HEADER, path_blocks)
-    if include_list:
-        _add_sheet(book, "Trace List", LIST_HEADER, list_blocks)
-    buffer = BytesIO()
-    book.save(buffer)
-    return buffer.getvalue()
 
 
 def _two_traces_over_one_pair(first_class, second_class, *, shared_entry=False):
@@ -234,7 +155,7 @@ class TraceWorkbookIdentityTest(SimpleTestCase):
                 )
 
     def test_a_reversed_restatement_collapses_without_fingerprint_churn(self):
-        """Direction changes provenance but not trace identity or content."""
+        """Direction changes provenance but not canonical trace identity, segments, or content."""
         endpoint_a = _termination("DEVICE-A", "CARD-A", "PORT-A", "Port")
         panel_entry = _termination("PANEL-A", "CARD-P", "FRONT-A", "Position Front")
         panel_exit = _termination("PANEL-A", "CARD-P", "REAR-A", "Punch-Down")
@@ -256,6 +177,8 @@ class TraceWorkbookIdentityTest(SimpleTestCase):
 
         self.assertEqual(forward_trace.identity, reverse_trace.identity)
         self.assertEqual(forward_trace.content_fingerprint, reverse_trace.content_fingerprint)
+        self.assertEqual(forward_trace.segments, reverse_trace.segments)
+        self.assertEqual(forward_trace.pass_through_claims, reverse_trace.pass_through_claims)
         self.assertEqual(len(combined.rows), 1)
         self.assertEqual(len(combined.rows[0].provenance), 2)
         self.assertEqual({item.direction for item in combined.rows[0].provenance}, {"canonical", "reversed"})
@@ -371,6 +294,17 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
         self.assertEqual(stated_end.rack, "RACK-Q")
         self.assertEqual(stated_end.u_position, "7")
 
+    def test_an_endpoint_only_fallback_refuses_one_termination(self):
+        """A fallback states no segments, so the linearity check never saw its endpoints."""
+        endpoint_a, _endpoint_b, _lines = self._pair()
+        lines = (_endpoint_line(endpoint_a), _endpoint_line(endpoint_a))
+        list_block = (*lines, (_visit(endpoint_a),))
+
+        batch = _interpret(_workbook(path_blocks=(), list_blocks=(list_block,), include_list=True))
+
+        self.assertIn("trace.non_linear_path", _codes(batch))
+        self.assertFalse(batch.rows[0].valid, _codes(batch))
+
     def test_a_reversed_trace_list_block_does_not_invalidate_the_path_trace(self):
         """An unpaired Trace List block states no segments, so it cannot contradict segment evidence."""
         endpoint_a, endpoint_b, lines = self._pair()
@@ -384,6 +318,33 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
         self.assertNotIn("trace.duplicate_conflict", _codes(batch))
         self.assertTrue(batch.rows[0].valid, _codes(batch))
         self.assertEqual(len(batch.rows[0].segments), 1)
+
+    def test_segment_evidence_is_selected_over_an_endpoint_summary_fallback(self):
+        """A collapsed Source Trace keeps Segment Evidence instead of its endpoint-only occurrence."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        path_block = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b),))
+        reversed_lines = (_endpoint_line(endpoint_b), _endpoint_line(endpoint_a))
+        list_block = (*reversed_lines, (_visit(endpoint_b), _visit(endpoint_a)))
+        content = _workbook(path_blocks=(path_block,), list_blocks=(list_block,), include_list=True)
+
+        batch = _interpret(content)
+
+        self.assertEqual(len(batch.rows), 1)
+        self.assertEqual(len(batch.rows[0].segments), 1, "the collapsed occurrence dropped its segments")
+
+    def test_same_rank_duplicate_selection_does_not_depend_on_block_order(self):
+        """Equal Segment Evidence occurrences use source content instead of position as the tie-break."""
+        endpoint_a, endpoint_b, lines = self._pair()
+        rack_a = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b, ("1", "RACK-A", "Site A")),))
+        rack_z = (*lines, (_segment(endpoint_a, "Cable A", endpoint_b, ("9", "RACK-Z", "Site Z")),))
+
+        rack_z_first = _interpret(_workbook(path_blocks=(rack_z, rack_a)))
+        rack_a_first = _interpret(_workbook(path_blocks=(rack_a, rack_z)))
+
+        self.assertEqual(
+            [batch.rows[0].endpoint_summary.from_termination.rack for batch in (rack_z_first, rack_a_first)],
+            ["RACK-A", "RACK-A"],
+        )
 
     def test_a_path_row_value_survives_a_later_empty_visit(self):
         """The first non-empty value wins, so a blank list row cannot clear a stated one."""
@@ -429,6 +390,21 @@ class TraceWorkbookCorroborationTest(SimpleTestCase):
 
 class TraceWorkbookTaxonomyTest(SimpleTestCase):
     """Small workbooks cover source-only validation conditions absent from the corpus."""
+
+    def test_an_overlength_export_timestamp_is_rejected_at_the_adapter(self):
+        """Raw export metadata cannot reach a shorter provenance database column."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")
+        block = (
+            _endpoint_line(endpoint_a),
+            _endpoint_line(endpoint_b),
+            (_segment(endpoint_a, "Cable", endpoint_b),),
+        )
+
+        batch = _interpret(_workbook(path_blocks=(block,), export_timestamp="2" * 101))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.metadata_too_long"])
 
     def test_no_recognized_sheet_is_a_batch_error(self):
         """An unrelated workbook returns its diagnostic code without creating a unit."""
@@ -702,6 +678,17 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         panel = _termination("PANEL-A", "CARD-A", "01", "Position Front")
         lines = _endpoint_line(endpoint_a), _endpoint_line(endpoint_a)
         block = (*lines, (_segment(endpoint_a, "Cable A", panel), _segment(panel, "Cable A", endpoint_a)))
+
+        batch = _interpret(_workbook(path_blocks=(block,)))
+
+        self.assertFalse(batch.rows[0].valid)
+        self.assertEqual(_codes(batch), ["trace.non_linear_path"])
+
+    def test_one_segment_that_ends_where_it_starts_is_not_linear(self):
+        """A cable from a termination to itself is unrepresentable, so the source refuses it."""
+        endpoint_a = _termination("DEVICE-A", "", "PORT-A", "Port")
+        lines = _endpoint_line(endpoint_a), _endpoint_line(endpoint_a)
+        block = (*lines, (_segment(endpoint_a, "Cable A", endpoint_a),))
 
         batch = _interpret(_workbook(path_blocks=(block,)))
 

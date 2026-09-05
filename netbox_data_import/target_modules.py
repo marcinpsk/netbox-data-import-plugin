@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Target Module runtime protocol, and the Rack module that implements it.
+"""The Rack, Device and Cable Target Modules, and the registry the coordinator resolves them through.
 
 Section 2.3 gives a Target Module target-specific matching, ORM queries, permission checks,
 preconditions, locking and writes. It plans against the complete relevant Source Batch and applies
@@ -18,18 +18,26 @@ import re
 from copy import copy
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any
 
 from django.core.exceptions import ValidationError
 
 from . import ip_assignment
+from .cable_target import CableModule
 from .catalog import OutputKind
-from .contact_resolution import ContactResolutionRequired, ContactReview, ContactSelection, PrimaryContactResolver
+from .contact_resolution import (
+    ContactResolutionRequired,
+    ContactReview,
+    ContactSelection,
+    DanglingProfileReference,
+    PrimaryContactResolver,
+)
 from .device_field_review import DeviceFieldReviewer
-from .device_identity import DeviceTypeIdentityResolver, normalize_mapping_text
+from .device_identity import DeviceTypeIdentityResolver
 from .netbox_reader import PlanningTargetUnavailable
 from .object_permissions import ObjectPermissionDenied
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
+from .target_runtime import ExecutionContext, PreconditionFailed, TargetModuleRuntime
 from .values import (
     effective_device_name,
     identity_text,
@@ -40,34 +48,6 @@ from .values import (
 )
 
 DEFAULT_RACK_HEIGHT = 42
-
-
-class PreconditionFailed(Exception):
-    """Target state moved between planning and the write, so the change no longer applies."""
-
-
-@dataclass(frozen=True)
-class ExecutionContext:
-    """What a Target Module needs while the coordinator's transaction is open."""
-
-    actor: Any
-    reader: Any
-    profile: Any
-
-
-class TargetModuleRuntime(Protocol):
-    """What the coordinator may call on a Target Module."""
-
-    key: str
-    consumes: frozenset[str]
-
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
-        """Return the Synchronization Units this module owns for the whole batch."""
-        ...
-
-    def apply(self, planned_change: PlannedChange, execution_context) -> Any:
-        """Apply one Planned Change inside the coordinator's transaction."""
-        ...
 
 
 def _text(value) -> str:
@@ -188,7 +168,7 @@ def _translate(value, table) -> str:
     return text if text in set(table.values()) else ""
 
 
-def _coerce_height(value) -> int:
+def _coerce_rack_height(value) -> int:
     """Return the rack height the row asks for, never below one unit."""
     try:
         return max(1, int(float(_source_text(value) or DEFAULT_RACK_HEIGHT)))
@@ -251,8 +231,18 @@ class RackModule:
     key = "rack"
     consumes = frozenset({OutputKind.RACK_SOURCE_ROW})
 
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
+    def plan(
+        self,
+        source_batch,
+        profile,
+        catalog,
+        netbox_reader,
+        *,
+        lock_plan_references: bool = False,
+    ) -> list[SynchronizationUnit]:
         """Return one Synchronization Unit per rack row, with the disposition its state earns."""
+        # Planned Change preconditions carry every target row this module depends on, so no read-only reference remains.
+        del lock_plan_references
         rows = self._rack_rows(source_batch, profile)
         if not rows:
             return []
@@ -320,7 +310,7 @@ class RackModule:
                 )
             return _refused(identity, code, display)
 
-        height = _coerce_height(row.get("u_height"))
+        height = _coerce_rack_height(row.get("u_height"))
         serial = _source_text(row.get("serial"))
         rack_type_id = mapping.rack_type_id
         matches = existing.get(identity_text(name), ())
@@ -573,16 +563,6 @@ def _with_issues(identity, issues) -> SynchronizationUnit:
     )
 
 
-def _blocked(identity, code, display) -> SynchronizationUnit:
-    """Return a unit waiting on a dependency this module does not create."""
-    return SynchronizationUnit(
-        identity=identity,
-        disposition=Disposition.BLOCKED,
-        diagnostics=(Diagnostic(code=code, severity=Severity.ERROR, identities=(identity,), display=display),),
-        display=display,
-    )
-
-
 @dataclass(frozen=True)
 class _Dependencies:
     """What a device row needs to already exist, or the first thing that does not."""
@@ -591,10 +571,8 @@ class _Dependencies:
     role: Any = None
     rack: Any = None
     rack_identity: str | None = None
-    device_type_slugs: tuple[str, str] = ("", "")
     role_slug: str = ""
     explicit_device_type: bool = False
-    device_type_exists: bool = True
     changes: tuple[PlannedChange, ...] = ()
     missing: tuple[str, dict] | None = None
 
@@ -627,15 +605,6 @@ class _Match:
     value: str = ""
     method: str = ""
     inaccessible: bool = False
-
-
-@dataclass(frozen=True)
-class _PlannedDeviceType:
-    """The placement facts of a Device Type this unit will create."""
-
-    u_height: int
-    is_full_depth: bool
-    pk: None = None
 
 
 @dataclass(frozen=True)
@@ -823,18 +792,20 @@ class _DeviceBatch:
         ("asset_tag", "device.duplicate_asset_tag", True),
     )
 
-    def __init__(self, source_batch, rows, profile, netbox_reader):
+    def __init__(self, source_batch, rows, profile, netbox_reader, *, lock_plan_references: bool = False):
         from dcim.models import Device
 
         self.profile = profile
         self.reader = netbox_reader
+        self.lock_plan_references = lock_plan_references
+        self._locked_placement: dict[tuple[type, int], Any] = {}
         self.ignored = _ignored_source_ids(profile)
         self._identity = DeviceTypeIdentityResolver.for_profile(profile)
         self._reviewer = DeviceFieldReviewer.for_profile(profile)
         self._candidate_columns = PrimaryContactResolver.candidate_source_columns(profile)
         self._mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         self._roles = {source_class: _text(mapping.role_slug) for source_class, mapping in self._mappings.items()}
-        self._device_types, self._manufacturers, self._role_objects = self._load_dependency_objects(rows)
+        self._device_types, self._role_objects = self._load_dependency_objects(rows)
         self._bindings = {_text(match.source_id): match.netbox_device_id for match in profile.device_matches.all()}
         self._bound_sources = {match.netbox_device_id: _text(match.source_id) for match in profile.device_matches.all()}
         identity_rows = [row for row in rows if self._is_identity_writing_row(row)]
@@ -885,8 +856,6 @@ class _DeviceBatch:
         }
         self._reserved_names.update(identity_text(effective_device_name(row)) for row in identity_rows)
         self._effective_identity = self._effective_identity_values(identity_rows)
-        self._ignored_device_type_rows = self._active_ignored_device_type_rows(identity_rows)
-        self._slug_conflicts = self._derived_slug_conflicts(identity_rows)
         self._clashes = {
             "source_id": self._rows_by_value(source_batch.rows, "source_id", False),
             "serial": self._rows_by_effective("serial", fold=False),
@@ -894,16 +863,79 @@ class _DeviceBatch:
         }
         self._racks = _racks_by_comparison_name(netbox_reader)
         self._planned_racks = self._planned_racks_by_name(source_batch, profile)
+        self._lock_placement_references(rows)
         self.side_map, self.airflow_map, self.status_map = translation_maps()
         # Row order decides who keeps a slot two rows claim, so the first row planned wins it.
         self._claimed: dict[tuple[int | str, str | None, Any], int] = {}
         self._claimed_devices: dict[int, tuple[int | None, str]] = {}
 
-    def _load_dependency_objects(
-        self, rows: list[dict[str, Any]]
-    ) -> tuple[dict[tuple[str, str], Any], dict[str, Any], dict[str, Any]]:
-        """Load each Device Type, Manufacturer, and Device Role this batch can reference."""
-        from dcim.models import DeviceRole, DeviceType, Manufacturer
+    def placement_reference(self, model, pk):
+        """Return one row the placement reads, from the locks this batch took before planning."""
+        if self.lock_plan_references:
+            return self._locked_placement.get((model, pk))
+        return model.objects.filter(pk=pk).first()
+
+    def _lock_placement_references(self, rows: list[dict[str, Any]]) -> None:
+        """Lock every placement row this batch can read, in one model and primary-key order.
+
+        Two profiles plan concurrently, because the policy lock covers one profile each. A lock
+        taken per row therefore follows source order, and two batches can take the same rows in
+        opposite orders. One ordered pass per model cannot.
+        """
+        if not self.lock_plan_references:
+            return
+        from dcim.models import DeviceType, Rack
+
+        candidates = self._placement_candidate_devices()
+        # u_height and is_full_depth decide placement here, and Device.full_clean() reads them again.
+        type_ids = {device_type.pk for device_type in self._device_types.values()}
+        type_ids.update(device.device_type_id for device in candidates)
+        rack_ids = {rack.pk for rack in self._named_rack_matches(rows)}
+        rack_ids.update(device.rack_id for device in candidates if device.rack_id)
+        locked_types = (
+            DeviceType.objects.select_related("manufacturer")
+            .filter(pk__in=sorted(type_ids))
+            .order_by("pk")
+            .select_for_update(of=("self",))
+        )
+        for device_type in locked_types:
+            self._locked_placement[(DeviceType, device_type.pk)] = device_type
+        locked_racks = Rack.objects.filter(pk__in=sorted(rack_ids)).order_by("pk").select_for_update(of=("self",))
+        for rack in locked_racks:
+            self._locked_placement[(Rack, rack.pk)] = rack
+        # A Device Type deleted between the unlocked read and the lock leaves its rows unplannable.
+        self._device_types = {
+            key: locked
+            for key, device_type in self._device_types.items()
+            if (locked := self._locked_placement.get((DeviceType, device_type.pk))) is not None
+        }
+
+    def _placement_candidate_devices(self) -> list[Any]:
+        """Return every stored Device a row can match, whose placement a review can retain."""
+        candidates = list(self._reviewed_devices.values())
+        for index in (
+            self._devices_by_source_id,
+            self._devices_by_serial,
+            self._devices_by_asset_tag,
+            self._devices_by_name,
+        ):
+            for found in index.values():
+                candidates.extend(found)
+        return candidates
+
+    def _named_rack_matches(self, rows: list[dict[str, Any]]) -> list[Any]:
+        """Return the one existing Rack each row names, skipping the names that match several."""
+        matched = []
+        for row in rows:
+            rack_name = _source_text(row.get("rack_name"))
+            found = self._racks.get(identity_text(rack_name), ()) if rack_name else ()
+            if len(found) == 1:
+                matched.append(found[0])
+        return matched
+
+    def _load_dependency_objects(self, rows: list[dict[str, Any]]) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
+        """Load each Device Type and Device Role this batch can reference."""
+        from dcim.models import DeviceRole, DeviceType
 
         type_keys = set()
         for row in rows:
@@ -911,21 +943,16 @@ class _DeviceBatch:
             model = " ".join((_source_text(row.get("model")) or "Unknown").split())
             type_keys.add(self._identity.resolve(make, model)[:2])
 
+        referenced_types = DeviceType.objects.select_related("manufacturer").filter(
+            manufacturer__slug__in={mfg_slug for mfg_slug, _dt_slug in type_keys},
+            slug__in={dt_slug for _mfg_slug, dt_slug in type_keys},
+        )
         device_types = {
-            (device_type.manufacturer.slug, device_type.slug): device_type
-            for device_type in DeviceType.objects.select_related("manufacturer").filter(
-                manufacturer__slug__in={mfg_slug for mfg_slug, _dt_slug in type_keys},
-                slug__in={dt_slug for _mfg_slug, dt_slug in type_keys},
-            )
-        }
-        missing_manufacturers = {mfg_slug for mfg_slug, dt_slug in type_keys if (mfg_slug, dt_slug) not in device_types}
-        manufacturers = {
-            manufacturer.slug: manufacturer
-            for manufacturer in Manufacturer.objects.filter(slug__in=missing_manufacturers)
+            (device_type.manufacturer.slug, device_type.slug): device_type for device_type in referenced_types
         }
         role_slugs = {role_slug for role_slug in self._roles.values() if role_slug}
         roles = {role.slug: role for role in DeviceRole.objects.filter(slug__in=role_slugs)}
-        return device_types, manufacturers, roles
+        return device_types, roles
 
     def _load_identity_objects(self, rows):
         """Load the global Device identity candidates and their visibility once."""
@@ -997,86 +1024,6 @@ class _DeviceBatch:
             index(name_devices, lambda device: device._identity_name),
             visible_ids,
         )
-
-    def _active_ignored_device_type_rows(self, rows) -> frozenset[int]:
-        """Return rows whose saved review keeps the matched Device Type."""
-        ignored = set()
-        for row in rows:
-            source_id = _source_text(row.get("source_id"))
-            reviewed_ids = self._review_device_ids.get(source_id, frozenset())
-            if len(reviewed_ids) != 1:
-                continue
-            device_id = next(iter(reviewed_ids))
-            device = self._reviewed_devices.get(device_id)
-            if device is None or device_id not in self._visible_reviewed_device_ids:
-                continue
-            make = " ".join((_source_text(row.get("make")) or "Unknown").split())
-            model = " ".join((_source_text(row.get("model")) or "Unknown").split())
-            mfg_slug, dt_slug, _explicit = self._identity.resolve(make, model)
-            review = self._reviewer.review(
-                source_id,
-                device,
-                {"device_type": (mfg_slug, dt_slug, make, model)},
-            )
-            if "device_type" in review.ignored:
-                ignored.add(row.get("_row_number"))
-        return frozenset(ignored)
-
-    def _derived_slug_conflicts(self, rows) -> dict[int, dict[str, Any]]:
-        """Return source identities that collapse onto one generated dependency slug."""
-        manufacturer_groups: dict[str, list[dict[str, Any]]] = {}
-        device_type_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for row in rows:
-            row_number = row.get("_row_number")
-            if row_number in self._ignored_device_type_rows:
-                continue
-            make = " ".join((_source_text(row.get("make")) or "Unknown").split())
-            model = " ".join((_source_text(row.get("model")) or "Unknown").split())
-            mfg_slug, dt_slug, explicit_device_type = self._identity.resolve(make, model)
-            record = {
-                "row_number": row_number,
-                "make": make,
-                "model": model,
-                "explicit_device_type": explicit_device_type,
-                "explicit_manufacturer": (
-                    explicit_device_type
-                    or normalize_mapping_text(make).casefold() in self._identity.mapped_source_makes
-                ),
-            }
-            manufacturer_groups.setdefault(mfg_slug, []).append(record)
-            device_type_groups.setdefault((mfg_slug, dt_slug), []).append(record)
-
-        conflicts = {}
-        for slug, records in manufacturer_groups.items():
-            manufacturer_labels = {identity_text(record["make"]) for record in records}
-            if len(manufacturer_labels) <= 1 or all(record["explicit_manufacturer"] for record in records):
-                continue
-            message = f"Different manufacturer names derive the same slug '{slug}'. Add explicit manufacturer mappings."
-            row_numbers = tuple(record["row_number"] for record in records)
-            for record in records:
-                conflicts[record["row_number"]] = {
-                    "message": message,
-                    "mfg_slug": slug,
-                    "rows": row_numbers,
-                }
-
-        for (mfg_slug, dt_slug), records in device_type_groups.items():
-            device_type_labels = {(identity_text(record["make"]), identity_text(record["model"])) for record in records}
-            if len(device_type_labels) <= 1 or all(record["explicit_device_type"] for record in records):
-                continue
-            message = (
-                f"Different device types derive the same slug '{mfg_slug}/{dt_slug}'. "
-                "Add explicit device type mappings."
-            )
-            row_numbers = tuple(record["row_number"] for record in records)
-            for record in records:
-                conflicts[record["row_number"]] = {
-                    "message": message,
-                    "mfg_slug": mfg_slug,
-                    "dt_slug": dt_slug,
-                    "rows": row_numbers,
-                }
-        return conflicts
 
     def _is_identity_writing_row(self, row) -> bool:
         """Return whether a row can write Device identity fields."""
@@ -1173,9 +1120,7 @@ class _DeviceBatch:
         return None
 
     def dependencies(self, row) -> _Dependencies:
-        """Return existing or planned relation objects, or the first unmet dependency."""
-        from dcim.models import DeviceType
-
+        """Return existing relation objects and planned roles, or the first unmet dependency."""
         make = " ".join((_source_text(row.get("make")) or "Unknown").split())
         model = " ".join((_source_text(row.get("model")) or "Unknown").split())
         mfg_slug, dt_slug, explicit = self._identity.resolve(make, model)
@@ -1183,36 +1128,18 @@ class _DeviceBatch:
         actor = self.reader.actor
         device_type = self._device_types.get((mfg_slug, dt_slug))
         if device_type is None:
-            if not self.profile.adapter_settings.create_missing_device_types:
-                return _Dependencies(missing=("device.device_type_missing", {"mfg_slug": mfg_slug, "dt_slug": dt_slug}))
-            manufacturer = self._manufacturers.get(mfg_slug)
-            if manufacturer is not None and not explicit and identity_text(manufacturer.name) != identity_text(make):
-                return _Dependencies(
-                    missing=(
-                        "device.manufacturer_slug_collision",
-                        {"mfg_slug": mfg_slug, "source_make": make, "stored_make": manufacturer.name},
-                    )
-                )
-            if manufacturer is None:
-                if actor is not None and not actor.has_perm("dcim.add_manufacturer"):
-                    return _Dependencies(missing=("device.manufacturer_permission", {"mfg_slug": mfg_slug}))
-                changes.append(self._manufacturer_change(mfg_slug, make))
-            if actor is not None and not actor.has_perm("dcim.add_devicetype"):
-                return _Dependencies(missing=("device.device_type_permission", {"dt_slug": dt_slug}))
-            u_height = _coerce_height(row.get("u_height"))
-            changes.append(
-                self._device_type_change(
-                    mfg_slug,
-                    dt_slug,
-                    make,
-                    model,
-                    u_height,
-                    manufacturer_missing=manufacturer is None,
+            return _Dependencies(
+                missing=(
+                    "device.device_type_missing",
+                    {
+                        "mfg_slug": mfg_slug,
+                        "dt_slug": dt_slug,
+                        "source_make": make,
+                        "source_model": model,
+                    },
                 )
             )
-            default_full_depth = DeviceType._meta.get_field("is_full_depth").get_default()
-            device_type = _PlannedDeviceType(u_height=u_height, is_full_depth=default_full_depth)
-        elif not explicit and identity_text(device_type.model) != identity_text(model):
+        if not explicit and identity_text(device_type.model) != identity_text(model):
             return _Dependencies(
                 missing=(
                     "device.device_type_slug_collision",
@@ -1236,6 +1163,11 @@ class _DeviceBatch:
         if len(rack_matches) > 1:
             return _Dependencies(missing=("device.rack_ambiguous", {"rack_name": rack_name}))
         rack = rack_matches[0] if rack_matches else None
+        if rack is not None:
+            from dcim.models import Rack
+
+            # The name scan above cannot lock, and this rack decides the placement claim.
+            rack = self.placement_reference(Rack, rack.pk)
         rack_identity = self._planned_racks.get(rack_key) if rack_name and rack is None else None
         if rack_name and rack is None and rack_identity is None:
             return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
@@ -1244,40 +1176,9 @@ class _DeviceBatch:
             role=role,
             rack=rack,
             rack_identity=rack_identity,
-            device_type_slugs=(mfg_slug, dt_slug),
             role_slug=role_slug,
             explicit_device_type=explicit,
-            device_type_exists=not isinstance(device_type, _PlannedDeviceType),
             changes=tuple(changes),
-        )
-
-    @staticmethod
-    def _manufacturer_change(slug, name) -> PlannedChange:
-        identity = f"manufacturer:{slug}:create"
-        return PlannedChange(
-            identity=identity,
-            target_module=DeviceModule.key,
-            operation="create_manufacturer",
-            payload={"slug": slug, "name": name},
-            preconditions={"manufacturer_id": None},
-        )
-
-    @staticmethod
-    def _device_type_change(mfg_slug, dt_slug, make, model, u_height, manufacturer_missing) -> PlannedChange:
-        identity = f"device_type:{mfg_slug}:{dt_slug}:create"
-        return PlannedChange(
-            identity=identity,
-            target_module=DeviceModule.key,
-            operation="create_device_type",
-            payload={
-                "manufacturer_slug": mfg_slug,
-                "manufacturer_name": make,
-                "slug": dt_slug,
-                "model": model,
-                "u_height": u_height,
-            },
-            dependencies=(f"manufacturer:{mfg_slug}:create",) if manufacturer_missing else (),
-            preconditions={"device_type_id": None},
         )
 
     @staticmethod
@@ -1448,19 +1349,13 @@ class _DeviceBatch:
     def review(self, row, device, dependencies, placement, payload):
         """Return the operator's saved review for one matched device, in the reviewer's terms."""
         device_type = dependencies.device_type
-        make = " ".join((_source_text(row.get("make")) or "Unknown").split())
-        model = " ".join((_source_text(row.get("model")) or "Unknown").split())
-        if device_type.pk is None:
-            mfg_slug, dt_slug = dependencies.device_type_slugs
-            device_type_identity = (mfg_slug, dt_slug, make, model)
-        else:
-            manufacturer = device_type.manufacturer
-            device_type_identity = (
-                manufacturer.slug,
-                device_type.slug,
-                manufacturer.name,
-                device_type.model,
-            )
+        manufacturer = device_type.manufacturer
+        device_type_identity = (
+            manufacturer.slug,
+            device_type.slug,
+            manufacturer.name,
+            device_type.model,
+        )
         ip_fields = payload.get("ip_fields") or {}
         proposal = {
             "device_name": payload["name"],
@@ -1502,14 +1397,22 @@ class DeviceModule:
     key = "device"
     consumes = frozenset({OutputKind.DEVICE_SOURCE_ROW})
 
-    def plan(self, source_batch, profile, catalog, netbox_reader) -> list[SynchronizationUnit]:
+    def plan(
+        self,
+        source_batch,
+        profile,
+        catalog,
+        netbox_reader,
+        *,
+        lock_plan_references: bool = False,
+    ) -> list[SynchronizationUnit]:
         """Return one Synchronization Unit per device row, with the disposition its state earns."""
         rows = self._device_rows(source_batch, profile)
         if not rows:
             return []
         if netbox_reader.site is None:
             raise PlanningTargetUnavailable("Device planning needs an import target site.")
-        batch = _DeviceBatch(source_batch, rows, profile, netbox_reader)
+        batch = _DeviceBatch(source_batch, rows, profile, netbox_reader, lock_plan_references=lock_plan_references)
         return [self._unit(row, batch) for row in rows]
 
     @staticmethod
@@ -1644,9 +1547,6 @@ class DeviceModule:
             # The class says to skip this row, so nothing after it has anything to plan.
             mapping = None
 
-        if slug_conflict := batch._slug_conflicts.get(row.get("_row_number")):
-            problem(Disposition.INVALID, "device.derived_slug_collision", slug_conflict)
-
         dependencies = batch.dependencies(row) if mapping is not None else None
         if dependencies is not None and dependencies.missing is not None:
             code, missing_display = dependencies.missing
@@ -1728,11 +1628,10 @@ class DeviceModule:
                     "extra_data": {
                         **display["extra_data"],
                         "airflow": placement.airflow,
-                        "dt_exists": dependencies.device_type_exists,
-                        "dt_slug": dependencies.device_type_slugs[1],
+                        "dt_slug": dependencies.device_type.slug,
                         "face": placement.face,
                         "is_explicit_mapping": dependencies.explicit_device_type,
-                        "mfg_slug": dependencies.device_type_slugs[0],
+                        "mfg_slug": dependencies.device_type.manufacturer.slug,
                         "status": placement.status,
                         "u_height": _display_value(dependencies.device_type.u_height),
                         "u_position": placement.position,
@@ -1745,6 +1644,8 @@ class DeviceModule:
             contact = batch.contact_review(row, match.device)
         except ObjectPermissionDenied as exc:
             problem(Disposition.INVALID, "device.contact_permission", {"message": str(exc)})
+        except DanglingProfileReference as exc:
+            problem(Disposition.BLOCKED, "profile.dangling_reference", {"message": "; ".join(exc.messages)})
         except ContactResolutionRequired as exc:
             problem(
                 Disposition.INVALID,
@@ -1821,19 +1722,13 @@ class DeviceModule:
         review = batch.review(row, match.device, dependencies, placement, payload)
         display = self._review_display(display, review)
         payload = _reviewed_payload(payload, review, match.device)
-        relation_changes = tuple(
-            change
-            for change in dependencies.changes
-            if not (
-                ("device_type" in review.ignored and change.operation in {"create_manufacturer", "create_device_type"})
-                or ("role" in review.ignored and change.operation == "create_role")
-            )
-        )
+        relation_changes = () if "role" in review.ignored else dependencies.changes
         effective_type = dependencies.device_type
         if payload["device_type_id"] is not None and payload["device_type_id"] != dependencies.device_type.pk:
             from dcim.models import DeviceType
 
-            effective_type = DeviceType.objects.filter(pk=payload["device_type_id"]).first()
+            # A retained review value sizes the placement too, so the replan must hold it.
+            effective_type = batch.placement_reference(DeviceType, payload["device_type_id"])
             if effective_type is None:
                 # Every check below reads the device type this row would write.
                 problem(Disposition.INVALID, "device.device_type_missing")
@@ -1857,7 +1752,7 @@ class DeviceModule:
             if payload["rack_id"] != (dependencies.rack.pk if dependencies.rack is not None else None):
                 from dcim.models import Rack
 
-                effective_rack = Rack.objects.filter(pk=payload["rack_id"]).first() if payload["rack_id"] else None
+                effective_rack = batch.placement_reference(Rack, payload["rack_id"]) if payload["rack_id"] else None
         effective_placement = _Placement(
             position=payload["u_position"],
             face=payload["face"],
@@ -1957,7 +1852,7 @@ class DeviceModule:
         """Return a model validation message for a fully resolvable Device change."""
         from dcim.models import Device
 
-        if payload["device_type_id"] is None or payload["role_id"] is None or payload["rack_name"] is not None:
+        if payload["role_id"] is None or payload["rack_name"] is not None:
             return ""
         candidate = copy(device) if device is not None else Device(name=payload["name"])
         candidate.device_type_id = payload["device_type_id"]
@@ -2003,39 +1898,11 @@ class DeviceModule:
 
     def apply(self, planned_change: PlannedChange, execution_context) -> Any:  # noqa: C901
         """Apply one device change, having locked its row and rechecked its preconditions."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack
+        from dcim.models import Device, DeviceRole, Rack
 
         from .object_permissions import enforce_saved_object_permission
 
         payload = planned_change.payload
-        if planned_change.operation == "create_manufacturer":
-            if Manufacturer.objects.filter(slug=payload["slug"]).exists():
-                raise PreconditionFailed(f"Manufacturer slug '{payload['slug']}' appeared after planning.")
-            manufacturer = Manufacturer(name=payload["name"], slug=payload["slug"])
-            manufacturer.full_clean()
-            manufacturer.save()
-            enforce_saved_object_permission(manufacturer, execution_context.actor, "add")
-            return manufacturer
-        if planned_change.operation == "create_device_type":
-            manufacturer = Manufacturer.objects.filter(slug=payload["manufacturer_slug"]).first()
-            if manufacturer is None:
-                raise PreconditionFailed(
-                    f"Manufacturer '{payload['manufacturer_slug']}' is absent, so the Device Type cannot be created."
-                )
-            if DeviceType.objects.filter(manufacturer=manufacturer, slug=payload["slug"]).exists():
-                raise PreconditionFailed(
-                    f"Device Type '{payload['manufacturer_slug']}/{payload['slug']}' appeared after planning."
-                )
-            device_type = DeviceType(
-                manufacturer=manufacturer,
-                slug=payload["slug"],
-                model=payload["model"],
-                u_height=payload["u_height"],
-            )
-            device_type.full_clean()
-            device_type.save()
-            enforce_saved_object_permission(device_type, execution_context.actor, "add")
-            return device_type
         if planned_change.operation == "create_role":
             if DeviceRole.objects.filter(slug=payload["slug"]).exists():
                 raise PreconditionFailed(f"Device Role slug '{payload['slug']}' appeared after planning.")
@@ -2066,14 +1933,6 @@ class DeviceModule:
                 raise PreconditionFailed(f"Device '{device.name}' changed after the plan was made.")
             action = "change"
 
-        device_type_id = payload["device_type_id"]
-        if device_type_id is None:
-            device_type = DeviceType.objects.filter(
-                manufacturer__slug=payload["manufacturer_slug"], slug=payload["device_type_slug"]
-            ).first()
-            if device_type is None:
-                raise PreconditionFailed("The planned Device Type dependency is still absent.")
-            device_type_id = device_type.pk
         role_id = payload["role_id"]
         if role_id is None:
             role = DeviceRole.objects.filter(slug=payload["role_slug"]).first()
@@ -2101,7 +1960,7 @@ class DeviceModule:
 
         if action == "add":
             device.name = payload["name"]
-        device.device_type_id = device_type_id
+        device.device_type_id = payload["device_type_id"]
         device.role_id = role_id
         device.site_id = payload["site_id"]
         device.location_id = payload["location_id"]
@@ -2163,8 +2022,6 @@ class DeviceModule:
             "status": placement.status,
             "device_type_id": dependencies.device_type.pk,
             "role_id": dependencies.role.pk,
-            "manufacturer_slug": dependencies.device_type_slugs[0],
-            "device_type_slug": dependencies.device_type_slugs[1],
             "role_slug": dependencies.role_slug,
             "rack_id": dependencies.rack.pk if dependencies.rack is not None else None,
             "rack_name": _source_text(row.get("rack_name")) if dependencies.rack_identity is not None else None,
@@ -2331,6 +2188,7 @@ class DeviceModule:
 MODULE_RUNTIMES: dict[str, Any] = {
     RackModule.key: RackModule(),
     DeviceModule.key: DeviceModule(),
+    CableModule.key: CableModule(),
 }
 
 
@@ -2341,6 +2199,7 @@ def runtime_for(key: str) -> Any | None:
 
 __all__ = (
     "DEFAULT_RACK_HEIGHT",
+    "CableModule",
     "DeviceModule",
     "ExecutionContext",
     "MODULE_RUNTIMES",

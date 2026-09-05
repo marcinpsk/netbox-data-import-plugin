@@ -36,6 +36,22 @@ urlpatterns = [
         views.ClassRoleMappingDeleteView.as_view(),
         name="classrolemapping_delete",
     ),
+    # CableClass Mappings
+    path(
+        "profiles/<int:profile_pk>/cable-classes/add/",
+        views.CableClassMappingAddView.as_view(),
+        name="cableclassmapping_add",
+    ),
+    path(
+        "cable-class-mappings/<int:pk>/edit/",
+        views.CableClassMappingEditView.as_view(),
+        name="cableclassmapping_edit",
+    ),
+    path(
+        "cable-class-mappings/<int:pk>/delete/",
+        views.CableClassMappingDeleteView.as_view(),
+        name="cableclassmapping_delete",
+    ),
     # Device Type Mappings
     path(
         "profiles/<int:profile_pk>/device-types/add/",
@@ -125,7 +141,6 @@ urlpatterns = [
     path("check-device/", views.CheckDeviceNameView.as_view(), name="check_device"),
     path("search-objects/", views.SearchNetBoxObjectsView.as_view(), name="search_objects"),
     # Quick-resolve views (POST from preview inline fix buttons)
-    path("quick-create-manufacturer/", views.QuickCreateManufacturerView.as_view(), name="quick_create_manufacturer"),
     path(
         "quick-resolve-manufacturer/", views.QuickResolveManufacturerView.as_view(), name="quick_resolve_manufacturer"
     ),

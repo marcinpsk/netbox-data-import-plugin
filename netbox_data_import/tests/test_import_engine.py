@@ -77,9 +77,6 @@ class ImportEngineTestDataMixin:
         from dcim.models import Rack
 
         self.site, self.manufacturer, self.device_type, self.role = make_dcim_objects("Coordinator")
-        # The identity resolver derives '<manufacturer>-<model>', so a row only resolves to that slug.
-        self.device_type.slug = f"{self.manufacturer.slug}-{self.device_type.slug}"
-        self.device_type.save(update_fields=["slug"])
         self.rack = Rack.objects.create(name="rack-a", site=self.site, u_height=42)
         self.profile = ImportProfile.objects.create(
             name="Coordinator Profile",
@@ -546,7 +543,7 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
             key = runtimes.RackModule.key
             consumes = runtimes.RackModule.consumes
 
-            def plan(self, source_batch, profile, catalog, netbox_reader):
+            def plan(self, source_batch, profile, catalog, netbox_reader, *, lock_plan_references=False):
                 """Return the one unreferenceable unit this test needs."""
                 return [
                     SynchronizationUnit(

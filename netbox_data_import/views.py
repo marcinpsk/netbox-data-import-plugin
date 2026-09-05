@@ -24,6 +24,7 @@ from utilities.views import ConditionalLoginRequiredMixin
 
 from .filters import ImportProfileFilterSet
 from .forms import (
+    CableClassMappingForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
@@ -33,7 +34,7 @@ from .forms import (
     ImportProfileImportForm,
     ImportSetupForm,
 )
-from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG
+from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS
 from .values import (
     effective_device_name,
     identity_text,
@@ -45,6 +46,7 @@ from .values import (
 )
 from . import __version__ as _plugin_version
 from .models import (
+    CableClassMapping,
     locked_profile_policy,
     locked_resolution_policy,
     ClassRoleMapping,
@@ -64,6 +66,7 @@ from .models import (
     validate_source_resolution_fields,
 )
 from .tables import (
+    CableClassMappingTable,
     ClassRoleMappingTable,
     ColumnMappingTable,
     ColumnTransformRuleTable,
@@ -432,7 +435,12 @@ class ImportProfileListView(generic.ObjectListView):
 class ImportProfileView(generic.ObjectView):
     """Detail view for a single import profile, with inline mapping tables."""
 
-    queryset = ImportProfile.objects.prefetch_related("column_mappings", "class_role_mappings", "device_type_mappings")
+    queryset = ImportProfile.objects.prefetch_related(
+        "column_mappings",
+        "class_role_mappings",
+        "device_type_mappings",
+        "cable_class_mappings",
+    )
 
     def get_extra_context(self, request, instance):
         """Inject inline mapping tables into the template context."""
@@ -440,11 +448,17 @@ class ImportProfileView(generic.ObjectView):
         class_role_table = ClassRoleMappingTable(instance.class_role_mappings.all())
         device_type_table = DeviceTypeMappingTable(instance.device_type_mappings.all())
         transform_table = ColumnTransformRuleTable(instance.column_transform_rules.all())
+        cable_class_table = CableClassMappingTable(instance.cable_class_mappings.all())
+        applicable_policy_sections = frozenset(
+            section.key for section in POLICY_SECTIONS if section.applies_to(instance.output_kinds)
+        )
         return {
             "column_table": column_table,
             "class_role_table": class_role_table,
             "device_type_table": device_type_table,
             "transform_table": transform_table,
+            "cable_class_table": cable_class_table,
+            "applicable_policy_sections": applicable_policy_sections,
         }
 
 
@@ -642,6 +656,20 @@ def _import_class_role_mappings(data, profile, stats):
         ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
 
 
+def _import_cable_class_mappings(data, profile, stats):
+    """Import cable_class_mappings from YAML data into the given profile."""
+    ccm_cable_classes = []
+    for m in _iter_yaml_section(data, "cable_class_mappings", ("cable_class",)):
+        instance = _get_or_init(CableClassMapping, profile=profile, cable_class=m["cable_class"])
+        _set_if_present(instance, m, ("cable_type_resolved", "cable_type", "cable_profile_resolved", "cable_profile"))
+        _validate_model_instance(instance, f"cable_class_mappings[{m['cable_class']}]")
+        _save_or_refetch(instance, CableClassMapping, profile=profile, cable_class=m["cable_class"])
+        ccm_cable_classes.append(m["cable_class"])
+        stats["cable_class_mappings"] = stats.get("cable_class_mappings", 0) + 1
+    if "cable_class_mappings" in data:
+        CableClassMapping.objects.filter(profile=profile).exclude(cable_class__in=ccm_cable_classes).delete()
+
+
 def _release_replaced_column_policy_rows(profile, mapping_rows, transform_rows):
     """Remove rows that leave or change target ownership before validating their replacements."""
     if mapping_rows is not None:
@@ -732,6 +760,7 @@ def _apply_profile_yaml_data(data):
             ColumnMapping.objects.filter(profile=profile).exclude(pk__in=cm_ids).delete()
 
         _import_class_role_mappings(data, profile, stats)
+        _import_cable_class_mappings(data, profile, stats)
 
         dtm_keys = []
         for m in _iter_yaml_section(
@@ -791,7 +820,8 @@ class ImportProfileBulkImportView(generic.BulkImportView):
     * **Hierarchical YAML** – the format produced by the "Export YAML" button
       (top-level keys: ``profile``, ``column_mappings``, ``class_role_mappings``,
       ``device_type_mappings``, ``manufacturer_mappings``,
-      ``column_transform_rules``).  All nested mappings are created/updated.
+      ``column_transform_rules``, ``cable_class_mappings``).  All nested
+      mappings are created/updated.
     * **Flat CSV/YAML** – one record per profile, plain metadata fields only
       (name, description, sheet_name, …).  Falls back to NetBox's standard
       bulk-import logic.
@@ -1003,6 +1033,31 @@ class ClassRoleMappingDeleteView(_ProfileChildDeleteView):
     """Delete a class→role mapping."""
 
     queryset = ClassRoleMapping.objects.all()
+
+
+class CableClassMappingAddView(_ProfileChildEditView):
+    """Add a CableClass mapping to an existing ImportProfile."""
+
+    queryset = CableClassMapping.objects.all()
+    form = CableClassMappingForm
+    template_name = "netbox_data_import/cableclassmapping_edit.html"
+    permission_required = "netbox_data_import.add_cableclassmapping"
+
+
+class CableClassMappingEditView(_ProfileChildEditView):
+    """Edit an existing CableClass mapping."""
+
+    queryset = CableClassMapping.objects.all()
+    form = CableClassMappingForm
+    template_name = "netbox_data_import/cableclassmapping_edit.html"
+    permission_required = "netbox_data_import.change_cableclassmapping"
+
+
+class CableClassMappingDeleteView(_ProfileChildDeleteView):
+    """Delete a CableClass mapping."""
+
+    queryset = CableClassMapping.objects.all()
+    permission_required = "netbox_data_import.delete_cableclassmapping"
 
 
 # ---------------------------------------------------------------------------
@@ -1303,7 +1358,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "device_serial": device.serial,
             }
 
-        view_mode = parse_qs(urlsplit(preview_url).query).get("view", [profile.adapter_settings.preview_view_mode])[-1]
+        # The preview serves every adapter, and only the flat one declares a stored view mode.
+        stored_view_mode = profile.adapter_settings.get("preview_view_mode", "rows")
+        view_mode = parse_qs(urlsplit(preview_url).query).get("view", [stored_view_mode])[-1]
 
         # Build unused columns list: filter out any that are now mapped
         mapped_source_cols = set(profile.column_mappings.values_list("source_column", flat=True))
@@ -1389,6 +1446,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "resolved_contact_source_ids": [
                     source_id for source_id, columns in existing_resolutions.items() if "candidate:contact" in columns
                 ],
+                "configured_source_classes": set(profile.class_role_mappings.values_list("source_class", flat=True)),
                 "can_create_role": request.user.has_perm("dcim.add_devicerole"),
                 "unused_columns": unused_columns,
                 "target_field_choices": CATALOG.choices(output_kinds=profile.output_kinds),
@@ -1767,7 +1825,7 @@ class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
 
 
 class _PermissionScopedWriteMixin:
-    """Mark preview writers and render their object-scope refusals in one place."""
+    """Mark preview writers and render the refusals their policy writes raise in one place."""
 
     def dispatch(self, request, *args, **kwargs):
         try:
@@ -1775,11 +1833,21 @@ class _PermissionScopedWriteMixin:
         except ObjectPermissionDenied as exc:
             # The permission names an object the caller may not be allowed to know exists.
             logger.warning("%s: write refused outside the caller's object scope: %s", type(self).__name__, exc)
-            error = "Permission denied: this action is outside your NetBox object permissions."
-            if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
-                return JsonResponse({"ok": False, "error": error}, status=403)
-            messages.error(request, error)
-            return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
+            return self._refusal(
+                request,
+                "Permission denied: this action is outside your NetBox object permissions.",
+                403,
+            )
+        except ImportProfile.DoesNotExist:
+            # Every policy write locks its profile, which can be deleted after the view looked it up.
+            return self._refusal(request, "The import profile is no longer available.", 404)
+
+    def _refusal(self, request, error, status):
+        """Render one refused write the way this caller asked for its answer."""
+        if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
+            return JsonResponse({"ok": False, "error": error}, status=status)
+        messages.error(request, error)
+        return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
 
 
 class IgnoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
@@ -1836,10 +1904,12 @@ class UnignoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, V
             messages.error(request, "A valid import profile is required.")
         elif source_id:
             profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-            count = delete_permission_scoped_objects(
-                request.user,
-                IgnoredDevice.objects.filter(profile=profile, source_id=source_id),
-            )
+            # Serialize against an executing import, which holds the same profile row.
+            with locked_profile_policy(profile.pk):
+                count = delete_permission_scoped_objects(
+                    request.user,
+                    IgnoredDevice.objects.filter(profile=profile, source_id=source_id),
+                )
             if count:
                 messages.success(request, "Device removed from ignore list.")
             else:
@@ -2146,7 +2216,7 @@ def _placement_action_intent(request):
     )
 
 
-class IgnoreFieldDifferenceView(PermissionRequiredMixin, View):
+class IgnoreFieldDifferenceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Ignore one exact current field difference for a matched Device."""
 
     permission_required = "netbox_data_import.add_ignoredfielddifference"
@@ -3417,6 +3487,17 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
                 }
                 for r in profile.column_transform_rules.all()
             ],
+            # All four fields travel: "decided as none" and "not decided" are different answers.
+            "cable_class_mappings": [
+                {
+                    "cable_class": m.cable_class,
+                    "cable_type_resolved": m.cable_type_resolved,
+                    "cable_type": m.cable_type,
+                    "cable_profile_resolved": m.cable_profile_resolved,
+                    "cable_profile": m.cable_profile,
+                }
+                for m in profile.cable_class_mappings.all()
+            ],
         }
 
         yaml_str = yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
@@ -3562,55 +3643,6 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 
 
-class QuickCreateManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Immediately create a Manufacturer in NetBox from the preview page."""
-
-    permission_required = "netbox_data_import.change_importprofile"
-
-    def post(self, request):
-        """Create the manufacturer in NetBox and report the pending preview change."""
-        from dcim.models import Manufacturer
-
-        next_url = reverse("plugins:netbox_data_import:import_preview")
-        profile_id = _parse_posted_profile_id(request)
-        if profile_id is None:
-            return _preview_action_error(
-                request,
-                next_url,
-                "A valid import profile is required. Reload the preview and try again.",
-                status=400,
-            )
-        get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-        stale_reason = _stale_preview_reason(request)
-        if stale_reason is not None:
-            return _preview_action_error(request, next_url, stale_reason, status=409)
-        mfg_name = request.POST.get("mfg_name", "").strip()
-        mfg_slug = request.POST.get("mfg_slug", "").strip()
-        if not mfg_name or not mfg_slug:
-            return _preview_action_error(request, next_url, "Manufacturer name and slug are required.", status=400)
-        mfg = _get_or_init(Manufacturer, slug=mfg_slug)
-        if mfg.pk is None:
-            mfg.name = mfg_name
-            try:
-                _validate_model_instance(mfg, f"manufacturer '{mfg_name}'")
-            except PreviewActionInvalid as exc:
-                return _preview_action_error(request, next_url, str(exc), status=400)
-        result = save_permission_scoped_object(
-            request.user,
-            Manufacturer,
-            {"slug": mfg_slug},
-            {"name": mfg_name},
-            on_existing="keep",
-        )
-        mfg = result.instance
-        created = result.created
-        if created:
-            saved_message = f"Manufacturer '{mfg.name}' created."
-        else:
-            saved_message = f"Manufacturer '{mfg.name}' already existed."
-        return _saved_preview_action_response(request, next_url, saved_message)
-
-
 class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Save a ManufacturerMapping (source make → NetBox manufacturer slug) from the preview page."""
 
@@ -3661,17 +3693,13 @@ class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequir
 
 
 class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
-    """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page.
-
-    Optionally also creates the manufacturer and/or device type in NetBox right now.
-    """
+    """Save a DeviceTypeMapping (source make/model → NetBox slugs) from the preview page."""
 
     permission_required = "netbox_data_import.change_importprofile"
 
     def post(self, request):
         """Save the device type mapping and report the pending preview change."""
-        from dcim.models import DeviceType, Manufacturer
-        from django.utils.text import slugify
+        from .device_identity import default_identity_slugs
 
         next_url = reverse("plugins:netbox_data_import:import_preview")
         profile_id = _parse_posted_profile_id(request)
@@ -3690,81 +3718,51 @@ class QuickResolveDeviceTypeView(_PermissionScopedWriteMixin, PermissionRequired
         source_model = " ".join(request.POST.get("source_model", "").split())
         netbox_mfg_slug = request.POST.get("netbox_mfg_slug", "").strip()
         netbox_dt_slug = request.POST.get("netbox_dt_slug", "").strip()
-        action = request.POST.get("action", "map")  # "map" or "create_now"
+        action = request.POST.get("action", "map")
 
         if not source_make or not source_model:
             return _preview_action_error(request, next_url, "Source make and model are required.", status=400)
+        if action != "map":
+            return _preview_action_error(
+                request, next_url, "The requested Device Type action is not supported.", status=400
+            )
 
+        # The importer derives both slugs the same way, so a default that differs maps to nothing.
+        default_mfg_slug, default_dt_slug = default_identity_slugs(source_make, source_model)
         if not netbox_mfg_slug:
-            netbox_mfg_slug = slugify(source_make)
+            netbox_mfg_slug = default_mfg_slug
         if not netbox_dt_slug:
-            netbox_dt_slug = slugify(source_model)
+            netbox_dt_slug = default_dt_slug
 
-        # Every name and slug below is posted directly, so validate each write before it happens.
         try:
-            with transaction.atomic():
-                mapping = _get_or_init(
-                    DeviceTypeMapping,
-                    profile=profile,
-                    source_make=source_make,
-                    source_model=source_model,
-                )
-                mapping.netbox_manufacturer_slug = netbox_mfg_slug
-                mapping.netbox_device_type_slug = netbox_dt_slug
-                _validate_model_instance(
-                    mapping,
-                    f"device type mapping '{source_make} / {source_model}'",
-                )
-                mapping_result = save_permission_scoped_object(
-                    request.user,
-                    DeviceTypeMapping,
-                    {"profile": profile, "source_make": source_make, "source_model": source_model},
-                    {
-                        "netbox_manufacturer_slug": netbox_mfg_slug,
-                        "netbox_device_type_slug": netbox_dt_slug,
-                    },
-                )
-                created = mapping_result.created
-
-                if action == "create_now":
-                    mfg_candidate = _get_or_init(Manufacturer, slug=netbox_mfg_slug)
-                    if mfg_candidate.pk is None:
-                        mfg_candidate.name = source_make
-                        _validate_model_instance(mfg_candidate, f"manufacturer '{source_make}'")
-                    mfg = save_permission_scoped_object(
-                        request.user,
-                        Manufacturer,
-                        {"slug": netbox_mfg_slug},
-                        {"name": source_make},
-                        on_existing="keep",
-                    ).instance
-                    dt_name = request.POST.get("netbox_dt_name", source_model).strip() or source_model
-                    try:
-                        u_height = max(1, int(request.POST.get("u_height", "1")))
-                    except ValueError:
-                        u_height = 1
-                    device_type_candidate = _get_or_init(DeviceType, manufacturer=mfg, slug=netbox_dt_slug)
-                    if device_type_candidate.pk is None:
-                        device_type_candidate.model = dt_name
-                        device_type_candidate.u_height = u_height
-                        _validate_model_instance(device_type_candidate, f"device type '{dt_name}'")
-                    save_permission_scoped_object(
-                        request.user,
-                        DeviceType,
-                        {"manufacturer": mfg, "slug": netbox_dt_slug},
-                        {"model": dt_name, "u_height": u_height},
-                        on_existing="keep",
-                    )
+            mapping = _get_or_init(
+                DeviceTypeMapping,
+                profile=profile,
+                source_make=source_make,
+                source_model=source_model,
+            )
+            mapping.netbox_manufacturer_slug = netbox_mfg_slug
+            mapping.netbox_device_type_slug = netbox_dt_slug
+            _validate_model_instance(
+                mapping,
+                f"device type mapping '{source_make} / {source_model}'",
+            )
+            mapping_result = save_permission_scoped_object(
+                request.user,
+                DeviceTypeMapping,
+                {"profile": profile, "source_make": source_make, "source_model": source_model},
+                {
+                    "netbox_manufacturer_slug": netbox_mfg_slug,
+                    "netbox_device_type_slug": netbox_dt_slug,
+                },
+            )
         except PreviewActionInvalid as exc:
             return _preview_action_error(request, next_url, str(exc), status=400)
 
-        if action == "create_now":
-            saved_message = f"Mapping saved and device type '{source_make} / {source_model}' created in NetBox."
-        else:
-            verb = "created" if created else "updated"
-            saved_message = (
-                f"DeviceType mapping {verb}: '{source_make} / {source_model}' → {netbox_mfg_slug}/{netbox_dt_slug}"
-            )
+        verb = "created" if mapping_result.created else "updated"
+        saved_message = (
+            f"DeviceType mapping {verb}: '{source_make} / {source_model}' → {netbox_mfg_slug}/{netbox_dt_slug}"
+        )
 
         return _saved_preview_action_response(request, next_url, saved_message)
 
@@ -3916,7 +3914,7 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
             saved_message = f"{verb} candidate mapping: '{source_column}' → {target_field}"
         else:
             # A quick direct mapping replaces the source column that supplied the target before it.
-            with transaction.atomic():
+            with locked_profile_policy(profile.pk):
                 displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
                     source_column=source_column
                 )
@@ -3940,7 +3938,7 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
         return _saved_preview_action_response(request, next_url, saved_message)
 
 
-class MatchExistingDeviceView(PermissionRequiredMixin, View):
+class MatchExistingDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Link a source row to an existing NetBox device (by device ID).
 
     Saves a DeviceExistingMatch; on next preview re-run the row shows action='update'.
@@ -4245,7 +4243,7 @@ class QuickCreateDeviceRoleView(_PermissionScopedWriteMixin, _AjaxPermissionView
         )
 
 
-class AutoMatchDevicesView(PermissionRequiredMixin, View):
+class AutoMatchDevicesView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Run the Review Workspace device auto-match command."""
 
     permission_required = (

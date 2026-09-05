@@ -3,6 +3,8 @@
 """Shared test helpers for netbox_data_import tests."""
 
 import os
+import re
+from unittest import TestCase
 from contextlib import contextmanager
 from queue import Queue
 from threading import Thread
@@ -31,6 +33,107 @@ def workbook_bytes(headers, rows, *, sheet_name="Data") -> bytes:
     content = BytesIO()
     workbook.save(content)
     return content.getvalue()
+
+
+TRACE_PATH_HEADER = (
+    "Port",
+    "PortClass",
+    "Cards",
+    "Device",
+    "UPos",
+    "Rack",
+    "Location",
+    "CableClass",
+    "Port",
+    "PortClass",
+    "Cards",
+    "Device",
+    "UPos",
+    "Rack",
+    "Location",
+)
+TRACE_LIST_HEADER = ("Location", "Rack", "UPos", "Device", "Cards", "Port", "PortClass", "Cable")
+
+
+def trace_termination(device, cards, port, port_class):
+    """Return one compact termination tuple for an in-memory trace workbook."""
+    return device, cards, port, port_class
+
+
+def trace_endpoint_line(termination):
+    """Render one endpoint line in the source format."""
+    device, cards, port, port_class = termination
+    parts = [device]
+    if cards:
+        parts.append(cards)
+    parts.append(f"{port} ({port_class})")
+    return " > ".join(parts)
+
+
+def trace_segment(left, cable_class, right, corroboration=("", "", "")):
+    """Render one Segment Evidence row in the source column order."""
+    left_device, left_cards, left_port, left_class = left
+    right_device, right_cards, right_port, right_class = right
+    return (
+        left_port,
+        left_class,
+        left_cards,
+        left_device,
+        *corroboration,
+        cable_class,
+        right_port,
+        right_class,
+        right_cards,
+        right_device,
+        *corroboration,
+    )
+
+
+def trace_visit(termination):
+    """Render one Trace List visit row."""
+    device, cards, port, port_class = termination
+    return "", "", "", device, cards, port, port_class, "Ignored"
+
+
+def add_trace_sheet(book, name, header, blocks, export_timestamp):
+    """Add one trace sheet with the supplied source blocks."""
+    sheet = book.create_sheet(name)
+    sheet.append(("Executed", export_timestamp))
+    sheet.append(())
+    for from_line, to_line, rows in blocks:
+        sheet.append(("From", from_line))
+        sheet.append(("To", to_line))
+        sheet.append(header)
+        for row in rows:
+            sheet.append(row)
+    return sheet
+
+
+def trace_workbook_bytes(
+    *,
+    path_blocks=(),
+    list_blocks=(),
+    include_path=True,
+    include_list=False,
+    export_timestamp="2026-08-31 12:00:00+00:00",
+) -> bytes:
+    """Build trace workbook bytes with the fixed trace sheet names."""
+    from io import BytesIO
+
+    import openpyxl
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    book = openpyxl.Workbook()
+    active = book.active
+    if isinstance(active, Worksheet):
+        book.remove(active)
+    if include_path:
+        add_trace_sheet(book, "Trace From To", TRACE_PATH_HEADER, path_blocks, export_timestamp)
+    if include_list:
+        add_trace_sheet(book, "Trace List", TRACE_LIST_HEADER, list_blocks, export_timestamp)
+    buffer = BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
 
 
 def store_workbook_document(profile, headers, rows, uploaded_by, filename, *, sheet_name="Data"):
@@ -104,6 +207,48 @@ def apply_source_rows(rows, profile, site, *, actor=None, location=None, tenant=
     return workspace
 
 
+# One competing transaction gets this long to take the row before it is treated as blocked.
+COMPETING_WRITE_LOCK_TIMEOUT = "750ms"
+
+
+@contextmanager
+def competing_write_during(signal, sender, competing_write):
+    """Attempt *competing_write* on a second connection at the first *signal* this thread sends.
+
+    Yields the ``observed`` and ``blocked`` lists. ``blocked`` holds one entry when the competing
+    write waited for the lock the code under test holds, so an empty list means it landed.
+    """
+    from threading import current_thread
+
+    from django.db import OperationalError, connection
+
+    calling_thread = current_thread()
+    observed: list[bool] = []
+    blocked: list[bool] = []
+
+    def contend_during_write(sender, instance, **kwargs):
+        if observed or current_thread() is not calling_thread:
+            return
+        observed.append(True)
+
+        def contend():
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout TO %s", [COMPETING_WRITE_LOCK_TIMEOUT])
+            try:
+                competing_write()
+            except OperationalError:
+                blocked.append(True)
+
+        with run_on_separate_connection(contend):
+            pass
+
+    signal.connect(contend_during_write, sender=sender, weak=False)
+    try:
+        yield observed, blocked
+    finally:
+        signal.disconnect(contend_during_write, sender=sender)
+
+
 @contextmanager
 def run_on_separate_connection(target):
     """Run *target* in a thread with a fresh database connection."""
@@ -158,7 +303,8 @@ def make_dcim_objects(name_prefix=""):
     device_type = DeviceType.objects.create(
         manufacturer=manufacturer,
         model=f"{name_prefix}Model",
-        slug=f"{slug_prefix}model",
+        # The importer derives a Device Type slug from make and model, so the fixture must match it.
+        slug=f"{slug_prefix}mfg-{slug_prefix}model",
         u_height=1,
     )
     role = DeviceRole.objects.create(name=f"{name_prefix}Role", slug=f"{slug_prefix}role")
@@ -277,3 +423,19 @@ def wait_until_a_lock_is_blocked(test, timeout=10):
                 return
         sleep(0.05)
     test.fail("No other backend started waiting for a lock this connection holds.")
+
+
+def action_link_tag(html: str, href: str) -> str:
+    """Return the opening anchor tag that targets *href*, so a test can read its attributes."""
+    match = re.search(rf'<a[^>]*href="{re.escape(href)}"[^>]*>', html)
+    return match.group(0) if match else ""
+
+
+def assert_action_link_is_named(test: TestCase, html: str, href: str, name: str) -> None:
+    """Fail unless the icon-only action link at *href* announces *name* to a screen reader."""
+    tag = action_link_tag(html, href)
+    test.assertNotEqual(tag, "", f"No action link renders for {href}.")
+    match = re.search(r'aria-label="([^"]*)"', tag)
+    if match is None:
+        test.fail(f"The action link for {href} has no accessible name: {tag}")
+    test.assertIn(name, match.group(1))

@@ -147,7 +147,6 @@ class SearchDeviceSerialDisplayTest(TestCase):
                 "sheet_name": "Data",
                 "source_id_column": "Id",
                 "update_existing": True,
-                "create_missing_device_types": True,
             },
         )
         for src, tgt in {

@@ -726,7 +726,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         class BrokenDeviceRuntime:
             @staticmethod
-            def plan(*args):
+            def plan(*args, **kwargs):
                 return (
                     SynchronizationUnit(
                         identity="test:unexpected-lookup",
@@ -893,8 +893,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         class BrokenRackRuntime:
             @staticmethod
-            def plan(*args):
-                return runtime.plan(*args)
+            def plan(*args, **kwargs):
+                return runtime.plan(*args, **kwargs)
 
             @staticmethod
             def apply(*args):

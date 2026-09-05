@@ -490,6 +490,7 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 | Pass-Through Claim whose entry or exit carries an interface-kind PortClass | `trace.pass_through_at_interface` | `invalid` | Source Adapter |
 | Same termination claimed by different traces, or same segment pair with different CableClass | `trace.cross_trace_conflict` | `invalid` on every involved trace | Source Adapter |
 | A PortClass value outside the adapter's fixed vocabulary | `trace.unknown_port_class` | `invalid` | Source Adapter |
+| Raw export metadata longer than the provenance column that stores it | `trace.metadata_too_long` | `invalid` | Source Adapter |
 | The resolved object is not an Interface, FrontPort, or RearPort | `cable.unsupported_termination_kind` | `invalid` | Cable Target Module |
 | Ambiguous or missing Device, panels included | `trace.device_unresolved` | `blocked` | Cable Target Module |
 | Endpoint evidence only and no matching direct Cable | `trace.endpoint_evidence_only` | `blocked` | Cable Target Module |
@@ -544,9 +545,10 @@ blank-row layout, empty-string cells, and sheet dimensions.
 
 ## 6. Patched Path Replacement planning and transaction behavior
 
-The Cable Target Module requires NetBox 4.6 or later, because it verifies pass-throughs against the
-PortMapping model. The plugin's minimum NetBox version is 4.6.0 for this feature and for the plugin as
-a whole.
+The Cable Target Module verifies pass-throughs against the PortMapping model, which NetBox 4.5
+introduced in place of the single rear-port reference on a front port. The plugin's minimum NetBox
+version is 4.6.0, for this feature and for the plugin as a whole, because 4.6 is the oldest release
+the test matrix covers.
 
 ### 6.1 Port resolution
 
@@ -698,11 +700,18 @@ inside the transaction as the accepted plan's operator.
 | Several mapped peers for a same-port continuation | `cable.ambiguous_mapped_peer` | `blocked` |
 | A foreign Cable occupies a desired termination | `cable.termination_occupied` | `blocked` |
 | A multi-termination Cable touches a desired port | `cable.multi_termination_conflict` | `blocked` |
+| Source Traces plan different Cables on one free termination | `cable.planned_termination_conflict` | `blocked` |
+| A segment whose two ends resolve to one termination | `cable.segment_self_connection` | `blocked` |
+| A stored termination selection whose kind contradicts the stated PortClass | `cable.termination_kind_mismatch` | `blocked` |
 | A CableClass dimension is unresolved | `cable.cableclass_unmapped` | `blocked` |
 | A stored Cable Type or Cable Profile value is no longer offered by the running instance | `cable.cableclass_stale_mapping` | `blocked` |
 | A stored Cable Profile is offered but is incompatible with one termination per side | `cable.profile_incompatible` | `blocked` |
+| Source Traces resolve one shared segment to different Cable policies | `cable.resolved_segment_conflict` | `invalid` |
 | The operator lacks a required Cable or view permission | `cable.permission_denied` | `blocked` |
 | A dangling natural-key reference in `adapter_config` | `profile.dangling_reference` | `blocked` |
+| A PortMapping row proves the stated Pass-Through Claim | `cable.pass_through_verified` | `info` diagnostic, disposition unchanged |
+| A mapped peer substitutes a same-port continuation | `cable.same_port_continuation` | `info` diagnostic, disposition unchanged |
+| An existing Cable already proves a desired segment | `cable.segment_reused` | `info` diagnostic, disposition unchanged |
 | Attribute drift on a reused Cable | `cable.attribute_drift` | `info` diagnostic, disposition unchanged |
 
 Diagnostic code strings are spec defaults; the conditions and dispositions are normative.
@@ -1122,7 +1131,7 @@ no secret value.
 3. A generated schema migration that drops the moved columns.
 
 The moved columns are: `sheet_name`, `source_id_column`, `custom_field_name`, `update_existing`,
-`create_missing_device_types`, `capture_extra_data`, `primary_contact_role`,
+`capture_extra_data`, `primary_contact_role`,
 `primary_contact_lookup_field`, and `preview_view_mode`. Dropping `primary_contact_role` removes the
 database-level PROTECT relationship. Forms, REST, and YAML switch to the new shape in the same
 release. There is no compatibility path between the three steps and no dual read path after them.

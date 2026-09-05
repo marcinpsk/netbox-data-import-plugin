@@ -37,15 +37,21 @@
         <a href="{% url 'plugins:netbox_data_import:exportprofile_yaml' object.pk %}" class="btn btn-outline-primary">
           <i class="mdi mdi-download"></i> Export YAML
         </a>
+        {% if 'column_mappings' in applicable_policy_sections %}
         <a href="{% url 'plugins:netbox_data_import:bulk_yaml_import' object.pk %}" class="btn btn-outline-secondary">
           <i class="mdi mdi-file-upload"></i> Bulk YAML Import
         </a>
+        {% endif %}
+        {% if 'source_resolutions' in applicable_policy_sections %}
         <a href="{% url 'plugins:netbox_data_import:source_resolution_list' object.pk %}" class="btn btn-outline-secondary">
           <i class="mdi mdi-tune-variant"></i> Row Resolutions
         </a>
+        {% endif %}
+        {% if 'device_type_mappings' in applicable_policy_sections %}
         <a href="{% url 'plugins:netbox_data_import:device_type_analysis_profile' object.pk %}" class="btn btn-outline-secondary">
           <i class="mdi mdi-magnify"></i> Device Type Analysis
         </a>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -54,6 +60,7 @@
   <div class="col col-md-7">
 
     {# Column Mappings #}
+    {% if 'column_mappings' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
         <strong>Column Mappings</strong>
@@ -67,8 +74,10 @@
         <div class="card-body text-muted">No column mappings configured.</div>
       {% endif %}
     </div>
+    {% endif %}
 
     {# Class → Role Mappings #}
+    {% if 'class_role_mappings' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
         <strong>Class → Role Mappings</strong>
@@ -82,8 +91,10 @@
         <div class="card-body text-muted">No class→role mappings configured.</div>
       {% endif %}
     </div>
+    {% endif %}
 
     {# Device Type Mappings #}
+    {% if 'device_type_mappings' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
         <strong>Device Type Mappings</strong>
@@ -97,8 +108,10 @@
         <div class="card-body text-muted">No device type mappings configured.</div>
       {% endif %}
     </div>
+    {% endif %}
 
     {# Column Transform Rules #}
+    {% if 'column_transform_rules' in applicable_policy_sections %}
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center">
         <strong>Column Transform Rules</strong>
@@ -112,6 +125,24 @@
         <div class="card-body text-muted">No column transform rules configured.</div>
       {% endif %}
     </div>
+    {% endif %}
+
+    {# CableClass Mappings #}
+    {% if 'cable_class_mappings' in applicable_policy_sections %}
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>CableClass Mappings</strong>
+        <a href="{% url 'plugins:netbox_data_import:cableclassmapping_add' object.pk %}" class="btn btn-sm btn-primary">
+          <i class="mdi mdi-plus-thick"></i> Add
+        </a>
+      </div>
+      {% if cable_class_table.rows %}
+        {% include 'inc/table.html' with table=cable_class_table %}
+      {% else %}
+        <div class="card-body text-muted">No CableClass mappings configured.</div>
+      {% endif %}
+    </div>
+    {% endif %}
 
   </div>
 </div>

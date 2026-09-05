@@ -46,6 +46,7 @@ def _migrate(target, *, fake=False):
 
 def _rewind_to_before_the_cutover():
     """Reverse schema operations and fake only the irreversible data operation."""
+    _migrate("0029_alter_cableimportsource_from_text_and_more", fake=True)
     _migrate(DROP_MOVED_COLUMNS)
     _migrate(MOVE_CONFIG_DATA)
     _migrate(ADD_CONFIG_FIELDS, fake=True)

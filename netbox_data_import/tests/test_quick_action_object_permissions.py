@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Preview quick actions enforce constrained ObjectPermission rows at their write seam."""
 
-from dcim.models import DeviceRole, DeviceType, Manufacturer
-from django.contrib.messages import get_messages
+from dcim.models import DeviceRole
 from django.test import Client, TestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
     ColumnMapping,
-    DeviceTypeMapping,
     IgnoredDevice,
     ImportProfile,
     ManufacturerMapping,
@@ -48,21 +46,6 @@ class QuickActionObjectPermissionTest(TestCase):
     def _assert_preview_redirect(self, response):
         self.assertRedirects(response, self.preview_url, fetch_redirect_response=False)
 
-    def test_a_constrained_manufacturer_slug_is_refused(self):
-        client = self._client_with(
-            "quick-mfg-scope",
-            (Manufacturer, ["add"], {"slug": "allowed-manufacturer"}),
-        )
-
-        response = self._post(
-            client,
-            "quick_create_manufacturer",
-            {"mfg_name": "Refused Manufacturer", "mfg_slug": "refused-manufacturer"},
-        )
-
-        self._assert_preview_redirect(response)
-        self.assertFalse(Manufacturer.objects.filter(slug="refused-manufacturer").exists())
-
     def test_a_constrained_device_role_slug_is_refused_with_json_403(self):
         client = self._client_with(
             "quick-role-scope",
@@ -77,6 +60,21 @@ class QuickActionObjectPermissionTest(TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertFalse(DeviceRole.objects.filter(slug="refused-role").exists())
+
+    def test_a_refusal_does_not_echo_the_permission_name(self):
+        """CodeQL caught the exception text reaching the response; the operator log keeps it.
+
+        The permission names an object the caller may not be allowed to know exists.
+        """
+        client = self._client_with("scope-leak-user")
+
+        with self.assertLogs("netbox_data_import.views", level="WARNING") as operator_log:
+            response = self._post(client, "quick_create_role", {"name": "Acme", "slug": "acme"})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn("dcim.add_devicerole", response.content.decode().lower())
+        self.assertIn("dcim.add_devicerole", "\n".join(operator_log.output))
+        self.assertFalse(DeviceRole.objects.filter(slug="acme").exists())
 
     def test_a_constrained_ignored_device_source_id_is_refused(self):
         client = self._client_with(
@@ -204,56 +202,6 @@ class QuickActionObjectPermissionTest(TestCase):
         self.assertTrue(ColumnMapping.objects.filter(pk=displaced.pk).exists())
         self.assertFalse(ColumnMapping.objects.filter(profile=self.profile, source_column="New Serial").exists())
 
-    def test_a_denied_manufacturer_rolls_back_the_create_now_composite(self):
-        client = self._client_with(
-            "quick-device-type-mfg-denied",
-            (DeviceTypeMapping, ["add"], None),
-            (Manufacturer, ["add"], {"slug": "allowed-manufacturer"}),
-            (DeviceType, ["add"], None),
-        )
-
-        response = self._post(
-            client,
-            "quick_resolve_device_type",
-            {
-                "source_make": "Refused Manufacturer",
-                "source_model": "Widget",
-                "netbox_mfg_slug": "refused-manufacturer",
-                "netbox_dt_slug": "widget",
-                "action": "create_now",
-            },
-        )
-
-        self._assert_preview_redirect(response)
-        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
-        self.assertFalse(Manufacturer.objects.filter(slug="refused-manufacturer").exists())
-        self.assertFalse(DeviceType.objects.filter(slug="widget").exists())
-
-    def test_a_denied_device_type_rolls_back_the_create_now_composite(self):
-        client = self._client_with(
-            "quick-device-type-denied",
-            (DeviceTypeMapping, ["add"], None),
-            (Manufacturer, ["add"], None),
-            (DeviceType, ["add"], {"slug": "allowed-device-type"}),
-        )
-
-        response = self._post(
-            client,
-            "quick_resolve_device_type",
-            {
-                "source_make": "Acme",
-                "source_model": "Refused Widget",
-                "netbox_mfg_slug": "acme",
-                "netbox_dt_slug": "refused-widget",
-                "action": "create_now",
-            },
-        )
-
-        self._assert_preview_redirect(response)
-        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
-        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())
-        self.assertFalse(DeviceType.objects.filter(slug="refused-widget").exists())
-
     def test_a_constrained_ignored_device_delete_leaves_the_row(self):
         ignored = IgnoredDevice.objects.create(
             profile=self.profile,
@@ -292,21 +240,3 @@ class QuickActionObjectPermissionTest(TestCase):
         )
 
         self._assert_preview_redirect(response)
-
-    def test_a_refusal_does_not_echo_the_permission_name(self):
-        """CodeQL caught the exception text reaching the response; the operator log keeps it.
-
-        The permission names an object the caller may not be allowed to know exists.
-        """
-        client = self._client_with("scope-leak-user")
-
-        response = client.post(
-            reverse("plugins:netbox_data_import:quick_create_manufacturer"),
-            {"profile_id": self.profile.pk, "mfg_name": "Acme", "mfg_slug": "acme"},
-        )
-
-        # The refusal rides on a Django message, so it is only visible once the redirect renders.
-        shown = " ".join(str(message) for message in get_messages(response.wsgi_request))
-        self.assertIn("Permission denied", shown)
-        self.assertNotIn("dcim.add_manufacturer", shown)
-        self.assertFalse(Manufacturer.objects.filter(slug="acme").exists())

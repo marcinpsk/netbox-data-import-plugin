@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Present an Import Plan and resolve explicit review commands."""
+"""Present an Import Plan, resolve explicit review commands, and persist review decisions."""
 
 from __future__ import annotations
 
@@ -8,6 +8,9 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
+from .import_engine import ImportEngine
+from .models import ImportProfile, TerminationResolution, locked_profile_policy
+from .object_permissions import save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
     effective_device_name,
@@ -20,7 +23,47 @@ from .values import (
 )
 
 
+def save_termination_resolution_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    task_type,
+    field_key,
+    selected_object_type,
+    selected_object_id,
+    selected_display_name,
+):
+    """Persist one manual termination selection, then request a fresh Import Plan."""
+    values = {
+        "selected_object_type": selected_object_type,
+        "selected_object_id": selected_object_id,
+        "selected_display_name": selected_display_name,
+    }
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        lookup = {
+            "profile": locked_profile,
+            "task_type": task_type,
+            "field_key": field_key,
+        }
+        candidate = TerminationResolution(**lookup, **values)
+        candidate.full_clean(validate_unique=False, validate_constraints=False)
+        save_permission_scoped_object(
+            actor,
+            TerminationResolution,
+            lookup,
+            values,
+        )
+        # atomic-exit-safe: decision-saved-and-replanned
+        return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
 _DIAGNOSTIC_MESSAGES = {
+    "cable.planned_termination_conflict": (
+        "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
+    ),
     "device.add_permission": "Permission denied: dcim.add_device",
     "device.already_bound": "Another source row is already linked to this device.",
     "device.ambiguous_asset_tag": "Multiple devices have this asset tag.",
@@ -34,12 +77,10 @@ _DIAGNOSTIC_MESSAGES = {
     "device.class_ignored": "Ignored source class",
     "device.class_unmapped": "No class-to-role mapping exists for this source class.",
     "device.cross_site_match": "A strong identity matches a device at another site.",
-    "device.device_type_missing": "The device type does not exist. Map or create it before importing.",
-    "device.device_type_permission": "Permission denied: dcim.add_devicetype",
+    "device.device_type_missing": (
+        "Add the Device Type in NetBox, or map the source make and model to an existing Device Type."
+    ),
     "device.device_type_slug_collision": "A stored device type already uses the slug this model derives.",
-    "device.manufacturer_permission": "Permission denied: dcim.add_manufacturer",
-    "device.manufacturer_slug_collision": "A stored manufacturer already uses the slug this make derives.",
-    "device.derived_slug_collision": "Different source identities derive the same dependency slug.",
     "device.duplicate_asset_tag": "The asset tag appears more than once in this import.",
     "device.duplicate_name": "The device name appears more than once in this import.",
     "device.duplicate_serial": "The serial number appears more than once in this import.",
@@ -80,7 +121,6 @@ _IDENTITY_CONFLICTS = {
     "device.ambiguous_serial": "ambiguous_serial",
     "device.ambiguous_stored_source_id": "ambiguous_source_id",
     "device.cross_site_match": "cross_site_match",
-    "device.derived_slug_collision": "derived_slug_collision",
     "device.duplicate_asset_tag": "duplicate_asset_tag",
     "device.duplicate_name": "duplicate_name",
     "device.duplicate_serial": "duplicate_serial",

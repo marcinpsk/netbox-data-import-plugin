@@ -344,6 +344,56 @@ class ResolvedContactRowIsMarkedTest(BaseViewTestCase):
         self.assertIn("btn-outline-success", classes)
 
 
+class ConfiguredClassRowIsMarkedTest(PreviewSessionMixin, BaseViewTestCase):
+    """A class editor must distinguish configured policy from policy that still needs a decision."""
+
+    def _class_button(self, cells):
+        """Return the class editor button from one rendered Device row."""
+        match = re.search(
+            r'(<button[^>]*data-ndi-modal="#classMappingModal"[^>]*>.*?</button>)',
+            cells,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match, "an errored Device row must offer the class editor")
+        return match.group(1)
+
+    def test_configured_and_unconfigured_classes_render_different_actions(self):
+        """A configured class stays reviewable but does not look like unresolved policy."""
+
+        def add_errors(worksheet):
+            worksheet["G4"] = "10"
+            worksheet.append(
+                [
+                    "4",
+                    "Rack-01",
+                    "unmapped-01",
+                    "Unmapped",
+                    "Front",
+                    "Front to Back",
+                    "30",
+                    "Live",
+                    "Example Make",
+                    "Example Model",
+                    "1",
+                    "SN003",
+                    "AT003",
+                ]
+            )
+
+        self._setup_session(mutate_workbook=add_errors)
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertIn("configured_source_classes", response.context)
+        configured = self._class_button(self._device_row_cells(response.content.decode(), 4))
+        unresolved = self._class_button(self._device_row_cells(response.content.decode(), 5))
+        self.assertIn("btn-outline-success", configured)
+        self.assertIn("mdi-cog-check", configured)
+        self.assertIn("Class configured", configured)
+        self.assertIn("btn-outline-warning", unresolved)
+        self.assertIn("mdi-cog", unresolved)
+        self.assertIn("Configure class", unresolved)
+
+
 class ConflictJumpTargetsOneRowTest(SimpleTestCase):
     """The conflict jump has to name the row it means, not a row number several rows share."""
 
@@ -518,6 +568,19 @@ class DuplicateSerialActionTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertIn(f"also on row {first}.", self._device_row_cells(html, second))
 
 
+def _device_type_for_row(row):
+    """Create the Manufacturer and Device Type one source row resolves to, with the derived slug."""
+    from dcim.models import DeviceType, Manufacturer
+    from django.utils.text import slugify
+
+    make, model = row["make"], row["model"]
+    manufacturer, _ = Manufacturer.objects.get_or_create(name=make, defaults={"slug": slugify(make)[:50]})
+    device_type, _ = DeviceType.objects.get_or_create(
+        manufacturer=manufacturer, model=model, defaults={"slug": slugify(f"{make}-{model}")[:50]}
+    )
+    return manufacturer, device_type
+
+
 class SplitNameReachesAMatchedRowTest(PreviewSessionMixin, BaseViewTestCase):
     """The file name is worth splitting exactly when NetBox already disagrees with it."""
 
@@ -537,12 +600,11 @@ class SplitNameReachesAMatchedRowTest(PreviewSessionMixin, BaseViewTestCase):
 
     def _match_a_workbook_device(self):
         """Create the NetBox device one workbook row names, so that row stops being a create."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from dcim.models import Device, DeviceRole, Site
 
         row = next(r for r in self.client.session["import_rows"] if r.get("device_name") and r.get("u_position"))
         site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
-        manufacturer = Manufacturer.objects.create(name="SplitMfg", slug="split-mfg")
-        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="SplitModel", slug="split-model")
+        manufacturer, device_type = _device_type_for_row(row)
         role = DeviceRole.objects.create(name="SplitRole", slug="split-role")
         Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
         return row
@@ -614,14 +676,13 @@ class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
 
     def _match_a_workbook_device(self):
         """Create the NetBox device one workbook row names, so that row matches it."""
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
+        from dcim.models import Device, DeviceRole, Site
 
         self._setup_session()
         rows = self.client.session["import_rows"]
         row = next(r for r in rows if r.get("device_name") and r.get("u_position"))
         site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
-        manufacturer = Manufacturer.objects.create(name="MatchMfg", slug="match-mfg")
-        device_type = DeviceType.objects.create(manufacturer=manufacturer, model="MatchModel", slug="match-model")
+        manufacturer, device_type = _device_type_for_row(row)
         role = DeviceRole.objects.create(name="MatchRole", slug="match-role")
         device = Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
         return row, device

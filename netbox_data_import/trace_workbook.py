@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -14,25 +14,19 @@ from typing import Iterable, Mapping, Sequence
 import openpyxl
 
 from .adapters import SourceDiagnostic, SourceUnreadable
+from .field_keys import (
+    FRONT_PORT_CLASSES,
+    INTERFACE_PORT_CLASSES,
+    PORT_CLASS_CLAIMED_KINDS,
+    PORT_CLASSES,
+    REAR_PORT_CLASSES,
+    same_device_and_cards,
+)
+from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
 from .values import identity_text, source_text
 
 TRACE_PATH_SHEET = "Trace From To"
 TRACE_LIST_SHEET = "Trace List"
-
-INTERFACE_PORT_CLASSES = frozenset({"NIC", "Switch Port", "Port"})
-FRONT_PORT_CLASSES = frozenset({"Position Front", "Fiber Pair Front"})
-REAR_PORT_CLASSES = frozenset({"Punch-Down", "Fiber Pair Back"})
-PORT_CLASSES = INTERFACE_PORT_CLASSES | FRONT_PORT_CLASSES | REAR_PORT_CLASSES
-
-INTERFACE_KIND = "interface"
-FRONT_PORT_KIND = "front_port"
-REAR_PORT_KIND = "rear_port"
-
-PORT_CLASS_CLAIMED_KINDS = {
-    **dict.fromkeys(INTERFACE_PORT_CLASSES, INTERFACE_KIND),
-    **dict.fromkeys(FRONT_PORT_CLASSES, FRONT_PORT_KIND),
-    **dict.fromkeys(REAR_PORT_CLASSES, REAR_PORT_KIND),
-}
 
 IdentityKey = tuple[str, str, str, str]
 
@@ -127,7 +121,7 @@ class TraceProvenance:
 
 @dataclass(frozen=True)
 class SourceTrace:
-    """Carry one complete source path or Endpoint Summary fallback."""
+    """Carry canonical Segment Evidence for one path or an Endpoint Summary fallback."""
 
     endpoint_summary: EndpointSummary
     segments: tuple[SegmentEvidence, ...]
@@ -366,6 +360,22 @@ def _error(block: _Block, code: str, detail: str, row_number: int | None = None)
     )
 
 
+def _metadata_errors(blocks: Iterable[_Block | None]) -> list[SourceDiagnostic]:
+    """Return diagnostics for raw workbook metadata that cannot fit its stored representation."""
+    errors = []
+    for block in blocks:
+        if block is not None and len(block.export_timestamp) > TRACE_EXPORT_TIMESTAMP_MAX_LENGTH:
+            errors.append(
+                _error(
+                    block,
+                    "trace.metadata_too_long",
+                    f"The export timestamp exceeds {TRACE_EXPORT_TIMESTAMP_MAX_LENGTH} characters.",
+                    row_number=1,
+                )
+            )
+    return errors
+
+
 def _endpoint_summary(block: _Block) -> tuple[EndpointSummary | None, list[SourceDiagnostic]]:
     """Return the Endpoint Summary of one block, or the reason it has none."""
     errors = []
@@ -474,15 +484,18 @@ def _unknown_port_class_error(
     return None
 
 
-def _same_device_and_cards(first: TerminationReference, second: TerminationReference) -> bool:
-    """Return whether two terminations name one device and cards label."""
-    return first.identity_key[:2] == second.identity_key[:2]
-
-
 def _linearity_error(
     block: _Block, summary: EndpointSummary, segments: Sequence[_ParsedSegment]
 ) -> SourceDiagnostic | None:
     """Return the first structural break in a path, or None when the path is linear."""
+    # A path states two terminations whether or not it states the segments between them.
+    if summary.from_termination.identity_key == summary.to_termination.identity_key:
+        return _error(
+            block,
+            "trace.non_linear_path",
+            "The From and To lines name one termination, so the path does not join two terminations.",
+            segments[-1].row_number if segments else block.row_start,
+        )
     if not segments:
         return None
     if segments[0].evidence.left.identity_key != summary.from_termination.identity_key:
@@ -525,21 +538,13 @@ def _linearity_error(
                 parsed.row_number,
             )
     for previous, following in zip(segments, segments[1:], strict=False):
-        if not _same_device_and_cards(previous.evidence.right, following.evidence.left):
+        if not same_device_and_cards(previous.evidence.right, following.evidence.left):
             return _error(
                 block,
                 "trace.non_linear_path",
                 "Consecutive Segment Evidence rows do not share a device and cards label.",
                 following.row_number,
             )
-    # One segment that ends where it starts is a self-connection, which the Cable module names.
-    if len(segments) > 1 and summary.from_termination.identity_key == summary.to_termination.identity_key:
-        return _error(
-            block,
-            "trace.non_linear_path",
-            "The From and To lines name one termination, so the path closes a loop.",
-            segments[-1].row_number,
-        )
     return None
 
 
@@ -547,7 +552,7 @@ def _pass_through_claims(segments: Sequence[SegmentEvidence]) -> tuple[PassThrou
     """Return the continuation each pair of consecutive segments claims."""
     claims = []
     for previous, following in zip(segments, segments[1:], strict=False):
-        if not _same_device_and_cards(previous.right, following.left):
+        if not same_device_and_cards(previous.right, following.left):
             continue
         claims.append(
             PassThroughClaim(
@@ -563,7 +568,7 @@ def _pass_through_claims(segments: Sequence[SegmentEvidence]) -> tuple[PassThrou
 def _pass_through_error(block: _Block, segments: Sequence[_ParsedSegment]) -> SourceDiagnostic | None:
     """Return a diagnostic for the first Pass-Through Claim at an interface PortClass."""
     for previous, following in zip(segments, segments[1:], strict=False):
-        if not _same_device_and_cards(previous.evidence.right, following.evidence.left):
+        if not same_device_and_cards(previous.evidence.right, following.evidence.left):
             continue
         if (
             previous.evidence.right.port_class in INTERFACE_PORT_CLASSES
@@ -689,6 +694,7 @@ def _path_trace(
 ) -> tuple[SourceTrace | None, tuple[SourceDiagnostic, ...]]:
     """Return the Source Trace one path block states, with any block-level diagnostic."""
     summary, errors = _endpoint_summary(path_block)
+    errors.extend(_metadata_errors((path_block, list_block)))
     if summary is None:
         return None, tuple(errors)
     parsed_segments, segment_errors = _parse_segments(path_block)
@@ -728,10 +734,13 @@ def _path_trace(
             )
             if mismatch is not None:
                 errors.append(mismatch)
-    segments = tuple(parsed.evidence for parsed in parsed_segments)
+    stated_segments = tuple(parsed.evidence for parsed in parsed_segments)
     visits = tuple(visit.termination for visit in parsed_visits)
-    path_corroboration = tuple(termination for segment in segments for termination in (segment.left, segment.right))
+    path_corroboration = tuple(
+        termination for segment in stated_segments for termination in (segment.left, segment.right)
+    )
     summary = _enrich_summary(summary, (*path_corroboration, *visits))
+    segments = canonical_orientation(summary.from_termination, summary.to_termination, stated_segments)
     provenance = [_provenance(path_block, summary)]
     if list_block is not None:
         provenance.append(_provenance(list_block, summary))
@@ -742,7 +751,11 @@ def _path_trace(
             pass_through_claims=_pass_through_claims(segments),
             corroboration=visits,
             identity=canonical_trace_identity(summary.from_termination, summary.to_termination),
-            content_fingerprint=content_fingerprint(summary.from_termination, summary.to_termination, segments),
+            content_fingerprint=content_fingerprint(
+                summary.from_termination,
+                summary.to_termination,
+                stated_segments,
+            ),
             provenance=tuple(provenance),
             errors=_deduplicate_errors(errors),
         ),
@@ -753,6 +766,7 @@ def _path_trace(
 def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiagnostic, ...]]:
     """Return the Endpoint Summary fallback an unpaired Trace List block states."""
     summary, errors = _endpoint_summary(block)
+    errors.extend(_metadata_errors((block,)))
     visits, visit_errors = _parse_visits(block)
     errors.extend(visit_errors)
     if summary is None or not visits:
@@ -765,6 +779,9 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
     unknown = _unknown_port_class_error(block, terms)
     if unknown is not None:
         errors.append(unknown)
+    loop = _linearity_error(block, summary, ())
+    if loop is not None:
+        errors.append(loop)
     corroboration = tuple(visit.termination for visit in visits)
     summary = _enrich_summary(summary, corroboration)
     return (
@@ -782,6 +799,18 @@ def _fallback_trace(block: _Block) -> tuple[SourceTrace | None, tuple[SourceDiag
     )
 
 
+def _trace_selection_key(trace: SourceTrace) -> tuple[bool, bool, str]:
+    """Rank Segment Evidence first, then canonical direction and serialized occurrence content."""
+    summary = trace.endpoint_summary
+    # Provenance and errors carry the block position, which states where a trace was read, not what it says.
+    content = replace(trace, provenance=(), errors=())
+    return (
+        not bool(trace.segments),
+        summary.from_termination.identity_key > summary.to_termination.identity_key,
+        json.dumps(asdict(content), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+    )
+
+
 def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ...]:
     """Collapse occurrences that share an identity, and flag differing evidence."""
     by_identity: dict[str, list[SourceTrace]] = {}
@@ -789,12 +818,13 @@ def _collapse_duplicates(traces: Sequence[SourceTrace]) -> tuple[SourceTrace, ..
         by_identity.setdefault(trace.identity, []).append(trace)
     collapsed = []
     for occurrences in by_identity.values():
-        selected = occurrences[0]
-        provenance = tuple(dict.fromkeys(item for trace in occurrences for item in trace.provenance))
+        ordered = sorted(occurrences, key=_trace_selection_key)
+        selected = ordered[0]
+        provenance = tuple(dict.fromkeys(item for trace in ordered for item in trace.provenance))
         # The fingerprint excludes Trace List data, so a later occurrence can state its own finding.
-        errors = _first_of_each_code(occurrences)
+        errors = _first_of_each_code(ordered)
         # An endpoint-only fallback states no segments, so it contradicts no segment evidence.
-        compared = [trace for trace in occurrences if trace.segments] or list(occurrences)
+        compared = [trace for trace in ordered if trace.segments] or ordered
         if len({trace.content_fingerprint for trace in compared}) > 1:
             locations = "; ".join(_location_from_provenance(trace.provenance[0]) for trace in compared)
             errors.append(

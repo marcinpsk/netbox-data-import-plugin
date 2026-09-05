@@ -9,6 +9,9 @@ nothing from NetBox, so every other layer may depend on it.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 
@@ -67,7 +70,7 @@ TARGET_MODULES: tuple[TargetModule, ...] = (
         key=TargetModuleKey.CABLE,
         label="Cable",
         consumes=frozenset({OutputKind.SOURCE_TRACE}),
-        implemented=False,
+        implemented=True,
     ),
 )
 
@@ -130,6 +133,7 @@ class KeyFamily:
 
 _FLAT_ROW_KINDS = frozenset({OutputKind.DEVICE_SOURCE_ROW, OutputKind.RACK_SOURCE_ROW})
 _DEVICE_ONLY = frozenset({OutputKind.DEVICE_SOURCE_ROW})
+_TRACE_ONLY = frozenset({OutputKind.SOURCE_TRACE})
 
 EXTRA_JSON_PREFIX = "extra_json:"
 CANDIDATE_TARGET_PREFIX = "candidate:"
@@ -255,6 +259,8 @@ POLICY_SECTIONS: tuple[PolicySection, ...] = (
     PolicySection("source_resolutions", "Source Resolutions", _DEVICE_ONLY),
     PolicySection("device_existing_matches", "Device Existing Matches", _DEVICE_ONLY),
     PolicySection("ignored_field_differences", "Ignored Field Differences", _DEVICE_ONLY),
+    PolicySection("termination_resolutions", "Termination Resolutions", _TRACE_ONLY),
+    PolicySection("cable_class_mappings", "CableClass Mappings", _TRACE_ONLY),
 )
 
 _SECTIONS_BY_KEY = {section.key: section for section in POLICY_SECTIONS}
@@ -270,9 +276,32 @@ def policy_section(key: str) -> PolicySection | None:
     return _SECTIONS_BY_KEY.get(key)
 
 
+_declared_override: ContextVar[tuple[TargetModule, ...] | None] = ContextVar("declared_modules", default=None)
+
+
+def declared_modules() -> tuple[TargetModule, ...]:
+    """Return the Target Module declarations in force."""
+    override = _declared_override.get()
+    return TARGET_MODULES if override is None else override
+
+
+@contextmanager
+def declared_modules_override(modules: Sequence[TargetModule]) -> Iterator[None]:
+    """Run the block against *modules*, so a caller can state a table this release does not ship.
+
+    Every entry point reaches the runtime gate through `ImportProfile.clean`, far below its own
+    signature, so a declaration table cannot be passed down to it as an argument.
+    """
+    token = _declared_override.set(tuple(modules))
+    try:
+        yield
+    finally:
+        _declared_override.reset(token)
+
+
 def consuming_modules(output_kinds: frozenset[str]) -> tuple[TargetModule, ...]:
     """Return the Target Modules that consume any of *output_kinds*."""
-    return tuple(module for module in TARGET_MODULES if module.consumes & output_kinds)
+    return tuple(module for module in declared_modules() if module.consumes & output_kinds)
 
 
 def has_implemented_module(output_kinds: frozenset[str]) -> bool:
@@ -295,6 +324,8 @@ __all__ = (
     "TargetModuleKey",
     "ValueKind",
     "consuming_modules",
+    "declared_modules",
+    "declared_modules_override",
     "has_implemented_module",
     "policy_section",
     "target_module",

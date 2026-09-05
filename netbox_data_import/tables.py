@@ -3,6 +3,7 @@
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 from .models import (
+    CableClassMapping,
     ImportProfile,
     ColumnMapping,
     ClassRoleMapping,
@@ -10,6 +11,29 @@ from .models import (
     ColumnTransformRule,
     ImportExecution,
 )
+
+
+_MAPPING_ACTIONS_TEMPLATE = """
+<a href="{% url edit_url record.pk %}" class="btn btn-sm btn-warning" aria-label="Edit {{ record }}">
+    <i class="mdi mdi-pencil"></i>
+</a>
+<a href="{% url delete_url record.pk %}" class="btn btn-sm btn-danger" aria-label="Delete {{ record }}">
+    <i class="mdi mdi-trash-can-outline"></i>
+</a>
+"""
+
+
+def _mapping_actions_column(route_prefix: str) -> tables.TemplateColumn:
+    """Return the edit and delete actions every inline mapping table shares."""
+    return tables.TemplateColumn(
+        template_code=_MAPPING_ACTIONS_TEMPLATE,
+        extra_context={
+            "edit_url": f"plugins:netbox_data_import:{route_prefix}_edit",
+            "delete_url": f"plugins:netbox_data_import:{route_prefix}_delete",
+        },
+        verbose_name="",
+        orderable=False,
+    )
 
 
 class ImportProfileTable(NetBoxTable):
@@ -60,18 +84,7 @@ class ColumnMappingTable(tables.Table):
 
     source_column = tables.Column()
     target_field = tables.Column(accessor="get_target_field_display", order_by="target_field")
-    actions = tables.TemplateColumn(
-        template_code="""
-        <a href="{% url 'plugins:netbox_data_import:columnmapping_edit' record.pk %}" class="btn btn-sm btn-warning">
-            <i class="mdi mdi-pencil"></i>
-        </a>
-        <a href="{% url 'plugins:netbox_data_import:columnmapping_delete' record.pk %}" class="btn btn-sm btn-danger">
-            <i class="mdi mdi-trash-can-outline"></i>
-        </a>
-        """,
-        verbose_name="",
-        orderable=False,
-    )
+    actions = _mapping_actions_column("columnmapping")
 
     class Meta:
         model = ColumnMapping
@@ -86,22 +99,26 @@ class ClassRoleMappingTable(tables.Table):
     rack_type = tables.Column(verbose_name="Rack Type", accessor="rack_type", default="—")
     role_slug = tables.Column()
     ignore = tables.BooleanColumn()
-    actions = tables.TemplateColumn(
-        template_code="""
-        <a href="{% url 'plugins:netbox_data_import:classrolemapping_edit' record.pk %}" class="btn btn-sm btn-warning">
-            <i class="mdi mdi-pencil"></i>
-        </a>
-        <a href="{% url 'plugins:netbox_data_import:classrolemapping_delete' record.pk %}" class="btn btn-sm btn-danger">
-            <i class="mdi mdi-trash-can-outline"></i>
-        </a>
-        """,
-        verbose_name="",
-        orderable=False,
-    )
+    actions = _mapping_actions_column("classrolemapping")
 
     class Meta:
         model = ClassRoleMapping
         fields = ("source_class", "creates_rack", "rack_type", "role_slug", "ignore", "actions")
+
+
+class CableClassMappingTable(tables.Table):
+    """Display CableClass target decisions inline on the profile detail page."""
+
+    cable_class = tables.Column(verbose_name="CableClass")
+    cable_type = tables.Column(accessor="cable_type_display", order_by="cable_type", verbose_name="Cable Type")
+    cable_profile = tables.Column(
+        accessor="cable_profile_display", order_by="cable_profile", verbose_name="Cable Profile"
+    )
+    actions = _mapping_actions_column("cableclassmapping")
+
+    class Meta:
+        model = CableClassMapping
+        fields = ("cable_class", "cable_type", "cable_profile", "actions")
 
 
 class DeviceTypeMappingTable(tables.Table):
@@ -111,18 +128,7 @@ class DeviceTypeMappingTable(tables.Table):
     source_model = tables.Column()
     netbox_manufacturer_slug = tables.Column()
     netbox_device_type_slug = tables.Column()
-    actions = tables.TemplateColumn(
-        template_code="""
-        <a href="{% url 'plugins:netbox_data_import:devicetypemapping_edit' record.pk %}" class="btn btn-sm btn-warning">
-            <i class="mdi mdi-pencil"></i>
-        </a>
-        <a href="{% url 'plugins:netbox_data_import:devicetypemapping_delete' record.pk %}" class="btn btn-sm btn-danger">
-            <i class="mdi mdi-trash-can-outline"></i>
-        </a>
-        """,
-        verbose_name="",
-        orderable=False,
-    )
+    actions = _mapping_actions_column("devicetypemapping")
 
     class Meta:
         model = DeviceTypeMapping
@@ -212,18 +218,7 @@ class ColumnTransformRuleTable(tables.Table):
     pattern = tables.Column()
     group_1_target = tables.Column()
     group_2_target = tables.Column()
-    actions = tables.TemplateColumn(
-        template_code="""
-        <a href="{% url 'plugins:netbox_data_import:columntransformrule_edit' record.pk %}" class="btn btn-sm btn-warning">
-            <i class="mdi mdi-pencil"></i>
-        </a>
-        <a href="{% url 'plugins:netbox_data_import:columntransformrule_delete' record.pk %}" class="btn btn-sm btn-danger">
-            <i class="mdi mdi-trash-can-outline"></i>
-        </a>
-        """,
-        verbose_name="",
-        orderable=False,
-    )
+    actions = _mapping_actions_column("columntransformrule")
 
     class Meta:
         model = ColumnTransformRule

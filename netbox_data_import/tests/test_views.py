@@ -11,6 +11,7 @@ from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
+    CableClassMapping,
     ClassRoleMapping,
     ColumnMapping,
     DeviceTypeMapping,
@@ -24,6 +25,7 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
 )
 from netbox_data_import.tests.helpers import (
+    assert_action_link_is_named,
     run_on_separate_connection,
     set_import_source,
     setup_preview_with_device_matches,
@@ -42,7 +44,6 @@ def _make_profile(name="ViewTest") -> ImportProfile:
             "sheet_name": "Data",
             "source_id_column": "Id",
             "update_existing": True,
-            "create_missing_device_types": True,
         },
     )
     for src, tgt in {
@@ -109,6 +110,28 @@ def _store_workspace_rows(client, user, profile, site, rows):
     session.save()
 
 
+def _ensure_source_device_types(content):
+    """Create the Device Types the sample workbook names, because the importer never creates one."""
+    from dcim.models import DeviceType, Manufacturer
+    from django.utils.text import slugify
+    from openpyxl import load_workbook
+
+    worksheet = load_workbook(BytesIO(content))["Data"]
+    headings = {cell.value: cell.column for cell in worksheet[1]}
+    make_column, model_column = headings.get("Make"), headings.get("Model")
+    if not make_column or not model_column:
+        return
+    for row in worksheet.iter_rows(min_row=2):
+        make = row[make_column - 1].value
+        model = row[model_column - 1].value
+        if not make or not model:
+            continue
+        manufacturer, _ = Manufacturer.objects.get_or_create(name=make, defaults={"slug": slugify(make)[:50]})
+        DeviceType.objects.get_or_create(
+            manufacturer=manufacturer, model=model, defaults={"slug": slugify(f"{make}-{model}")[:50]}
+        )
+
+
 class BaseViewTestCase(TestCase):
     """Base class that sets up an authenticated client."""
 
@@ -168,6 +191,54 @@ class ImportProfileDetailViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
+    def test_every_inline_mapping_action_link_announces_its_row(self):
+        """The inline actions are icon only, so each needs an accessible name to be usable."""
+        url = reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk})
+
+        html = self.client.get(url).content.decode()
+
+        rows = (
+            ("columnmapping", self.profile.column_mappings.first()),
+            ("classrolemapping", self.profile.class_role_mappings.first()),
+        )
+        for route_prefix, record in rows:
+            self.assertIsNotNone(record, f"No {route_prefix} row exists to render.")
+            for action in ("Edit", "Delete"):
+                with self.subTest(route_prefix=route_prefix, action=action):
+                    href = reverse(
+                        f"plugins:netbox_data_import:{route_prefix}_{action.lower()}",
+                        kwargs={"pk": record.pk},
+                    )
+                    assert_action_link_is_named(self, html, href, action)
+                    assert_action_link_is_named(self, html, href, str(record))
+
+    def test_only_the_sections_a_profile_uses_reach_its_detail_page(self):
+        """Each policy action is gated by one membership test, so pin the applicable and the absent."""
+        trace_profile = ImportProfile.objects.create(
+            name="Trace Only Detail",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        gated_routes = ("bulk_yaml_import", "source_resolution_list", "device_type_analysis_profile")
+
+        flat_html = self.client.get(
+            reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk})
+        ).content.decode()
+        trace_html = self.client.get(
+            reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": trace_profile.pk})
+        ).content.decode()
+
+        for route in gated_routes:
+            with self.subTest(route=route):
+                self.assertIn(
+                    reverse(f"plugins:netbox_data_import:{route}", args=[self.profile.pk]),
+                    flat_html,
+                )
+                self.assertNotIn(
+                    reverse(f"plugins:netbox_data_import:{route}", args=[trace_profile.pk]),
+                    trace_html,
+                )
+
     def test_detail_contains_export_yaml_link(self):
         """Profile detail contains an export YAML link."""
         url = reverse("plugins:netbox_data_import:importprofile", kwargs={"pk": self.profile.pk})
@@ -223,7 +294,6 @@ class ImportProfileEditViewTest(BaseViewTestCase):
             "sheet_name": "Data",
             "source_id_column": "Id",
             "update_existing": "on",
-            "create_missing_device_types": "on",
             "primary_contact_lookup_field": "email",
             "preview_view_mode": "rows",
             "_create": "1",
@@ -571,6 +641,7 @@ class PreviewSessionMixin:
             output = BytesIO()
             workbook.save(output)
             content = output.getvalue()
+        _ensure_source_device_types(content)
         document = SourceDocument.store(
             profile=profile,
             content=content,
@@ -1230,6 +1301,112 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+class CableClassMappingProfileYamlTest(BaseViewTestCase):
+    """The full-profile YAML carries the CableClass policy decisions of a trace profile."""
+
+    def setUp(self):
+        """Create a trace profile holding one settled and one part-settled CableClass decision."""
+        super().setUp()
+        self.profile = ImportProfile.objects.create(
+            name="TraceYamlExportProfile",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        CableClassMapping.objects.create(
+            profile=self.profile,
+            cable_class="Patch",
+            cable_type_resolved=True,
+            cable_type="cat6",
+            cable_profile_resolved=True,
+            cable_profile="single-1c1p",
+        )
+        # "Decided as none" and "not decided yet" are different answers that must survive apart.
+        CableClassMapping.objects.create(
+            profile=self.profile,
+            cable_class="Trunk",
+            cable_type_resolved=True,
+            cable_type=None,
+            cable_profile_resolved=False,
+            cable_profile=None,
+        )
+
+    def exported(self):
+        """Return the parsed full-profile YAML the export view produces."""
+        import yaml
+
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.profile.pk})
+        )
+        self.assertEqual(response.status_code, 200)
+        return yaml.safe_load(response.content)
+
+    def test_the_export_states_every_cable_class_decision(self):
+        """All four persisted decision fields have to travel, or the answers collapse into one."""
+        data = self.exported()
+
+        self.assertEqual(
+            data["cable_class_mappings"],
+            [
+                {
+                    "cable_class": "Patch",
+                    "cable_type_resolved": True,
+                    "cable_type": "cat6",
+                    "cable_profile_resolved": True,
+                    "cable_profile": "single-1c1p",
+                },
+                {
+                    "cable_class": "Trunk",
+                    "cable_type_resolved": True,
+                    "cable_type": None,
+                    "cable_profile_resolved": False,
+                    "cable_profile": None,
+                },
+            ],
+        )
+
+    def test_a_cable_class_decision_survives_export_and_import(self):
+        """Round trip through both real views: the receiving profile answers exactly as the source did."""
+        import yaml
+
+        data = self.exported()
+        data["profile"]["name"] = "TraceYamlImportedProfile"
+        upload = BytesIO(yaml.dump(data, allow_unicode=True, sort_keys=False).encode())
+        upload.name = "profile.yaml"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload}, follow=True
+        )
+
+        self.assertEqual(response.status_code, 200)
+        imported = ImportProfile.objects.get(name="TraceYamlImportedProfile")
+        self.assertEqual(
+            [
+                (m.cable_class, m.cable_type_resolved, m.cable_type, m.cable_profile_resolved, m.cable_profile)
+                for m in imported.cable_class_mappings.order_by("cable_class")
+            ],
+            [
+                ("Patch", True, "cat6", True, "single-1c1p"),
+                ("Trunk", True, None, False, None),
+            ],
+        )
+
+    def test_an_absent_cable_class_row_is_reconcile_deleted(self):
+        """The section reconciles like every other policy table, so a removed row must not linger."""
+        import yaml
+
+        data = self.exported()
+        data["cable_class_mappings"] = [row for row in data["cable_class_mappings"] if row["cable_class"] == "Patch"]
+        upload = BytesIO(yaml.dump(data, allow_unicode=True, sort_keys=False).encode())
+        upload.name = "profile.yaml"
+
+        self.client.post(reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload}, follow=True)
+
+        self.assertEqual(
+            list(self.profile.cable_class_mappings.values_list("cable_class", flat=True)),
+            ["Patch"],
+        )
+
+
 class ImportProfileYamlViewTest(BaseViewTestCase):
     """Tests for ImportProfileYamlView."""
 
@@ -1239,7 +1416,6 @@ class ImportProfileYamlViewTest(BaseViewTestCase):
     sheet_name: Data
     source_id_column: Id
     update_existing: true
-    create_missing_device_types: true
 column_mappings:
   - source_column: Name
     target_field: device_name
@@ -1415,41 +1591,6 @@ manufacturer_mappings:
         no_profile.name = "nokey.yaml"
         resp = self.client.post(url, {"yaml_file": no_profile})
         self.assertEqual(resp.status_code, 200)
-
-
-class QuickCreateManufacturerViewTest(BaseViewTestCase):
-    """Tests for QuickCreateManufacturerView."""
-
-    def setUp(self):
-        super().setUp()
-        self.profile = ImportProfile.objects.create(name="Quick Manufacturer Profile")
-
-    def _post(self, payload):
-        return self.client.post(
-            reverse("plugins:netbox_data_import:quick_create_manufacturer"),
-            {"profile_id": self.profile.pk, **payload},
-        )
-
-    def test_creates_manufacturer(self):
-        """POST creates a new Manufacturer in NetBox."""
-        from dcim.models import Manufacturer
-
-        resp = self._post({"mfg_name": "AcmeCorp", "mfg_slug": "acmecorp"})
-        self.assertIn(resp.status_code, [200, 302])
-        self.assertTrue(Manufacturer.objects.filter(slug="acmecorp").exists())
-
-    def test_creates_manufacturer_idempotent(self):
-        """POSTing the same manufacturer twice does not create a duplicate."""
-        from dcim.models import Manufacturer
-
-        for _ in range(2):
-            self._post({"mfg_name": "AcmeCorp2", "mfg_slug": "acmecorp2"})
-        self.assertEqual(Manufacturer.objects.filter(slug="acmecorp2").count(), 1)
-
-    def test_missing_slug_redirects(self):
-        """POST without slug redirects with error (does not crash)."""
-        resp = self._post({"mfg_name": "NoSlug"})
-        self.assertIn(resp.status_code, [200, 302])
 
 
 class QuickCreateDeviceRoleViewTest(BaseViewTestCase):
@@ -1696,12 +1837,12 @@ class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
             DeviceTypeMapping.objects.filter(profile=self.profile, source_make="Cisco", source_model="C9500").exists()
         )
 
-    def test_create_now_action_creates_objects(self):
-        """POST with action=create_now creates the Manufacturer and DeviceType."""
-        from dcim.models import Manufacturer, DeviceType
+    def test_an_unsupported_action_creates_nothing(self):
+        """The mapping action cannot create a Manufacturer or Device Type in NetBox."""
+        from dcim.models import DeviceType, Manufacturer
 
         url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
-        self.client.post(
+        response = self.client.post(
             url,
             {
                 "profile_id": self.profile.pk,
@@ -1709,13 +1850,14 @@ class QuickResolveDeviceTypeViewTest(BaseViewTestCase):
                 "source_model": "QFX5100",
                 "netbox_mfg_slug": "juniper",
                 "netbox_dt_slug": "juniper-qfx5100",
-                "netbox_dt_name": "QFX5100",
-                "u_height": "1",
-                "action": "create_now",
+                "action": "unsupported",
             },
+            HTTP_ACCEPT="application/json",
         )
-        self.assertTrue(Manufacturer.objects.filter(slug="juniper").exists())
-        self.assertTrue(DeviceType.objects.filter(slug="juniper-qfx5100").exists())
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Manufacturer.objects.filter(slug="juniper").exists())
+        self.assertFalse(DeviceType.objects.filter(slug="juniper-qfx5100").exists())
+        self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.profile).exists())
 
 
 class DeviceTypeAnalysisViewTest(BaseViewTestCase):
@@ -3190,27 +3332,6 @@ class QuickResolveDeviceTypeMissingFieldsTest(BaseViewTestCase):
             ).exists()
         )
 
-    def test_create_now_invalid_u_height_defaults_to_one(self):
-        """POST action=create_now with invalid u_height defaults to 1."""
-        from dcim.models import DeviceType
-
-        url = reverse("plugins:netbox_data_import:quick_resolve_device_type")
-        self.client.post(
-            url,
-            {
-                "profile_id": self.profile.pk,
-                "source_make": "UHMfg2",
-                "source_model": "UHModel2",
-                "netbox_mfg_slug": "uh-mfg2",
-                "netbox_dt_slug": "uh-model2",
-                "u_height": "not-a-number",
-                "action": "create_now",
-            },
-        )
-        dt = DeviceType.objects.filter(slug="uh-model2").first()
-        self.assertIsNotNone(dt)
-        self.assertEqual(dt.u_height, 1)
-
 
 class AutoMatchNameScopeTest(BaseViewTestCase):
     """The Review Workspace scopes name matching to the active target site."""
@@ -3347,7 +3468,6 @@ class ImportProfileBulkImportViewTest(BaseViewTestCase):
     sheet_name: Data
     source_id_column: Id
     update_existing: true
-    create_missing_device_types: true
 column_mappings:
   - source_column: Name
     target_field: device_name

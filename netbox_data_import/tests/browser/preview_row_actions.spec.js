@@ -32,6 +32,13 @@ const fixture = `
     <input type="hidden" name="action" value="map">
     <button type="submit">Save mapping</button>
   </form>
+  <div id="ndi-class-mapping-modal">
+    <form id="ndi-class-mapping-form" class="ndi-deferred-preview-form" method="post"
+          action="/plugins/data-import/quick-add-class-mapping/">
+      <input type="hidden" name="source_class" value="Server">
+      <button type="submit">Save mapping</button>
+    </form>
+  </div>
   <button class="ndi-sync-row-btn" id="ndi-sync-row-1" data-ndi-modal="#syncRowModal"
           title="Create this device in NetBox now">Sync to NetBox</button>
   <button class="ndi-sync-row-btn" id="ndi-sync-row-2" disabled
@@ -142,6 +149,42 @@ test("a deferred form posts to its action attribute, not to a control that shado
 
   await expect(button).toContainText("Saved");
   expect(requestedUrl).toBe("http://preview.test/plugins/data-import/quick-resolve-device-type/");
+});
+
+test("a shared mapping modal can save a second mapping before recalculation", async ({ page }) => {
+  let requestCount = 0;
+  await page.route("**/quick-add-class-mapping/", async (route) => {
+    requestCount += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        row_number: null,
+        preview_state: "recalculation_required",
+        message: "Mapped.",
+      }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  const form = page.locator("#ndi-class-mapping-form");
+  const button = form.locator("button");
+  await button.click();
+  await expect(button).toBeDisabled();
+  await expect(button).toContainText("Saved");
+
+  // The trigger button writes the hidden source class, so the test sets it the same way.
+  await form.locator('[name="source_class"]').evaluate((input) => {
+    input.value = "Switch";
+  });
+  await page.locator("#ndi-class-mapping-modal").dispatchEvent("show.bs.modal");
+
+  await expect(button).toBeEnabled();
+  await expect(button).toHaveText("Save mapping");
+  await button.click();
+  await expect(button).toContainText("Saved");
+  expect(requestCount).toBe(2);
 });
 
 test("placement sync defers field-detail refresh", async ({ page }) => {

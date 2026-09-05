@@ -66,9 +66,20 @@
 
   function markSaved(button, message) {
     button.disabled = true;
+    button.dataset.ndiSaved = 'true';
     button.innerHTML = '<i class="mdi mdi-check"></i> Saved';
     button.title = message || 'Saved. Recalculate the preview to refresh this row.';
     markPreviewStale();
+  }
+
+  function resetSavedModalForm(modal) {
+    modal.querySelectorAll('.ndi-deferred-preview-form button[type=submit][data-ndi-saved="true"]')
+      .forEach(function (button) {
+        button.disabled = false;
+        button.innerHTML = button.dataset.originalHtml || button.textContent;
+        button.title = '';
+        delete button.dataset.ndiSaved;
+      });
   }
 
   /* The one place that states the deferred row action contract, so the modal and the row
@@ -125,6 +136,10 @@
   window.ndiPostPreviewAction = requestAction;
   window.ndiMarkPreviewStale = markPreviewStale;
   window.ndiRecalculatePreview = recalculatePreview;
+
+  document.addEventListener('show.bs.modal', function (event) {
+    resetSavedModalForm(event.target);
+  });
 
   function postAction(url, body, button, pendingLabel, placementError) {
     setPending(button, pendingLabel);

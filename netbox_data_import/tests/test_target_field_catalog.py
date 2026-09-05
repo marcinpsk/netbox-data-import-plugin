@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The target-field catalog, the Source Adapter registry, and the Import Profile cutover."""
 
+import dataclasses
+from contextvars import Context
 import json
 import os
 
 from dcim.models import Site
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from tenancy.models import ContactRole
 
@@ -20,6 +22,7 @@ from netbox_data_import.adapters import (
     selectable_adapter_choices,
 )
 from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
+from netbox_data_import import catalog as catalog_module
 from netbox_data_import.catalog import CATALOG, POLICY_SECTIONS, OutputKind, TargetModuleKey
 from netbox_data_import.forms import ColumnMappingForm, ColumnTransformRuleForm, ImportProfileForm
 from netbox_data_import.models import ColumnMapping, ColumnTransformRule, ImportProfile
@@ -236,7 +239,6 @@ class ImportProfileAdapterTest(TestCase):
                 "source_id_column": "",
                 "custom_field_name": "",
                 "update_existing": True,
-                "create_missing_device_types": True,
                 "capture_extra_data": False,
                 "primary_contact_role": None,
                 "primary_contact_lookup_field": "email",
@@ -251,7 +253,6 @@ class ImportProfileAdapterTest(TestCase):
                 "source_id_column": "",
                 "custom_field_name": "",
                 "update_existing": False,
-                "create_missing_device_types": False,
                 "capture_extra_data": False,
                 "primary_contact_role": None,
                 "primary_contact_lookup_field": "name",
@@ -263,7 +264,6 @@ class ImportProfileAdapterTest(TestCase):
         self.assertEqual(profile.adapter_config["source_id_column"], "")
         self.assertEqual(profile.adapter_config["custom_field_name"], "")
         self.assertFalse(profile.adapter_config["update_existing"])
-        self.assertFalse(profile.adapter_config["create_missing_device_types"])
         self.assertFalse(profile.adapter_config["capture_extra_data"])
         self.assertIsNone(profile.adapter_config["primary_contact_role"])
 
@@ -768,13 +768,72 @@ class ProfileAndPolicyBoundaryTest(TestCase):
         self.assertIn("source_adapter", form.errors)
 
 
+WITHOUT_CABLE_MODULE = tuple(
+    dataclasses.replace(module, implemented=False) if module.key == TargetModuleKey.CABLE else module
+    for module in catalog_module.TARGET_MODULES
+)
+WITHOUT_DEVICE_MODULE = tuple(
+    dataclasses.replace(module, implemented=False) if module.key == TargetModuleKey.DEVICE else module
+    for module in catalog_module.TARGET_MODULES
+)
+
+
+class RuntimeGateTest(SimpleTestCase):
+    """The gate itself answers from a stated declaration table, so no test has to replace one."""
+
+    def test_an_output_kind_with_no_implemented_module_is_not_runnable(self):
+        """This is the condition the selectable-adapter tests below stand an override up for."""
+        with catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE):
+            self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+
+    def test_the_gate_still_answers_for_a_kind_a_stated_module_implements(self):
+        """The table is read, not ignored, so an implemented kind stays runnable."""
+        with catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE):
+            self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
+
+    def test_a_stated_table_lasts_for_its_block_only(self):
+        """The gate reads the stated table with no argument, and the real one returns after it."""
+        with catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE):
+            self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+
+        self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+
+    def test_the_real_table_runs_every_declared_kind(self):
+        """The release implements every declared module, which is why the override exists at all."""
+        self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+
+    def test_nested_stated_tables_restore_within_their_own_context(self):
+        """Nested declaration blocks restore without changing an isolated execution context."""
+        isolated = Context()
+
+        with catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE):
+            self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+            self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
+            self.assertTrue(isolated.run(catalog_module.has_implemented_module, frozenset({OutputKind.SOURCE_TRACE})))
+            with catalog_module.declared_modules_override(WITHOUT_DEVICE_MODULE):
+                self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+                self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
+            self.assertFalse(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+            self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
+
+        self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.SOURCE_TRACE})))
+        self.assertTrue(catalog_module.has_implemented_module(frozenset({OutputKind.DEVICE_SOURCE_ROW})))
+
+
 class AdapterRuntimeSupportTest(TestCase):
-    """An adapter is selectable only when this release implements a Target Module that consumes it."""
+    """An adapter is selectable only when this release implements a Target Module that consumes it.
+
+    Every entry point below reaches the gate through `ImportProfile.clean`, so the declaration table
+    is stated for the block rather than passed to each call.
+    """
+
+    def setUp(self):
+        """State a table that leaves the Cable module unimplemented, the way T5 found it."""
+        self.enterContext(catalog_module.declared_modules_override(WITHOUT_CABLE_MODULE))
 
     @classmethod
     def setUpTestData(cls):
         cls.site = Site.objects.create(name="Runtime Site", slug="runtime-site")
-        # The Cable Target Module does not exist yet, so a trace profile is only reachable this way.
         cls.trace = ImportProfile.objects.create(
             name="Runtime Trace", source_adapter="trace_workbook", adapter_config={}
         )
@@ -903,6 +962,46 @@ class AdapterRuntimeSupportTest(TestCase):
                 actor,
                 {"site_id": self.site.pk, "location_id": None, "tenant_id": None},
             )
+
+
+class TraceAdapterIsSelectableTest(TestCase):
+    """T5 implements the Cable Target Module, so every surface offers the trace adapter."""
+
+    def test_every_declared_target_module_is_implemented(self):
+        """Nothing in this release is declared and unbuilt, so no adapter is held back."""
+        self.assertEqual([module.key for module in catalog_module.TARGET_MODULES if not module.implemented], [])
+
+    def test_the_profile_form_offers_the_trace_adapter(self):
+        offered = {key for key, _label in ImportProfileForm().fields["source_adapter"].choices if key}
+
+        self.assertEqual(offered, {"flat_workbook", "trace_workbook"})
+
+    def test_the_profile_form_creates_a_trace_profile(self):
+        form = ImportProfileForm(data={"name": "Form Trace", "source_adapter": "trace_workbook"})
+
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_rest_creates_a_trace_profile(self):
+        self.client.force_login(_superuser())
+
+        response = self.client.post(
+            _api_url("importprofile-list"),
+            data=json.dumps({"name": "REST Trace", "source_adapter": "trace_workbook"}),
+            content_type="application/json",
+            HTTP_ACCEPT="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertTrue(ImportProfile.objects.filter(name="REST Trace").exists())
+
+    def test_the_cable_target_module_has_a_registered_runtime(self):
+        """The coordinator resolves the declared module to a runtime that consumes Source Traces."""
+        from netbox_data_import import target_modules
+
+        runtime = target_modules.runtime_for(TargetModuleKey.CABLE)
+
+        self.assertIsNotNone(runtime)
+        self.assertEqual(runtime.consumes, frozenset({OutputKind.SOURCE_TRACE}))
 
 
 class StaleAdapterRuntimeGuardTest(TestCase):

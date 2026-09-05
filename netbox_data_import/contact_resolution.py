@@ -110,6 +110,10 @@ class ContactReview:
     suggestion: dict | None
 
 
+class DanglingProfileReference(ValidationError):
+    """Report an `adapter_config` natural key that no longer resolves to a NetBox object."""
+
+
 class ContactResolutionRequired(ValidationError):
     """Require an operator decision for ambiguous or invalid Contact values."""
 
@@ -224,6 +228,9 @@ class PrimaryContactResolver:
             plan = None if selection is None else cls._plan(obj, profile, selection, user)
         except ContactResolutionRequired as exc:
             exc.suggestion = cls.suggest(candidate_values, profile, user)
+            raise
+        except DanglingProfileReference:
+            # The profile is at fault, so candidate values cannot turn this into a row decision.
             raise
         except ValidationError as exc:
             if not candidate_values:
@@ -400,7 +407,7 @@ class PrimaryContactResolver:
         else:
             role = profile.resolved_primary_contact_role
         if role is None:
-            raise ValidationError(
+            raise DanglingProfileReference(
                 {
                     "primary_contact": f"The import profile references Contact Role '{role_name}', which no longer exists."
                 }

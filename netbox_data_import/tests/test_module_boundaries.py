@@ -12,6 +12,8 @@ PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE_NAME = PACKAGE.name
 CALLERS = ("views.py", "jobs.py")
 INTERPRETERS = ("flat_workbook.py", "trace_workbook.py")
+TARGET_MODULES = ("target_modules.py", "cable_target.py")
+FORBIDDEN_TARGET_MODULE_IMPORTS = frozenset({"flat_workbook", "trace_workbook", "views"})
 FORBIDDEN_INTERPRETER_IMPORTS = frozenset(
     {
         "django",
@@ -67,6 +69,19 @@ def _imported_roots(path: pathlib.Path) -> set[str]:
             else:
                 roots.add(_import_root(node.module))
     return roots
+
+
+def _referenced_names(path: pathlib.Path) -> set[str]:
+    """Return every name one module imports or reads, ignoring comments and docstrings."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(alias.name.rpartition(".")[2] for alias in node.names)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    return names
 
 
 def _imports_target_modules(path: pathlib.Path) -> bool:
@@ -174,6 +189,39 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             path.write_text("def parse():\n    from dcim.models import Device\n    return Device\n")
 
             self.assertEqual(_imported_roots(path) & FORBIDDEN_INTERPRETER_IMPORTS, {"dcim"})
+
+    def test_target_modules_import_no_source_adapter_implementation(self):
+        """Section 2.2: a Target Module consumes typed source items, never a parser."""
+        for name in TARGET_MODULES:
+            with self.subTest(module=name):
+                self.assertEqual(_imported_roots(PACKAGE / name) & FORBIDDEN_TARGET_MODULE_IMPORTS, set())
+
+    def test_no_first_party_module_names_the_cable_path_model(self):
+        """Section 6.4: the plugin writes Cables and NetBox derives every path from them."""
+        sources = (
+            source for source in sorted(PACKAGE.rglob("*.py")) if "tests" not in source.relative_to(PACKAGE).parts
+        )
+        offenders = [str(source.relative_to(PACKAGE)) for source in sources if "CablePath" in _referenced_names(source)]
+
+        self.assertEqual(offenders, [])
+
+    def test_the_cable_path_guard_reads_an_import_and_a_call(self):
+        """The guard reads code, so the rule can still be stated in prose."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "writer.py"
+            path.write_text('"""Never touch CablePath."""\nfrom dcim.models import CablePath\n')
+
+            self.assertIn("CablePath", _referenced_names(path))
+
+    def test_the_cable_path_guard_reads_an_attribute_reference(self):
+        """A module that never imports the name still reads it through the package it imports."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "attribute_writer.py"
+            path.write_text(
+                '"""Reach it through the module."""\nfrom dcim import models\n\nmodels.CablePath.objects.all()\n'
+            )
+
+            self.assertIn("CablePath", _referenced_names(path))
 
     def test_the_interpreter_guard_reads_a_package_root_import(self):
         """`from netbox_data_import import models` names the module in the imported names."""

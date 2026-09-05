@@ -57,7 +57,7 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         )
         self.profile = ImportProfile.objects.create(
             name="Review Action Profile",
-            adapter_config={"update_existing": True, "create_missing_device_types": False},
+            adapter_config={"update_existing": True},
         )
         ClassRoleMapping.objects.create(
             profile=self.profile,
@@ -627,7 +627,7 @@ class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
         )
         self.profile = ImportProfile.objects.create(
             name="Unplaced Profile",
-            adapter_config={"update_existing": True, "create_missing_device_types": False},
+            adapter_config={"update_existing": True},
         )
         ClassRoleMapping.objects.create(
             profile=self.profile,

@@ -15,6 +15,13 @@ def normalize_mapping_text(value: str) -> str:
     return " ".join(value.split())
 
 
+def default_identity_slugs(make: str, model: str) -> tuple[str, str]:
+    """Return the Manufacturer and Device Type slugs one source make and model derive."""
+    normalized_make = normalize_mapping_text(make)
+    normalized_model = normalize_mapping_text(model)
+    return slugify(normalized_make)[:50], slugify(f"{normalized_make}-{normalized_model}")[:50]
+
+
 class DeviceTypeIdentityResolver:
     """Resolve all profile Device Type identities from two batch-loaded indexes."""
 
@@ -31,7 +38,6 @@ class DeviceTypeIdentityResolver:
         for mapping in self.manufacturer_mappings:
             normalized_make = normalize_mapping_text(mapping.source_make).casefold()
             self._manufacturers_exact.setdefault(normalized_make, mapping)
-        self.mapped_source_makes = frozenset(self._manufacturers_exact)
 
     @classmethod
     def for_profile(cls, profile):
@@ -59,12 +65,13 @@ class DeviceTypeIdentityResolver:
             return mapping.netbox_manufacturer_slug, mapping.netbox_device_type_slug, True
 
         manufacturer_mapping = self._manufacturers_exact.get(normalized_make.casefold())
+        default_manufacturer_slug, default_device_type_slug = default_identity_slugs(make, model)
         manufacturer_slug = (
             manufacturer_mapping.netbox_manufacturer_slug
             if manufacturer_mapping is not None
-            else slugify(normalized_make)[:50]
+            else default_manufacturer_slug
         )
-        return manufacturer_slug, slugify(f"{normalized_make}-{normalized_model}")[:50], False
+        return manufacturer_slug, default_device_type_slug, False
 
 
-__all__ = ("DeviceTypeIdentityResolver", "normalize_mapping_text")
+__all__ = ("DeviceTypeIdentityResolver", "default_identity_slugs", "normalize_mapping_text")

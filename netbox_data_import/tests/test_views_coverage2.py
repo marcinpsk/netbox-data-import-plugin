@@ -31,7 +31,6 @@ def _make_profile(name="VCov2Test") -> ImportProfile:
             "sheet_name": "Data",
             "source_id_column": "Id",
             "update_existing": True,
-            "create_missing_device_types": True,
         },
     )
 

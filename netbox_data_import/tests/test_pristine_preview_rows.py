@@ -5,8 +5,10 @@
 from threading import Event
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.db.utils import OperationalError
 from django.test import Client, TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_data_import.models import ColumnMapping, ImportProfile, SourceResolution
@@ -17,7 +19,7 @@ def _build_profile(name):
     """Return a profile that maps the three columns the rows below carry."""
     profile = ImportProfile.objects.create(
         name=name,
-        adapter_config={"sheet_name": "Data", "source_id_column": "Id", "create_missing_device_types": True},
+        adapter_config={"sheet_name": "Data", "source_id_column": "Id"},
     )
     ColumnMapping.objects.create(profile=profile, source_column="Name", target_field="device_name")
     ColumnMapping.objects.create(profile=profile, source_column="Tag", target_field="asset_tag")
@@ -43,7 +45,7 @@ class UploadStoresPristineSourceTest(TestCase):
         self.site = Site.objects.create(name="Upload Site", slug="upload-site")
         self.profile = ImportProfile.objects.create(
             name="Upload Profile",
-            adapter_config={"sheet_name": "Data", "source_id_column": "Id", "create_missing_device_types": True},
+            adapter_config={"sheet_name": "Data", "source_id_column": "Id"},
         )
         for source_column, target_field in {
             "Id": "source_id",
@@ -245,6 +247,104 @@ class PolicyWriteSerializationTest(TransactionTestCase):
         self.assertEqual(resolution.resolved_fields, {"device_name": "second-decision"})
 
 
+class PreviewActionWriteSerializationTest(TransactionTestCase):
+    """A preview quick action and an executing import serialize on the same profile row."""
+
+    def setUp(self):
+        """Create the profile whose policy rows the quick action and the import contend for."""
+        self.profile = _build_profile("Quick Action Lock Profile")
+        self.user = get_user_model().objects.create_superuser("quick-lock", "q@example.invalid", "testpass")
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def _attempt_while_the_worker_holds_the_profile(self, write):
+        """Run *write* while another connection holds the same profile row."""
+        from django.db import connection
+
+        from netbox_data_import.models import locked_profile_policy
+
+        started = Event()
+        release = Event()
+        blocked = []
+
+        def hold_the_profile_like_the_worker():
+            """Take the same lock the import execution transaction takes."""
+            with locked_profile_policy(self.profile.pk):
+                started.set()
+                self.assertTrue(release.wait(timeout=10))
+
+        with run_on_separate_connection(hold_the_profile_like_the_worker):
+            try:
+                self.assertTrue(started.wait(timeout=10))
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO '750ms'")
+                try:
+                    write()
+                except OperationalError:
+                    blocked.append(True)
+            finally:
+                release.set()
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO 0")
+        return blocked
+
+    def test_a_quick_device_type_mapping_cannot_change_while_an_import_holds_the_profile(self):
+        """Updating a policy row touches no parent row, so only the view's own lock serializes it."""
+        from netbox_data_import.models import DeviceTypeMapping
+
+        mapping = DeviceTypeMapping.objects.create(
+            profile=self.profile,
+            source_make="Dell",
+            source_model="R660",
+            netbox_manufacturer_slug="dell",
+            netbox_device_type_slug="dell-r660",
+        )
+        responses = []
+
+        def remap():
+            responses.append(
+                self.client.post(
+                    reverse("plugins:netbox_data_import:quick_resolve_device_type"),
+                    {
+                        "profile_id": self.profile.pk,
+                        "source_make": "Dell",
+                        "source_model": "R660",
+                        "netbox_mfg_slug": "dell",
+                        "netbox_dt_slug": "dell-r760",
+                        "action": "map",
+                    },
+                )
+            )
+
+        self.assertEqual(self._attempt_while_the_worker_holds_the_profile(remap), [True], _seen(responses))
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.netbox_device_type_slug, "dell-r660")
+
+    def test_unignoring_a_device_takes_the_profile_lock_itself(self):
+        """A delete has no sibling write to serialize it, so the view states the lock on its own."""
+        from netbox_data_import.models import IgnoredDevice
+
+        IgnoredDevice.objects.create(profile=self.profile, source_id="IGN-1", device_name="srv-1")
+
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:unignore_device"),
+                {"profile_id": self.profile.pk, "source_id": "IGN-1"},
+            )
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        table = ImportProfile._meta.db_table
+        locks = [
+            query["sql"]
+            for query in captured.captured_queries
+            if "FOR UPDATE" in query["sql"]
+            and f'FROM "{table}"' in query["sql"]
+            and IgnoredDevice._meta.db_table not in query["sql"]
+        ]
+        self.assertEqual(len(locks), 1, captured.captured_queries)
+        self.assertFalse(IgnoredDevice.objects.filter(source_id="IGN-1").exists())
+
+
 class ProfileVanishedBeforeTheCreateLockTest(TransactionTestCase):
     """A profile deleted between validation and the lock is the 404 the request would have got."""
 
@@ -291,6 +391,64 @@ class ProfileVanishedBeforeTheCreateLockTest(TransactionTestCase):
         self.assertEqual(deleted, [True], "the locking statement never ran")
         self.assertEqual(response.status_code, 404, response.content[:300])
         self.assertFalse(SourceResolution.objects.filter(source_id="CREATE-RACE-1").exists())
+
+
+class PreviewWriteVanishedProfileTest(TransactionTestCase):
+    """A preview write whose profile is deleted before its lock answers, rather than crashing."""
+
+    def setUp(self):
+        """Create the profile the request names and the operator who posts the write."""
+        self.profile = _build_profile("Vanished Preview Profile")
+        self.user = get_user_model().objects.create_superuser("vanish-preview", "v@example.invalid", "testpass")
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def _post_while_the_profile_vanishes(self, url_name, data):
+        """POST *data*, deleting the profile the moment the policy lock statement runs."""
+        from django.db import connection
+
+        deleted = []
+
+        def delete_the_profile_when_the_lock_runs(execute, sql, params, many, context):
+            # Stand in for a profile deleted between the view's own lookup and its policy lock.
+            if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
+                deleted.append(True)
+
+                def delete_it():
+                    ImportProfile.objects.get(pk=self.profile.pk).delete()
+
+                with run_on_separate_connection(delete_it):
+                    pass
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(delete_the_profile_when_the_lock_runs):
+            response = self.client.post(reverse(f"plugins:netbox_data_import:{url_name}"), data)
+        self.assertEqual(deleted, [True], "the policy lock statement never ran")
+        return response
+
+    def test_unignoring_a_device_answers_a_deleted_profile(self):
+        """`UnignoreDeviceView` takes the policy lock, so it owes the same answer its lookup gives."""
+        from netbox_data_import.models import IgnoredDevice
+
+        IgnoredDevice.objects.create(profile=self.profile, source_id="IGN-1", device_name="srv-1")
+
+        response = self._post_while_the_profile_vanishes(
+            "unignore_device",
+            {"profile_id": self.profile.pk, "source_id": "IGN-1"},
+        )
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        self.assertFalse(ImportProfile.objects.filter(pk=self.profile.pk).exists())
+
+    def test_a_quick_column_mapping_answers_a_deleted_profile(self):
+        """The direct-mapping branch replaces a row under the lock, so it owes the same answer."""
+        response = self._post_while_the_profile_vanishes(
+            "quick_add_column_mapping",
+            {"profile_id": self.profile.pk, "source_column": "Hostname", "target_field": "device_name"},
+        )
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+        self.assertFalse(ColumnMapping.objects.filter(source_column="Hostname").exists())
 
 
 class ConcurrentPartialUpdateTest(TransactionTestCase):

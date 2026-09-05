@@ -28,6 +28,12 @@ function addPreviewFixture() {
       <input type="hidden" name="source_model" value="Source Model">
       <button type="submit">Save mapping</button>
     </form>
+    <div id="class-mapping-modal">
+      <form id="class-mapping-form" class="ndi-deferred-preview-form" action="/quick-add-class-mapping/">
+        <input type="hidden" name="source_class" value="Server">
+        <button type="submit">Save mapping</button>
+      </form>
+    </div>
     <a href="/preview/" class="btn ndi-recalculate-preview" id="ndi-recalculate-preview">
       <i class="mdi mdi-refresh"></i> Recalculate Preview
     </a>
@@ -50,7 +56,9 @@ function submitReviewForm() {
 }
 
 function stubResponse(response) {
-  vi.stubGlobal("fetch", () => Promise.resolve(response));
+  const fetchMock = vi.fn(() => Promise.resolve(response));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
 }
 
 beforeEach(() => {
@@ -116,6 +124,31 @@ describe("preview row actions", () => {
     expect(form.querySelector("button").textContent).toContain("Saved");
     expect(document.getElementById("ndi-preview-stale").hidden).toBe(false);
     expect(document.getElementById("ndi-run-import").disabled).toBe(true);
+  });
+
+  it("resets a shared mapping modal for a second mapping", async () => {
+    const fetchMock = stubResponse({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ ok: true, preview_state: "recalculation_required", message: "Mapped." }),
+    });
+    const form = document.getElementById("class-mapping-form");
+    const button = form.querySelector("button");
+
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toContain("Saved");
+
+    form.querySelector('[name="source_class"]').value = "Switch";
+    document.getElementById("class-mapping-modal").dispatchEvent(new Event("show.bs.modal", { bubbles: true }));
+
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Save mapping");
+    button.click();
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+    expect(button.textContent).toContain("Saved");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("reports that recalculation started and ignores a second press", () => {
