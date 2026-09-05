@@ -2237,6 +2237,12 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 <td>Source Adapter</td>
 </tr>
 <tr>
+<td>Raw export metadata longer than the provenance column that stores it</td>
+<td><code>trace.metadata_too_long</code></td>
+<td><code>invalid</code></td>
+<td>Source Adapter</td>
+</tr>
+<tr>
 <td>The resolved object is not an Interface, FrontPort, or RearPort</td>
 <td><code>cable.unsupported_termination_kind</code></td>
 <td><code>invalid</code></td>
@@ -2309,9 +2315,10 @@ blank-row layout, empty-string cells, and sheet dimensions.</p>
 </tbody>
 </table>
 <h2 id="6-patched-path-replacement-planning-and-transaction-behavior">6. Patched Path Replacement planning and transaction behavior</h2>
-<p>The Cable Target Module requires NetBox 4.6 or later, because it verifies pass-throughs against the
-PortMapping model. The plugin's minimum NetBox version is 4.6.0 for this feature and for the plugin as
-a whole.</p>
+<p>The Cable Target Module verifies pass-throughs against the PortMapping model, which NetBox 4.5
+introduced in place of the single rear-port reference on a front port. The plugin's minimum NetBox
+version is 4.6.0, for this feature and for the plugin as a whole, because 4.6 is the oldest release
+the test matrix covers.</p>
 <h3 id="61-port-resolution">6.1 Port resolution</h3>
 <p>Each Termination Reference resolves inside its resolved Device. Endpoint Device resolution uses the
 existing explicit matching approach and runs before port resolution begins.</p>
@@ -2503,6 +2510,21 @@ inside the transaction as the accepted plan's operator.</p>
 <td><code>blocked</code></td>
 </tr>
 <tr>
+<td>Source Traces plan different Cables on one free termination</td>
+<td><code>cable.planned_termination_conflict</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A segment whose two ends resolve to one termination</td>
+<td><code>cable.segment_self_connection</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A stored termination selection whose kind contradicts the stated PortClass</td>
+<td><code>cable.termination_kind_mismatch</code></td>
+<td><code>blocked</code></td>
+</tr>
+<tr>
 <td>A CableClass dimension is unresolved</td>
 <td><code>cable.cableclass_unmapped</code></td>
 <td><code>blocked</code></td>
@@ -2518,6 +2540,11 @@ inside the transaction as the accepted plan's operator.</p>
 <td><code>blocked</code></td>
 </tr>
 <tr>
+<td>Source Traces resolve one shared segment to different Cable policies</td>
+<td><code>cable.resolved_segment_conflict</code></td>
+<td><code>invalid</code></td>
+</tr>
+<tr>
 <td>The operator lacks a required Cable or view permission</td>
 <td><code>cable.permission_denied</code></td>
 <td><code>blocked</code></td>
@@ -2526,6 +2553,21 @@ inside the transaction as the accepted plan's operator.</p>
 <td>A dangling natural-key reference in <code>adapter_config</code></td>
 <td><code>profile.dangling_reference</code></td>
 <td><code>blocked</code></td>
+</tr>
+<tr>
+<td>A PortMapping row proves the stated Pass-Through Claim</td>
+<td><code>cable.pass_through_verified</code></td>
+<td><code>info</code> diagnostic, disposition unchanged</td>
+</tr>
+<tr>
+<td>A mapped peer substitutes a same-port continuation</td>
+<td><code>cable.same_port_continuation</code></td>
+<td><code>info</code> diagnostic, disposition unchanged</td>
+</tr>
+<tr>
+<td>An existing Cable already proves a desired segment</td>
+<td><code>cable.segment_reused</code></td>
+<td><code>info</code> diagnostic, disposition unchanged</td>
 </tr>
 <tr>
 <td>Attribute drift on a reused Cable</td>
@@ -3037,7 +3079,7 @@ no secret value.</p>
 <li>A generated schema migration that drops the moved columns.</li>
 </ol>
 <p>The moved columns are: <code>sheet_name</code>, <code>source_id_column</code>, <code>custom_field_name</code>, <code>update_existing</code>,
-<code>create_missing_device_types</code>, <code>capture_extra_data</code>, <code>primary_contact_role</code>,
+<code>capture_extra_data</code>, <code>primary_contact_role</code>,
 <code>primary_contact_lookup_field</code>, and <code>preview_view_mode</code>. Dropping <code>primary_contact_role</code> removes the
 database-level PROTECT relationship. Forms, REST, and YAML switch to the new shape in the same
 release. There is no compatibility path between the three steps and no dual read path after them.</p>
