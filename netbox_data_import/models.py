@@ -1102,6 +1102,80 @@ class ManufacturerMapping(PolicySectionModel):
         return f"{self.source_make} → {self.netbox_manufacturer_slug}"
 
 
+class InferenceBackend(NetBoxModel):
+    """One named Inference Backend definition; the enabled row is the active backend (section 8.2)."""
+
+    ADAPTER_TYPES = (("openai_compatible", "OpenAI compatible"),)
+    AUTHENTICATION_METHODS = (("bearer", "Bearer token"),)
+    RESPONSE_MODES = (
+        ("prompt_json", "JSON asked for in the prompt"),
+        ("json_object", "JSON object mode"),
+        ("json_schema", "JSON schema mode"),
+    )
+
+    backend_key = models.SlugField(
+        max_length=100,
+        unique=True,
+        help_text="The unique name of this backend, and the only identifier a job payload carries.",
+    )
+    display_name = models.CharField(max_length=200)
+    adapter_type = models.CharField(max_length=50, choices=ADAPTER_TYPES, default="openai_compatible")
+    api_root = models.CharField(
+        max_length=500,
+        help_text="Exact API root without a trailing slash. The client appends /chat/completions.",
+    )
+    model = models.CharField(max_length=200, help_text="Exact backend model id. The worker never chooses one.")
+    authentication = models.CharField(max_length=20, choices=AUTHENTICATION_METHODS, default="bearer")
+    response_mode = models.CharField(
+        max_length=20,
+        choices=RESPONSE_MODES,
+        default="prompt_json",
+        help_text="Select a mode other than prompt_json only after verifying the exact backend and model.",
+    )
+    credential_reference = models.JSONField(help_text="A typed Vault KV v2 reference. It never holds a secret value.")
+    connect_timeout = models.PositiveIntegerField(default=5)
+    read_timeout = models.PositiveIntegerField(default=60)
+    enabled = models.BooleanField(default=False, help_text="Whether Ask AI may use this backend.")
+
+    # Override tags reverse accessor to avoid clashes with other plugins
+    tags = models.ManyToManyField(to="extras.Tag", related_name="+", blank=True)
+
+    class Meta:
+        ordering = ["backend_key"]
+        constraints = [
+            # A partial unique index over one column value permits exactly one enabled row.
+            models.UniqueConstraint(
+                fields=["enabled"],
+                condition=models.Q(enabled=True),
+                name="ndi_inferencebackend_one_enabled",
+            ),
+        ]
+        verbose_name = "AI backend"
+        verbose_name_plural = "AI backends"
+
+    def __str__(self):
+        return self.display_name or self.backend_key
+
+    def get_absolute_url(self):
+        """Return the detail URL for this Inference Backend."""
+        return reverse("plugins:netbox_data_import:inferencebackend", args=[self.pk])
+
+    def clean(self):
+        """Reject a second enabled row, an unapproved api_root, and a reference that is not typed."""
+        super().clean()
+        from .inference_backend import validate_backend_fields
+
+        if self.enabled:
+            competing = type(self).objects.filter(enabled=True).exclude(pk=self.pk)
+            if competing.exists():
+                raise ValidationError({"enabled": "Another Inference Backend is already enabled. Disable it first."})
+        validate_backend_fields(
+            api_root=self.api_root,
+            authentication=self.authentication,
+            credential_reference=self.credential_reference,
+        )
+
+
 class IgnoredDevice(PolicySectionModel):
     """Per-device ignore record — prevents a specific source device from being imported."""
 
