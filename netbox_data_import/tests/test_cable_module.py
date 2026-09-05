@@ -1348,6 +1348,80 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
         )
         self.assertEqual(unresolved[0]["kind"], "interface")
 
+    def test_a_segment_two_traces_claim_with_different_policy_states_conflict(self):
+        """A refused shared segment is a conflict the panel names, not an unplanned blank."""
+        alias_a = trace_termination("DEV-A", "", "source-port-a", "Port")
+        alias_b = trace_termination("DEV-B", "", "source-port-b", "NIC")
+        aliased = (
+            trace_endpoint_line(alias_a),
+            trace_endpoint_line(alias_b),
+            (trace_segment(alias_a, "Patch", alias_b),),
+        )
+        conflicting = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (trace_segment(DEVICE_A, "Trunk", DEVICE_B),),
+        )
+        CableClassMapping.objects.filter(profile=self.profile, cable_class="Trunk").update(
+            cable_type=None, cable_profile=None
+        )
+        for reference, selected in ((alias_a, self.eth0), (alias_b, self.eth1)):
+            device, cards, port, port_class = reference
+            TerminationResolution.objects.create(
+                profile=self.profile,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=termination_field_key(
+                    device=device, cards=cards, port=port, kind=claimed_termination_kind(port_class)
+                ),
+                selected_object_type=ObjectType.objects.get_for_model(selected),
+                selected_object_id=selected.pk,
+                selected_display_name=str(selected),
+            )
+
+        plan = self.plan(aliased, conflicting)
+
+        for unit in plan.units:
+            statuses = [segment["status"] for segment in unit.display["trace"]["segments"]]
+            self.assertEqual(statuses, ["conflict"], unit.identity)
+
+    def test_a_trace_that_never_reached_classification_does_not_claim_an_absent_cable(self):
+        """Planning that stopped before it read the topology reports unknown, not absence."""
+        self.connect(self.eth0, self.eth1)
+        blocked = (
+            trace_endpoint_line(DEVICE_A),
+            trace_endpoint_line(DEVICE_B),
+            (
+                trace_segment(DEVICE_A, "Patch", trace_termination("PANEL-1", "", "absent", "Position Front")),
+                trace_segment(PANEL_1_REAR, "Trunk", PANEL_2_REAR),
+                trace_segment(PANEL_2_FRONT, "Patch", DEVICE_B),
+            ),
+        )
+
+        workspace = self.workspace(self.unit(blocked))
+
+        self.assertFalse(workspace["topology_known"])
+        self.assertIsNone(workspace["logical_cable"])
+
+    def test_a_planned_trace_states_that_it_read_the_topology(self):
+        """A trace that reached classification did look, so its panel may report what it found."""
+        workspace = self.workspace(self.unit(patched_path()))
+
+        self.assertTrue(workspace["topology_known"])
+
+    def test_the_logical_cable_a_replacement_deletes_carries_what_a_reviewer_needs(self):
+        """Section 6.3: the operator reviews the description and tags before the deletion runs."""
+        from extras.models import Tag
+
+        tag = Tag.objects.create(name="Trace Review Tag", slug="trace-review-tag")
+        cable = self.connect(self.eth0, self.eth1, description="Temporary logical path")
+        cable.tags.add(tag)
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+
+        workspace = self.workspace(self.unit(patched_path()))
+
+        self.assertEqual(workspace["logical_cable"]["description"], "Temporary logical path")
+        self.assertEqual(list(workspace["logical_cable"]["tags"]), ["Trace Review Tag"])
+
     def test_the_source_evidence_states_both_endpoints_and_every_segment_in_order(self):
         """The source panel restates what the workbook said, in the order it said it."""
         workspace = self.workspace(self.unit(patched_path()))
