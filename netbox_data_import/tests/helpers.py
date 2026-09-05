@@ -441,6 +441,31 @@ def assert_action_link_is_named(test: TestCase, html: str, href: str, name: str)
     test.assertIn(name, match.group(1))
 
 
+# A faked rewind never touches the schema, so above this floor a restore is bookkeeping only.
+FAKED_REWIND_FLOOR = "0029_alter_cableimportsource_from_text_and_more"
+
+
+def restore_plugin_migrations(floor=FAKED_REWIND_FLOOR):
+    """Return the plugin app to its leaf state after a migration test rewound it.
+
+    Replaying a faked rewind for real would re-run a CreateModel against a table that still exists,
+    so the restore is real up to *floor* and bookkeeping only above it.
+    """
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    app = "netbox_data_import"
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    plan = executor.migration_plan([(app, floor)])
+    # Forwards only: reversing here would drop a table the faked rewind left in place.
+    if plan and not any(backwards for _migration, backwards in plan):
+        executor.migrate([(app, floor)])
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    executor.migrate(list(executor.loader.graph.leaf_nodes(app)), fake=True)
+
+
 def cables_on(*terminations):
     """Return the Cables terminating on every one of these exact objects.
 
