@@ -3722,19 +3722,36 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             _discard_import_preview(request)
             messages.warning(request, "The saved import target is no longer available. Start a new preview.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        traces = workspace.traces
+        wanted = request.GET.get("trace", "")
+        selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
+        # Section 10.2: compared on each full load and on the re-read action, never polled.
+        drift = live.fingerprint != workspace.plan.fingerprint
+        summary = dict(workspace.trace_summary)
+        from .models import TerminationResolution
+
+        summary["saved_decisions"] = TerminationResolution.objects.filter(profile=profile).count()
+        summary["preview_state"] = self._preview_state(request, drift)
         return render(
             request,
             "netbox_data_import/trace_workspace.html",
             {
                 "profile": profile,
-                "traces": workspace.traces,
-                "summary": workspace.trace_summary,
-                # Section 10.2: compared on each full load and on the re-read action, never polled.
-                "drift": live.fingerprint != workspace.plan.fingerprint,
+                "traces": traces,
+                "selected_trace": selected,
+                "summary": summary,
+                "drift": drift,
                 "preview_revision": current_preview_revision(request.session),
                 "plugin_version": _plugin_version,
             },
         )
+
+    @staticmethod
+    def _preview_state(request, drift: bool) -> str:
+        """Return what the strip says about the preview the operator is reviewing."""
+        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
+            return "recalculation required"
+        return "changed in NetBox" if drift else "current"
 
 
 class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
