@@ -133,6 +133,77 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         self.assertEqual(blocked, [True], "the competing Device Type change did not wait for the execution")
         self.assertEqual(DeviceType.objects.get(pk=self.device_type.pk).u_height, 1)
 
+    def test_execution_holds_the_device_type_a_review_retained(self):
+        """An ignored device_type keeps the matched Device's own type, which still sizes placement."""
+        from threading import current_thread
+
+        from dcim.models import Device, DeviceType
+        from django.db import OperationalError, connection
+        from django.db.models.signals import pre_save
+
+        from netbox_data_import.models import IgnoredFieldDifference
+
+        retained_type = DeviceType.objects.create(
+            manufacturer=self.manufacturer,
+            model="Retained Model",
+            slug="coordinatormfg-retained-model",
+            u_height=1,
+        )
+        device = Device.objects.create(
+            name="server-a",
+            site=self.site,
+            rack=self.rack,
+            device_type=retained_type,
+            role=self.role,
+        )
+        IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id="D-1",
+            netbox_device_id=device.pk,
+            target_field="device_type",
+            file_snapshot={"canonical": f"{self.manufacturer.slug}/{self.device_type.slug}", "display": "file"},
+            netbox_snapshot={"canonical": f"{self.manufacturer.slug}/{retained_type.slug}", "display": "netbox"},
+        )
+        accepted = self._plan()
+        unit = accepted.unit("device:source:D-1")
+        self.assertEqual(unit.changes[0].payload["device_type_id"], retained_type.pk)
+        execution_thread = current_thread()
+        observed = []
+        blocked = []
+
+        def contend_during_write(sender, instance, **kwargs):
+            if observed or current_thread() is not execution_thread:
+                return
+            observed.append(True)
+
+            def contend():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET lock_timeout TO '750ms'")
+                try:
+                    DeviceType.objects.filter(pk=retained_type.pk).update(u_height=42)
+                except OperationalError:
+                    blocked.append(True)
+
+            with run_on_separate_connection(contend):
+                pass
+
+        pre_save.connect(contend_during_write, sender=Device, weak=False)
+        try:
+            ImportEngine.execute(
+                self.profile,
+                self.document,
+                accepted.to_dict(),
+                [unit.identity],
+                "hold-retained-device-type",
+                self.actor,
+            )
+        finally:
+            pre_save.disconnect(contend_during_write, sender=Device)
+
+        self.assertTrue(observed, "the execution reached no Device write")
+        self.assertEqual(blocked, [True], "the competing Device Type change did not wait for the execution")
+        self.assertEqual(DeviceType.objects.get(pk=retained_type.pk).u_height, 1)
+
     def test_a_captured_extra_column_reaches_the_stored_provenance(self):
         """A created device stores the captured extra columns its plan carries."""
         from dcim.models import Device

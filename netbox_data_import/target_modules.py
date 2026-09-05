@@ -1651,7 +1651,11 @@ class DeviceModule:
         if payload["device_type_id"] is not None and payload["device_type_id"] != dependencies.device_type.pk:
             from dcim.models import DeviceType
 
-            effective_type = DeviceType.objects.filter(pk=payload["device_type_id"]).first()
+            retained_types = DeviceType.objects.filter(pk=payload["device_type_id"])
+            if batch.lock_plan_references:
+                # A retained review value sizes the placement too, so the replan must hold it.
+                retained_types = retained_types.select_for_update(of=("self",))
+            effective_type = retained_types.first()
             if effective_type is None:
                 # Every check below reads the device type this row would write.
                 problem(Disposition.INVALID, "device.device_type_missing")
