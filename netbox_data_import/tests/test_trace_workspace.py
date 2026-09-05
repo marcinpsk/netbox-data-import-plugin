@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The Trace Review Workspace: its summary strip, its trace list, and its per-trace actions."""
 
+import re
 from io import BytesIO
 
 from dcim.models import Cable, Interface
@@ -242,6 +243,14 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertFalse(blocked["selectable"])
         self.assertIn("matching Devices", blocked["reason"])
         self.assertContains(response, blocked["reason"])
+
+    def test_the_termination_search_carries_an_accessible_name(self):
+        """A screen reader has to name the search box, and a placeholder is not a name."""
+        response = self.open_workspace(patched_path())
+
+        tag = re.search(r'<input[^>]*id="traceTerminationSearch"[^>]*>', response.content.decode())
+        self.assertIsNotNone(tag)
+        self.assertRegex(tag.group(0), r'aria-label="[^"]+"')
 
     def test_the_workspace_reports_no_drift_for_a_freshly_read_preview(self):
         """The strip appears on a difference, so a preview just read must not show one."""
