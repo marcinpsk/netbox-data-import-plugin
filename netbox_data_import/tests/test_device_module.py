@@ -169,6 +169,54 @@ class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
         device_queries = [query["sql"] for query in captured.captured_queries if f"FROM {table}" in query["sql"]]
         self.assertEqual(len(device_queries), 4, device_queries)
 
+    def test_a_locking_replan_takes_every_placement_lock_once_in_primary_key_order(self):
+        """Lazy per-row locks let two profiles take the same Racks in opposite orders and deadlock."""
+        from dcim.models import DeviceType, Rack
+
+        second_rack = Rack.objects.create(name="dm-rack-2", site=self.site, u_height=42)
+        reviewed_rack = Rack.objects.create(name="dm-rack-3", site=self.site, u_height=42)
+        reviewed_type = DeviceType.objects.create(
+            manufacturer=self.manufacturer, model="R760", slug="dell-r760", u_height=1
+        )
+        reviewed = self._with_provenance(
+            self._device("srv-reviewed", rack=reviewed_rack, device_type=reviewed_type), source_id="D-3"
+        )
+        for target_field in ("rack_name", "device_type"):
+            IgnoredFieldDifference.objects.create(
+                profile=self.profile,
+                source_id="D-3",
+                netbox_device_id=reviewed.pk,
+                target_field=target_field,
+            )
+        # Source-row order is the reverse of primary-key order, so a lazy lock takes them backwards.
+        rows = [
+            self._row(1, "D-1", "srv-01", rack_name="dm-rack-2"),
+            self._row(2, "D-2", "srv-02", rack_name="dm-rack"),
+            self._row(3, "D-3", "srv-reviewed", rack_name="dm-rack"),
+        ]
+
+        with CaptureQueriesContext(connection) as captured:
+            units = DeviceModule().plan(
+                self._batch(*rows), self.profile, CATALOG, self.reader, lock_plan_references=True
+            )
+
+        expected = {
+            Rack: {self.rack.pk, second_rack.pk, reviewed_rack.pk},
+            DeviceType: {self.device_type.pk, reviewed_type.pk},
+        }
+        for model, primary_keys in expected.items():
+            table = connection.ops.quote_name(model._meta.db_table)
+            locks = [
+                query["sql"]
+                for query in captured.captured_queries
+                if f"FROM {table}" in query["sql"] and "FOR UPDATE" in query["sql"]
+            ]
+            self.assertEqual(len(locks), 1, locks)
+            self.assertIn(f'ORDER BY {table}."id" ASC', locks[0])
+            for primary_key in primary_keys:
+                self.assertIn(str(primary_key), locks[0])
+        self.assertEqual([unit.disposition for unit in units], [Disposition.ACTIONABLE] * 3)
+
     def test_dependencies_are_loaded_once_for_the_batch(self):
         """Repeated dependency identities do not issue one ORM query per Device row."""
         from dcim.models import DeviceRole, DeviceType

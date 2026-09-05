@@ -798,6 +798,7 @@ class _DeviceBatch:
         self.profile = profile
         self.reader = netbox_reader
         self.lock_plan_references = lock_plan_references
+        self._locked_placement: dict[tuple[type, int], Any] = {}
         self.ignored = _ignored_source_ids(profile)
         self._identity = DeviceTypeIdentityResolver.for_profile(profile)
         self._reviewer = DeviceFieldReviewer.for_profile(profile)
@@ -862,17 +863,75 @@ class _DeviceBatch:
         }
         self._racks = _racks_by_comparison_name(netbox_reader)
         self._planned_racks = self._planned_racks_by_name(source_batch, profile)
+        self._lock_placement_references(rows)
         self.side_map, self.airflow_map, self.status_map = translation_maps()
         # Row order decides who keeps a slot two rows claim, so the first row planned wins it.
         self._claimed: dict[tuple[int | str, str | None, Any], int] = {}
         self._claimed_devices: dict[int, tuple[int | None, str]] = {}
 
     def placement_reference(self, model, pk):
-        """Return one row the placement reads, locked when the replan must hold it until the write."""
-        queryset = model.objects.filter(pk=pk)
+        """Return one row the placement reads, from the locks this batch took before planning."""
         if self.lock_plan_references:
-            queryset = queryset.select_for_update(of=("self",))
-        return queryset.first()
+            return self._locked_placement.get((model, pk))
+        return model.objects.filter(pk=pk).first()
+
+    def _lock_placement_references(self, rows: list[dict[str, Any]]) -> None:
+        """Lock every placement row this batch can read, in one model and primary-key order.
+
+        Two profiles plan concurrently, because the policy lock covers one profile each. A lock
+        taken per row therefore follows source order, and two batches can take the same rows in
+        opposite orders. One ordered pass per model cannot.
+        """
+        if not self.lock_plan_references:
+            return
+        from dcim.models import DeviceType, Rack
+
+        candidates = self._placement_candidate_devices()
+        # u_height and is_full_depth decide placement here, and Device.full_clean() reads them again.
+        type_ids = {device_type.pk for device_type in self._device_types.values()}
+        type_ids.update(device.device_type_id for device in candidates)
+        rack_ids = {rack.pk for rack in self._named_rack_matches(rows)}
+        rack_ids.update(device.rack_id for device in candidates if device.rack_id)
+        locked_types = (
+            DeviceType.objects.select_related("manufacturer")
+            .filter(pk__in=sorted(type_ids))
+            .order_by("pk")
+            .select_for_update(of=("self",))
+        )
+        for device_type in locked_types:
+            self._locked_placement[(DeviceType, device_type.pk)] = device_type
+        locked_racks = Rack.objects.filter(pk__in=sorted(rack_ids)).order_by("pk").select_for_update(of=("self",))
+        for rack in locked_racks:
+            self._locked_placement[(Rack, rack.pk)] = rack
+        # A Device Type deleted between the unlocked read and the lock leaves its rows unplannable.
+        self._device_types = {
+            key: locked
+            for key, device_type in self._device_types.items()
+            if (locked := self._locked_placement.get((DeviceType, device_type.pk))) is not None
+        }
+
+    def _placement_candidate_devices(self) -> list[Any]:
+        """Return every stored Device a row can match, whose placement a review can retain."""
+        candidates = list(self._reviewed_devices.values())
+        for index in (
+            self._devices_by_source_id,
+            self._devices_by_serial,
+            self._devices_by_asset_tag,
+            self._devices_by_name,
+        ):
+            for found in index.values():
+                candidates.extend(found)
+        return candidates
+
+    def _named_rack_matches(self, rows: list[dict[str, Any]]) -> list[Any]:
+        """Return the one existing Rack each row names, skipping the names that match several."""
+        matched = []
+        for row in rows:
+            rack_name = _source_text(row.get("rack_name"))
+            found = self._racks.get(identity_text(rack_name), ()) if rack_name else ()
+            if len(found) == 1:
+                matched.append(found[0])
+        return matched
 
     def _load_dependency_objects(self, rows: list[dict[str, Any]]) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
         """Load each Device Type and Device Role this batch can reference."""
@@ -888,9 +947,6 @@ class _DeviceBatch:
             manufacturer__slug__in={mfg_slug for mfg_slug, _dt_slug in type_keys},
             slug__in={dt_slug for _mfg_slug, dt_slug in type_keys},
         )
-        if self.lock_plan_references:
-            # u_height and is_full_depth decide placement here, and Device.full_clean() reads them again.
-            referenced_types = referenced_types.select_for_update(of=("self",)).order_by("pk")
         device_types = {
             (device_type.manufacturer.slug, device_type.slug): device_type for device_type in referenced_types
         }
