@@ -110,8 +110,10 @@ class CableClassMappingTable(tables.Table):
     """Display CableClass target decisions inline on the profile detail page."""
 
     cable_class = tables.Column(verbose_name="CableClass")
-    cable_type = tables.Column(accessor="cable_type_display", verbose_name="Cable Type")
-    cable_profile = tables.Column(accessor="cable_profile_display", verbose_name="Cable Profile")
+    cable_type = tables.Column(accessor="cable_type_display", order_by="cable_type", verbose_name="Cable Type")
+    cable_profile = tables.Column(
+        accessor="cable_profile_display", order_by="cable_profile", verbose_name="Cable Profile"
+    )
     actions = _mapping_actions_column("cableclassmapping")
 
     class Meta:

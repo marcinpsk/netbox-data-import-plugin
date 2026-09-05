@@ -51,12 +51,26 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: mypy
+        name: mypy (the type gate CI runs inside format-and-lint)
+        entry: uv run --no-sync --native-tls mypy
+        language: system
+        pass_filenames: false
+        files: \.py$
+
       - id: diagnostic-wording
         name: Diagnostic codes have operator wording
         entry: python3 scripts/check_diagnostic_wording.py
         language: system
         pass_filenames: false
         files: ^netbox_data_import/(target_modules|review_workspace)\.py$
+
+      - id: spec-diagnostics
+        name: Normative spec tables list every diagnostic the planner emits
+        entry: python3 scripts/check_spec_diagnostics.py
+        language: system
+        pass_filenames: false
+        files: ^(netbox_data_import/(cable_target|models|trace_workbook)\.py|docs/spec/target-neutral-import-architecture\.md|scripts/check_spec_diagnostics\.py)$
 
       - id: gen-compatibility
         name: Compatibility metadata follows the version and the test matrix

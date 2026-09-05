@@ -4,8 +4,8 @@
 
 from django.test import TestCase
 
-from netbox_data_import.models import ImportExecution, ImportProfile
-from netbox_data_import.tables import ColumnMappingTable, ImportExecutionTable
+from netbox_data_import.models import CableClassMapping, ImportExecution, ImportProfile
+from netbox_data_import.tables import CableClassMappingTable, ColumnMappingTable, ImportExecutionTable
 from netbox_data_import.template_content import DeviceImportDataExtension
 from netbox_data_import.tests.helpers import set_import_source
 from netbox_data_import.values import source_text
@@ -181,6 +181,30 @@ class ColumnMappingTableTest(TestCase):
         table = ColumnMappingTable([])
 
         self.assertEqual(tuple(table.columns["target_field"].order_by), ("target_field",))
+
+
+class CableClassMappingTableTest(TestCase):
+    """Both CableClass display columns read model methods the queryset cannot order by."""
+
+    def test_sorting_a_display_column_orders_through_its_field(self):
+        """django-tables2 falls back to the accessor, so sorting must name a real column."""
+        profile = _make_profile("CableTableProfile")
+        for cable_class, cable_type in (("Patch", "cat6"), ("Trunk", "cat5e")):
+            CableClassMapping.objects.create(
+                profile=profile,
+                cable_class=cable_class,
+                cable_type_resolved=True,
+                cable_type=cable_type,
+                cable_profile_resolved=True,
+                cable_profile="single-1c1p",
+            )
+
+        for column in ("cable_type", "cable_profile"):
+            with self.subTest(column=column):
+                table = CableClassMappingTable(CableClassMapping.objects.filter(profile=profile))
+                table.order_by = column
+
+                self.assertEqual(len(list(table.rows)), 2)
 
 
 class SourceTextTests(TestCase):
