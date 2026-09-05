@@ -1878,10 +1878,12 @@ class UnignoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, V
             messages.error(request, "A valid import profile is required.")
         elif source_id:
             profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "change"), pk=profile_id)
-            count = delete_permission_scoped_objects(
-                request.user,
-                IgnoredDevice.objects.filter(profile=profile, source_id=source_id),
-            )
+            # Serialize against an executing import, which holds the same profile row.
+            with locked_profile_policy(profile.pk):
+                count = delete_permission_scoped_objects(
+                    request.user,
+                    IgnoredDevice.objects.filter(profile=profile, source_id=source_id),
+                )
             if count:
                 messages.success(request, "Device removed from ignore list.")
             else:
@@ -3875,7 +3877,7 @@ class QuickAddColumnMappingView(_PermissionScopedWriteMixin, PermissionRequiredM
             saved_message = f"{verb} candidate mapping: '{source_column}' → {target_field}"
         else:
             # A quick direct mapping replaces the source column that supplied the target before it.
-            with transaction.atomic():
+            with locked_profile_policy(profile.pk):
                 displaced = ColumnMapping.objects.filter(profile=profile, target_field=target_field).exclude(
                     source_column=source_column
                 )

@@ -69,6 +69,20 @@ def save_or_refetch(instance, model, lookup):
     return instance, True
 
 
+def _policy_profile_id(model, lookup: dict) -> int | None:
+    """Return the profile a policy write belongs to, or None when the model carries no policy."""
+    from .models import PolicySectionModel
+
+    if not (isinstance(model, type) and issubclass(model, PolicySectionModel)):
+        return None
+    profile = lookup.get("profile")
+    profile_id = lookup.get("profile_id") if profile is None else profile.pk
+    if profile_id is None:
+        # A caller that names no profile cannot be serialized against an import, so it is a bug.
+        raise ValueError(f"A {model._meta.verbose_name} write must name the profile it belongs to.")
+    return profile_id
+
+
 def save_permission_scoped_object(
     user,
     model,
@@ -82,7 +96,29 @@ def save_permission_scoped_object(
     ``on_existing`` decides what an already-present row means: ``update`` writes *values* under the
     change permission, ``keep`` returns it untouched under the view permission, and ``reject``
     refuses it. Raises ``ObjectPermissionDenied`` when any of those checks fails.
+
+    A policy write also holds its import profile, so it cannot commit inside an execution that has
+    already replanned against the old policy.
     """
+    from .models import locked_profile_policy
+
+    profile_id = _policy_profile_id(model, lookup)
+    if profile_id is None:
+        return _scoped_write(user, model, lookup, values, on_existing=on_existing)
+    with locked_profile_policy(profile_id):
+        # atomic-exit-safe: policy-write-committed
+        return _scoped_write(user, model, lookup, values, on_existing=on_existing)
+
+
+def _scoped_write(
+    user,
+    model,
+    lookup: dict,
+    values: dict,
+    *,
+    on_existing: Literal["update", "keep", "reject"],
+) -> PermissionScopedSaveResult:
+    """Write one object and prove its saved state stays inside the user's object scope."""
     with transaction.atomic():
         instance = model.objects.select_for_update().filter(**lookup).first()
         if instance is None:

@@ -29,10 +29,14 @@ AUDITED_EXITS = {
         "The selection cleared its permission check and is meant to commit, and the plan that "
         "follows it inside the lock only reads."
     ),
-    ("save_permission_scoped_object", "existing-row-kept-unwritten"): (
+    ("save_permission_scoped_object", "policy-write-committed"): (
+        "The profile lock only serializes the write against an import execution, which the "
+        "committed write is meant to survive."
+    ),
+    ("_scoped_write", "existing-row-kept-unwritten"): (
         "on_existing is keep, so the row is returned untouched after its view check."
     ),
-    ("save_permission_scoped_object", "scoped-write-committed"): (
+    ("_scoped_write", "scoped-write-committed"): (
         "The success path: every check passed, so committing the write is the point."
     ),
     ("delete_permission_scoped_objects", "scoped-delete-committed"): (

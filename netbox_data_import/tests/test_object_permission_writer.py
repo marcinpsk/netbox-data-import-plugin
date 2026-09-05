@@ -9,7 +9,9 @@ permission check would only restate the assumption under test.
 """
 
 from django.core.exceptions import ValidationError
+from django.db import connection
 from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 
 from netbox_data_import.models import DeviceTypeMapping, ImportProfile
 from netbox_data_import.object_permissions import (
@@ -170,48 +172,117 @@ class SavePermissionScopedObjectTest(TestCase):
         self.assertFalse(DeviceTypeMapping.objects.filter(**self._lookup()).exists())
 
 
+class PolicyWriteHoldsTheProfileTest(TestCase):
+    """A policy write serializes against an executing import, and says so in its own SQL."""
+
+    def setUp(self):
+        """Create the profile whose policy row the write belongs to."""
+        self.profile = ImportProfile.objects.create(name="Policy Lock Profile")
+
+    def _profile_locks(self, captured) -> list[str]:
+        """Return the statements that lock the profile row on its own, without a policy-row join."""
+        table = ImportProfile._meta.db_table
+        return [
+            query["sql"]
+            for query in captured.captured_queries
+            if "FOR UPDATE" in query["sql"]
+            and f'FROM "{table}"' in query["sql"]
+            and DeviceTypeMapping._meta.db_table not in query["sql"]
+        ]
+
+    def test_a_policy_create_takes_the_profile_lock_itself(self):
+        """`Meta.ordering` joins the profile today, so an ordering change would drop the lock."""
+        with CaptureQueriesContext(connection) as captured:
+            save_permission_scoped_object(
+                None,
+                DeviceTypeMapping,
+                {"profile": self.profile, "source_make": "Dell", "source_model": "R660"},
+                {"netbox_manufacturer_slug": "dell", "netbox_device_type_slug": "dell-r660"},
+            )
+
+        self.assertEqual(len(self._profile_locks(captured)), 1, captured.captured_queries)
+
+    def test_a_policy_update_takes_the_profile_lock_itself(self):
+        """An update of an existing row touches no parent row, so nothing else would serialize it."""
+        save_permission_scoped_object(
+            None,
+            DeviceTypeMapping,
+            {"profile": self.profile, "source_make": "Dell", "source_model": "R660"},
+            {"netbox_manufacturer_slug": "dell", "netbox_device_type_slug": "dell-r660"},
+        )
+
+        with CaptureQueriesContext(connection) as captured:
+            save_permission_scoped_object(
+                None,
+                DeviceTypeMapping,
+                {"profile": self.profile, "source_make": "Dell", "source_model": "R660"},
+                {"netbox_manufacturer_slug": "dell", "netbox_device_type_slug": "dell-r760"},
+            )
+
+        self.assertEqual(len(self._profile_locks(captured)), 1, captured.captured_queries)
+
+    def test_a_policy_write_for_a_deleted_profile_is_refused(self):
+        """The lock reads the profile again, so a row whose profile is gone cannot be written."""
+        gone = ImportProfile.objects.create(name="Deleted Policy Profile")
+        primary_key = gone.pk
+        gone.delete()
+        gone.pk = primary_key
+
+        with self.assertRaises(ImportProfile.DoesNotExist):
+            save_permission_scoped_object(
+                None,
+                DeviceTypeMapping,
+                {"profile": gone, "source_make": "Dell", "source_model": "R660"},
+                {"netbox_manufacturer_slug": "dell", "netbox_device_type_slug": "dell-r660"},
+            )
+
+    def test_a_write_outside_the_policy_tables_takes_no_profile_lock(self):
+        """A NetBox model has no import profile, so the seam has nothing to serialize it against."""
+        from dcim.models import Manufacturer
+
+        with CaptureQueriesContext(connection) as captured:
+            save_permission_scoped_object(None, Manufacturer, {"slug": "seam-mfg"}, {"name": "Seam Mfg"})
+
+        self.assertEqual(self._profile_locks(captured), [])
+
+
 class SavePermissionScopedObjectConcurrencyTest(TransactionTestCase):
     """Concurrent inserts resolve through the requested existing-row policy."""
 
     def test_a_concurrent_create_is_resolved_through_keep_policy(self):
+        """A policy write holds its profile, so only a write outside the policy tables can race."""
         from threading import Event, current_thread
 
+        from dcim.models import Manufacturer
         from django.db.models.signals import pre_save
 
-        profile = ImportProfile.objects.create(name="Concurrent Writer Profile")
-        lookup = {"profile": profile, "source_make": "Acme", "source_model": "Widget"}
-        user = user_with_object_permission("writer-concurrent-keep", [(DeviceTypeMapping, ["add", "view"], None)])
+        lookup = {"slug": "concurrent-writer"}
+        user = user_with_object_permission("writer-concurrent-keep", [(Manufacturer, ["add", "view"], None)])
         insert_started = Event()
         competing_insert_finished = Event()
         request_thread = current_thread()
 
         def pause_before_insert(sender, instance, **kwargs):
-            if current_thread() is request_thread and instance.profile_id == profile.pk:
+            if current_thread() is request_thread and instance.slug == lookup["slug"]:
                 insert_started.set()
                 self.assertTrue(competing_insert_finished.wait(timeout=10))
 
-        pre_save.connect(pause_before_insert, sender=DeviceTypeMapping, weak=False)
-        self.addCleanup(pre_save.disconnect, pause_before_insert, sender=DeviceTypeMapping)
+        pre_save.connect(pause_before_insert, sender=Manufacturer, weak=False)
+        self.addCleanup(pre_save.disconnect, pause_before_insert, sender=Manufacturer)
 
         def insert_competing_row():
             self.assertTrue(insert_started.wait(timeout=10))
             try:
-                DeviceTypeMapping.objects.create(**lookup, netbox_manufacturer_slug="winner")
+                Manufacturer.objects.create(**lookup, name="Winner")
             finally:
                 competing_insert_finished.set()
 
         with run_on_separate_connection(insert_competing_row):
-            result = save_permission_scoped_object(
-                user,
-                DeviceTypeMapping,
-                lookup,
-                {"netbox_manufacturer_slug": "request"},
-                on_existing="keep",
-            )
+            result = save_permission_scoped_object(user, Manufacturer, lookup, {"name": "Request"}, on_existing="keep")
 
         self.assertFalse(result.created)
-        self.assertEqual(result.instance.netbox_manufacturer_slug, "winner")
-        self.assertEqual(DeviceTypeMapping.objects.filter(**lookup).count(), 1)
+        self.assertEqual(result.instance.name, "Winner")
+        self.assertEqual(Manufacturer.objects.filter(**lookup).count(), 1)
 
 
 class DeletePermissionScopedObjectsTest(TestCase):
