@@ -656,6 +656,20 @@ def _import_class_role_mappings(data, profile, stats):
         ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
 
 
+def _import_cable_class_mappings(data, profile, stats):
+    """Import cable_class_mappings from YAML data into the given profile."""
+    ccm_cable_classes = []
+    for m in _iter_yaml_section(data, "cable_class_mappings", ("cable_class",)):
+        instance = _get_or_init(CableClassMapping, profile=profile, cable_class=m["cable_class"])
+        _set_if_present(instance, m, ("cable_type_resolved", "cable_type", "cable_profile_resolved", "cable_profile"))
+        _validate_model_instance(instance, f"cable_class_mappings[{m['cable_class']}]")
+        _save_or_refetch(instance, CableClassMapping, profile=profile, cable_class=m["cable_class"])
+        ccm_cable_classes.append(m["cable_class"])
+        stats["cable_class_mappings"] = stats.get("cable_class_mappings", 0) + 1
+    if "cable_class_mappings" in data:
+        CableClassMapping.objects.filter(profile=profile).exclude(cable_class__in=ccm_cable_classes).delete()
+
+
 def _release_replaced_column_policy_rows(profile, mapping_rows, transform_rows):
     """Remove rows that leave or change target ownership before validating their replacements."""
     if mapping_rows is not None:
@@ -746,6 +760,7 @@ def _apply_profile_yaml_data(data):
             ColumnMapping.objects.filter(profile=profile).exclude(pk__in=cm_ids).delete()
 
         _import_class_role_mappings(data, profile, stats)
+        _import_cable_class_mappings(data, profile, stats)
 
         dtm_keys = []
         for m in _iter_yaml_section(
@@ -805,7 +820,8 @@ class ImportProfileBulkImportView(generic.BulkImportView):
     * **Hierarchical YAML** – the format produced by the "Export YAML" button
       (top-level keys: ``profile``, ``column_mappings``, ``class_role_mappings``,
       ``device_type_mappings``, ``manufacturer_mappings``,
-      ``column_transform_rules``).  All nested mappings are created/updated.
+      ``column_transform_rules``, ``cable_class_mappings``).  All nested
+      mappings are created/updated.
     * **Flat CSV/YAML** – one record per profile, plain metadata fields only
       (name, description, sheet_name, …).  Falls back to NetBox's standard
       bulk-import logic.
@@ -3470,6 +3486,17 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
                     "group_2_target": r.group_2_target,
                 }
                 for r in profile.column_transform_rules.all()
+            ],
+            # All four fields travel: "decided as none" and "not decided" are different answers.
+            "cable_class_mappings": [
+                {
+                    "cable_class": m.cable_class,
+                    "cable_type_resolved": m.cable_type_resolved,
+                    "cable_type": m.cable_type,
+                    "cable_profile_resolved": m.cable_profile_resolved,
+                    "cable_profile": m.cable_profile,
+                }
+                for m in profile.cable_class_mappings.all()
             ],
         }
 

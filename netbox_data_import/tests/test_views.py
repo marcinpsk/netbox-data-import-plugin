@@ -11,6 +11,7 @@ from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.models import (
+    CableClassMapping,
     ClassRoleMapping,
     ColumnMapping,
     DeviceTypeMapping,
@@ -1298,6 +1299,112 @@ class ExportProfileYamlViewTest(BaseViewTestCase):
         url = reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": 99999})
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 404)
+
+
+class CableClassMappingProfileYamlTest(BaseViewTestCase):
+    """The full-profile YAML carries the CableClass policy decisions of a trace profile."""
+
+    def setUp(self):
+        """Create a trace profile holding one settled and one part-settled CableClass decision."""
+        super().setUp()
+        self.profile = ImportProfile.objects.create(
+            name="TraceYamlExportProfile",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        CableClassMapping.objects.create(
+            profile=self.profile,
+            cable_class="Patch",
+            cable_type_resolved=True,
+            cable_type="cat6",
+            cable_profile_resolved=True,
+            cable_profile="single-1c1p",
+        )
+        # "Decided as none" and "not decided yet" are different answers that must survive apart.
+        CableClassMapping.objects.create(
+            profile=self.profile,
+            cable_class="Trunk",
+            cable_type_resolved=True,
+            cable_type=None,
+            cable_profile_resolved=False,
+            cable_profile=None,
+        )
+
+    def exported(self):
+        """Return the parsed full-profile YAML the export view produces."""
+        import yaml
+
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.profile.pk})
+        )
+        self.assertEqual(response.status_code, 200)
+        return yaml.safe_load(response.content)
+
+    def test_the_export_states_every_cable_class_decision(self):
+        """All four persisted decision fields have to travel, or the answers collapse into one."""
+        data = self.exported()
+
+        self.assertEqual(
+            data["cable_class_mappings"],
+            [
+                {
+                    "cable_class": "Patch",
+                    "cable_type_resolved": True,
+                    "cable_type": "cat6",
+                    "cable_profile_resolved": True,
+                    "cable_profile": "single-1c1p",
+                },
+                {
+                    "cable_class": "Trunk",
+                    "cable_type_resolved": True,
+                    "cable_type": None,
+                    "cable_profile_resolved": False,
+                    "cable_profile": None,
+                },
+            ],
+        )
+
+    def test_a_cable_class_decision_survives_export_and_import(self):
+        """Round trip through both real views: the receiving profile answers exactly as the source did."""
+        import yaml
+
+        data = self.exported()
+        data["profile"]["name"] = "TraceYamlImportedProfile"
+        upload = BytesIO(yaml.dump(data, allow_unicode=True, sort_keys=False).encode())
+        upload.name = "profile.yaml"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload}, follow=True
+        )
+
+        self.assertEqual(response.status_code, 200)
+        imported = ImportProfile.objects.get(name="TraceYamlImportedProfile")
+        self.assertEqual(
+            [
+                (m.cable_class, m.cable_type_resolved, m.cable_type, m.cable_profile_resolved, m.cable_profile)
+                for m in imported.cable_class_mappings.order_by("cable_class")
+            ],
+            [
+                ("Patch", True, "cat6", True, "single-1c1p"),
+                ("Trunk", True, None, False, None),
+            ],
+        )
+
+    def test_an_absent_cable_class_row_is_reconcile_deleted(self):
+        """The section reconciles like every other policy table, so a removed row must not linger."""
+        import yaml
+
+        data = self.exported()
+        data["cable_class_mappings"] = [row for row in data["cable_class_mappings"] if row["cable_class"] == "Patch"]
+        upload = BytesIO(yaml.dump(data, allow_unicode=True, sort_keys=False).encode())
+        upload.name = "profile.yaml"
+
+        self.client.post(reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload}, follow=True)
+
+        self.assertEqual(
+            list(self.profile.cable_class_mappings.values_list("cable_class", flat=True)),
+            ["Patch"],
+        )
 
 
 class ImportProfileYamlViewTest(BaseViewTestCase):
