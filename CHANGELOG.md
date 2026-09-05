@@ -2,6 +2,96 @@
 
 <!-- version list -->
 
+## v2.0.0 (2026-09-05)
+
+### Bug Fixes
+
+- Answer a preview write whose profile is deleted before its lock
+  ([`7a48781`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7a487810c21edf0f4bee95a5344a0081b100cbeb))
+
+- Bind the placement-lock guard to the queryset it checks
+  ([`aef0434`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/aef04345c436576d68016c1447d6677c182325c2))
+
+- Block a dangling profile reference instead of reporting a row decision
+  ([`bb35647`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/bb356475fa2a659b54800d1f0127c4333e225d3d))
+
+- Carry the CableClass decisions through the profile YAML
+  ([`1295f52`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1295f52afeff27a4ee56f771bbe5de7d47baef85))
+
+- Close five adversarial review findings on the Cable planner and the trace reader
+  ([`7f7b808`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7f7b808969ae4a852c70e602da086adf6bbf6e78))
+
+- Close three adversarial review findings on trace orientation and planning
+  ([`aaf4b75`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/aaf4b757b1fcbc5ea01c8bb5758c17088c892c16))
+
+- Close three review findings on the Cable planner and the trace reader
+  ([`7e5982f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7e5982f5b3ae8ad34b1fa0490b1541546007c9e1))
+
+- Derive the quick-action Device Type slug the way the importer does
+  ([`ecc0318`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ecc03185b25749b5bf5206b2f34bc1f38e243465))
+
+- Hold every placement reference the replan reads, and index port mappings
+  ([`7beba1f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7beba1fb02ca3cd306107c1da81b3338203a7fe7))
+
+- Hold the import profile for every policy write
+  ([`d991948`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d9919485c11dab7d0a8d3b0ece46fcfca97c8b7c))
+
+- Lock the Device Type a review retains, not only the resolved one
+  ([`e22cb79`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e22cb792dd06e7f8753ca87827cb1074c4d62248))
+
+- Name the inline mapping actions for a screen reader
+  ([`2fca690`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2fca6903f0f817ec3e466ecf8151c628b9fa7280))
+
+- Narrow the AST types the placement-lock guard reads
+  ([`11872c2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/11872c23c5a527fee0d0d83c901be5538e643799))
+
+- Refuse a Device Type this import cannot size, and correct two preview affordances
+  ([`233e7db`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/233e7db319267c1646200bf93742773de989119f))
+
+- State the Logical Cable deletion identity once, and date PortMapping correctly
+  ([`66a3041`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/66a3041945c6172e0eb5a657fdf42fa08c04308c))
+
+- Take every placement lock in one primary-key ordered pass
+  ([`4025882`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/402588251cf1f8d64b110dd67107a10880ccfee2))
+
+### Continuous Integration
+
+- Gate mypy and spec-table drift locally, and sort the CableClass columns
+  ([`fd1ebee`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/fd1ebeefd53f7619435515a7f9b74ed884ff3a4d))
+
+### Features
+
+- Never create a Device Type, and require one that already exists
+  ([`7150eca`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7150eca6cd6c135920383d246840cd646b24c57f))
+
+### Refactoring
+
+- Answer the runtime gate from a stated declaration table
+  ([`a6c4920`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a6c492096ddab25c7699fcd2ebb7e734e6d738fc))
+
+- Keep block position out of the duplicate selection key
+  ([`e1bd84c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e1bd84cc0e07ca3d5fbb81cdc43bbcc28e549023))
+
+- Read the declaration table from a context variable
+  ([`07bcddf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/07bcddf632491e5b693aa8a810242b81c07af1ef))
+
+- Remove the unreachable Manufacturer quick-create action
+  ([`1b59076`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1b59076a8e437c067255752b275ee635b6911a70))
+
+- State the declaration table instead of replacing the constant
+  ([`12cb2f3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/12cb2f363c45357d1d910ef5b2545f926c2d366e))
+
+### Testing
+
+- Assert the operator log keeps the refused permission name
+  ([`73df89b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/73df89b2255841f4b903aa7faa16cbb1d005c00d))
+
+### Breaking Changes
+
+- An Import Profile no longer creates missing Device Types or Manufacturers. Add the Device Type in
+  NetBox, or map it, before importing a row that needs it.
+
+
 ## v1.12.0 (2026-09-04)
 
 ### Bug Fixes
