@@ -103,9 +103,11 @@ from .import_engine import (
     StaleSourceDocument,
     operator_failure_message,
 )
-from .netbox_reader import PlanningTargetUnavailable
-from .plan import ImportPlan, PlanError
-from .review_workspace import ReviewWorkspace
+from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
+from .field_keys import SELECT_TERMINATION_TASK
+from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
+from .plan import ImportPlan, PlanError, fingerprint_of
+from .review_workspace import ReviewWorkspace, save_termination_resolution_and_replan
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -1438,6 +1440,8 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "profile": profile,
                 "preview_url": preview_url,
                 "view_mode": view_mode,
+                # Only a trace preview has a workspace to open, so only it offers the link.
+                "trace_workspace_available": bool(result.traces),
                 "existing_resolutions_json": _json.dumps(existing_resolutions).translate(
                     {ord("<"): "\\u003C", ord(">"): "\\u003E", ord("&"): "\\u0026"}
                 ),
@@ -1599,6 +1603,60 @@ def _restore_import_session(request, job):
     return data
 
 
+def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, selection, *, keep_preview=False):
+    """Queue one accepted Import Plan for the given selection and hand over its progress page.
+
+    A per-trace command runs several times against one preview, so it keys each execution on the
+    selection it queues. Reusing the wizard's own key would return the first execution and apply
+    nothing. It also keeps the preview, which the operator returns to for the next trace.
+    """
+    from core.choices import JobNotificationChoices
+
+    from .jobs import ImportJobRunner
+
+    if keep_preview:
+        # `ImportPlan.revision` never advances, so the plan's own content is what tells two apart.
+        idempotency_key = fingerprint_of({"plan": plan_data, "selection": sorted(selection)})
+    else:
+        idempotency_key = request.session.get("import_idempotency_key") or uuid.uuid4().hex
+        request.session["import_idempotency_key"] = idempotency_key
+    _clear_restored_import_job(request)
+    with transaction.atomic():
+        job = ImportJobRunner.enqueue(
+            name=ImportJobRunner.name,
+            user=request.user,
+            notifications=JobNotificationChoices.NOTIFICATION_NEVER,
+            job_timeout=3600,
+            profile_id=profile.pk,
+            source_document_id=document.pk,
+            accepted_plan=plan_data,
+            selection=selection,
+            idempotency_key=idempotency_key,
+        )
+        job.data = {
+            "job_type": ImportJobRunner.job_type,
+            "phase": "queued",
+            "processed": 0,
+            "total": 0,
+            "filename": ctx_data.get("filename", ""),
+            "profile_id": profile.pk,
+            "profile_name": profile.name,
+            "source_document_id": document.pk,
+            "accepted_plan": plan_data,
+            "context_data": ctx_data,
+        }
+        job.save(update_fields=["data"])
+
+    request.session["import_background_job_id"] = job.pk
+    if keep_preview:
+        # The write just made the reviewed plan stale, so the next command has to re-read first.
+        mark_preview_dirty(request.session)
+    else:
+        request.session["import_preview_pending"] = False
+        request.session.pop("import_preview_source_job_id", None)
+    return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
+
+
 class ImportRunView(PermissionRequiredMixin, View):
     """Step 3: queue the accepted Import Plan."""
 
@@ -1650,42 +1708,7 @@ class ImportRunView(PermissionRequiredMixin, View):
             messages.info(request, "The accepted Import Plan has no changes to apply.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        from core.choices import JobNotificationChoices
-        from .jobs import ImportJobRunner
-
-        idempotency_key = request.session.get("import_idempotency_key") or uuid.uuid4().hex
-        request.session["import_idempotency_key"] = idempotency_key
-        _clear_restored_import_job(request)
-        with transaction.atomic():
-            job = ImportJobRunner.enqueue(
-                name=ImportJobRunner.name,
-                user=request.user,
-                notifications=JobNotificationChoices.NOTIFICATION_NEVER,
-                job_timeout=3600,
-                profile_id=profile.pk,
-                source_document_id=document.pk,
-                accepted_plan=plan_data,
-                selection=selection,
-                idempotency_key=idempotency_key,
-            )
-            job.data = {
-                "job_type": ImportJobRunner.job_type,
-                "phase": "queued",
-                "processed": 0,
-                "total": 0,
-                "filename": ctx_data.get("filename", ""),
-                "profile_id": profile.pk,
-                "profile_name": profile.name,
-                "source_document_id": document.pk,
-                "accepted_plan": plan_data,
-                "context_data": ctx_data,
-            }
-            job.save(update_fields=["data"])
-
-        request.session["import_background_job_id"] = job.pk
-        request.session["import_preview_pending"] = False
-        request.session.pop("import_preview_source_job_id", None)
-        return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
+        return _queue_accepted_plan(request, profile, document, ctx_data, plan_data, selection)
 
 
 class ImportProgressView(PermissionRequiredMixin, View):
@@ -3641,6 +3664,261 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 # Quick-resolve views (inline fixes from preview page)
 # ---------------------------------------------------------------------------
+
+
+def _workspace_field_keys(workspace) -> set:
+    """Return every termination field key the reviewed preview actually asked about."""
+    return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
+
+
+def _object_type_label(obj) -> str:
+    """Return the ``app_label.model_name`` key one termination is offered under."""
+    return f"{obj._meta.app_label}.{obj._meta.model_name}"
+
+
+class _TraceWorkspaceMixin:
+    """Load the reviewed preview a trace workspace request acts on."""
+
+    def reviewed_preview(self, request):
+        """Return the profile, the stored document and the reviewed workspace, or None."""
+        preview = load_cached_preview(request)
+        if preview is None:
+            return None
+        profile, workspace = preview
+        context = request.session.get("import_context") or {}
+        document = SourceDocument.objects.filter(pk=context.get("source_document_id"), profile=profile).first()
+        if document is None:
+            return None
+        planning_context = {
+            "site_id": context.get("site_id"),
+            "location_id": context.get("location_id"),
+            "tenant_id": context.get("tenant_id"),
+        }
+        return profile, document, workspace, planning_context
+
+    @staticmethod
+    def live_plan(profile, document, request, planning_context):
+        """Return the plan live NetBox states right now, or None when the target is gone."""
+        try:
+            return ImportEngine.plan(profile, document, request.user, planning_context)
+        except PlanningTargetUnavailable:
+            return None
+
+
+class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Section 10.2: one review workspace page per preview, for the traces it planned."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def get(self, request):
+        """Render the reviewed traces and say whether live NetBox has moved under them."""
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        live = self.live_plan(profile, document, request, planning_context)
+        if live is None:
+            _discard_import_preview(request)
+            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        traces = workspace.traces
+        wanted = request.GET.get("trace", "")
+        selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
+        # Section 10.2: compared on each full load and on the re-read action, never polled.
+        drift = live.fingerprint != workspace.plan.fingerprint
+        summary = dict(workspace.trace_summary)
+        from .models import TerminationResolution
+
+        summary["saved_decisions"] = TerminationResolution.objects.filter(profile=profile).count()
+        summary["preview_state"] = self._preview_state(request, drift)
+        return render(
+            request,
+            "netbox_data_import/trace_workspace.html",
+            {
+                "profile": profile,
+                "traces": traces,
+                "selected_trace": selected,
+                "summary": summary,
+                "drift": drift,
+                "preview_revision": current_preview_revision(request.session),
+                "plugin_version": _plugin_version,
+            },
+        )
+
+    @staticmethod
+    def _preview_state(request, drift: bool) -> str:
+        """Return what the strip says about the preview the operator is reviewing."""
+        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
+            return "recalculation required"
+        return "changed in NetBox" if drift else "current"
+
+
+class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Adopt the plan live NetBox states now, which is what clears the drift strip."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Replace the reviewed preview with a freshly read one."""
+        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, _workspace, planning_context = loaded
+        live = self.live_plan(profile, document, request, planning_context)
+        if live is None:
+            _discard_import_preview(request)
+            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        record_recalculated_preview(request.session, live)
+        messages.success(request, "The workspace was re-read from NetBox.")
+        return redirect(next_url)
+
+
+class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Synchronize one Source Trace together with the units its changes depend on."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Queue the reviewed plan for one trace's own selection."""
+        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, _planning_context = loaded
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            messages.warning(request, stale_reason)
+            return redirect(next_url)
+        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
+            messages.warning(request, "Recalculate and review the saved preview changes before importing.")
+            return redirect(next_url)
+        selection = workspace.sync_selection(request.POST.get("identity", "").strip())
+        if not selection:
+            messages.warning(request, "That trace has no changes to synchronize.")
+            return redirect(next_url)
+        return _queue_accepted_plan(
+            request,
+            profile,
+            document,
+            request.session.get("import_context") or {},
+            request.session.get(PREVIEW_PLAN_SESSION_KEY),
+            list(selection),
+            keep_preview=True,
+        )
+
+
+class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Serve one page of eligible terminations for the workspace picker."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def get(self, request):
+        """Return the eligible candidates and the uncapped total the count states."""
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            return JsonResponse({"ok": False, "error": "No import preview in progress."}, status=409)
+        profile, _document, _workspace, planning_context = loaded
+        field_key = request.GET.get("field_key", "").strip()
+        try:
+            limit = min(int(request.GET.get("limit", ELIGIBLE_TERMINATION_LIMIT)), ELIGIBLE_TERMINATION_LIMIT)
+        except (TypeError, ValueError):
+            limit = ELIGIBLE_TERMINATION_LIMIT
+        try:
+            found = self._eligible(request, profile, planning_context, field_key, request.GET.get("search", ""), limit)
+        except (PlanningTargetUnavailable, ValueError):
+            return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
+        return JsonResponse(
+            {
+                "ok": True,
+                "candidates": [
+                    {"id": candidate.pk, "name": candidate.name, "display": str(candidate)}
+                    for candidate in found.candidates
+                ],
+                "shown": len(found.candidates),
+                "total": found.total,
+            }
+        )
+
+    @staticmethod
+    def _eligible(request, profile, planning_context, field_key, search, limit):
+        """Return the eligible page, inside the caller's own read scope."""
+        reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit)
+
+
+class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+    """Record one operator termination decision and ask for a fresh Import Plan."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Save the selection the picker offered, then replan the preview against it."""
+        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            return _preview_action_error(request, next_url, stale_reason, status=409)
+        field_key = request.POST.get("field_key", "").strip()
+        object_type = request.POST.get("object_type", "").strip()
+        try:
+            object_id = int(request.POST.get("object_id", ""))
+        except (TypeError, ValueError):
+            return _preview_action_error(request, next_url, "A termination selection names one object.", status=400)
+        # A review command answers a question this preview asked, never one the caller invented.
+        if field_key not in _workspace_field_keys(workspace):
+            return _preview_action_error(
+                request, next_url, "This preview asked no question about that termination.", status=400
+            )
+        try:
+            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+            # The recheck repeats the query that made the offer, so a searched candidate still counts.
+            found = eligible_terminations(
+                field_key,
+                reader,
+                profile=profile,
+                search=request.POST.get("search", ""),
+                limit=ELIGIBLE_TERMINATION_LIMIT,
+            )
+        except (PlanningTargetUnavailable, ValueError):
+            return _preview_action_error(request, next_url, "That termination cannot be resolved here.", status=400)
+        # The picker is the only legal source of a choice, so the write rechecks the offer.
+        chosen = next(
+            (
+                candidate
+                for candidate in found.candidates
+                if candidate.pk == object_id and _object_type_label(candidate) == object_type
+            ),
+            None,
+        )
+        if chosen is None:
+            return _preview_action_error(
+                request, next_url, "That termination is not one of the eligible candidates.", status=400
+            )
+        from core.models import ObjectType
+
+        plan = save_termination_resolution_and_replan(
+            profile=profile,
+            source_document=document,
+            actor=request.user,
+            planning_context=planning_context,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=field_key,
+            selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
+            selected_object_id=chosen.pk,
+            selected_display_name=str(chosen),
+        )
+        record_recalculated_preview(request.session, plan)
+        messages.success(request, f"Termination resolved to '{chosen}'.")
+        return redirect(next_url)
 
 
 class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):

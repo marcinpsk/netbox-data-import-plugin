@@ -59,7 +59,9 @@ def load_cached_preview(request):
         return None
     revision = current_preview_revision(request.session)
     if "application/json" in request.headers.get("Accept", ""):
-        if request.POST.get("preview_revision") != revision:
+        # A read carries its revision in the query, because a GET has no posted body to hold it.
+        posted = request.POST.get("preview_revision", request.GET.get("preview_revision"))
+        if posted != revision:
             return None
     profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
     if profile is None:

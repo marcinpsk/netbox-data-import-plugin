@@ -1,0 +1,282 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'base/layout.html' %}
+{% load static %}
+
+{% block title %}Trace Review Workspace{% endblock %}
+
+{% block content %}
+{# htmx boost swaps the body and discards the response head, so this renders here. #}
+<style>
+  .ndi-trace-state-unresolved { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  .ndi-trace-state-auto { background-color: var(--tblr-info) !important; color: #fff !important; }
+  .ndi-trace-state-manual { background-color: var(--tblr-primary) !important; color: #fff !important; }
+  .ndi-trace-status-create { background-color: var(--tblr-success) !important; color: #fff !important; }
+  .ndi-trace-status-reuse { background-color: var(--tblr-secondary) !important; color: #fff !important; }
+  .ndi-trace-status-conflict { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  .ndi-trace-disposition-actionable { background-color: var(--tblr-success) !important; color: #fff !important; }
+  .ndi-trace-disposition-blocked { background-color: var(--tblr-warning) !important; color: #000 !important; }
+  .ndi-trace-disposition-invalid { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  .ndi-trace-disposition-no-op { background-color: var(--tblr-secondary) !important; color: #fff !important; }
+  [data-bs-theme="dark"] .ndi-trace-disposition-no-op,
+  [data-bs-theme="dark"] .ndi-trace-status-reuse { background-color: #4b5563 !important; color: #e5e7eb !important; }
+  [data-bs-theme="dark"] .ndi-trace-state-auto { color: #08283a !important; }
+  .ndi-trace-panel { height: 100%; }
+  .ndi-trace-panel .card-header { font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; }
+  .ndi-trace-claim { color: var(--tblr-secondary); font-size: .8rem; }
+  .ndi-trace-reason { color: var(--tblr-secondary); font-size: .8rem; }
+</style>
+
+<h1 class="page-title mb-3">Trace Review Workspace</h1>
+
+<div class="{% if drift %}alert alert-warning{% else %}card mb-3 p-2{% endif %}
+            d-flex align-items-center justify-content-between" {% if drift %}role="alert"{% endif %}>
+  <div>
+    {% if drift %}
+      <strong>NetBox has changed since this preview was read.</strong>
+      The proposed topology below is the one you reviewed, not what NetBox holds now.
+    {% else %}
+      <span class="text-secondary">This workspace matches what NetBox holds now.</span>
+    {% endif %}
+  </div>
+  <form method="post" action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3">
+    {% csrf_token %}
+    <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+    <button type="submit" class="btn {% if drift %}btn-warning{% else %}btn-outline-secondary{% endif %}">
+      Re-read from NetBox
+    </button>
+  </form>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body d-flex flex-wrap gap-4">
+    <div><div class="text-secondary small">Traces</div><div class="h2 mb-0">{{ summary.traces }}</div></div>
+    <div><div class="text-secondary small">Actionable</div><div class="h2 mb-0">{{ summary.actionable }}</div></div>
+    <div><div class="text-secondary small">Blocked</div><div class="h2 mb-0">{{ summary.blocked }}</div></div>
+    <div><div class="text-secondary small">Invalid</div><div class="h2 mb-0">{{ summary.invalid }}</div></div>
+    <div><div class="text-secondary small">No change</div><div class="h2 mb-0">{{ summary.no_change }}</div></div>
+    <div>
+      <div class="text-secondary small">Terminations resolved</div>
+      <div class="h2 mb-0">{{ summary.resolved_terminations }}</div>
+    </div>
+    <div>
+      <div class="text-secondary small">Terminations open</div>
+      <div class="h2 mb-0">{{ summary.unresolved_terminations }}</div>
+    </div>
+    <div>
+      <div class="text-secondary small">Saved decisions</div>
+      <div class="h2 mb-0">{{ summary.saved_decisions }}</div>
+    </div>
+    <div>
+      <div class="text-secondary small">Preview</div>
+      <div class="h2 mb-0">{{ summary.preview_state }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-md-3">
+    <div class="card">
+      <div class="card-header">Source Traces</div>
+      <div class="list-group list-group-flush">
+        {% for trace in traces %}
+          <a class="list-group-item list-group-item-action{% if trace.identity == selected_trace.identity %} active{% endif %}"
+             href="?trace={{ trace.identity|urlencode }}">
+            <span class="badge ndi-trace-disposition-{{ trace.disposition }}">{{ trace.disposition }}</span>
+            <div>{{ trace.name }}</div>
+          </a>
+        {% empty %}
+          <div class="list-group-item text-secondary">This preview planned no Source Trace.</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  <div class="col-md-9">
+
+{% with trace=selected_trace %}
+{% if trace %}
+  <div class="card mb-3" data-trace-identity="{{ trace.trace_identity }}">
+    <div class="card-header d-flex align-items-center justify-content-between">
+      <div>
+        <span class="badge ndi-trace-disposition-{{ trace.disposition }}">{{ trace.disposition }}</span>
+        <strong class="ms-2">{{ trace.name }}</strong>
+        {% if trace.sheet %}<span class="text-secondary ms-2">{{ trace.sheet }} row {{ trace.row_number }}</span>{% endif %}
+      </div>
+      <div class="text-end">
+        {% for action in trace.actions %}
+          <form method="post" action="{% url 'plugins:netbox_data_import:trace_sync' %}" class="d-inline">
+            {% csrf_token %}
+            <input type="hidden" name="identity" value="{{ trace.identity }}">
+            <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+            <button type="submit" class="btn btn-primary" data-trace-action="{{ action.key }}"
+                    {% if not action.enabled %}disabled{% endif %}>{{ action.label }}</button>
+          </form>
+          {% if not action.enabled %}<div class="ndi-trace-reason mt-1">{{ action.reason }}</div>{% endif %}
+        {% endfor %}
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="row g-3">
+
+        <div class="col-md-4">
+          <div class="card ndi-trace-panel">
+            <div class="card-header">Source evidence</div>
+            <div class="card-body">
+              <div><strong>From</strong> {{ trace.endpoints.from }}</div>
+              <div class="mb-2"><strong>To</strong> {{ trace.endpoints.to }}</div>
+              <ol class="mb-0 ps-3">
+                {% for segment in trace.segments %}
+                  <li>
+                    {{ segment.source_left }} &rarr; {{ segment.source_right }}
+                    <span class="text-secondary">({{ segment.cable_class }})</span>
+                  </li>
+                {% empty %}
+                  <li class="text-secondary">The source states no segment.</li>
+                {% endfor %}
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-4">
+          <div class="card ndi-trace-panel">
+            <div class="card-header">Current NetBox topology</div>
+            <div class="card-body">
+              {% if trace.logical_cable %}
+                {% if trace.logical_cable.visible %}
+                  <div>Logical Cable <strong>{{ trace.logical_cable.display }}</strong></div>
+                  {% if trace.logical_cable.description %}
+                    <div class="text-secondary">{{ trace.logical_cable.description }}</div>
+                  {% endif %}
+                  {% for tag in trace.logical_cable.tags %}
+                    <span class="badge ndi-trace-status-reuse">{{ tag }}</span>
+                  {% endfor %}
+                {% else %}
+                  <div class="text-secondary">A Logical Cable exists that you may not view.</div>
+                {% endif %}
+              {% elif trace.topology_known %}
+                <div class="text-secondary">No direct Logical Cable joins these endpoints.</div>
+              {% else %}
+                <div class="text-secondary">Planning stopped before it read the current topology.</div>
+              {% endif %}
+              <hr>
+              <div class="text-secondary small mb-1">Terminations</div>
+              <ul class="list-unstyled mb-0">
+                {% for termination in trace.terminations %}
+                  <li class="mb-1">
+                    {{ termination.label }}
+                    {% if termination.state == "unresolved" %}
+                      <span class="badge ndi-trace-state-unresolved">unresolved</span>
+                    {% elif termination.state == "manually resolved" %}
+                      <span class="badge ndi-trace-state-manual">manually resolved</span>
+                    {% else %}
+                      <span class="badge ndi-trace-state-auto">automatically resolved</span>
+                    {% endif %}
+                    {% if termination.selected %}
+                      <span class="text-secondary">{{ termination.selected }}</span>
+                    {% endif %}
+                    <button type="button" class="btn btn-sm btn-outline-secondary ms-1"
+                            data-trace-picker="{{ termination.field_key }}"
+                            data-trace-kind="{{ termination.kind }}"
+                            data-trace-label="{{ termination.label }}"
+                            {% if not termination.selectable %}disabled{% endif %}>Choose termination</button>
+                    {% if not termination.selectable %}
+                      <div class="ndi-trace-reason">{{ termination.reason }}</div>
+                    {% endif %}
+                  </li>
+                {% empty %}
+                  <li class="text-secondary">This trace resolved no termination.</li>
+                {% endfor %}
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-4">
+          <div class="card ndi-trace-panel">
+            <div class="card-header">Proposed physical topology</div>
+            <div class="card-body">
+              {% if trace.deletes_logical_cable %}
+                <div class="mb-2">
+                  <span class="badge ndi-trace-status-conflict">delete Logical Cable</span>
+                  {% if trace.logical_cable.visible %}{{ trace.logical_cable.display }}{% endif %}
+                </div>
+              {% endif %}
+              <ol class="mb-0 ps-3">
+                {% for segment in trace.segments %}
+                  <li>
+                    {{ segment.left }} &rarr; {{ segment.right }}
+                    {% if segment.status == "create" %}
+                      <span class="badge ndi-trace-status-create">create</span>
+                    {% elif segment.status == "reuse existing" %}
+                      <span class="badge ndi-trace-status-reuse">reuse existing</span>
+                    {% elif segment.status == "conflict" %}
+                      <span class="badge ndi-trace-status-conflict">conflict</span>
+                    {% else %}
+                      <span class="text-secondary">not planned</span>
+                    {% endif %}
+                    {% if segment.pass_through %}
+                      <div class="ndi-trace-claim">Pass-Through Claim: entered at {{ segment.left }}.</div>
+                    {% endif %}
+                  </li>
+                {% empty %}
+                  <li class="text-secondary">Planning stopped before it proposed a topology.</li>
+                {% endfor %}
+              </ol>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      {% if trace.findings %}
+        <ul class="list-unstyled mt-3 mb-0">
+          {% for finding in trace.findings %}
+            <li class="ndi-trace-reason">{{ finding.message }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  <div class="alert alert-info">This preview planned no Source Trace.</div>
+{% endif %}
+{% endwith %}
+  </div>
+</div>
+
+<div class="modal" id="traceTerminationPicker" tabindex="-1">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <form id="traceTerminationForm" method="post"
+            action="{% url 'plugins:netbox_data_import:trace_resolve_termination' %}"
+            data-candidates-url="{% url 'plugins:netbox_data_import:trace_termination_candidates' %}">
+        {% csrf_token %}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        <input type="hidden" name="search" id="traceTerminationOfferedSearch">
+        <input type="hidden" name="field_key" id="traceTerminationFieldKey">
+        <input type="hidden" name="object_type" id="traceTerminationObjectType">
+        <input type="hidden" name="object_id" id="traceTerminationObjectId">
+        <div class="modal-header">
+          <h5 class="modal-title">Choose the termination for <span id="traceTerminationLabel"></span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <input type="search" class="form-control mb-2" id="traceTerminationSearch"
+                 aria-label="Search the eligible terminations"
+                 placeholder="Search the eligible terminations" autocomplete="off">
+          <div class="text-secondary small mb-2" id="traceTerminationCount" hidden></div>
+          <div class="alert alert-danger" id="traceTerminationError" hidden></div>
+          <div class="list-group" id="traceTerminationCandidates"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-link" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="traceTerminationSubmit" disabled>Save decision</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
+{% endblock %}

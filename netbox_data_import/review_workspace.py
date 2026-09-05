@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
+from .cable_target import UNRESOLVED
 from .import_engine import ImportEngine
 from .models import ImportProfile, TerminationResolution, locked_profile_policy
 from .object_permissions import save_permission_scoped_object
@@ -373,6 +374,81 @@ def _device_placement_differs(device, source_location_id, rack_name, position, f
     )
 
 
+_SUMMARY_KEYS = {
+    Disposition.ACTIONABLE: "actionable",
+    Disposition.BLOCKED: "blocked",
+    Disposition.INVALID: "invalid",
+    Disposition.NO_OP: "no_change",
+}
+
+
+@dataclass(frozen=True)
+class TraceAction:
+    """One review command, always visible, carrying its reason when it cannot run."""
+
+    key: str
+    label: str
+    enabled: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class TraceWorkspaceUnit:
+    """One Source Trace as the review workspace shows it."""
+
+    identity: str
+    trace_identity: str
+    disposition: str
+    name: str
+    row_number: int | None
+    sheet: str
+    endpoints: dict[str, str]
+    segments: list[dict[str, Any]]
+    logical_cable: dict[str, Any] | None
+    deletes_logical_cable: bool
+    topology_known: bool
+    terminations: list[dict[str, Any]]
+    findings: list[dict[str, str]]
+    actions: tuple[TraceAction, ...]
+
+    @classmethod
+    def from_unit(cls, unit: SynchronizationUnit) -> TraceWorkspaceUnit:
+        """Build the workspace entry one trace unit states, without recomputing its plan."""
+        display = unit.to_dict()["display"]
+        workspace = dict(display.get("trace") or {})
+        findings = [
+            {"code": item.code, "message": _diagnostic_message(item), "severity": item.severity}
+            for item in unit.diagnostics
+        ]
+        return cls(
+            identity=unit.identity,
+            trace_identity=str(workspace.get("identity") or ""),
+            disposition=unit.disposition,
+            name=str(display.get("name") or ""),
+            row_number=display.get("row_number"),
+            sheet=str(display.get("sheet") or ""),
+            endpoints=dict(workspace.get("endpoints") or {}),
+            segments=[dict(segment) for segment in workspace.get("segments") or ()],
+            logical_cable=workspace.get("logical_cable"),
+            deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
+            topology_known=bool(workspace.get("topology_known")),
+            terminations=[dict(item) for item in workspace.get("terminations") or ()],
+            findings=findings,
+            actions=cls._actions(unit, findings, str(display.get("detail") or "")),
+        )
+
+    @staticmethod
+    def _actions(unit: SynchronizationUnit, findings: list[dict[str, str]], detail: str) -> tuple[TraceAction, ...]:
+        """Return every review command, each stating why it cannot run when it cannot."""
+        blocking = next((item["message"] for item in findings if item["severity"] == Severity.ERROR), "")
+        if unit.disposition == Disposition.ACTIONABLE:
+            sync = TraceAction(key="sync", label="Sync with dependencies", enabled=True)
+        else:
+            reason = blocking or detail or f"This trace is {unit.disposition}."
+            sync = TraceAction(key="sync", label="Sync with dependencies", enabled=False, reason=reason)
+        return (sync,)
+
+
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
@@ -407,6 +483,56 @@ class ReviewWorkspace:
     def has_errors(self) -> bool:
         """Return whether any unit cannot execute."""
         return any(unit.action == "error" for unit in self.units)
+
+    @property
+    def traces(self) -> tuple[TraceWorkspaceUnit, ...]:
+        """Return one workspace entry per Source Trace, in plan order."""
+        return tuple(
+            TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if unit.display.get("trace") is not None
+        )
+
+    def sync_selection(self, identity: str) -> tuple[str, ...]:
+        """Return the unit and every unit owning a change it depends on, transitively.
+
+        `merge_changes` refuses a selection whose dependency is absent, so a review command that
+        synchronizes one trace has to carry the units its changes wait on.
+        """
+        units = {unit.identity: unit for unit in self.plan.units}
+        selected = units.get(identity)
+        if selected is None or selected.disposition != Disposition.ACTIONABLE:
+            return ()
+        owner_of = {change.identity: unit.identity for unit in self.plan.units for change in unit.changes}
+        chosen: list[str] = []
+        queue = [identity]
+        while queue:
+            current = queue.pop()
+            if current in chosen:
+                continue
+            chosen.append(current)
+            for change in units[current].changes:
+                for dependency in change.dependencies:
+                    owner = owner_of.get(dependency)
+                    if owner is not None and owner not in chosen:
+                        queue.append(owner)
+        return tuple(chosen)
+
+    @property
+    def trace_summary(self) -> dict[str, int]:
+        """Return the summary strip: what the reviewer still has to work through."""
+        traces = self.traces
+        summary = {
+            "traces": len(traces),
+            "unresolved_terminations": 0,
+            "resolved_terminations": 0,
+        }
+        # A template cannot resolve a key with a hyphen, so the strip names each disposition itself.
+        for disposition, key in _SUMMARY_KEYS.items():
+            summary[key] = sum(1 for trace in traces if trace.disposition == disposition)
+        for trace in traces:
+            for termination in trace.terminations:
+                key = "unresolved_terminations" if termination["state"] == UNRESOLVED else "resolved_terminations"
+                summary[key] += 1
+        return summary
 
     @property
     def rack_groups(self) -> dict:
