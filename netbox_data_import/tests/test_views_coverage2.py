@@ -3,7 +3,7 @@
 """Additional view coverage tests targeting specific uncovered lines in views.py."""
 
 from io import BytesIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
@@ -42,10 +42,15 @@ def _make_superuser(username):
 class ValidateModelInstanceNonDictTest(TestCase):
     """Tests for _validate_model_instance — line 211: non-dict ValidationError."""
 
+    class _StringErrorInstance:
+        """Stands in for a model whose full_clean raises a string-only ValidationError."""
+
+        def full_clean(self, validate_unique=True):
+            raise DjangoValidationError("plain error message")
+
     def test_string_validation_error_joined_via_messages(self):
         """DjangoValidationError raised with a plain string uses exc.messages — line 211."""
-        instance = MagicMock()
-        instance.full_clean.side_effect = DjangoValidationError("plain error message")
+        instance = self._StringErrorInstance()
         with self.assertRaises(ValueError) as cm:
             _validate_model_instance(instance, "test_label")
         self.assertIn("plain error message", str(cm.exception))
@@ -346,7 +351,7 @@ class SyncDeviceFieldBareExceptionTest(TestCase):
         """RuntimeError inside _apply_field returns 500 JSON response — lines 1039-1045."""
         from netbox_data_import.views import SyncDeviceFieldView
 
-        with patch.object(SyncDeviceFieldView, "_apply_field", side_effect=RuntimeError("unexpected")):
+        with patch.object(SyncDeviceFieldView, "_apply_field", autospec=True, side_effect=RuntimeError("unexpected")):
             resp = self.client.post(self.url, {"device_id": self.device.pk, "field": "serial", "value": "X"})
         self.assertEqual(resp.status_code, 500)
         self.assertIn("internal", resp.json()["error"].lower())
@@ -536,6 +541,7 @@ class BulkYamlImportKeyErrorTest(TestCase):
         with patch.object(
             ClassRoleMapping.objects,
             "get_or_create",
+            autospec=True,
             side_effect=Exception("unexpected db error"),
         ):
             resp = self.client.post(
