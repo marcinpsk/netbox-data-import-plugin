@@ -62,9 +62,40 @@ def save_termination_resolution_and_replan(
 
 
 _DIAGNOSTIC_MESSAGES = {
+    "cable.ambiguous_mapped_peer": (
+        "NetBox maps this port to several peer ports. Choose the peer port this trace continues through."
+    ),
+    "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
+    "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Map it on the import profile.",
+    "cable.multi_termination_conflict": (
+        "A Cable with several terminations on one side holds a port this trace needs. Correct that Cable in NetBox."
+    ),
+    "cable.pass_through_not_mapped": (
+        "No PortMapping joins these two ports, so the stated pass-through cannot be true. "
+        "Correct the source, or add the PortMapping in NetBox."
+    ),
+    "cable.pass_through_verified": "A PortMapping proves the stated pass-through.",
+    "cable.permission_denied": "Permission denied: you cannot make one of the Cable changes this trace needs.",
     "cable.planned_termination_conflict": (
         "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
     ),
+    "cable.resolved_segment_conflict": (
+        "Two Source Traces give one shared segment different Cable policies. Make their CableClass values agree."
+    ),
+    "cable.same_port_continuation": "A mapped peer port continues the path where the source repeats one port.",
+    "cable.segment_reused": "An existing Cable already proves this segment, so the import keeps it.",
+    "cable.segment_self_connection": "Both ends of this segment name one termination. Correct the source path.",
+    "cable.termination_kind_mismatch": (
+        "The saved selection is a different kind of port than the stated PortClass. Choose the termination again."
+    ),
+    "cable.termination_occupied": (
+        "Another Cable already occupies this termination. "
+        "Remove that Cable, or resolve this trace to a free termination."
+    ),
+    "cable.termination_unresolved": (
+        "No single port on the resolved Device matches this name. Choose the termination for it."
+    ),
+    "cable.unsupported_termination_kind": "A Cable can end on an Interface, a Front Port, or a Rear Port only.",
     "device.add_permission": "Permission denied: dcim.add_device",
     "device.already_bound": "Another source row is already linked to this device.",
     "device.ambiguous_asset_tag": "Multiple devices have this asset tag.",
@@ -104,6 +135,7 @@ _DIAGNOSTIC_MESSAGES = {
     "device.zero_u_review_conflict": "A saved review keeps a rack position on a 0U device type.",
     "device.unparseable_ip": "The source value is not a valid IP address.",
     "device.validation_failed": "The planned device does not pass NetBox validation.",
+    "profile.dangling_reference": "The import profile names something NetBox no longer offers.",
     "rack.add_permission": "Permission denied: dcim.add_rack",
     "rack.change_permission": "Permission denied: dcim.change_rack",
     "rack.duplicate_name": "The rack name appears more than once in this import.",
@@ -112,6 +144,11 @@ _DIAGNOSTIC_MESSAGES = {
     "rack.missing_name": "Missing rack name",
     "rack.ambiguous_name": "Multiple racks have this name at the import target.",
     "rack.validation_failed": "The planned rack does not pass NetBox validation.",
+    "trace.device_unresolved": "No single Device matches this name. Correct the source, or add the Device in NetBox.",
+    "trace.endpoint_evidence_only": (
+        "This trace states its two endpoints and no physical path, and no Cable joins them. "
+        "Add the Segment Evidence rows the path needs."
+    ),
 }
 
 _IDENTITY_CONFLICTS = {

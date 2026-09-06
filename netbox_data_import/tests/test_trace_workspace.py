@@ -65,7 +65,7 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertEqual(sync.reason, "")
 
     def test_synchronizing_a_blocked_trace_is_disabled_with_its_reason(self):
-        """An illegal action stays visible and states why it cannot run."""
+        """An illegal action stays visible and states why it cannot run, in operator wording."""
         missing = trace_termination("DEV-A", "", "absent-port", "Port")
 
         trace = self.traces(direct_path(from_end=missing))[0]
@@ -73,7 +73,28 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
         sync = self.action(trace, "sync")
         self.assertEqual(trace.disposition, "blocked")
         self.assertFalse(sync.enabled)
-        self.assertIn("termination", sync.reason.lower())
+        self.assertEqual(
+            sync.reason,
+            "No single port on the resolved Device matches this name. Choose the termination for it.",
+        )
+
+    def test_no_finding_reads_back_its_own_diagnostic_code(self):
+        """A code is an internal name. Every finding the workspace renders has to be an instruction."""
+        traces = self.traces(
+            patched_path(),
+            self.separate_blocked_path("W"),
+            direct_path(
+                from_end=trace_termination("NO-SUCH-DEVICE", "", "eth0", "Port"),
+                to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+            ),
+        )
+
+        findings = [finding for trace in traces for finding in trace.findings]
+        self.assertNotEqual(findings, [])
+        for finding in findings:
+            with self.subTest(code=finding["code"]):
+                self.assertNotEqual(finding["message"], finding["code"])
+                self.assertIn(" ", finding["message"])
 
     def test_a_trace_that_needs_no_change_is_disabled_with_its_reason(self):
         """A path NetBox already holds has nothing to synchronize, and says so."""
