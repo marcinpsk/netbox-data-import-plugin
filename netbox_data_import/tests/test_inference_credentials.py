@@ -87,6 +87,25 @@ def serving(status=200, payload=None):
         thread.join(timeout=5)
 
 
+@contextmanager
+def vault_token(value):
+    """Set VAULT_TOKEN for the block, then put back whatever the process had, including nothing."""
+    import os
+
+    previous = os.environ.get("VAULT_TOKEN")
+    if value is None:
+        os.environ.pop("VAULT_TOKEN", None)
+    else:
+        os.environ["VAULT_TOKEN"] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("VAULT_TOKEN", None)
+        else:
+            os.environ["VAULT_TOKEN"] = previous
+
+
 class CredentialReferenceTest(SimpleTestCase):
     """The typed reference carries the KV v2 mount and nothing about the connection."""
 
@@ -98,6 +117,27 @@ class CredentialReferenceTest(SimpleTestCase):
     def test_a_missing_field_is_rejected(self):
         with self.assertRaises(InvalidCredentialReference):
             CredentialReference.from_mapping({**REFERENCE, "field": ""})
+
+    def test_a_traversal_path_is_rejected(self):
+        """The path is interpolated into a URL, so a dot segment could name another secret."""
+        for value in ("../../other", "inference/../../other", "inference/./backend"):
+            with self.subTest(path=value):
+                with self.assertRaises(InvalidCredentialReference):
+                    CredentialReference.from_mapping({**REFERENCE, "path": value})
+
+    def test_url_syntax_in_the_reference_is_rejected(self):
+        """A query or fragment delimiter changes which Vault request the read actually makes."""
+        for key, value in (
+            ("path", "inference?list=true"),
+            ("path", "inference#fragment"),
+            ("path", "inference%2f..%2fother"),
+            ("mount", "secret/data"),
+            ("mount", "secret?x=1"),
+            ("path", "inference//backend"),
+        ):
+            with self.subTest(**{key: value}):
+                with self.assertRaises(InvalidCredentialReference):
+                    CredentialReference.from_mapping({**REFERENCE, key: value})
 
     def test_a_vault_address_is_rejected(self):
         """Connection data belongs to the deployment-owned vault setting."""
@@ -154,23 +194,15 @@ class VaultReadTest(SimpleTestCase):
         self.assertNotIn("x-vault-token", seen[0]["headers"])
 
     def test_the_token_auth_method_sends_the_environment_token(self):
-        import os
-
         with serving() as (settings, seen):
-            os.environ["VAULT_TOKEN"] = VAULT_TOKEN
-            try:
+            with vault_token(VAULT_TOKEN):
                 self.resolve({**settings, "auth_method": "token"})
-            finally:
-                del os.environ["VAULT_TOKEN"]
 
         self.assertEqual(seen[0]["headers"]["x-vault-token"], VAULT_TOKEN)
 
     def test_the_token_auth_method_without_a_token_fails_as_configuration(self):
-        import os
-
-        os.environ.pop("VAULT_TOKEN", None)
         with serving() as (settings, _seen):
-            with self.assertRaises(CredentialFailure) as caught:
+            with vault_token(None), self.assertRaises(CredentialFailure) as caught:
                 self.resolve({**settings, "auth_method": "token"})
 
         self.assertEqual(caught.exception.category, "invalid_configuration")

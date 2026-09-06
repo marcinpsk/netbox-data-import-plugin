@@ -6,6 +6,11 @@
 boundary and again at request time. Resolution is a separate step: the allowlist approves a name,
 and `assert_resolved_address_allowed` decides whether the address that name answered with is one
 NetBox may reach.
+
+Specification 8.3 asks for a recheck after resolution, which is what this module performs. It does
+not pin the socket to the address it checked, so a name that answers differently between the check
+and the connect is a residual window. Closing it needs an address-pinned transport with its own TLS
+hostname handling, which is tracked in issue #147.
 """
 
 import ipaddress

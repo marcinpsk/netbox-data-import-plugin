@@ -85,6 +85,21 @@ def validate_vault_settings(value: Any) -> Mapping[str, Any]:
     return mapping
 
 
+_UNSAFE_PATH_SEGMENTS = frozenset({"", ".", ".."})
+
+
+def _validate_vault_path(value: Any, label: str, *, segments: bool) -> None:
+    """Reject a Vault path value that could change the request it is interpolated into."""
+    text = str(value)
+    for character in "?#%":
+        if character in text:
+            raise InvalidInferenceConfiguration(f"'{label}' cannot contain '{character}'.")
+    if not segments and "/" in text:
+        raise InvalidInferenceConfiguration(f"'{label}' names one path segment, so it cannot contain '/'.")
+    if any(part in _UNSAFE_PATH_SEGMENTS for part in text.split("/")):
+        raise InvalidInferenceConfiguration(f"'{label}' cannot hold an empty, '.' or '..' path segment.")
+
+
 def validate_credential_reference(value: Any, label: str = "credential_reference") -> Mapping[str, Any]:
     """Return the typed Vault KV v2 reference, rejecting connection data and secret material."""
     mapping = _require_mapping(value, label)
@@ -98,6 +113,8 @@ def validate_credential_reference(value: Any, label: str = "credential_reference
         raise InvalidInferenceConfiguration(
             f"'{label}.backend' must be '{CREDENTIAL_REFERENCE_BACKEND}', got '{mapping['backend']}'."
         )
+    _validate_vault_path(mapping["mount"], f"{label}.mount", segments=False)
+    _validate_vault_path(mapping["path"], f"{label}.path", segments=True)
     return mapping
 
 

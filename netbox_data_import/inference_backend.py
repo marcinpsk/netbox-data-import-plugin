@@ -82,8 +82,10 @@ class ResolvedInferenceBackend:
         }
 
 
-def _from_row(row) -> ResolvedInferenceBackend:
+def _from_row(row, allowlist) -> ResolvedInferenceBackend:
     """Return the resolved backend one enabled database row describes."""
+    # A saved row outlives the allowlist that approved it, so spec 8.3 validates both sources alike.
+    validate_api_root(row.api_root, allowlist=allowlist, authentication=row.authentication)
     return ResolvedInferenceBackend(
         backend_key=row.backend_key,
         display_name=row.display_name,
@@ -123,7 +125,7 @@ def resolve_active_backend() -> ResolvedInferenceBackend:
 
     row = InferenceBackend.objects.filter(enabled=True).first()
     if row is not None:
-        return _from_row(row)
+        return _from_row(row, origin_allowlist())
     config = plugin_settings()
     if FILE_FALLBACK_SETTING not in config:
         raise NoActiveInferenceBackend(

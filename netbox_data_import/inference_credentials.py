@@ -9,6 +9,7 @@ any failure it catches.
 """
 
 import os
+from urllib.parse import quote
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -131,7 +132,10 @@ class VaultKvV2CredentialBackend:
     def _read(self, reference: CredentialReference) -> requests.Response:
         """Perform the one KV v2 read this reference names."""
         address = str(self._settings["address"]).rstrip("/")
-        url = f"{address}/v1/{reference.mount}/data/{reference.path}"
+        # The reference is validated, and quoting keeps a stray character out of the request anyway.
+        mount = quote(reference.mount, safe="")
+        path = quote(reference.path, safe="/")
+        url = f"{address}/v1/{mount}/data/{path}"
         timeout = (
             self._settings.get("connect_timeout", DEFAULT_CONNECT_TIMEOUT),
             self._settings.get("read_timeout", DEFAULT_READ_TIMEOUT),

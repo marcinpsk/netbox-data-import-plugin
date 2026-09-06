@@ -206,6 +206,14 @@ class ActiveBackendResolutionTest(TestCase):
         with self.assertRaises(InvalidCredentialReference):
             resolve_active_backend()
 
+    @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend_origin_allowlist=["https://other.invalid:443"]))
+    def test_a_row_whose_api_root_left_the_allowlist_is_refused_at_resolution(self):
+        """Spec 8.3 validates a row and a setting alike, and a saved row outlives its allowlist."""
+        make_row(backend_key="primary", enabled=True)
+
+        with self.assertRaises(InvalidInferenceConfiguration):
+            resolve_active_backend()
+
     @override_settings(PLUGINS_CONFIG=plugin_settings(inference_backend=FALLBACK))
     def test_the_source_reaches_backend_metadata(self):
         """The worker records which source it used, so an operator can tell them apart."""

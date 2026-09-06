@@ -7,6 +7,7 @@ from django.test import SimpleTestCase
 from netbox_data_import.inference_trust import (
     InvalidInferenceConfiguration,
     assert_resolved_address_allowed,
+    resolve_addresses,
     validate_api_root,
     validate_origin,
 )
@@ -142,3 +143,20 @@ class ResolvedAddressTest(SimpleTestCase):
     def test_resolving_no_address_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration):
             assert_resolved_address_allowed("https://backend.example.invalid:443", allowlist=ALLOWLIST, addresses=())
+
+    def test_a_name_that_does_not_resolve_fails_as_configuration(self):
+        """DNS is the one external boundary here, so its OSError has to reach a typed failure."""
+        import socket
+
+        def refuse(*args, **kwargs):
+            raise socket.gaierror("Name or service not known")
+
+        original = socket.getaddrinfo
+        socket.getaddrinfo = refuse
+        try:
+            with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                resolve_addresses("https://backend.example.invalid:443")
+        finally:
+            socket.getaddrinfo = original
+
+        self.assertIn("backend.example.invalid", str(caught.exception))
