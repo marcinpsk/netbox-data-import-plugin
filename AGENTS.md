@@ -44,8 +44,11 @@ netbox-manage makemigrations netbox_data_import
 ## Testing
 
 Run Django tests inside the repository devcontainer. Use a unique PostgreSQL database and a
-dedicated Redis sidecar for each task. NetBox's `RQQueueTestMixin` calls Redis `FLUSHALL`, so a
-database number on the shared Redis service does not isolate one task from another.
+dedicated Redis sidecar for each task. On NetBox 4.6 `RQQueueTestMixin` calls Redis `FLUSHALL`, so a
+database number on the shared Redis service does not isolate one task from another. NetBox 4.7
+narrowed it to `FLUSHDB`, and `tests/mixins.py::IsolatedRQQueueTestMixin` does the same on both, but
+the suite still needs its own Redis instance: eight workers use two databases each, which is all
+sixteen a Redis instance offers.
 
 Start a temporary Redis container on the devcontainer network. Pass its container name as
 `TEST_REDIS_HOST`. Set `TEST_DB_NAME` to a unique name that starts with `test_`. The `netbox-test`
