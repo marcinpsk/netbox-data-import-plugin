@@ -75,6 +75,8 @@
   function load() {
     var form = node('traceTerminationForm');
     var search = node('traceTerminationSearch');
+    // A boost can land on a page with no picker while a debounce is still pending.
+    if (!form || !search) return;
     var request = ++pending;
     var asked = search.value;
     var url = form.dataset.candidatesUrl + '?field_key=' + encodeURIComponent(node('traceTerminationFieldKey').value)
@@ -87,8 +89,9 @@
         });
       })
       .then(function (result) {
-        // A slower earlier search must not overwrite the answer to a later one.
-        if (request !== pending) return;
+        // A slower earlier search must not overwrite the answer to a later one, and an answer to
+        // the page a boost replaced must not be shown on the page that replaced it.
+        if (request !== pending || node('traceTerminationForm') !== form) return;
         if (!result.ok || !result.payload.ok) {
           reportFailure(result.payload.error || 'The candidates could not be read.');
           return;
@@ -97,7 +100,7 @@
         renderCandidates(result.payload, asked);
       })
       .catch(function () {
-        if (request !== pending) return;
+        if (request !== pending || node('traceTerminationForm') !== form) return;
         reportFailure('The candidates could not be read.');
       });
   }

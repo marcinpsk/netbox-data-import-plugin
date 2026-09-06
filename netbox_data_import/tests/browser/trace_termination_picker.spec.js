@@ -312,3 +312,43 @@ test("opening the picker twice reuses the one Modal the page already has", async
 
   expect(await page.evaluate(() => window.ndiModalInstances)).toBe(1);
 });
+
+test("a lookup that settles after a swap does not answer into the page that replaced it", async ({ page }) => {
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  await page.route("**/trace-workspace/candidates/**", async (route) => {
+    await held;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, candidates: [{ id: 1, name: "stale", display: "stale" }], shown: 1, total: 1 }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+  await page.locator("[data-trace-picker]").click();
+
+  // The boost swaps the page while that lookup is still in flight, then the answer arrives.
+  await page.evaluate((markup) => { document.body.innerHTML = markup; }, fixture);
+  release();
+
+  await expect(page.locator("#traceTerminationCount")).toBeHidden();
+  await expect(page.locator("#traceTerminationCandidates button")).toHaveCount(0);
+});
+
+test("a search on a page whose picker the swap removed does not throw", async ({ page }) => {
+  await serveCandidates(page, { ok: true, candidates: [], shown: 0, total: 0 });
+  const failures = [];
+  page.on("pageerror", (error) => failures.push(error.message));
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  // A boost can land on a page with no picker at all, while the debounce is still pending.
+  await page.evaluate(() => {
+    var box = document.getElementById("traceTerminationSearch");
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    document.body.innerHTML = "<p>another page</p>";
+  });
+  await page.waitForTimeout(400);
+
+  expect(failures).toEqual([]);
+});

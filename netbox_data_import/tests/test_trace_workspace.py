@@ -19,7 +19,12 @@ from netbox_data_import.tests.test_cable_module import (
     direct_path,
     patched_path,
 )
-from netbox_data_import.tests.helpers import trace_endpoint_line, trace_termination, trace_workbook_bytes
+from netbox_data_import.tests.helpers import (
+    competing_write_during,
+    trace_endpoint_line,
+    trace_termination,
+    trace_workbook_bytes,
+)
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 
@@ -805,3 +810,58 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             .exists()
         )
         self.assertTrue(Cable.objects.filter(terminations__termination_id=self.panel_1_rear.pk).exists())
+
+
+class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
+    """The replan a decision asks for reads the planning target, which can go while it is deciding."""
+
+    def setUp(self):
+        """Build the shared topology this transactional case cannot inherit from class data."""
+        super().setUp()
+        self.build_topology()
+
+    def test_a_target_deleted_while_the_decision_saves_ends_the_preview_with_its_reason(self):
+        """The saved decision replans, so a target removed under it must not answer a 500."""
+        from dcim.models import Location
+        from django.db.models.signals import post_save
+
+        location = Location.objects.create(name="Room 1", slug="room-1", site=self.site)
+        self.client.force_login(self.actor)
+        upload = BytesIO(
+            trace_workbook_bytes(
+                path_blocks=(
+                    direct_path(
+                        from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                        to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+                    ),
+                )
+            )
+        )
+        upload.name = "traces.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            follow=True,
+        )
+        field_key = termination_field_key(device="DEV-A", cards="", port="absent-port", kind="interface")
+
+        # The location goes on another connection between the eligibility recheck and the replan.
+        with competing_write_during(
+            post_save, TerminationResolution, lambda: Location.objects.filter(pk=location.pk).delete()
+        ) as (observed, _blocked):
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:trace_resolve_termination"),
+                {
+                    "field_key": field_key,
+                    "object_type": "dcim.interface",
+                    "object_id": self.eth0.pk,
+                    "search": "",
+                    "preview_revision": self.client.session["import_preview_revision"],
+                },
+                follow=True,
+            )
+
+        self.assertTrue(observed, "the decision never reached its TerminationResolution write")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "The saved import target is no longer available.")
+        self.assertFalse(self.client.session["import_preview_pending"])

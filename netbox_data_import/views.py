@@ -3696,6 +3696,12 @@ class _TraceWorkspaceMixin:
         }
         return profile, document, workspace, planning_context
 
+    def discard_unavailable_target(self, request):
+        """Return the response that ends a request whose saved import target is gone."""
+        _discard_import_preview(request)
+        messages.warning(request, "The saved import target is no longer available. Start a new preview.")
+        return redirect(reverse("plugins:netbox_data_import:import_setup"))
+
     def refuse_unregistered_adapter(self, request, profile):
         """Return the response that ends a request this release cannot plan for, or None.
 
@@ -3736,9 +3742,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             return refusal
         live = self.live_plan(profile, document, request, planning_context)
         if live is None:
-            _discard_import_preview(request)
-            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+            return self.discard_unavailable_target(request)
         traces = workspace.traces
         wanted = request.GET.get("trace", "")
         selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
@@ -3793,9 +3797,7 @@ class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             return refusal
         live = self.live_plan(profile, document, request, planning_context)
         if live is None:
-            _discard_import_preview(request)
-            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+            return self.discard_unavailable_target(request)
         record_recalculated_preview(request.session, live)
         messages.success(request, "The workspace was re-read from NetBox.")
         return redirect(next_url)
@@ -3937,17 +3939,21 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
             )
         from core.models import ObjectType
 
-        plan = save_termination_resolution_and_replan(
-            profile=profile,
-            source_document=document,
-            actor=request.user,
-            planning_context=planning_context,
-            task_type=SELECT_TERMINATION_TASK,
-            field_key=field_key,
-            selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
-            selected_object_id=chosen.pk,
-            selected_display_name=str(chosen),
-        )
+        try:
+            # One transaction: a target lost before the replan rolls the saved decision back with it.
+            plan = save_termination_resolution_and_replan(
+                profile=profile,
+                source_document=document,
+                actor=request.user,
+                planning_context=planning_context,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=field_key,
+                selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
+                selected_object_id=chosen.pk,
+                selected_display_name=str(chosen),
+            )
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
         record_recalculated_preview(request.session, plan)
         messages.success(request, f"Termination resolved to '{chosen}'.")
         return redirect(next_url)
