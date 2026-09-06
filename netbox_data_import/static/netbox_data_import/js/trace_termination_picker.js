@@ -5,39 +5,35 @@
  * It offers only the eligible candidates the server returns, and states how many of the
  * eligible set it is showing, so a capped page never reads as the whole answer. */
 (function () {
-  var modal = document.getElementById('traceTerminationPicker');
-  var form = document.getElementById('traceTerminationForm');
-  if (!modal || !form) return;
+  // The script ships inside the swapped content, so an htmx boost evaluates it again on every
+  // navigation. Document listeners outlive the swap, so a second evaluation would double them.
+  if (window.ndiTraceTerminationPicker) return;
+  window.ndiTraceTerminationPicker = true;
 
-  var candidatesUrl = form.dataset.candidatesUrl;
-  var list = document.getElementById('traceTerminationCandidates');
-  var count = document.getElementById('traceTerminationCount');
-  var search = document.getElementById('traceTerminationSearch');
-  var title = document.getElementById('traceTerminationLabel');
-  var error = document.getElementById('traceTerminationError');
-  var fieldKey = document.getElementById('traceTerminationFieldKey');
-  var objectType = document.getElementById('traceTerminationObjectType');
-  var objectId = document.getElementById('traceTerminationObjectId');
-  var submit = document.getElementById('traceTerminationSubmit');
-  var offeredSearch = document.getElementById('traceTerminationOfferedSearch');
-  var previewRevision = form.elements.namedItem('preview_revision');
   var kindLabels = {interface: 'dcim.interface', front_port: 'dcim.frontport', rear_port: 'dcim.rearport'};
   var activeKind = '';
   var pending = 0;
+  var searchTimer = null;
 
-  function show(node, visible) {
-    node.hidden = !visible;
+  // A swap replaces every node this picker reads, so each one is read at the time it is used.
+  function node(id) {
+    return document.getElementById(id);
+  }
+
+  function show(target, visible) {
+    if (target) target.hidden = !visible;
   }
 
   function clearSelection() {
-    objectId.value = '';
-    objectType.value = '';
+    node('traceTerminationObjectId').value = '';
+    node('traceTerminationObjectType').value = '';
     // The offered search belongs to a selection, so it cannot outlive one.
-    offeredSearch.value = '';
-    submit.disabled = true;
+    node('traceTerminationOfferedSearch').value = '';
+    node('traceTerminationSubmit').disabled = true;
   }
 
   function renderCandidates(payload, offered) {
+    var list = node('traceTerminationCandidates');
     list.replaceChildren();
     clearSelection();
     (payload.candidates || []).forEach(function (candidate) {
@@ -53,24 +49,37 @@
           row.classList.remove('active');
         });
         item.classList.add('active');
-        objectId.value = candidate.id;
+        var objectType = node('traceTerminationObjectType');
+        node('traceTerminationObjectId').value = candidate.id;
         objectType.value = kindLabels[activeKind] || '';
         // The write rechecks the offer, so it needs the search that produced it.
-        offeredSearch.value = item.dataset.offeredSearch;
-        submit.disabled = !objectType.value;
+        node('traceTerminationOfferedSearch').value = item.dataset.offeredSearch;
+        node('traceTerminationSubmit').disabled = !objectType.value;
       });
       list.appendChild(item);
     });
+    var count = node('traceTerminationCount');
     count.textContent = (payload.shown || 0) + ' of ' + (payload.total || 0) + ' eligible';
     show(count, true);
   }
 
+  function reportFailure(message) {
+    var error = node('traceTerminationError');
+    node('traceTerminationCandidates').replaceChildren();
+    clearSelection();
+    show(node('traceTerminationCount'), false);
+    error.textContent = message;
+    show(error, true);
+  }
+
   function load() {
+    var form = node('traceTerminationForm');
+    var search = node('traceTerminationSearch');
     var request = ++pending;
     var asked = search.value;
-    var url = candidatesUrl + '?field_key=' + encodeURIComponent(fieldKey.value)
+    var url = form.dataset.candidatesUrl + '?field_key=' + encodeURIComponent(node('traceTerminationFieldKey').value)
       + '&search=' + encodeURIComponent(search.value)
-      + '&preview_revision=' + encodeURIComponent(previewRevision.value);
+      + '&preview_revision=' + encodeURIComponent(form.elements.namedItem('preview_revision').value);
     fetch(url, {headers: {Accept: 'application/json'}, credentials: 'same-origin'})
       .then(function (response) {
         return response.json().then(function (payload) {
@@ -81,43 +90,41 @@
         // A slower earlier search must not overwrite the answer to a later one.
         if (request !== pending) return;
         if (!result.ok || !result.payload.ok) {
-          list.replaceChildren();
-          clearSelection();
-          show(count, false);
-          error.textContent = result.payload.error || 'The candidates could not be read.';
-          show(error, true);
+          reportFailure(result.payload.error || 'The candidates could not be read.');
           return;
         }
-        show(error, false);
+        show(node('traceTerminationError'), false);
         renderCandidates(result.payload, asked);
       })
       .catch(function () {
         if (request !== pending) return;
-        list.replaceChildren();
-        clearSelection();
-        show(count, false);
-        error.textContent = 'The candidates could not be read.';
-        show(error, true);
+        reportFailure('The candidates could not be read.');
       });
   }
 
   document.addEventListener('click', function (event) {
     var trigger = event.target.closest('[data-trace-picker]');
     if (!trigger) return;
-    fieldKey.value = trigger.dataset.tracePicker;
+    var modal = node('traceTerminationPicker');
+    if (!modal || !node('traceTerminationForm')) return;
+    // NetBox/Tabler exposes Bootstrap as global `Modal`, not `bootstrap.Modal`.
+    var ModalClass = (typeof bootstrap !== 'undefined' && bootstrap.Modal) || window.Modal;
+    if (!ModalClass) return;
+    node('traceTerminationFieldKey').value = trigger.dataset.tracePicker;
     activeKind = trigger.dataset.traceKind || '';
-    title.textContent = trigger.dataset.traceLabel || '';
-    search.value = '';
-    show(error, false);
-    list.replaceChildren();
-    show(count, false);
+    node('traceTerminationLabel').textContent = trigger.dataset.traceLabel || '';
+    node('traceTerminationSearch').value = '';
+    show(node('traceTerminationError'), false);
+    node('traceTerminationCandidates').replaceChildren();
+    show(node('traceTerminationCount'), false);
     clearSelection();
     load();
-    new window.Modal(modal).show();
+    modal.addEventListener('hidden.bs.modal', function () { trigger.focus(); }, {once: true});
+    ModalClass.getOrCreateInstance(modal).show(trigger);
   });
 
-  var searchTimer = null;
-  search.addEventListener('input', function () {
+  document.addEventListener('input', function (event) {
+    if (event.target.id !== 'traceTerminationSearch') return;
     window.clearTimeout(searchTimer);
     searchTimer = window.setTimeout(load, 200);
   });

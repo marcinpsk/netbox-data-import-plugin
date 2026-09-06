@@ -31,7 +31,24 @@ const fixture = `
       <button type="submit" id="traceTerminationSubmit" disabled>Save decision</button>
     </form>
   </div>
-  <script>window.Modal = function () { return { show: function () {} }; };</script>
+  <script>
+    /* Bootstrap's shape, so the fixture proves how the picker constructs and reuses a Modal. */
+    window.ndiModalShows = [];
+    window.ndiModalInstances = 0;
+    window.Modal = function (element) {
+      window.ndiModalInstances += 1;
+      this.show = function (trigger) {
+        window.ndiModalShows.push({
+          connected: element.isConnected,
+          trigger: trigger ? trigger.dataset.tracePicker : null,
+        });
+      };
+    };
+    window.Modal.getOrCreateInstance = function (element) {
+      if (!element.ndiModalInstance) element.ndiModalInstance = new window.Modal(element);
+      return element.ndiModalInstance;
+    };
+  </script>
 `;
 
 async function serveCandidates(page, payload) {
@@ -257,4 +274,41 @@ test("a lookup that never answers drops the offer on screen", async ({ page }) =
   await expect(page.locator("#traceTerminationCount")).toBeHidden();
   await expect(page.locator("#traceTerminationSubmit")).toBeDisabled();
   await expect(page.locator("#traceTerminationObjectId")).toHaveValue("");
+});
+
+test("a boosted navigation that evaluates the script again opens the picker once", async ({ page }) => {
+  let requests = 0;
+  await page.route("**/trace-workspace/candidates/**", async (route) => {
+    requests += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, candidates: [{ id: 1, name: "eth0", display: "eth0" }], shown: 1, total: 1 }),
+    });
+  });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+  // An htmx boost swaps the page and evaluates the script the new page carries a second time.
+  await page.evaluate((markup) => { document.body.innerHTML = markup; }, fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  await page.locator("[data-trace-picker]").click();
+
+  await expect(page.locator("#traceTerminationCandidates button")).toHaveText(["eth0"]);
+  expect(requests).toBe(1);
+  // The one Modal shown has to be the one on screen, not the detached copy the swap replaced.
+  expect(await page.evaluate(() => window.ndiModalShows)).toEqual([
+    { connected: true, trigger: "device:DEV-A|cards:|port:absent|kind:interface|role:termination" },
+  ]);
+});
+
+test("opening the picker twice reuses the one Modal the page already has", async ({ page }) => {
+  await serveCandidates(page, { ok: true, candidates: [], shown: 0, total: 0 });
+  await page.setContent(fixture);
+  await page.addScriptTag({ content: controllerSource });
+
+  await page.locator("[data-trace-picker]").click();
+  await expect(page.locator("#traceTerminationCount")).toHaveText("0 of 0 eligible");
+  await page.locator("[data-trace-picker]").click();
+
+  expect(await page.evaluate(() => window.ndiModalInstances)).toBe(1);
 });
