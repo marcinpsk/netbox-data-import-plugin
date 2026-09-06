@@ -252,6 +252,16 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertIsNotNone(tag)
         self.assertRegex(tag.group(0), r'aria-label="[^"]+"')
 
+    def test_the_termination_picker_modal_is_named_by_its_own_title(self):
+        """A dialog needs an accessible name, and the name has to resolve to an element that exists."""
+        page = self.open_workspace(patched_path()).content.decode()
+
+        modal = re.search(r'<div[^>]*id="traceTerminationPicker"[^>]*>', page)
+        self.assertIsNotNone(modal)
+        labelled_by = re.search(r'aria-labelledby="([^"]+)"', modal.group(0))
+        self.assertIsNotNone(labelled_by, modal.group(0))
+        self.assertRegex(page, rf'<h5[^>]*id="{re.escape(labelled_by.group(1))}"')
+
     def test_the_workspace_reports_no_drift_for_a_freshly_read_preview(self):
         """The strip appears on a difference, so a preview just read must not show one."""
         response = self.open_workspace(patched_path())
@@ -383,6 +393,17 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(payload["shown"], 3)
         self.assertEqual(payload["total"], 7)
+
+    def test_the_picker_clamps_a_limit_below_one(self):
+        """The limit is a QuerySet slice stop, so a value under one has to be clamped, not passed on."""
+        field_key = self.open_blocked_workspace()
+        Interface.objects.create(device=self.device_a, name="eth5", type="1000base-t")
+
+        payload = self.candidates(field_key, limit=-1).json()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["shown"], 1)
+        self.assertEqual(payload["total"], 2)
 
     def test_the_picker_searches_by_name(self):
         """A searchable picker narrows the same eligible set, and never widens it."""

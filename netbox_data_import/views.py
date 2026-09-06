@@ -3825,9 +3825,11 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         profile, _document, _workspace, planning_context = loaded
         field_key = request.GET.get("field_key", "").strip()
         try:
-            limit = min(int(request.GET.get("limit", ELIGIBLE_TERMINATION_LIMIT)), ELIGIBLE_TERMINATION_LIMIT)
+            requested = int(request.GET.get("limit", ELIGIBLE_TERMINATION_LIMIT))
         except (TypeError, ValueError):
-            limit = ELIGIBLE_TERMINATION_LIMIT
+            requested = ELIGIBLE_TERMINATION_LIMIT
+        # The limit becomes a QuerySet slice stop, which refuses a value below one.
+        limit = min(max(requested, 1), ELIGIBLE_TERMINATION_LIMIT)
         try:
             found = self._eligible(request, profile, planning_context, field_key, request.GET.get("search", ""), limit)
         except (PlanningTargetUnavailable, ValueError):
