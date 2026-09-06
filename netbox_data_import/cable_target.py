@@ -210,6 +210,7 @@ class _TraceAnalysis:
     terminations: dict = field(default_factory=dict)
     topology_read: bool = False
     logical_cable: Any = None
+    retains_logical_cable: bool = False
     blocked: bool = False
     invalid: bool = False
 
@@ -224,9 +225,15 @@ class _TraceAnalysis:
         return [segment for segment in self.segments if segment.index not in self.proven]
 
     @property
+    def deleted_logical_cable(self):
+        """Return the Logical Cable this trace removes, which a Cable that proves its path is not."""
+        return None if self.retains_logical_cable else self.logical_cable
+
+    @property
     def delete_identity(self) -> str | None:
         """Return the Planned Change identity that removes this trace's Logical Cable."""
-        return None if self.logical_cable is None else _delete_identity(self.logical_cable.cable.pk)
+        removed = self.deleted_logical_cable
+        return None if removed is None else _delete_identity(removed.cable.pk)
 
     def error(self, code: str, display: dict, identities=()) -> None:
         """Record one blocking or invalidating finding."""
@@ -941,7 +948,7 @@ class _CableBatch:
             {"segment_index": 0, **cable_display},
             identities=cable_identities,
         )
-        analysis.logical_cable = None
+        analysis.retains_logical_cable = True
 
     def _note_reuse(self, analysis: _TraceAnalysis, segment: _DesiredSegment, proven: _ExistingCable) -> None:
         """Record the proven physical segment, so its live state joins the unit fingerprint."""
@@ -976,7 +983,8 @@ class _CableBatch:
 
     def _report_conflicts(self, analysis: _TraceAnalysis) -> None:
         """Block the trace when a Cable this import may not touch holds a termination it needs."""
-        logical_id = None if analysis.logical_cable is None else analysis.logical_cable.cable.pk
+        removed = analysis.deleted_logical_cable
+        logical_id = None if removed is None else removed.cable.pk
         for segment in analysis.pending:
             for termination in segment.terminations:
                 occupying = self._occupied.get(termination.key)
@@ -1033,7 +1041,7 @@ class _CableBatch:
         if analysis.pending and not self.actor.has_perm("dcim.add_cable"):
             analysis.block("cable.permission_denied", {"permission": "dcim.add_cable"})
             return
-        logical = analysis.logical_cable
+        logical = analysis.deleted_logical_cable
         if logical is not None and not self.actor.has_perm("dcim.delete_cable", logical.cable):
             cable_display, cable_identities = self._cable_diagnostic_disclosure(logical.cable)
             analysis.block(
@@ -1193,7 +1201,7 @@ class _CableBatch:
             "logical_cable": self._logical_cable_display(analysis),
             "topology_known": analysis.topology_read,
             # A unit with no changes proposes nothing, so the panel must not offer to delete one.
-            "deletes_logical_cable": writes and analysis.logical_cable is not None,
+            "deletes_logical_cable": writes and analysis.deleted_logical_cable is not None,
             "terminations": list(analysis.terminations.values()),
         }
 
@@ -1215,7 +1223,7 @@ class _CableBatch:
         return CREATE_SEGMENT if writes else ""
 
     def _logical_cable_display(self, analysis: _TraceAnalysis) -> dict | None:
-        """Return the one Logical Cable this trace would delete, as far as the actor may see it."""
+        """Return the Logical Cable NetBox holds for this trace, as far as the actor may see it."""
         if analysis.logical_cable is None:
             return None
         cable = analysis.logical_cable.cable
@@ -1235,8 +1243,8 @@ class _CableBatch:
         if analysis.stopped:
             return ()
         changes = []
-        if analysis.logical_cable is not None:
-            changes.append(self._delete_change(analysis.logical_cable))
+        if analysis.deleted_logical_cable is not None:
+            changes.append(self._delete_change(analysis.deleted_logical_cable))
         changes.extend(self._create_change(segment, analysis.policies[segment.index]) for segment in analysis.pending)
         return tuple(changes)
 
@@ -1281,7 +1289,7 @@ class _CableBatch:
         if disposition != Disposition.ACTIONABLE:
             return ""
         count = len(analysis.pending)
-        if analysis.logical_cable is not None:
+        if analysis.deleted_logical_cable is not None:
             return f"Would replace the logical cable with {count} physical segment(s)."
         return f"Would create {count} physical segment(s)."
 

@@ -19,7 +19,7 @@ from netbox_data_import.tests.test_cable_module import (
     direct_path,
     patched_path,
 )
-from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes
+from netbox_data_import.tests.helpers import trace_endpoint_line, trace_termination, trace_workbook_bytes
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 
@@ -335,6 +335,46 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
         self.assertEqual(response.status_code, 302)
+
+    def open_endpoint_evidence_workspace(self):
+        """Upload a Trace List block that states two endpoints and no physical path."""
+        self.client.force_login(self.actor)
+        upload = BytesIO(
+            trace_workbook_bytes(
+                include_path=False,
+                include_list=True,
+                list_blocks=(
+                    (
+                        trace_endpoint_line(trace_termination("DEV-A", "", "eth0", "Port")),
+                        trace_endpoint_line(trace_termination("DEV-B", "", "eth1", "NIC")),
+                        (("", "", "", "DEV-A", "", "eth0", "Port", "Ignored"),),
+                    ),
+                ),
+            )
+        )
+        upload.name = "traces.xlsx"
+        setup = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(setup.status_code, 200)
+        return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+    def test_the_topology_panel_names_the_cable_that_satisfies_endpoint_evidence(self):
+        """The panel states what NetBox holds. A Cable the import keeps is still a Cable it holds."""
+        existing = self.connect(self.eth0, self.eth1)
+
+        response = self.open_endpoint_evidence_workspace()
+
+        trace = response.context["traces"][0]
+        self.assertEqual(trace.disposition, "no-op")
+        self.assertIsNotNone(trace.logical_cable)
+        self.assertTrue(trace.logical_cable["visible"])
+        self.assertEqual(trace.logical_cable["display"], str(existing))
+        # The Cable is kept, so the proposed panel must not offer to remove it.
+        self.assertFalse(trace.deletes_logical_cable)
+        self.assertNotContains(response, "No direct Logical Cable joins these endpoints.")
 
 
 class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
