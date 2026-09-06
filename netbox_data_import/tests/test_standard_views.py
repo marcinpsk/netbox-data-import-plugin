@@ -102,3 +102,5 @@ class ImportProfileAPIViewTestCase(APIViewTestCases.APIViewTestCase):
             "description": "Bulk updated through the standard API contract",
             "adapter_config": {**flat_defaults, "update_existing": False},
         }
+        # Lets NetBox run test_bulk_update_objects_validation_error, which needs a failing row.
+        cls.bulk_update_invalid_data = {"source_adapter": "no_such_adapter"}
