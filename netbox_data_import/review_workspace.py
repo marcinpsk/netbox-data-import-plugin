@@ -223,6 +223,11 @@ def _blocking(unit: SynchronizationUnit) -> list:
     return [item for item in unit.diagnostics if item.severity == Severity.ERROR]
 
 
+def _states_a_trace(unit: SynchronizationUnit) -> bool:
+    """Return whether one unit carries a Source Trace, which is what the workspace lists."""
+    return unit.display.get("trace") is not None
+
+
 def _diagnostic_message(diagnostic) -> str:
     """Return the operator wording for one diagnostic."""
     return str(diagnostic.display.get("message") or "") or _DIAGNOSTIC_MESSAGES.get(diagnostic.code, diagnostic.code)
@@ -522,11 +527,14 @@ class ReviewWorkspace:
         return any(unit.action == "error" for unit in self.units)
 
     @property
+    def has_traces(self) -> bool:
+        """Return whether the plan holds a Source Trace, without building one workspace entry."""
+        return any(_states_a_trace(unit) for unit in self.plan.units)
+
+    @property
     def traces(self) -> tuple[TraceWorkspaceUnit, ...]:
         """Return one workspace entry per Source Trace, in plan order."""
-        return tuple(
-            TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if unit.display.get("trace") is not None
-        )
+        return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if _states_a_trace(unit))
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:
         """Return the unit and every unit owning a change it depends on, transitively.

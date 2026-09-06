@@ -119,6 +119,14 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
             [item.enabled for item in actionable.actions],
         )
 
+    def test_the_workspace_answers_whether_it_holds_a_trace_without_building_one(self):
+        """The preview page asks this on every render, so it must not serialize the whole plan."""
+        workspace = ReviewWorkspace(self.plan(patched_path()))
+
+        self.assertTrue(workspace.has_traces)
+        self.assertEqual(len(workspace.traces), 1)
+        self.assertFalse(ReviewWorkspace(ImportPlan(units=())).has_traces)
+
     def test_the_summary_strip_counts_terminations_and_dispositions(self):
         """The strip states what the reviewer has to work through, not one number."""
         summary = ReviewWorkspace(self.plan(patched_path(), self.separate_blocked_path("S"))).trace_summary

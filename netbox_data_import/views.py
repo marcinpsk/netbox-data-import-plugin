@@ -1441,7 +1441,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "preview_url": preview_url,
                 "view_mode": view_mode,
                 # Only a trace preview has a workspace to open, so only it offers the link.
-                "trace_workspace_available": bool(result.traces),
+                "trace_workspace_available": result.has_traces,
                 "existing_resolutions_json": _json.dumps(existing_resolutions).translate(
                     {ord("<"): "\\u003C", ord(">"): "\\u003E", ord("&"): "\\u0026"}
                 ),
