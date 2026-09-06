@@ -63,17 +63,19 @@ def _split(value: str, setting: str):
 def origin_of(value: str, setting: str) -> str:
     """Return the scheme, host and port of one absolute URL, lower-cased."""
     parts = _split(value, setting)
+    unusable = f"'{setting}' must name a port between 1 and 65535. Got '{value}'."
     try:
         # urlsplit defers the cast, so a non-numeric or out-of-range port raises only here.
         port = parts.port
     except ValueError as exc:
-        raise InvalidInferenceConfiguration(
-            f"'{setting}' must name a port between 1 and 65535. Got '{value}'."
-        ) from exc
+        raise InvalidInferenceConfiguration(unusable) from exc
     if port is None:
         raise InvalidInferenceConfiguration(
             f"'{setting}' must name an explicit port, for example https://host:443. Got '{value}'."
         )
+    if port < 1:
+        # urlsplit returns zero rather than raising, and no connection can use it.
+        raise InvalidInferenceConfiguration(unusable)
     return f"{parts.scheme.lower()}://{parts.hostname.lower()}:{port}"
 
 

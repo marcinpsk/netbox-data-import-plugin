@@ -45,7 +45,7 @@ class OriginFormatTest(SimpleTestCase):
 
     def test_an_unusable_port_is_rejected_as_configuration(self):
         """urlsplit defers the port cast, so reading it has to fail as a typed configuration error."""
-        for entry in ("https://host:abc", "https://host:99999", "https://host:-1"):
+        for entry in ("https://host:abc", "https://host:99999", "https://host:-1", "https://host:0"):
             with self.subTest(entry=entry):
                 with self.assertRaises(InvalidInferenceConfiguration) as caught:
                     validate_origin(entry, setting="allowlist")
