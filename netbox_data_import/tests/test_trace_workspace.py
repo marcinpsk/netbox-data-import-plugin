@@ -11,7 +11,7 @@ from django.urls import reverse
 
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import.field_keys import termination_field_key
-from netbox_data_import.models import TerminationResolution
+from netbox_data_import.models import ImportProfile, TerminationResolution
 from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
@@ -375,6 +375,49 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         # The Cable is kept, so the proposed panel must not offer to remove it.
         self.assertFalse(trace.deletes_logical_cable)
         self.assertNotContains(response, "No direct Logical Cable joins these endpoints.")
+
+    def test_a_re_read_from_a_stale_tab_is_refused(self):
+        """Every other workspace command checks the revision it is sent, so this one has to too."""
+        self.open_workspace(patched_path())
+        current = self.client.session["import_preview_revision"]
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": "stale"},
+            follow=True,
+        )
+
+        self.assertEqual(self.client.session["import_preview_revision"], current)
+        self.assertContains(response, "This preview is no longer the current one.")
+
+    def test_a_sync_is_refused_when_this_release_dropped_the_source_adapter(self):
+        """Queueing a plan for an adapter this release does not register writes nothing but a failure."""
+        from core.models import Job
+
+        workspace = self.open_workspace(patched_path())
+        chosen = workspace.context["traces"][0]
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired-adapter")
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            follow=True,
+        )
+
+        self.assertFalse(Job.objects.filter(data__job_type="netbox_data_import.import").exists())
+        self.assertContains(response, "retired-adapter")
+        # The preview cannot be planned again in this release, so it is not left to be retried.
+        self.assertFalse(self.client.session["import_preview_pending"])
+
+    def test_the_workspace_page_refuses_an_adapter_this_release_dropped(self):
+        """Planning raises for an unregistered adapter, so the page has to refuse before it plans."""
+        self.open_workspace(patched_path())
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired-adapter")
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "retired-adapter")
 
 
 class TraceTerminationPickerTest(CableTopologyMixin, TestCase):

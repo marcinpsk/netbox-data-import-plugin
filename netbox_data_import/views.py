@@ -3696,6 +3696,20 @@ class _TraceWorkspaceMixin:
         }
         return profile, document, workspace, planning_context
 
+    def refuse_unregistered_adapter(self, request, profile):
+        """Return the response that ends a request this release cannot plan for, or None.
+
+        Planning raises UnknownSourceAdapter, so a workspace request that reaches it without this
+        gate answers a 500. The preview is discarded because no release-side decision revives it.
+        """
+        try:
+            validate_registered_adapter(profile)
+        except ValidationError as exc:
+            _discard_import_preview(request)
+            messages.warning(request, "; ".join(exc.messages))
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        return None
+
     @staticmethod
     def live_plan(profile, document, request, planning_context):
         """Return the plan live NetBox states right now, or None when the target is gone."""
@@ -3717,6 +3731,9 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             messages.warning(request, "No import preview in progress. Start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         profile, document, workspace, planning_context = loaded
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
         live = self.live_plan(profile, document, request, planning_context)
         if live is None:
             _discard_import_preview(request)
@@ -3767,6 +3784,13 @@ class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             messages.warning(request, "No import preview in progress. Start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         profile, document, _workspace, planning_context = loaded
+        stale_reason = _stale_preview_reason(request)
+        if stale_reason is not None:
+            messages.warning(request, stale_reason)
+            return redirect(next_url)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
         live = self.live_plan(profile, document, request, planning_context)
         if live is None:
             _discard_import_preview(request)
@@ -3797,6 +3821,9 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
         if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
             messages.warning(request, "Recalculate and review the saved preview changes before importing.")
             return redirect(next_url)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
         selection = workspace.sync_selection(request.POST.get("identity", "").strip())
         if not selection:
             messages.warning(request, "That trace has no changes to synchronize.")
@@ -3869,6 +3896,9 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         stale_reason = _stale_preview_reason(request)
         if stale_reason is not None:
             return _preview_action_error(request, next_url, stale_reason, status=409)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
         field_key = request.POST.get("field_key", "").strip()
         object_type = request.POST.get("object_type", "").strip()
         try:
