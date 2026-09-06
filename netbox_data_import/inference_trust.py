@@ -63,11 +63,18 @@ def _split(value: str, setting: str):
 def origin_of(value: str, setting: str) -> str:
     """Return the scheme, host and port of one absolute URL, lower-cased."""
     parts = _split(value, setting)
-    if parts.port is None:
+    try:
+        # urlsplit defers the cast, so a non-numeric or out-of-range port raises only here.
+        port = parts.port
+    except ValueError as exc:
+        raise InvalidInferenceConfiguration(
+            f"'{setting}' must name a port between 1 and 65535. Got '{value}'."
+        ) from exc
+    if port is None:
         raise InvalidInferenceConfiguration(
             f"'{setting}' must name an explicit port, for example https://host:443. Got '{value}'."
         )
-    return f"{parts.scheme.lower()}://{parts.hostname.lower()}:{parts.port}"
+    return f"{parts.scheme.lower()}://{parts.hostname.lower()}:{port}"
 
 
 def validate_origin(value: str, setting: str) -> str:
@@ -127,6 +134,11 @@ def validate_api_root(
     if parts.path.endswith("/"):
         raise InvalidInferenceConfiguration(
             f"'{setting}' must have no trailing slash. The client appends /chat/completions. Got '{api_root}'."
+        )
+    if parts.query or parts.fragment:
+        raise InvalidInferenceConfiguration(
+            f"'{setting}' carries no query or fragment component. The client appends /chat/completions to the "
+            f"path, which either one would swallow. Got '{api_root}'."
         )
     _assert_origin_approved(api_root, allowlist, authentication, setting)
     return api_root

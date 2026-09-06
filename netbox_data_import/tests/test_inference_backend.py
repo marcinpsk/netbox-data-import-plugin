@@ -134,6 +134,38 @@ class RowValidationTest(TestCase):
         self.assertIn("credential_reference", caught.exception.message_dict)
 
     @override_settings(PLUGINS_CONFIG=plugin_settings())
+    def test_an_unusable_port_is_a_field_error_rather_than_a_crash(self):
+        """validate_backend_fields maps only InvalidInferenceConfiguration, so nothing else may escape."""
+        row = InferenceBackend(
+            backend_key="a",
+            display_name="A",
+            api_root="https://backend.example.invalid:99999",
+            model="m",
+            credential_reference=REFERENCE,
+        )
+
+        with self.assertRaises(ValidationError) as caught:
+            row.full_clean()
+
+        self.assertIn("api_root", caught.exception.message_dict)
+
+    @override_settings(PLUGINS_CONFIG=plugin_settings())
+    def test_an_api_root_carrying_a_query_is_refused(self):
+        """The adapter appends /chat/completions as text, so a query would swallow the suffix."""
+        row = InferenceBackend(
+            backend_key="a",
+            display_name="A",
+            api_root="https://backend.example.invalid:443/v1?key=x",
+            model="m",
+            credential_reference=REFERENCE,
+        )
+
+        with self.assertRaises(ValidationError) as caught:
+            row.full_clean()
+
+        self.assertIn("api_root", caught.exception.message_dict)
+
+    @override_settings(PLUGINS_CONFIG=plugin_settings())
     def test_a_valid_row_passes(self):
         row = InferenceBackend(
             backend_key="a",

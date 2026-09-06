@@ -43,6 +43,15 @@ class OriginFormatTest(SimpleTestCase):
     def test_an_unsupported_scheme_is_rejected(self):
         self.assertIn("scheme", self.rejects("ftp://a.example.invalid:21"))
 
+    def test_an_unusable_port_is_rejected_as_configuration(self):
+        """urlsplit defers the port cast, so reading it has to fail as a typed configuration error."""
+        for entry in ("https://host:abc", "https://host:99999", "https://host:-1"):
+            with self.subTest(entry=entry):
+                with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                    validate_origin(entry, setting="allowlist")
+
+                self.assertIn("port", str(caught.exception))
+
     def test_a_non_string_entry_is_rejected(self):
         self.assertIn("string", self.rejects(443))
 
@@ -69,6 +78,19 @@ class ApiRootAllowlistTest(SimpleTestCase):
             validate_api_root("https://backend.example.invalid:443/v1/", allowlist=ALLOWLIST, authentication="bearer")
 
         self.assertIn("trailing slash", str(caught.exception))
+
+    def test_a_query_or_fragment_is_rejected(self):
+        """The client appends /chat/completions as text, so a query would swallow the suffix."""
+        for value in (
+            "https://backend.example.invalid:443/v1?key=x",
+            "https://backend.example.invalid:443/v1#section",
+            "https://backend.example.invalid:443?key=x",
+        ):
+            with self.subTest(api_root=value):
+                with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                    validate_api_root(value, allowlist=ALLOWLIST, authentication="bearer")
+
+                self.assertIn("query", str(caught.exception))
 
     def test_an_empty_allowlist_accepts_nothing(self):
         with self.assertRaises(InvalidInferenceConfiguration):
