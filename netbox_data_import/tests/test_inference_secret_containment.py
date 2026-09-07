@@ -152,6 +152,28 @@ class SecretContainmentTest(TestCase):
 
         self.assertNotIn(SECRET, stream.getvalue())
 
+    def test_no_log_record_names_the_vault_address(self):
+        """urllib3 logs the host and the request URL at DEBUG, which the exception redaction misses.
+
+        The address is deployment infrastructure and the KV path names which secret was read, so
+        neither belongs in a log a wider audience can read than the one holding the settings.
+        """
+        stream = StringIO()
+        handler = logging.StreamHandler(stream)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        previous = root.level
+        root.setLevel(logging.DEBUG)
+        try:
+            self.resolve_once()
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(previous)
+
+        written = stream.getvalue()
+        self.assertNotIn("127.0.0.1", written)
+        self.assertNotIn("/v1/secret/data/", written)
+
     def test_the_profile_yaml_export_holds_no_backend_credential(self):
         """The profile export carries policy tables, never an Inference Backend reference."""
         profile = ImportProfile.objects.create(name="Export sweep", adapter_config={})

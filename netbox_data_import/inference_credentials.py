@@ -8,10 +8,13 @@ failures. No message built here carries the secret or a Vault response body, so 
 any failure it catches.
 """
 
+import logging
 import os
+import threading
 from urllib.parse import quote
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -26,6 +29,37 @@ from .inference_trust import InvalidInferenceConfiguration
 
 # The deployment owns the token; the plugin never stores one.
 VAULT_TOKEN_ENVIRONMENT_VARIABLE = "VAULT_TOKEN"
+
+TRANSPORT_LOGGER = "urllib3.connectionpool"
+_reading_vault = threading.local()
+
+
+class _QuietDuringVaultRead(logging.Filter):
+    """Drop transport records emitted while this thread is reading a credential.
+
+    urllib3 logs the connection and the request line at DEBUG, which names the Vault address and
+    the KV path of the secret being read. Neither is recoverable by redacting the message, because
+    the address is interpolated into several formats, so the read is silenced for its duration.
+    Every failure this module raises is still typed and still reaches the caller.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return whether one transport record may be emitted."""
+        return not getattr(_reading_vault, "active", False)
+
+
+logging.getLogger(TRANSPORT_LOGGER).addFilter(_QuietDuringVaultRead())
+
+
+@contextmanager
+def _quiet_transport_logging():
+    """Silence the transport logger for this thread only, for the length of one read."""
+    _reading_vault.active = True
+    try:
+        yield
+    finally:
+        _reading_vault.active = False
+
 
 DEFAULT_CONNECT_TIMEOUT = 5
 DEFAULT_READ_TIMEOUT = 60
@@ -141,13 +175,14 @@ class VaultKvV2CredentialBackend:
             self._settings.get("read_timeout", DEFAULT_READ_TIMEOUT),
         )
         try:
-            return self._session.get(
-                url,
-                headers=self._headers(),
-                timeout=timeout,
-                verify=self._settings.get("ca_bundle", True),
-                allow_redirects=False,
-            )
+            with _quiet_transport_logging():
+                return self._session.get(
+                    url,
+                    headers=self._headers(),
+                    timeout=timeout,
+                    verify=self._settings.get("ca_bundle", True),
+                    allow_redirects=False,
+                )
         except requests.RequestException as exc:
             # This text reaches Job.data, so neither the address nor the URL is reported.
             raise CredentialUnavailable(
