@@ -38,7 +38,7 @@ class TargetModuleJsonBoundaryTest(SimpleTestCase):
         """Every scalar shape an adapter can emit has deterministic plan display data."""
         self.assertEqual(_display_value(float("inf")), "inf")
         self.assertEqual(_display_value(Decimal("NaN")), "NaN")
-        self.assertEqual(_display_value(Decimal("2")), 2)
+        self.assertEqual(_display_value(Decimal(2)), 2)
         self.assertEqual(_display_value(Decimal("2.5")), 2.5)
         self.assertEqual(_display_value(datetime.date(2026, 1, 2)), "2026-01-02")
         self.assertEqual(_display_value({1: (Decimal("3.5"),)}), {"1": [3.5]})

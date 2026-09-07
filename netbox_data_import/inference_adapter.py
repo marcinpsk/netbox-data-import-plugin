@@ -245,9 +245,9 @@ def encode_payload(value) -> str:
 
 
 __all__ = (
+    "CHAT_COMPLETIONS_PATH",
     "AuthenticationFailure",
     "BackendTimeout",
-    "CHAT_COMPLETIONS_PATH",
     "InferenceBackendError",
     "InferenceCompletion",
     "InferenceRequest",

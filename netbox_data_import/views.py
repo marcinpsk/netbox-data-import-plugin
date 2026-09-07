@@ -668,7 +668,7 @@ def _iter_yaml_section(data, section_name, required_keys=()):
         )
     for idx, item in enumerate(section, start=1):
         if not isinstance(item, dict):
-            raise ValueError(f"'{section_name}[{idx}]' must be a mapping, got {type(item).__name__}.")
+            raise TypeError(f"'{section_name}[{idx}]' must be a mapping, got {type(item).__name__}.")
         missing = [k for k in required_keys if k not in item]
         if missing:
             raise ValueError(f"'{section_name}[{idx}]' missing required key(s): {', '.join(missing)}")
@@ -698,7 +698,7 @@ def _import_class_role_mappings(data, profile, stats):
     for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
         instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
         _set_if_present(instance, m, ("creates_rack", "role_slug", "ignore"))
-        if "rack_type" in m and m["rack_type"]:
+        if m.get("rack_type"):
             from dcim.models import RackType
 
             try:
@@ -765,7 +765,7 @@ def _apply_profile_yaml_data(data):
     produced by :class:`ExportProfileYamlView`).
 
     Returns ``(profile, stats)`` where *stats* is a ``{section: count}`` dict.
-    Raises ``ValueError`` with a descriptive message on invalid input.
+    Raises ``TypeError`` or ``ValueError`` with a descriptive message on invalid input.
     """
     from django.db import transaction
 
@@ -776,7 +776,7 @@ def _apply_profile_yaml_data(data):
 
     pdata = data["profile"]
     if not isinstance(pdata, dict):
-        raise ValueError("The 'profile' value must be a mapping (dict), not a scalar or list.")
+        raise TypeError("The 'profile' value must be a mapping (dict), not a scalar or list.")
     if not pdata.get("name"):
         raise ValueError("Profile YAML must include a 'name' field.")
 
@@ -878,12 +878,12 @@ class ImportProfileBulkImportView(generic.BulkImportView):
 
     Supports two formats from the same text area / file upload:
 
-    * **Hierarchical YAML** – the format produced by the "Export YAML" button
+    * **Hierarchical YAML** - the format produced by the "Export YAML" button
       (top-level keys: ``profile``, ``column_mappings``, ``class_role_mappings``,
       ``device_type_mappings``, ``manufacturer_mappings``,
       ``column_transform_rules``, ``cable_class_mappings``).  All nested
       mappings are created/updated.
-    * **Flat CSV/YAML** – one record per profile, plain metadata fields only
+    * **Flat CSV/YAML** - one record per profile, plain metadata fields only
       (name, description, sheet_name, …).  Falls back to NetBox's standard
       bulk-import logic.
     """
@@ -900,7 +900,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
         if upload:
             try:
                 raw = upload.read().decode("utf-8-sig")
-            except Exception as exc:  # pragma: no cover
+            except (UnicodeDecodeError, OSError) as exc:
                 messages.error(request, f"Could not read uploaded file: {exc}")
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
         else:
@@ -923,7 +923,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
         if isinstance(data, dict) and "profile" in data:
             try:
                 profile, stats = _apply_profile_yaml_data(data)
-            except ValueError as exc:  # KeyError no longer escapes since _iter_yaml_section validates required_keys
+            except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
                 messages.error(request, str(exc))
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
             summary = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items())
@@ -1594,9 +1594,8 @@ def _resume_import_job(request):
     from core.choices import JobStatusChoices
 
     jobs = _user_import_jobs(request).filter(status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES)
-    if job_pk := request.session.get("import_background_job_id"):
-        if job := jobs.filter(pk=job_pk).first():
-            return job
+    if (job_pk := request.session.get("import_background_job_id")) and (job := jobs.filter(pk=job_pk).first()):
+        return job
     return jobs.first()
 
 
@@ -3648,13 +3647,13 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
 
         try:
             data = yaml.safe_load(yaml_file.read())
-        except Exception as exc:
+        except (yaml.YAMLError, UnicodeDecodeError, OSError) as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
         try:
             profile, stats = _apply_profile_yaml_data(data)
-        except ValueError as exc:  # KeyError no longer escapes since _iter_yaml_section validates required_keys
+        except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
             messages.error(request, str(exc))
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
@@ -4746,7 +4745,7 @@ def _refused_row_write_response(exc, row_number):
     The worker reports the same failures, so both read the message from one place.
     """
     if isinstance(exc, DatabaseError):
-        logger.exception("SyncSingleRowView: database error for row_number=%s", row_number)
+        logger.error("SyncSingleRowView: database error for row_number=%s", row_number, exc_info=exc)
     return JsonResponse({"ok": False, "error": operator_failure_message(exc)}, status=400)
 
 

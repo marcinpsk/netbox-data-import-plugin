@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 import hashlib
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import timedelta
 
 from django.conf import settings
@@ -90,7 +90,7 @@ def validate_contact_candidate_resolution(
     available_source_columns,
 ) -> dict:
     """Validate and normalize one saved Contact candidate resolution."""
-    if not isinstance(resolved_fields, dict) or not CONTACT_RESOLUTION_REQUIRED_KEYS <= set(resolved_fields):
+    if not isinstance(resolved_fields, dict) or not set(resolved_fields) >= CONTACT_RESOLUTION_REQUIRED_KEYS:
         raise ValidationError("The Contact candidate resolution has an invalid structure.")
     invalid = sorted(set(resolved_fields) - CONTACT_RESOLUTION_KEYS)
     if invalid:
@@ -105,7 +105,7 @@ def validate_contact_candidate_resolution(
         raise ValidationError("Each resolved Contact field must select one source column.")
     missing_sources = set(field_sources.values()) - set(available_source_columns)
     if missing_sources:
-        missing = sorted(missing_sources)[0]
+        missing = min(missing_sources)
         raise ValidationError(f"The source column '{missing}' has no candidate value in this row.")
 
     field_values = resolved_fields.get("contact_field_values", {})
@@ -115,7 +115,7 @@ def validate_contact_candidate_resolution(
         raise ValidationError("Each literal Contact field must contain text.")
     overlap = set(field_sources) & set(field_values)
     if overlap:
-        raise ValidationError(f"Select a source column or enter a value for Contact {sorted(overlap)[0]}, not both.")
+        raise ValidationError(f"Select a source column or enter a value for Contact {min(overlap)}, not both.")
 
     contact_id = _validated_contact_id(resolved_fields.get("contact_id"))
 
@@ -994,11 +994,9 @@ class ImportExecution(models.Model):
             live = self.created > (now or timezone.now()) - self.SYNCHRONOUS_BOUND
         if live:
             return self
-        try:
+        # A worker finished the row between this read and the transition; its outcome wins.
+        with suppress(ValueError):
             self.mark_failed(reason=FailureReason.ABANDONED)
-        except ValueError:
-            # A worker finished the row between this read and the transition; its outcome wins.
-            pass
         return self
 
     def _finish(self, **values):

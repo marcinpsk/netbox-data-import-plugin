@@ -79,10 +79,11 @@ def inject_preview_session(page: Page, base_url: str, profile_id: int, site_id: 
         # Submit — use the import form button specifically
         page.locator('button[type="submit"].btn-primary').click()
         page.wait_for_load_state("networkidle", timeout=20000)
-        return "/import/preview/" in page.url
     except Exception as exc:
         print(f"    [inject_preview_session error: {exc}]")
         return False
+    else:
+        return "/import/preview/" in page.url
 
 
 def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:

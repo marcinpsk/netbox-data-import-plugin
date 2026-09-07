@@ -53,7 +53,7 @@ class ImportJobRunner(JobRunner):
         if execution is not None:
             values["import_execution_id"] = execution.pk
         self._save_data(**values)
-        raise JobFailed()
+        raise JobFailed
 
     @staticmethod
     def _publish_progress(processed, total):

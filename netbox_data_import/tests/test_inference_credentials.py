@@ -38,7 +38,7 @@ class RecordingVault(BaseHTTPRequestHandler):
     payload: object = {"data": {"data": {"api_key": SECRET}}}
     seen: list = []
 
-    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler names the hook.
+    def do_GET(self):
         length = int(self.headers.get("Content-Length") or 0)
         type(self).seen.append(
             {
@@ -382,7 +382,7 @@ class VaultRedirectTest(SimpleTestCase):
     class Redirecting(RecordingVault):
         """Answer with a redirect the client must not follow."""
 
-        def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler names the hook.
+        def do_GET(self):
             type(self).seen.append({"path": self.path, "headers": {}, "body": "", "method": "GET"})
             self.send_response(307)
             self.send_header("Location", "https://vault-active.example.invalid:8200/v1/secret/data/x")

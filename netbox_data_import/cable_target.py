@@ -1428,15 +1428,15 @@ def _cable_terminations(cable_id: int) -> list:
 
 
 __all__ = (
-    "CABLE_STATUS",
-    "ELIGIBLE_TERMINATION_LIMIT",
-    "CableModule",
-    "EligibleTerminations",
-    "eligible_terminations",
     "AUTOMATICALLY_RESOLVED",
+    "CABLE_STATUS",
     "CONFLICT_SEGMENT",
     "CREATE_SEGMENT",
+    "ELIGIBLE_TERMINATION_LIMIT",
     "MANUALLY_RESOLVED",
     "REUSE_SEGMENT",
     "UNRESOLVED",
+    "CableModule",
+    "EligibleTerminations",
+    "eligible_terminations",
 )

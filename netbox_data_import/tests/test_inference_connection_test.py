@@ -34,7 +34,7 @@ class Vault(BaseHTTPRequestHandler):
     status = 200
     payload: object = {"data": {"data": {"api_key": SECRET}}}
 
-    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler names the hook.
+    def do_GET(self):
         SEEN_PATHS.append(self.path)
         raw = self.payload if isinstance(self.payload, str) else json.dumps(self.payload)
         encoded = raw.encode()

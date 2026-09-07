@@ -86,6 +86,20 @@ select = [
     "PLE",    # pylint errors
     "T10",    # a forgotten debugger
     "YTT",    # sys.version misuse
+    "B",      # bugbear
+    "BLE",    # blind except
+    "DJ",     # Django
+    "DTZ",    # naive datetime
+    "FURB",   # refurb
+    "LOG",    # logging misuse
+    "PLW",    # pylint warnings
+    "PTH",    # pathlib over os.path
+    "RSE",    # raise
+    "RUF",    # ruff's own
+    "S",      # bandit
+    "SIM",    # simplify
+    "T20",    # a forgotten print
+    "TRY",    # exception handling
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
@@ -99,6 +113,10 @@ ignore = [
     "D203",   # 1 blank line before class docstring (conflicts with D211)
     "D213",   # multi-line summary second line (conflicts with D212)
     "PLC0415", # an import inside a function: deliberate here, for Django app loading order
+    "TRY003",  # the message inside a raise is the operator wording, and it belongs there
+    "RUF012",  # a mutable class attribute: Django Meta and table columns; a ClassVar pass is its own change
+    "DJ001",   # null=True on a CharField: correcting the five needs a migration and a data pass
+    "DJ012",   # model body order: the bodies here group by concern, and reordering them buys only style
 ]
 
 [tool.ruff.lint.mccabe]
@@ -107,8 +125,11 @@ max-complexity = 15
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "*/migrations/*.py" = ["D"]
-"*/tests/*.py" = ["D"]
-".devcontainer/**" = ["D"]
+# A test asserts, names throwaway credentials, shells out, and nests its context managers.
+"*/tests/*.py" = ["D", "S101", "S105", "S106", "S603", "S607", "SIM117", "B018", "PTH", "T20"]
+# Operator scripts print, and they read fixtures from paths this repository controls.
+".devcontainer/**" = ["D", "S101", "S108", "S110", "S310", "T20", "PTH", "B904", "BLE001"]
+"scripts/**" = ["T20", "S101", "PTH"]
 ".devcontainer/scripts/test-e2e.py" = ["C901"]
 ".devcontainer/scripts/test-e2e-preview.py" = ["C901"]
 ".devcontainer/scripts/load-sample-data.py" = ["C901"]

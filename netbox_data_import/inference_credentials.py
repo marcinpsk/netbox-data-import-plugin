@@ -29,7 +29,7 @@ from .inference_settings import (
 from .inference_trust import InvalidInferenceConfiguration
 
 # The deployment owns the token; the plugin never stores one.
-VAULT_TOKEN_ENVIRONMENT_VARIABLE = "VAULT_TOKEN"
+VAULT_TOKEN_ENVIRONMENT_VARIABLE = "VAULT_TOKEN"  # noqa: S105 - This names an environment variable, not a token.
 
 TRANSPORT_LOGGER = "urllib3.connectionpool"
 _reading_vault = threading.local()
@@ -262,6 +262,7 @@ def credential_backend_for(reference: CredentialReference, vault_settings: Mappi
 
 
 __all__ = (
+    "VAULT_TOKEN_ENVIRONMENT_VARIABLE",
     "CredentialBackend",
     "CredentialDenied",
     "CredentialFailure",
@@ -270,7 +271,6 @@ __all__ = (
     "InvalidCredentialConfiguration",
     "InvalidCredentialReference",
     "InvalidSecretMaterial",
-    "VAULT_TOKEN_ENVIRONMENT_VARIABLE",
     "VaultKvV2CredentialBackend",
     "credential_backend_for",
 )

@@ -604,7 +604,7 @@ class SplitNameReachesAMatchedRowTest(PreviewSessionMixin, BaseViewTestCase):
 
         row = next(r for r in self.client.session["import_rows"] if r.get("device_name") and r.get("u_position"))
         site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
-        manufacturer, device_type = _device_type_for_row(row)
+        _manufacturer, device_type = _device_type_for_row(row)
         role = DeviceRole.objects.create(name="SplitRole", slug="split-role")
         Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
         return row
@@ -682,7 +682,7 @@ class MatchedDeviceBadgeTest(PreviewSessionMixin, BaseViewTestCase):
         rows = self.client.session["import_rows"]
         row = next(r for r in rows if r.get("device_name") and r.get("u_position"))
         site = Site.objects.get(pk=self.client.session["import_context"]["site_id"])
-        manufacturer, device_type = _device_type_for_row(row)
+        _manufacturer, device_type = _device_type_for_row(row)
         role = DeviceRole.objects.create(name="MatchRole", slug="match-role")
         device = Device.objects.create(name=row["device_name"], site=site, device_type=device_type, role=role)
         return row, device

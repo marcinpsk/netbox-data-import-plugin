@@ -258,7 +258,7 @@ def run_on_separate_connection(target):
         connections["default"].close()
         try:
             target()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - the thread transports every failure to the caller
             errors.put(exc)
         finally:
             connections["default"].close()
