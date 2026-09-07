@@ -814,22 +814,48 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
 
     def test_a_replanned_trace_is_executed_again_rather_than_reported_done(self):
         """One trace identity spans two workbooks, so the execution key cannot be the selection alone."""
+        from core.models import Job
+
+        from netbox_data_import.models import ImportExecution
+
         self.client.force_login(self.actor)
-        for blocks in (direct_path(), patched_path()):
+        keys = []
+        # The loop ignored every response, so a silent refusal anywhere arrived as one final failure.
+        for step, blocks in enumerate((direct_path(), patched_path()), start=1):
             upload = BytesIO(trace_workbook_bytes(path_blocks=(blocks,)))
             upload.name = "traces.xlsx"
-            self.client.post(
+            setup = self.client.post(
                 reverse("plugins:netbox_data_import:import_setup"),
                 {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
                 follow=True,
             )
+            self.assertEqual(setup.status_code, 200, f"step {step}: the setup POST did not render")
+            self.assertTrue(self.client.session.get("import_preview_pending"), f"step {step}: setup stored no preview")
             workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+            self.assertEqual(workspace.status_code, 200, f"step {step}: the workspace did not render")
+            self.assertFalse(
+                workspace.context["drift"], f"step {step}: the fresh preview already disagreed with NetBox"
+            )
+            self.assertTrue(workspace.context["traces"], f"step {step}: the preview planned no trace")
             chosen = workspace.context["traces"][0]
-            self.client.post(
+            response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
                 {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
             )
+            queued = Job.objects.filter(data__job_type="netbox_data_import.import").order_by("pk")
+            self.assertEqual(queued.count(), step, f"step {step}: the sync queued no new job")
+            self.assertRedirects(
+                response,
+                reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": queued.last().pk}),
+                fetch_redirect_response=False,
+                msg_prefix=f"step {step}",
+            )
             self.run_rq_jobs()
+            execution = ImportExecution.objects.order_by("pk").last()
+            self.assertIsNotNone(execution, f"step {step}: the queued job recorded no execution")
+            keys.append(execution.idempotency_key)
+
+        self.assertNotEqual(keys[0], keys[1], "both steps built one execution key, so the second never ran")
 
         # The patched path replaces the direct Cable with its three physical segments.
         self.assertFalse(
