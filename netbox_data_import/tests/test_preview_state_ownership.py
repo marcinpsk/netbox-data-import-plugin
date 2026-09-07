@@ -48,14 +48,29 @@ def _guarded_key(node) -> str | None:
     return None
 
 
-def _mapping_keys(node: ast.Dict) -> list[str]:
-    """Return the guarded keys one mapping literal names, following a nested `**` mapping."""
+def _is_dict_call(node) -> bool:
+    """Return whether one expression is a `dict(...)` call, which builds a mapping in place."""
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict"
+
+
+def _mapping_keys(node) -> list[str]:
+    """Return the guarded keys one mapping expression names, through `**` and through `dict(...)`."""
     keys: list[str] = []
+    if _is_dict_call(node):
+        for argument in node.args:
+            keys.extend(_mapping_keys(argument))
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                keys.extend(_mapping_keys(keyword.value))
+            elif keyword.arg in GUARDED_LITERALS:
+                keys.append(keyword.arg)
+        return keys
+    if not isinstance(node, ast.Dict):
+        return keys
     for element, value in zip(node.keys, node.values, strict=True):
         if element is None:
             # `{**{KEY: ...}}` names the key just as plainly as `{KEY: ...}` does.
-            if isinstance(value, ast.Dict):
-                keys.extend(_mapping_keys(value))
+            keys.extend(_mapping_keys(value))
         elif key := _guarded_key(element):
             keys.append(key)
     return keys
@@ -65,14 +80,13 @@ def _update_keys(node: ast.Call) -> list[str]:
     """Return the guarded keys one `session.update(...)` names, by mapping or by keyword."""
     keys: list[str] = []
     for argument in node.args:
-        if isinstance(argument, ast.Dict):
+        if isinstance(argument, (ast.Dict, ast.Call)):
             keys.extend(_mapping_keys(argument))
         elif key := _guarded_key(argument):
             keys.append(key)
     for keyword in node.keywords:
         if keyword.arg is None:
-            if isinstance(keyword.value, ast.Dict):
-                keys.extend(_mapping_keys(keyword.value))
+            keys.extend(_mapping_keys(keyword.value))
         elif keyword.arg in GUARDED_LITERALS:
             keys.append(keyword.arg)
     return keys
@@ -183,4 +197,20 @@ class WritesScanTest(SimpleTestCase):
 
     def test_ignores_a_delete_of_an_unguarded_key(self):
         source = "def f(session):\n    del session['import_rows']\n"
+        self.assertEqual(_writes_in_source(source, "t.py"), [])
+
+    def test_finds_a_guarded_key_in_a_dict_call_passed_to_update(self):
+        source = "def f(session, plan):\n    session.update(dict(import_plan=plan))\n"
+        self.assertEqual(_writes_in_source(source, "t.py"), ["t.py:2: session.update(import_plan)"])
+
+    def test_finds_a_guarded_key_in_a_dict_call_unpacked_into_update(self):
+        source = "def f(session, plan):\n    session.update(**dict(import_plan=plan))\n"
+        self.assertEqual(_writes_in_source(source, "t.py"), ["t.py:2: session.update(import_plan)"])
+
+    def test_finds_a_guarded_key_in_a_mapping_passed_to_a_dict_call(self):
+        source = "def f(session, plan):\n    session.update(dict({PREVIEW_PLAN_SESSION_KEY: plan}))\n"
+        self.assertEqual(_writes_in_source(source, "t.py"), ["t.py:2: session.update(PREVIEW_PLAN_SESSION_KEY)"])
+
+    def test_ignores_a_dict_call_naming_no_guarded_key(self):
+        source = "def f(session, plan):\n    session.update(dict(import_rows=plan))\n"
         self.assertEqual(_writes_in_source(source, "t.py"), [])

@@ -826,15 +826,25 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
         self.build_topology()
 
     @staticmethod
-    def _another_backend_waits_on_a_lock():
-        """Return whether another connection to this test database is blocked on a lock."""
+    def _backend_pid():
+        """Return the PostgreSQL backend PID this connection is using."""
         from django.db import connection
 
         with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
-                "WHERE NOT l.granted AND a.datname = current_database() AND a.pid <> pg_backend_pid()"
-            )
+            cursor.execute("SELECT pg_backend_pid()")
+            return cursor.fetchone()[0]
+
+    @staticmethod
+    def _is_blocked(pid):
+        """Return whether that one backend is waiting on a lock.
+
+        A row wait shows up as an ungranted `transactionid` lock with no relation, so this keys on
+        the backend rather than on the table: any other waiter would otherwise pass for ours.
+        """
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM pg_locks WHERE NOT granted AND pid = %s", [pid])
             return cursor.fetchone()[0] > 0
 
     def test_a_sync_queued_under_the_lock_refuses_the_one_waiting_behind_it(self):
@@ -860,6 +870,8 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
         chosen = workspace.context["traces"][0]
         context = self.client.session["import_context"]
         profile_pk, document_pk = self.profile.pk, context["source_document_id"]
+        # The test client runs the view on this connection, so this is the PID that will block.
+        target_pid = self._backend_pid()
         holding = threading.Event()
 
         def queue_the_competing_sync():
@@ -871,7 +883,7 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
                     holding.set()
                     # Let the request under test reach the row and block on it before committing.
                     deadline = time.monotonic() + 10
-                    while time.monotonic() < deadline and not self._another_backend_waits_on_a_lock():
+                    while time.monotonic() < deadline and not self._is_blocked(target_pid):
                         time.sleep(0.05)
                     rival = ImportJobRunner.enqueue(
                         name=ImportJobRunner.name,
