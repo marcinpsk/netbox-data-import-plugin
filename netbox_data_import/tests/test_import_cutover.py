@@ -779,12 +779,12 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
                 self.saved.append(self.meta["processed"])
 
         progress_job = ProgressJob()
-        with patch("netbox_data_import.jobs.get_current_job", return_value=progress_job):
+        with patch("netbox_data_import.jobs.get_current_job", autospec=True, return_value=progress_job):
             for processed in range(31):
                 ImportJobRunner._publish_progress(processed, 30)
         self.assertEqual(progress_job.saved, [0, 25, 30])
 
-        with patch("netbox_data_import.jobs.get_current_job", return_value=None):
+        with patch("netbox_data_import.jobs.get_current_job", autospec=True, return_value=None):
             ImportJobRunner._publish_progress(0, 1)
 
     def test_single_row_sync_rejects_invalid_session_and_row_inputs(self):

@@ -72,6 +72,13 @@ repos:
         pass_filenames: false
         files: ^(netbox_data_import/(cable_target|models|target_modules|trace_workbook)\.py|docs/spec/target-neutral-import-architecture\.md|scripts/check_spec_diagnostics\.py)$
 
+      - id: mock-discipline
+        name: Mocks are bounded, marked, or grandfathered
+        entry: python3 netbox_data_import/tests/mock_discipline.py
+        language: system
+        pass_filenames: false
+        files: ^netbox_data_import/tests/.*\.py$
+
       - id: gen-compatibility
         name: Compatibility metadata follows the version and the test matrix
         entry: python3 scripts/gen_compatibility.py
