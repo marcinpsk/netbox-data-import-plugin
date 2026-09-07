@@ -85,6 +85,22 @@ def test_flags_magicmock_with_false_spec():
     assert [h.mock for h in scan_source(src)] == ["MagicMock"]
 
 
+def test_flags_magicmock_with_autospec():
+    """`autospec` is a patch() argument. A mock constructor keeps it as a plain attribute."""
+    src = "from unittest.mock import MagicMock\nMagicMock(autospec=SomeClass)\n"
+    assert [h.mock for h in scan_source(src)] == ["MagicMock"]
+
+
+def test_accepts_autospec_on_patch_calls():
+    """The same keyword still bounds patch() and patch.object()."""
+    src = (
+        "from unittest.mock import patch\n"
+        'patch("netbox_data_import.views.helper", autospec=True)\n'
+        "patch.object(views, 'helper', autospec=True)\n"
+    )
+    assert scan_source(src) == []
+
+
 def test_accepts_mock_bound_expressions():
     for value in ("SomeClass", "factory()", "module.SomeClass", "0", "''"):
         src = f"from unittest.mock import MagicMock\nMagicMock(spec={value})\n"

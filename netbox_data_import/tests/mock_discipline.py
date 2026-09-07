@@ -67,9 +67,9 @@ _FABRICATING_MOCKS = {"MagicMock", "NonCallableMagicMock", "Mock", "NonCallableM
 # True while the plugin stays sync-only; a real async boundary would make this noise.
 INCLUDE_ASYNCMOCK = True
 # Keyword args that bound a mock to a real interface (or delegate to a real object).
-_BOUNDING_KWARGS = {"spec", "spec_set", "autospec", "wraps"}
-# The same for patch(), which additionally accepts a ready-made replacement object.
-_PATCH_BOUNDING_KWARGS = _BOUNDING_KWARGS | {"new"}
+_BOUNDING_KWARGS = {"spec", "spec_set", "wraps"}
+# patch() also takes `autospec`, which a mock constructor would keep as a plain attribute, and `new`.
+_PATCH_BOUNDING_KWARGS = _BOUNDING_KWARGS | {"new", "autospec"}
 # Canonical values stored in the lexical binding table for module imports.
 _MOCK_MODULE = "unittest.mock"
 _UNITTEST_MODULE = "unittest"
