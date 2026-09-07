@@ -25,6 +25,10 @@
   }
 
   function clearSelection() {
+    Array.prototype.forEach.call(node('traceTerminationCandidates').children, function (row) {
+      row.classList.remove('active');
+      row.setAttribute('aria-pressed', 'false');
+    });
     node('traceTerminationObjectId').value = '';
     node('traceTerminationObjectType').value = '';
     // The offered search belongs to a selection, so it cannot outlive one.
@@ -34,12 +38,13 @@
 
   function renderCandidates(payload, offered) {
     var list = node('traceTerminationCandidates');
-    list.replaceChildren();
     clearSelection();
+    list.replaceChildren();
     (payload.candidates || []).forEach(function (candidate) {
       var item = document.createElement('button');
       item.type = 'button';
       item.className = 'list-group-item list-group-item-action';
+      item.setAttribute('aria-pressed', 'false');
       item.textContent = candidate.display || candidate.name;
       item.dataset.candidateId = candidate.id;
       // The offer belongs to the query that produced it, not to whatever the box says on click.
@@ -47,8 +52,10 @@
       item.addEventListener('click', function () {
         Array.prototype.forEach.call(list.children, function (row) {
           row.classList.remove('active');
+          row.setAttribute('aria-pressed', 'false');
         });
         item.classList.add('active');
+        item.setAttribute('aria-pressed', 'true');
         var objectType = node('traceTerminationObjectType');
         node('traceTerminationObjectId').value = candidate.id;
         objectType.value = kindLabels[activeKind] || '';
@@ -65,8 +72,8 @@
 
   function reportFailure(message) {
     var error = node('traceTerminationError');
-    node('traceTerminationCandidates').replaceChildren();
     clearSelection();
+    node('traceTerminationCandidates').replaceChildren();
     show(node('traceTerminationCount'), false);
     error.textContent = message;
     show(error, true);
@@ -118,12 +125,16 @@
     node('traceTerminationLabel').textContent = trigger.dataset.traceLabel || '';
     node('traceTerminationSearch').value = '';
     show(node('traceTerminationError'), false);
+    clearSelection();
     node('traceTerminationCandidates').replaceChildren();
     show(node('traceTerminationCount'), false);
-    clearSelection();
     load();
     modal.addEventListener('hidden.bs.modal', function () { trigger.focus(); }, {once: true});
     ModalClass.getOrCreateInstance(modal).show(trigger);
+  });
+
+  document.addEventListener('keydown', function (event) {
+    if (event.target.id === 'traceTerminationSearch' && event.key === 'Enter') event.preventDefault();
   });
 
   document.addEventListener('input', function (event) {
