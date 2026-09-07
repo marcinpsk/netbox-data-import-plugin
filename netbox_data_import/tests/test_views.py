@@ -73,7 +73,7 @@ def _make_profile(name="ViewTest") -> ImportProfile:
 def _store_workspace_rows(client, user, profile, site, rows):
     """Store a small target-neutral preview for tests of Review Workspace commands."""
     from netbox_data_import.plan import Disposition, ImportPlan, SynchronizationUnit
-    from netbox_data_import.preview_row_actions import record_recalculated_preview
+    from netbox_data_import.preview_row_actions import start_new_preview
 
     units = tuple(
         SynchronizationUnit(
@@ -97,7 +97,7 @@ def _store_workspace_rows(client, user, profile, site, rows):
         planning_context={"site_id": site.pk, "location_id": None, "tenant_id": None},
     )
     session = client.session
-    record_recalculated_preview(session, plan)
+    start_new_preview(session, plan)
     session["import_rows"] = list(rows)
     session["import_context"] = {
         "profile_id": profile.pk,
@@ -626,7 +626,7 @@ class PreviewSessionMixin:
         from netbox_data_import.import_engine import ImportEngine
         from netbox_data_import.models import SourceDocument
         from netbox_data_import.preview_row_actions import (
-            record_recalculated_preview,
+            start_new_preview,
         )
         from netbox_data_import.review_workspace import ReviewWorkspace
 
@@ -653,7 +653,7 @@ class PreviewSessionMixin:
         workspace = ReviewWorkspace(plan)
 
         session = self.client.session
-        record_recalculated_preview(session, plan)
+        start_new_preview(session, plan)
         session["import_rows"] = workspace.source_rows
         session["import_context"] = {
             "profile_id": profile.pk,

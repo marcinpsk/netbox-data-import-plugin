@@ -87,14 +87,21 @@ from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-    RETAINED_SYNC_JOB_SESSION_KEY,
     PreviewActionInvalid,
+    PreviewLocked,
+    assert_preview_may_move,
+    clear_preview_state,
     current_preview_revision,
     load_cached_preview,
     mark_preview_dirty,
     pending_preview_payload,
     record_recalculated_preview,
+    release_retained_sync,
+    restore_preview_plan,
+    retain_sync_job,
+    retained_sync_block_reason,
     retire_preview_revision,
+    start_new_preview,
 )
 from .import_engine import (
     ImportEngine,
@@ -1154,13 +1161,12 @@ class ImportSetupView(PermissionRequiredMixin, View):
             return render(request, "netbox_data_import/import_setup.html", _import_setup_context(request, form))
 
         workspace = ReviewWorkspace(plan)
-        record_recalculated_preview(request.session, plan)
+        start_new_preview(request.session, plan)
         request.session["import_rows"] = workspace.source_rows
         request.session["import_context"] = context_data
         request.session["import_preview_pending"] = True
         request.session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         request.session.pop("import_preview_source_job_id", None)
-        request.session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
         _clear_restored_import_job(request)
         request.session["import_unused_columns"] = {
             column["name"]: {"count": column["count"], "samples": column["samples"]}
@@ -1325,7 +1331,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 _discard_import_preview(request)
                 messages.warning(request, "The saved import target is no longer available. Start a new preview.")
                 return redirect(reverse("plugins:netbox_data_import:import_setup"))
-            record_recalculated_preview(request.session, plan)
+            record_recalculated_preview(request.session, plan, user=request.user)
         result = ReviewWorkspace(plan)
         rows = result.source_rows
         request.session["import_rows"] = rows
@@ -1505,15 +1511,9 @@ def _import_setup_context(request, form):
 
 def _discard_import_preview(request):
     """Remove session data that belongs only to an unsubmitted preview."""
-    for key in (
-        "import_context",
-        "import_idempotency_key",
-        PREVIEW_PLAN_SESSION_KEY,
-        "import_rows",
-        "import_unused_columns",
-        RETAINED_SYNC_JOB_SESSION_KEY,
-    ):
+    for key in ("import_context", "import_idempotency_key", "import_rows", "import_unused_columns"):
         request.session.pop(key, None)
+    clear_preview_state(request.session)
     request.session["import_preview_pending"] = False
     request.session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
     request.session.pop("import_preview_source_job_id", None)
@@ -1594,7 +1594,7 @@ def _restore_import_session(request, job):
         and _import_source_rows_available(request, job)
     )
     if failed_preview_available and not preview_is_pending:
-        request.session[PREVIEW_PLAN_SESSION_KEY] = data["accepted_plan"]
+        restore_preview_plan(request.session, data["accepted_plan"])
         request.session["import_context"] = data["context_data"]
         request.session["import_preview_pending"] = True
         request.session["import_preview_source_job_id"] = job.pk
@@ -1621,6 +1621,8 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
 
     from .jobs import ImportJobRunner
 
+    # The second writer that can break the invariant: a queue while one is already retained.
+    assert_preview_may_move(request.session, request.user)
     if keep_preview:
         # `ImportPlan.revision` never advances, so the plan's own content is what tells two apart.
         idempotency_key = fingerprint_of({"plan": plan_data, "selection": sorted(selection)})
@@ -1658,9 +1660,9 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
     if keep_preview:
         # The write just made the reviewed plan stale, so the next command has to re-read first.
         mark_preview_dirty(request.session)
-        request.session[RETAINED_SYNC_JOB_SESSION_KEY] = job.pk
+        retain_sync_job(request.session, job.pk)
     else:
-        request.session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
+        release_retained_sync(request.session)
         request.session["import_preview_pending"] = False
         request.session.pop("import_preview_source_job_id", None)
     return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
@@ -1683,9 +1685,6 @@ class ImportRunView(PermissionRequiredMixin, View):
                 return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job_pk}))
             messages.warning(request, "No import in progress.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        if retained_reason := _retained_sync_block_reason(request):
-            messages.warning(request, retained_reason)
-            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
             messages.warning(request, "Recalculate and review the saved preview changes before importing.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
@@ -1720,7 +1719,11 @@ class ImportRunView(PermissionRequiredMixin, View):
             messages.info(request, "The accepted Import Plan has no changes to apply.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
-        return _queue_accepted_plan(request, profile, document, ctx_data, plan_data, selection)
+        try:
+            return _queue_accepted_plan(request, profile, document, ctx_data, plan_data, selection)
+        except PreviewLocked as exc:
+            messages.warning(request, str(exc))
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
 
 
 class ImportProgressView(PermissionRequiredMixin, View):
@@ -1801,8 +1804,9 @@ class ImportResultsView(PermissionRequiredMixin, View):
             request.session.pop("import_background_job_id", None)
             request.session["import_preview_pending"] = False
             request.session.pop("import_preview_source_job_id", None)
-            for key in ("import_rows", "import_context", PREVIEW_PLAN_SESSION_KEY, "import_unused_columns"):
+            for key in ("import_rows", "import_context", "import_unused_columns"):
                 request.session.pop(key, None)
+            clear_preview_state(request.session)
         return render(
             request,
             "netbox_data_import/import_results.html",
@@ -3685,25 +3689,12 @@ def _trace_sync_block_reason(reviewed_plan: ImportPlan, live_plan: ImportPlan) -
     return ""
 
 
-RETAINED_SYNC_BLOCK_REASON = (
-    "A trace synchronization is still running. Wait for it to finish before changing this workspace."
-)
-
-
 def _retained_sync_block_reason(request) -> str:
-    """Return why the retained import Job prevents another workspace command, or ``""``.
+    """Return why the retained trace sync holds this preview, for a page that has to say so.
 
-    A per-trace sync keeps the preview, so the workspace stays open while its Job runs. Until that
-    Job reaches a terminal state its writes are not in NetBox yet, so a re-read or a replan adopts
-    the state it is about to replace and clears the guard that stops a second queue.
+    Refusing is the writers' job, in `preview_row_actions`. This read only routes and renders.
     """
-    from core.choices import JobStatusChoices
-
-    job_pk = request.session.get(RETAINED_SYNC_JOB_SESSION_KEY)
-    if not job_pk:
-        return ""
-    retained = _user_import_jobs(request).filter(pk=job_pk, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES)
-    return RETAINED_SYNC_BLOCK_REASON if retained.exists() else ""
+    return retained_sync_block_reason(request.session, request.user)
 
 
 def _with_blocked_sync(trace, reason: str):
@@ -3849,17 +3840,17 @@ class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         if stale_reason is not None:
             messages.warning(request, stale_reason)
             return redirect(next_url)
-        retained_reason = _retained_sync_block_reason(request)
-        if retained_reason:
-            messages.warning(request, retained_reason)
-            return redirect(next_url)
         refusal = self.refuse_unregistered_adapter(request, profile)
         if refusal is not None:
             return refusal
         live = self.live_plan(profile, document, request, planning_context)
         if live is None:
             return self.discard_unavailable_target(request)
-        record_recalculated_preview(request.session, live)
+        try:
+            record_recalculated_preview(request.session, live, user=request.user)
+        except PreviewLocked as exc:
+            messages.warning(request, str(exc))
+            return redirect(next_url)
         messages.success(request, "The workspace was re-read from NetBox.")
         return redirect(next_url)
 
@@ -3881,10 +3872,6 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
         if stale_reason is not None:
             messages.warning(request, stale_reason)
             return redirect(next_url)
-        retained_reason = _retained_sync_block_reason(request)
-        if retained_reason:
-            messages.warning(request, retained_reason)
-            return redirect(next_url)
         if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
             messages.warning(request, "Recalculate and review the saved preview changes before importing.")
             return redirect(next_url)
@@ -3902,15 +3889,19 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
         if not selection:
             messages.warning(request, "That trace has no changes to synchronize.")
             return redirect(next_url)
-        return _queue_accepted_plan(
-            request,
-            profile,
-            document,
-            request.session.get("import_context") or {},
-            request.session.get(PREVIEW_PLAN_SESSION_KEY),
-            list(selection),
-            keep_preview=True,
-        )
+        try:
+            return _queue_accepted_plan(
+                request,
+                profile,
+                document,
+                request.session.get("import_context") or {},
+                request.session.get(PREVIEW_PLAN_SESSION_KEY),
+                list(selection),
+                keep_preview=True,
+            )
+        except PreviewLocked as exc:
+            messages.warning(request, str(exc))
+            return redirect(next_url)
 
 
 class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
@@ -3970,8 +3961,8 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         stale_reason = _stale_preview_reason(request)
         if stale_reason is not None:
             return _preview_action_error(request, next_url, stale_reason, status=409)
-        retained_reason = _retained_sync_block_reason(request)
-        if retained_reason:
+        # Refuse before writing: the decision and its replan commit together.
+        if retained_reason := _retained_sync_block_reason(request):
             return _preview_action_error(request, next_url, retained_reason, status=409)
         refusal = self.refuse_unregistered_adapter(request, profile)
         if refusal is not None:
@@ -4029,7 +4020,10 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
             )
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
-        record_recalculated_preview(request.session, plan)
+        try:
+            record_recalculated_preview(request.session, plan, user=request.user)
+        except PreviewLocked as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
         messages.success(request, f"Termination resolved to '{chosen}'.")
         return redirect(next_url)
 

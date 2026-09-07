@@ -319,7 +319,7 @@ def setup_preview_with_device_matches(client, profile):
     from netbox_data_import.models import DeviceExistingMatch, SourceDocument
     from netbox_data_import.preview_row_actions import (
         PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-        record_recalculated_preview,
+        start_new_preview,
     )
     from netbox_data_import.review_workspace import ReviewWorkspace
 
@@ -364,7 +364,7 @@ def setup_preview_with_device_matches(client, profile):
     plan = ImportEngine.plan(profile, document, actor, planning_context)
     result = ReviewWorkspace(plan)
     session = client.session
-    record_recalculated_preview(session, plan)
+    start_new_preview(session, plan)
     session["import_rows"] = result.source_rows
     session["import_context"] = {
         "profile_id": profile.pk,

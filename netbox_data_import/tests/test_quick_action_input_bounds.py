@@ -322,7 +322,7 @@ class QuickActionInputBoundsTest(TransactionTestCase):
     def _store_active_import(self, rows):
         """Store a real source document and accepted plan for deferred row actions."""
         from netbox_data_import.import_engine import ImportEngine
-        from netbox_data_import.preview_row_actions import record_recalculated_preview
+        from netbox_data_import.preview_row_actions import start_new_preview
         from netbox_data_import.review_workspace import ReviewWorkspace
 
         headers = [key for key in rows[0] if not key.startswith("_")]
@@ -338,7 +338,7 @@ class QuickActionInputBoundsTest(TransactionTestCase):
         result = ReviewWorkspace(plan)
 
         session = self.client.session
-        record_recalculated_preview(session, plan)
+        start_new_preview(session, plan)
         session["import_rows"] = result.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,

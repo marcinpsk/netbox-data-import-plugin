@@ -28,13 +28,92 @@ def current_preview_revision(session) -> str:
     return revision
 
 
-def record_recalculated_preview(session, plan) -> str:
-    """Store one authoritative preview and return its new revision."""
+RETAINED_SYNC_BLOCK_REASON = (
+    "A trace synchronization is still running. Wait for it to finish before changing this workspace."
+)
+
+
+class PreviewLocked(RuntimeError):
+    """The preview may not move while the trace sync it queued is still running.
+
+    A per-trace sync keeps the preview open, so the operator stays on a page whose plan the queued
+    Job is about to invalidate. Recalculating adopts NetBox state that predates the Job's writes and
+    clears the guard that stops a second queue, so both are refused until the Job is terminal.
+    """
+
+
+def retained_sync_block_reason(session, user) -> str:
+    """Return why the retained trace sync holds this preview, or ``""``.
+
+    Scope: this reads one session and is consulted before the enqueue, so it orders one operator's
+    commands. It does not serialize two concurrent requests.
+    """
+    from core.choices import JobStatusChoices
+
+    from .jobs import ImportJobRunner
+
+    job_pk = session.get(RETAINED_SYNC_JOB_SESSION_KEY)
+    if not job_pk:
+        return ""
+    retained = ImportJobRunner.get_jobs().filter(
+        pk=job_pk,
+        user=user,
+        data__job_type=ImportJobRunner.job_type,
+        status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
+    )
+    return RETAINED_SYNC_BLOCK_REASON if retained.exists() else ""
+
+
+def assert_preview_may_move(session, user) -> None:
+    """Raise `PreviewLocked` when the retained trace sync still holds this preview."""
+    if reason := retained_sync_block_reason(session, user):
+        raise PreviewLocked(reason)
+
+
+def _store_preview(session, plan) -> str:
+    """Write one authoritative preview and return its new revision."""
     revision = secrets.token_urlsafe(18)
     session[PREVIEW_PLAN_SESSION_KEY] = plan.to_dict()
     session[PREVIEW_DIRTY_SESSION_KEY] = False
     session[PREVIEW_REVISION_SESSION_KEY] = revision
     return revision
+
+
+def record_recalculated_preview(session, plan, *, user) -> str:
+    """Replace the current preview with a freshly read one, refusing while a sync holds it."""
+    assert_preview_may_move(session, user)
+    return _store_preview(session, plan)
+
+
+def start_new_preview(session, plan) -> str:
+    """Store the first preview of a newly uploaded source, replacing whatever came before.
+
+    Unguarded on purpose: this is a different import, so it inherits no earlier sync. Releasing the
+    retained key is what stops the previous preview's Job from refusing commands on this one.
+    """
+    session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
+    return _store_preview(session, plan)
+
+
+def restore_preview_plan(session, plan_data) -> None:
+    """Adopt the accepted plan a failed Job stored, so its preview can be reviewed again."""
+    session[PREVIEW_PLAN_SESSION_KEY] = plan_data
+
+
+def retain_sync_job(session, job_pk) -> None:
+    """Record the per-trace sync whose writes this preview is now waiting on."""
+    session[RETAINED_SYNC_JOB_SESSION_KEY] = job_pk
+
+
+def release_retained_sync(session) -> None:
+    """Forget the retained sync, because this preview no longer waits on one."""
+    session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
+
+
+def clear_preview_state(session) -> None:
+    """Drop the stored plan and any retained sync, for a preview that is being discarded."""
+    session.pop(PREVIEW_PLAN_SESSION_KEY, None)
+    session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
 
 
 def retire_preview_revision(session) -> str:

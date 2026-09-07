@@ -661,6 +661,44 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
         )
         return Job.objects.get(data__job_type="netbox_data_import.import")
 
+    def test_the_writer_itself_refuses_a_recalculation_while_the_retained_sync_runs(self):
+        """The guard lives in the writer, so a caller that never checks still cannot clear it."""
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.preview_row_actions import (
+            PREVIEW_PLAN_SESSION_KEY,
+            PreviewLocked,
+            record_recalculated_preview,
+        )
+
+        self.queue_one_sync()
+        session = self.client.session
+        plan = ImportPlan.from_dict(session[PREVIEW_PLAN_SESSION_KEY])
+
+        with self.assertRaises(PreviewLocked):
+            record_recalculated_preview(session, plan, user=self.actor)
+
+        self.assertTrue(session[PREVIEW_DIRTY_SESSION_KEY])
+
+    def test_the_writer_records_again_once_the_retained_sync_is_terminal(self):
+        """The refusal lasts exactly as long as the Job, so the writer is not simply disabled."""
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.preview_row_actions import (
+            PREVIEW_PLAN_SESSION_KEY,
+            record_recalculated_preview,
+        )
+
+        job = self.queue_one_sync()
+        Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_COMPLETED)
+        session = self.client.session
+        plan = ImportPlan.from_dict(session[PREVIEW_PLAN_SESSION_KEY])
+
+        record_recalculated_preview(session, plan, user=self.actor)
+
+        self.assertFalse(session[PREVIEW_DIRTY_SESSION_KEY])
+
     def test_the_ordinary_preview_does_not_recalculate_while_the_retained_sync_runs(self):
         """The wizard preview is another door onto the same preview, and it clears the same guard."""
         self.queue_one_sync()
