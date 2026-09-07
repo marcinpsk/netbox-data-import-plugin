@@ -3666,6 +3666,22 @@ class SourceResolutionDeleteView(_ProfileChildDeleteView):
 # ---------------------------------------------------------------------------
 
 
+def _trace_sync_block_reason(reviewed_plan: ImportPlan, live_plan: ImportPlan) -> str:
+    """Return why live NetBox prevents synchronization of the reviewed plan."""
+    if live_plan.fingerprint != reviewed_plan.fingerprint:
+        return "NetBox has changed. Re-read the preview before synchronizing."
+    return ""
+
+
+def _with_blocked_sync(trace, reason: str):
+    """Refuse the sync action the view would reject, so the page cannot offer what the POST refuses."""
+    actions = tuple(
+        replace(action, enabled=False, reason=reason) if action.key == "sync" and action.enabled else action
+        for action in trace.actions
+    )
+    return replace(trace, actions=actions)
+
+
 def _workspace_field_keys(workspace) -> set:
     """Return every termination field key the reviewed preview actually asked about."""
     return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
@@ -3743,11 +3759,14 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         live = self.live_plan(profile, document, request, planning_context)
         if live is None:
             return self.discard_unavailable_target(request)
-        traces = workspace.traces
+        # Section 10.2: compared on each full load and on the re-read action, never polled.
+        sync_block_reason = _trace_sync_block_reason(workspace.plan, live)
+        drift = bool(sync_block_reason)
+        traces = (
+            [_with_blocked_sync(trace, sync_block_reason) for trace in workspace.traces] if drift else workspace.traces
+        )
         wanted = request.GET.get("trace", "")
         selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
-        # Section 10.2: compared on each full load and on the re-read action, never polled.
-        drift = live.fingerprint != workspace.plan.fingerprint
         summary = dict(workspace.trace_summary)
         from .models import TerminationResolution
 
@@ -3815,7 +3834,7 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
         if loaded is None:
             messages.warning(request, "No import preview in progress. Start a new import.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
-        profile, document, workspace, _planning_context = loaded
+        profile, document, workspace, planning_context = loaded
         stale_reason = _stale_preview_reason(request)
         if stale_reason is not None:
             messages.warning(request, stale_reason)
@@ -3826,6 +3845,13 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
         refusal = self.refuse_unregistered_adapter(request, profile)
         if refusal is not None:
             return refusal
+        live = self.live_plan(profile, document, request, planning_context)
+        if live is None:
+            return self.discard_unavailable_target(request)
+        sync_block_reason = _trace_sync_block_reason(workspace.plan, live)
+        if sync_block_reason:
+            messages.warning(request, sync_block_reason)
+            return redirect(next_url)
         selection = workspace.sync_selection(request.POST.get("identity", "").strip())
         if not selection:
             messages.warning(request, "That trace has no changes to synchronize.")

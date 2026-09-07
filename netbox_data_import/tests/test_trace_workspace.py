@@ -252,7 +252,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         trace = response.context["traces"][0]
         self.assertFalse(trace.actions[0].enabled)
-        self.assertContains(response, "disabled")
+        self.assertRegex(response.content.decode(), r'<button\b[^>]*data-trace-action="sync"[^>]*\sdisabled(?=[\s>])')
         self.assertContains(response, trace.actions[0].reason)
 
     def test_the_re_read_action_is_visible_even_without_drift(self):
@@ -310,6 +310,34 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
         self.assertTrue(response.context["drift"])
+
+    def test_sync_refuses_topology_drift_after_the_workspace_was_rendered(self):
+        """A live topology change requires another review before a trace can be queued."""
+        from core.models import Job
+
+        response = self.open_workspace(patched_path())
+        chosen = response.context["traces"][0]
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            follow=True,
+        )
+
+        self.assertFalse(Job.objects.filter(data__job_type="netbox_data_import.import").exists())
+        self.assertRedirects(refused, reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertContains(refused, "NetBox has changed. Re-read the preview before synchronizing.")
+
+    def test_topology_drift_disables_the_sync_button_with_its_reason(self):
+        """The workspace must explain why the reviewed trace cannot be synchronized."""
+        self.open_workspace(patched_path())
+        self.connect(self.panel_1_rear, self.panel_2_rear)
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertRegex(response.content.decode(), r'<button\b[^>]*data-trace-action="sync"[^>]*\sdisabled(?=[\s>])')
+        self.assertContains(response, "NetBox has changed. Re-read the preview before synchronizing.")
 
     def test_re_reading_clears_the_drift_strip(self):
         """The re-read action adopts the live plan, so the difference it reported is gone."""
@@ -848,7 +876,7 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
         # The location goes on another connection between the eligibility recheck and the replan.
         with competing_write_during(
             post_save, TerminationResolution, lambda: Location.objects.filter(pk=location.pk).delete()
-        ) as (observed, _blocked):
+        ) as (observed, blocked):
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_resolve_termination"),
                 {
@@ -862,6 +890,9 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
             )
 
         self.assertTrue(observed, "the decision never reached its TerminationResolution write")
-        self.assertEqual(response.status_code, 200)
+        self.assertFalse(blocked, "the target deletion must complete before the replan")
+        self.assertFalse(Location.objects.filter(pk=location.pk).exists())
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertContains(response, "The saved import target is no longer available.")
         self.assertFalse(self.client.session["import_preview_pending"])
