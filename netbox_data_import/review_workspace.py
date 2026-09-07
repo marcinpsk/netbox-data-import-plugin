@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import cached_property
 from types import MappingProxyType
 from typing import Any
 
@@ -531,9 +532,12 @@ class ReviewWorkspace:
         """Return whether the plan holds a Source Trace, without building one workspace entry."""
         return any(_states_a_trace(unit) for unit in self.plan.units)
 
-    @property
+    @cached_property
     def traces(self) -> tuple[TraceWorkspaceUnit, ...]:
-        """Return one workspace entry per Source Trace, in plan order."""
+        """Return one workspace entry per Source Trace, in plan order.
+
+        Cached because one page reads it twice, and each build reserializes every change.
+        """
         return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if _states_a_trace(unit))
 
     def sync_selection(self, identity: str) -> tuple[str, ...]:

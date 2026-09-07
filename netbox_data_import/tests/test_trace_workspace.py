@@ -13,6 +13,7 @@ from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.models import ImportProfile, TerminationResolution
 from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
+from netbox_data_import.preview_row_actions import PREVIEW_DIRTY_SESSION_KEY
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
     CableTopologyMixin,
@@ -131,6 +132,26 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertTrue(workspace.has_traces)
         self.assertEqual(len(workspace.traces), 1)
         self.assertFalse(ReviewWorkspace(ImportPlan(units=())).has_traces)
+
+    def test_the_workspace_builds_its_trace_entries_once_per_instance(self):
+        """One page reads `traces` and `trace_summary`, and each build reserializes every change."""
+        workspace = ReviewWorkspace(self.plan(patched_path()))
+
+        first = workspace.traces
+        workspace.trace_summary
+
+        self.assertIs(workspace.traces, first)
+
+    def test_a_units_copy_builds_its_own_trace_entries(self):
+        """`with_units` bypasses `__init__`, so the copy must carry its own cache, not share one."""
+        workspace = ReviewWorkspace(self.plan(patched_path()))
+        original = workspace.traces
+
+        copy = workspace.with_units(workspace.units)
+
+        self.assertIsNot(copy, workspace)
+        self.assertIsNot(copy.traces, original)
+        self.assertEqual([trace.identity for trace in copy.traces], [trace.identity for trace in original])
 
     def test_the_summary_strip_counts_terminations_and_dispositions(self):
         """The strip states what the reviewer has to work through, not one number."""
@@ -383,6 +404,122 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         statuses = [segment["status"] for segment in response.context["traces"][0].segments]
         self.assertIn("reuse existing", statuses)
 
+    def queue_one_sync(self):
+        """Synchronize the first trace and return the queued Job, leaving it unstarted."""
+        from core.models import Job
+
+        response = self.open_workspace(patched_path())
+        chosen = response.context["traces"][0]
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+        )
+        return Job.objects.get(data__job_type="netbox_data_import.import")
+
+    def test_a_re_read_is_refused_while_the_queued_synchronization_still_runs(self):
+        """The queued job has not written yet, so a re-read would adopt the state it is about to replace."""
+        self.queue_one_sync()
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session["import_preview_revision"]},
+            follow=True,
+        )
+
+        self.assertContains(refused, "A trace synchronization is still running.")
+        self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
+
+    def test_a_second_synchronization_cannot_be_queued_by_re_reading_first(self):
+        """The re-read cleared the guard the first queue set, which let a second plan pre-write state."""
+        from core.models import Job
+
+        self.queue_one_sync()
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session["import_preview_revision"]},
+        )
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {
+                "identity": workspace.context["traces"][0].identity,
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
+            follow=True,
+        )
+
+        self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
+        self.assertContains(refused, "A trace synchronization is still running.")
+
+    def test_the_queued_synchronization_disables_the_workspace_controls_with_its_reason(self):
+        """The page cannot offer a command the POST refuses, so both controls state the same reason."""
+        self.queue_one_sync()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        body = response.content.decode()
+        self.assertRegex(body, r'<button\b[^>]*data-trace-action="sync"[^>]*\sdisabled(?=[\s>])')
+        self.assertRegex(body, r'<button\b[^>]*id="traceWorkspaceReread"[^>]*\sdisabled(?=[\s>])')
+        self.assertContains(response, "A trace synchronization is still running.")
+
+    def test_the_workspace_re_reads_again_once_the_queued_synchronization_ends(self):
+        """The block lasts exactly as long as the job, so a terminal job restores every command."""
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        job = self.queue_one_sync()
+        Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_COMPLETED)
+
+        accepted = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session["import_preview_revision"]},
+            follow=True,
+        )
+
+        self.assertContains(accepted, "The workspace was re-read from NetBox.")
+        self.assertFalse(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
+
+    def test_the_sync_command_refuses_the_retained_job_without_help_from_the_dirty_guard(self):
+        """The dirty guard hides the sync guard, so this clears it and leaves the retained job alone."""
+        from core.models import Job
+
+        self.queue_one_sync()
+        session = self.client.session
+        session[PREVIEW_DIRTY_SESSION_KEY] = False
+        session.save()
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {
+                "identity": workspace.context["traces"][0].identity,
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
+        )
+
+        self.assertEqual(refused.status_code, 302)
+        self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
+
+    def test_the_block_holds_for_every_non_terminal_job_status(self):
+        """The writes are outstanding until the Job is terminal, not until the worker picks it up."""
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        job = self.queue_one_sync()
+        for status in JobStatusChoices.ENQUEUED_STATE_CHOICES:
+            with self.subTest(status=status):
+                Job.objects.filter(pk=job.pk).update(status=status)
+
+                refused = self.client.post(
+                    reverse("plugins:netbox_data_import:trace_workspace_reread"),
+                    {"preview_revision": self.client.session["import_preview_revision"]},
+                    follow=True,
+                )
+
+                self.assertContains(refused, "A trace synchronization is still running.")
+                self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
+
     def test_a_stale_form_post_is_refused_by_the_sync_command(self):
         """Two tabs share one session, so a command from the older one must not queue its plan."""
         from core.models import Job
@@ -488,6 +625,89 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "retired-adapter")
+
+
+class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
+    """A per-trace sync keeps the preview, so every door onto that preview has to respect its Job."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def upload(self, *blocks):
+        """Upload the given path blocks and leave the wizard on a materialized preview."""
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=blocks))
+        upload.name = "traces.xlsx"
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def queue_one_sync(self):
+        """Synchronize the first trace and return the queued Job, leaving it unstarted."""
+        from core.models import Job
+
+        self.upload(patched_path())
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {
+                "identity": workspace.context["traces"][0].identity,
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
+        )
+        return Job.objects.get(data__job_type="netbox_data_import.import")
+
+    def test_the_ordinary_preview_does_not_recalculate_while_the_retained_sync_runs(self):
+        """The wizard preview is another door onto the same preview, and it clears the same guard."""
+        self.queue_one_sync()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"), follow=True)
+
+        self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
+        self.assertContains(response, "A trace synchronization is still running.")
+
+    def test_a_full_import_cannot_be_queued_while_the_retained_sync_runs(self):
+        """Recalculating through the wizard preview would otherwise unblock the whole-plan import."""
+        from core.models import Job
+
+        self.queue_one_sync()
+        self.client.get(reverse("plugins:netbox_data_import:import_preview"), follow=True)
+
+        refused = self.client.post(reverse("plugins:netbox_data_import:import_run"), follow=True)
+
+        self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
+        self.assertContains(refused, "A trace synchronization is still running.")
+
+    def test_a_running_whole_plan_import_does_not_block_a_later_workspace(self):
+        """The wizard leaves its own Job id behind, and that Job is not a retained trace sync."""
+        from core.models import Job
+
+        self.upload(patched_path())
+        self.client.post(reverse("plugins:netbox_data_import:import_run"), follow=True)
+        wizard_job = Job.objects.get(data__job_type="netbox_data_import.import")
+        self.assertEqual(self.client.session["import_background_job_id"], wizard_job.pk)
+
+        self.upload(patched_path())
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertNotContains(response, "A trace synchronization is still running.")
+        sync = next(action for action in response.context["traces"][0].actions if action.key == "sync")
+        self.assertTrue(sync.enabled)
+
+    def test_a_new_upload_frees_the_workspace_of_the_previous_retained_sync(self):
+        """A new preview owns no earlier sync, so the old Job must not refuse its commands."""
+        self.queue_one_sync()
+
+        self.upload(patched_path())
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertNotContains(response, "A trace synchronization is still running.")
+        sync = next(action for action in response.context["traces"][0].actions if action.key == "sync")
+        self.assertTrue(sync.enabled)
 
 
 class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
@@ -611,6 +831,41 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(trace.disposition, "actionable")
         states = {item["label"]: item["state"] for item in trace.terminations}
         self.assertEqual(states["DEV-A absent-port"], "manually resolved")
+
+    def test_a_decision_is_refused_while_a_queued_synchronization_still_runs(self):
+        """The replan a decision makes reads NetBox, which the queued job is about to write."""
+        from core.models import Job
+
+        Interface.objects.create(device=self.make_device("SRC-open"), name="eth0", type="1000base-t")
+        Interface.objects.create(device=self.make_device("DST-open"), name="eth0", type="1000base-t")
+        blocked = direct_path(
+            from_end=trace_termination("SRC-open", "", "absent-port", "Port"),
+            to_end=trace_termination("DST-open", "", "eth0", "Port"),
+        )
+        self.open_workspace(patched_path(), blocked)
+        field_key = termination_field_key(device="SRC-open", cards="", port="absent-port", kind="interface")
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        syncable = next(trace for trace in workspace.context["traces"] if trace.disposition == "actionable")
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": syncable.identity, "preview_revision": self.client.session["import_preview_revision"]},
+        )
+        self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
+
+        refused = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_termination"),
+            {
+                "field_key": field_key,
+                "object_type": "dcim.interface",
+                "object_id": Interface.objects.get(device__name="SRC-open", name="eth0").pk,
+                "preview_revision": self.client.session["import_preview_revision"],
+            },
+            headers={"accept": "application/json"},
+        )
+
+        self.assertEqual(refused.status_code, 409, refused.content[:300])
+        self.assertIn("A trace synchronization is still running.", refused.json()["error"])
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile, field_key=field_key).exists())
 
     def test_a_searched_candidate_beyond_the_first_page_can_be_saved(self):
         """The offer is what the picker showed, so the recheck has to reproduce that query."""

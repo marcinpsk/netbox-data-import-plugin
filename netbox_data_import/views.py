@@ -87,6 +87,7 @@ from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
     PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+    RETAINED_SYNC_JOB_SESSION_KEY,
     PreviewActionInvalid,
     current_preview_revision,
     load_cached_preview,
@@ -1159,6 +1160,7 @@ class ImportSetupView(PermissionRequiredMixin, View):
         request.session["import_preview_pending"] = True
         request.session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
         request.session.pop("import_preview_source_job_id", None)
+        request.session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
         _clear_restored_import_job(request)
         request.session["import_unused_columns"] = {
             column["name"]: {"count": column["count"], "samples": column["samples"]}
@@ -1299,8 +1301,12 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             messages.warning(request, "The stored source is no longer available. Upload it again.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
+        # A retained sync is mid-write, so NetBox is not authoritative and the plan must not move.
+        retained_reason = _retained_sync_block_reason(request)
+        if retained_reason:
+            messages.warning(request, retained_reason)
         stored_plan = request.session.get(PREVIEW_PLAN_SESSION_KEY)
-        if use_materialized_result and isinstance(stored_plan, dict):
+        if (use_materialized_result or retained_reason) and isinstance(stored_plan, dict):
             try:
                 plan = ImportPlan.from_dict(stored_plan)
             except PlanError as exc:
@@ -1505,6 +1511,7 @@ def _discard_import_preview(request):
         PREVIEW_PLAN_SESSION_KEY,
         "import_rows",
         "import_unused_columns",
+        RETAINED_SYNC_JOB_SESSION_KEY,
     ):
         request.session.pop(key, None)
     request.session["import_preview_pending"] = False
@@ -1651,7 +1658,9 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
     if keep_preview:
         # The write just made the reviewed plan stale, so the next command has to re-read first.
         mark_preview_dirty(request.session)
+        request.session[RETAINED_SYNC_JOB_SESSION_KEY] = job.pk
     else:
+        request.session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
         request.session["import_preview_pending"] = False
         request.session.pop("import_preview_source_job_id", None)
     return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
@@ -1674,6 +1683,9 @@ class ImportRunView(PermissionRequiredMixin, View):
                 return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job_pk}))
             messages.warning(request, "No import in progress.")
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        if retained_reason := _retained_sync_block_reason(request):
+            messages.warning(request, retained_reason)
+            return redirect(reverse("plugins:netbox_data_import:import_preview"))
         if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
             messages.warning(request, "Recalculate and review the saved preview changes before importing.")
             return redirect(reverse("plugins:netbox_data_import:import_preview"))
@@ -3673,6 +3685,27 @@ def _trace_sync_block_reason(reviewed_plan: ImportPlan, live_plan: ImportPlan) -
     return ""
 
 
+RETAINED_SYNC_BLOCK_REASON = (
+    "A trace synchronization is still running. Wait for it to finish before changing this workspace."
+)
+
+
+def _retained_sync_block_reason(request) -> str:
+    """Return why the retained import Job prevents another workspace command, or ``""``.
+
+    A per-trace sync keeps the preview, so the workspace stays open while its Job runs. Until that
+    Job reaches a terminal state its writes are not in NetBox yet, so a re-read or a replan adopts
+    the state it is about to replace and clears the guard that stops a second queue.
+    """
+    from core.choices import JobStatusChoices
+
+    job_pk = request.session.get(RETAINED_SYNC_JOB_SESSION_KEY)
+    if not job_pk:
+        return ""
+    retained = _user_import_jobs(request).filter(pk=job_pk, status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES)
+    return RETAINED_SYNC_BLOCK_REASON if retained.exists() else ""
+
+
 def _with_blocked_sync(trace, reason: str):
     """Refuse the sync action the view would reject, so the page cannot offer what the POST refuses."""
     actions = tuple(
@@ -3762,8 +3795,12 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         # Section 10.2: compared on each full load and on the re-read action, never polled.
         sync_block_reason = _trace_sync_block_reason(workspace.plan, live)
         drift = bool(sync_block_reason)
+        retained_reason = _retained_sync_block_reason(request)
+        block_reason = retained_reason or sync_block_reason
         traces = (
-            [_with_blocked_sync(trace, sync_block_reason) for trace in workspace.traces] if drift else workspace.traces
+            [_with_blocked_sync(trace, block_reason) for trace in workspace.traces]
+            if block_reason
+            else workspace.traces
         )
         wanted = request.GET.get("trace", "")
         selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
@@ -3781,6 +3818,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "selected_trace": selected,
                 "summary": summary,
                 "drift": drift,
+                "retained_sync_reason": retained_reason,
                 "preview_revision": current_preview_revision(request.session),
                 "plugin_version": _plugin_version,
             },
@@ -3811,6 +3849,10 @@ class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         if stale_reason is not None:
             messages.warning(request, stale_reason)
             return redirect(next_url)
+        retained_reason = _retained_sync_block_reason(request)
+        if retained_reason:
+            messages.warning(request, retained_reason)
+            return redirect(next_url)
         refusal = self.refuse_unregistered_adapter(request, profile)
         if refusal is not None:
             return refusal
@@ -3838,6 +3880,10 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
         stale_reason = _stale_preview_reason(request)
         if stale_reason is not None:
             messages.warning(request, stale_reason)
+            return redirect(next_url)
+        retained_reason = _retained_sync_block_reason(request)
+        if retained_reason:
+            messages.warning(request, retained_reason)
             return redirect(next_url)
         if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
             messages.warning(request, "Recalculate and review the saved preview changes before importing.")
@@ -3924,6 +3970,9 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         stale_reason = _stale_preview_reason(request)
         if stale_reason is not None:
             return _preview_action_error(request, next_url, stale_reason, status=409)
+        retained_reason = _retained_sync_block_reason(request)
+        if retained_reason:
+            return _preview_action_error(request, next_url, retained_reason, status=409)
         refusal = self.refuse_unregistered_adapter(request, profile)
         if refusal is not None:
             return refusal

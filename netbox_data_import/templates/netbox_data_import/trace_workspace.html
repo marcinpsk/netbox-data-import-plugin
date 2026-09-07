@@ -38,11 +38,16 @@
     {% else %}
       <span class="text-secondary">This workspace matches what NetBox holds now.</span>
     {% endif %}
+    {% if retained_sync_reason %}
+      <div class="ndi-trace-reason mt-1">{{ retained_sync_reason }}</div>
+    {% endif %}
   </div>
   <form method="post" action="{% url 'plugins:netbox_data_import:trace_workspace_reread' %}" class="ms-3">
     {% csrf_token %}
     <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
-    <button type="submit" class="btn {% if drift %}btn-warning{% else %}btn-outline-secondary{% endif %}">
+    <button type="submit" id="traceWorkspaceReread"
+            class="btn {% if drift %}btn-warning{% else %}btn-outline-secondary{% endif %}"
+            {% if retained_sync_reason %}disabled title="{{ retained_sync_reason }}"{% endif %}>
       Re-read from NetBox
     </button>
   </form>

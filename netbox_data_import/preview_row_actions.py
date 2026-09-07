@@ -16,6 +16,7 @@ PREVIEW_DIRTY_SESSION_KEY = "import_preview_dirty"
 PREVIEW_PLAN_SESSION_KEY = "import_plan"
 PREVIEW_REVISION_SESSION_KEY = "import_preview_revision"
 PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY = "import_preview_use_materialized_once"
+RETAINED_SYNC_JOB_SESSION_KEY = "import_retained_sync_job_id"
 
 
 def current_preview_revision(session) -> str:
