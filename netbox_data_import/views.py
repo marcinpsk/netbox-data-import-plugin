@@ -488,27 +488,27 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
 
 
 class InferenceBackendListView(generic.ObjectListView):
-    """List the configured AI backends."""
+    """Every configured backend row. At most one may be enabled, and that one is the active backend."""
 
     queryset = InferenceBackend.objects.all()
     table = InferenceBackendTable
 
 
 class InferenceBackendView(generic.ObjectView):
-    """Detail view for one AI backend."""
+    """One backend row, as `resolve_active_backend` reads it while this row is the enabled one."""
 
     queryset = InferenceBackend.objects.all()
 
 
 class InferenceBackendEditView(generic.ObjectEditView):
-    """Create or edit one AI backend."""
+    """Create or edit one backend row. Model validation applies the api_root trust boundary."""
 
     queryset = InferenceBackend.objects.all()
     form = InferenceBackendForm
 
 
 class InferenceBackendDeleteView(generic.ObjectDeleteView):
-    """Delete one AI backend."""
+    """Delete one backend row. With no enabled row left, the active backend is the plugin setting fallback."""
 
     queryset = InferenceBackend.objects.all()
 
