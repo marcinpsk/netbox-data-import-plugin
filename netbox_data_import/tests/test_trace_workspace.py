@@ -845,7 +845,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         """One trace identity spans two workbooks, so the execution key cannot be the selection alone."""
         from core.models import Job
 
-        from netbox_data_import.models import ImportExecution
+        from netbox_data_import.models import ExecutionOutcome, ImportExecution
 
         self.client.force_login(self.actor)
         keys = []
@@ -882,6 +882,15 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             self.run_rq_jobs()
             execution = ImportExecution.objects.order_by("pk").last()
             self.assertIsNotNone(execution, f"step {step}: the queued job recorded no execution")
+            job = queued.last()
+            job.refresh_from_db()
+            # The job swallows its own failure into a row, so the outcome is what says it ran.
+            self.assertEqual(
+                execution.outcome,
+                ExecutionOutcome.SUCCEEDED,
+                f"step {step}: outcome={execution.outcome} failure={execution.failure_detail} "
+                f"counts={execution.result_counts} job={job.status} data={job.data}",
+            )
             keys.append(execution.idempotency_key)
 
         self.assertNotEqual(keys[0], keys[1], "both steps built one execution key, so the second never ran")
