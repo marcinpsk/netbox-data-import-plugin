@@ -95,10 +95,22 @@ def test_accepts_autospec_on_patch_calls():
     """The same keyword still bounds patch() and patch.object()."""
     src = (
         "from unittest.mock import patch\n"
+        "from netbox_data_import import views\n"
         'patch("netbox_data_import.views.helper", autospec=True)\n'
         "patch.object(views, 'helper', autospec=True)\n"
     )
     assert scan_source(src) == []
+
+
+def test_flags_an_unbounded_patch_object_of_a_first_party_target():
+    """The autospec case above only proves something while this one reports both calls."""
+    src = (
+        "from unittest.mock import patch\n"
+        "from netbox_data_import import views\n"
+        'patch("netbox_data_import.views.helper")\n'
+        "patch.object(views, 'helper')\n"
+    )
+    assert [hit.kind for hit in scan_source(src)] == ["patch", "patch"]
 
 
 def test_accepts_mock_bound_expressions():
