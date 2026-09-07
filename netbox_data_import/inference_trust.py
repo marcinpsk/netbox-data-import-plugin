@@ -38,31 +38,39 @@ class InvalidInferenceConfiguration(ValueError):
     """An Inference Backend configuration value the deployment may not use."""
 
 
-def _split(value: str, setting: str):
-    """Return the parsed URL, rejecting a value that is not a usable absolute URL."""
+def split_url(value: str, setting: str, *, quote_value: bool = True):
+    """Return the parsed URL, rejecting a value that is not a usable absolute URL.
+
+    `quote_value=False` keeps the rejected value out of the message, for a setting that can carry
+    a secret in its userinfo and whose failures are persisted.
+    """
     if not isinstance(value, str):
         raise InvalidInferenceConfiguration(f"'{setting}' must be a string, got {type(value).__name__}.")
-    parts = urlsplit(value.strip())
+    got = f" Got '{value}'." if quote_value else ""
+    try:
+        # urlsplit raises a bare ValueError on malformed bracket syntax, which callers do not catch.
+        parts = urlsplit(value.strip())
+    except ValueError as exc:
+        raise InvalidInferenceConfiguration(f"'{setting}' is not a usable URL.{got}") from exc
     if not parts.scheme:
-        raise InvalidInferenceConfiguration(
-            f"'{setting}' must name a scheme, for example https://host:443. Got '{value}'."
-        )
+        raise InvalidInferenceConfiguration(f"'{setting}' must name a scheme, for example https://host:443.{got}")
     if parts.scheme.lower() not in SUPPORTED_SCHEMES:
+        scheme = f" Got '{parts.scheme}'." if quote_value else ""
         raise InvalidInferenceConfiguration(
-            f"'{setting}' must use the scheme {' or '.join(SUPPORTED_SCHEMES)}, got '{parts.scheme}'."
+            f"'{setting}' must use the scheme {' or '.join(SUPPORTED_SCHEMES)}.{scheme}"
         )
     if parts.username or parts.password:
         raise InvalidInferenceConfiguration(f"'{setting}' must not carry a credential in its userinfo component.")
     if not parts.hostname:
-        raise InvalidInferenceConfiguration(f"'{setting}' must name a host. Got '{value}'.")
+        raise InvalidInferenceConfiguration(f"'{setting}' must name a host.{got}")
     if "*" in parts.netloc:
-        raise InvalidInferenceConfiguration(f"'{setting}' must not use a wildcard. Got '{value}'.")
+        raise InvalidInferenceConfiguration(f"'{setting}' must not use a wildcard.{got}")
     return parts
 
 
 def origin_of(value: str, setting: str) -> str:
     """Return the scheme, host and port of one absolute URL, lower-cased."""
-    parts = _split(value, setting)
+    parts = split_url(value, setting)
     unusable = f"'{setting}' must name a port between 1 and 65535. Got '{value}'."
     try:
         # urlsplit defers the cast, so a non-numeric or out-of-range port raises only here.
@@ -81,7 +89,7 @@ def origin_of(value: str, setting: str) -> str:
 
 def validate_origin(value: str, setting: str) -> str:
     """Return one exact allowlist origin, rejecting a path, query, fragment or wildcard."""
-    parts = _split(value, setting)
+    parts = split_url(value, setting)
     if parts.path or parts.query or parts.fragment:
         raise InvalidInferenceConfiguration(
             f"'{setting}' entries carry no path, query or fragment component. Got '{value}'."
@@ -111,7 +119,7 @@ def _is_local_endpoint(origin: str) -> bool:
 
 def _assert_origin_approved(url: str, allowlist: Sequence[str], authentication: str, setting: str) -> str:
     """Reject a URL whose origin the deployment has not approved, or whose scheme it may not use."""
-    parts = _split(url, setting)
+    parts = split_url(url, setting)
     origin = origin_of(url, setting)
     if _allowlist_entry_for(origin, allowlist) is None:
         raise InvalidInferenceConfiguration(
@@ -132,7 +140,7 @@ def validate_api_root(
     setting: str = "api_root",
 ) -> str:
     """Return the validated API root, rejecting an origin the deployment has not approved."""
-    parts = _split(api_root, setting)
+    parts = split_url(api_root, setting)
     if parts.path.endswith("/"):
         raise InvalidInferenceConfiguration(
             f"'{setting}' must have no trailing slash. The client appends /chat/completions. Got '{api_root}'."
@@ -180,7 +188,7 @@ def assert_resolved_address_allowed(
 
 def resolve_addresses(api_root: str, setting: str = "api_root") -> tuple[str, ...]:
     """Return every address the API root's host answers with."""
-    parts = _split(api_root, setting)
+    parts = split_url(api_root, setting)
     port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
     try:
         answers = socket.getaddrinfo(parts.hostname, port, proto=socket.IPPROTO_TCP)
@@ -195,6 +203,7 @@ __all__ = (
     "assert_resolved_address_allowed",
     "origin_of",
     "resolve_addresses",
+    "split_url",
     "validate_api_root",
     "validate_origin",
 )

@@ -166,6 +166,25 @@ class RowValidationTest(TestCase):
         self.assertIn("api_root", caught.exception.message_dict)
 
     @override_settings(PLUGINS_CONFIG=plugin_settings())
+    def test_a_zero_timeout_is_refused(self):
+        """A zero timeout raises in the transport, so the row carries the fallback's floor."""
+        for field in ("connect_timeout", "read_timeout"):
+            with self.subTest(field=field):
+                row = InferenceBackend(
+                    backend_key="a",
+                    display_name="A",
+                    api_root="https://backend.example.invalid:443",
+                    model="m",
+                    credential_reference=REFERENCE,
+                    **{field: 0},
+                )
+
+                with self.assertRaises(ValidationError) as caught:
+                    row.full_clean()
+
+                self.assertIn(field, caught.exception.message_dict)
+
+    @override_settings(PLUGINS_CONFIG=plugin_settings())
     def test_a_valid_row_passes(self):
         row = InferenceBackend(
             backend_key="a",

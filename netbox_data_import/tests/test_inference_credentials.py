@@ -273,6 +273,28 @@ class VaultFailureClassificationTest(SimpleTestCase):
         with self.assertRaises(CredentialUnavailable):
             backend.resolve(CredentialReference.from_mapping(REFERENCE))
 
+    def test_an_unreachable_vault_does_not_quote_its_address(self):
+        """`run_connection_test` stores this text in `Job.data`, which is readable in the UI.
+
+        The address is deployment infrastructure, so the failure names the class of fault only.
+        """
+        # Loopback: a hostname here is answered by the environment's proxy instead of raising.
+        settings = {
+            "address": "http://127.0.0.1:9",
+            "auth_method": "proxy",
+            "connect_timeout": 1,
+            "read_timeout": 1,
+        }
+        backend = VaultKvV2CredentialBackend(settings)
+
+        with self.assertRaises(CredentialUnavailable) as caught:
+            backend.resolve(CredentialReference.from_mapping(REFERENCE))
+
+        message = str(caught.exception)
+        self.assertNotIn("127.0.0.1", message)
+        self.assertNotIn(":9", message)
+        self.assertIn("credential store", message)
+
     def test_no_failure_message_carries_the_secret_or_the_response_body(self):
         """Section 8.6: no exception text may carry the secret or a Vault response body."""
         cases = (

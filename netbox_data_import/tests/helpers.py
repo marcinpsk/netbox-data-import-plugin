@@ -446,11 +446,7 @@ FAKED_REWIND_FLOOR = "0029_alter_cableimportsource_from_text_and_more"
 
 
 def restore_plugin_migrations(floor=FAKED_REWIND_FLOOR):
-    """Return the plugin app to its leaf state after a migration test rewound it.
-
-    Replaying a faked rewind for real would re-run a CreateModel against a table that still exists,
-    so the restore is real up to *floor* and bookkeeping only above it.
-    """
+    """Return the plugin app to its leaf state, faking above *floor* because the tables still exist."""
     from django.db import connection
     from django.db.migrations.executor import MigrationExecutor
 

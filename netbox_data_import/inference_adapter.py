@@ -120,7 +120,8 @@ class OpenAICompatibleAdapter:
         read_timeout: int = 60,
         session: "requests.Session | None" = None,
     ):
-        self.api_root = api_root.rstrip("/")
+        # Verbatim: normalizing here would pass the request-time recheck a value the form refuses.
+        self.api_root = api_root
         self.model = model
         self.allowlist = tuple(allowlist)
         self.authentication = authentication

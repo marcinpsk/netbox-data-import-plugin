@@ -56,6 +56,26 @@ class OriginFormatTest(SimpleTestCase):
         self.assertIn("string", self.rejects(443))
 
 
+class MalformedUrlSyntaxTest(SimpleTestCase):
+    """`urlsplit` raises a bare ValueError, which callers catching this module's type would miss."""
+
+    MALFORMED = ("https://[bad", "https://[::1", "https://[]:443", "http://[oops]:80")
+
+    def test_every_entry_point_raises_the_configuration_error(self):
+        for value in self.MALFORMED:
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_origin(value, setting="allowlist")
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_api_root(value, ALLOWLIST)
+
+    def test_the_message_names_the_setting_and_the_value(self):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_origin("https://[bad", setting="allowlist")
+
+        self.assertIn("allowlist", str(caught.exception))
+
+
 class ApiRootAllowlistTest(SimpleTestCase):
     """`api_root` names a destination NetBox itself calls, so the allowlist governs it."""
 

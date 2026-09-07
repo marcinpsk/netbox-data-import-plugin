@@ -157,11 +157,11 @@ class InferenceBackendConnectionTestJob(JobRunner):
     class Meta:
         name = "AI backend connection test"
 
-    def run(self, *args, **kwargs):
+    def run(self, backend_key, *args, **kwargs):
         """Run one connection test and record its typed category as job data."""
         from .inference_connection_test import run_connection_test
 
-        result = run_connection_test()
+        result = run_connection_test(backend_key)
         self.job.data = {**(self.job.data or {}), **result.as_dict()}
         self.job.save(update_fields=["data"])
         return result.category

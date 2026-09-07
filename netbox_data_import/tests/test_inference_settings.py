@@ -112,6 +112,39 @@ class VaultSettingTest(SimpleTestCase):
     def test_a_missing_address_is_rejected(self):
         self.assertIn("address", self.rejects({"auth_method": "proxy"}))
 
+    def test_a_non_string_address_is_rejected(self):
+        """A truthy non-string reaches the request as `str(value)`, which is not a URL."""
+        self.assertIn("address", self.rejects({"address": 8200, "auth_method": "proxy"}))
+
+    def test_an_address_carrying_a_credential_is_rejected(self):
+        """Userinfo in the address is secret material in a setting that must hold none."""
+        message = self.rejects({"address": "https://user:token@vault.example.invalid:8200", "auth_method": "proxy"})
+
+        self.assertIn("userinfo", message)
+
+    def test_an_address_with_a_query_is_rejected(self):
+        """The read appends /v1/<mount>/data/<path>, which a query would swallow."""
+        self.assertIn("query", self.rejects({"address": "https://vault.example.invalid:8200?a=1"}))
+
+    def test_an_address_with_a_fragment_is_rejected(self):
+        self.assertIn("fragment", self.rejects({"address": "https://vault.example.invalid:8200#f"}))
+
+    def test_an_address_ending_in_a_bare_delimiter_is_rejected(self):
+        """The read appends /v1/<mount>/data/<path>, which a bare '?' or '#' puts in the wrong part."""
+        for address in ("https://vault.example.invalid:8200?", "https://vault.example.invalid:8200#"):
+            with self.subTest(address=address):
+                self.assertTrue(self.rejects({"address": address}))
+
+    def test_a_rejected_address_is_not_echoed_back(self):
+        """The message reaches Job.data, and an address can carry a token in its userinfo."""
+        message = self.rejects({"address": "https://user:s3cr3t-token@[bad"})
+
+        self.assertNotIn("s3cr3t-token", message)
+        self.assertNotIn("[bad", message)
+
+    def test_an_address_without_a_scheme_is_rejected(self):
+        self.assertIn("scheme", self.rejects({"address": "vault.example.invalid:8200"}))
+
 
 class FileFallbackSettingTest(SimpleTestCase):
     """The whole-backend fallback carries the row fields minus the backend key and enabled."""
@@ -172,6 +205,65 @@ class FileFallbackSettingTest(SimpleTestCase):
             )
 
         self.assertIn("allowlist", str(caught.exception))
+
+    def test_an_adapter_type_outside_the_row_choices_is_rejected(self):
+        """The fallback is one whole backend row, so every field carries the row's constraint."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(inference_backend=self.fallback(adapter_type="anthropic")))
+
+        self.assertIn("adapter_type", str(caught.exception))
+
+    def test_a_response_mode_outside_the_row_choices_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(inference_backend=self.fallback(response_mode="freeform")))
+
+        self.assertIn("response_mode", str(caught.exception))
+
+    def test_an_empty_model_is_rejected(self):
+        """The worker never chooses a model, so an empty one has no request to make."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(inference_backend=self.fallback(model="   ")))
+
+        self.assertIn("model", str(caught.exception))
+
+    def test_a_model_longer_than_the_column_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(inference_backend=self.fallback(model="m" * 201)))
+
+        self.assertIn("model", str(caught.exception))
+
+    def test_a_timeout_the_column_could_not_hold_is_rejected(self):
+        """`True` is the one that matters: bool is an int, so it would read as a one second timeout.
+
+        Zero and 2**31 are rejected on both sides: a zero timeout raises in the transport, and
+        anything above the column maximum cannot be stored. The row carries the same rule.
+        """
+        for field in ("connect_timeout", "read_timeout"):
+            for value in (-1, 0, "five", 1.5, True, 2**31):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                        validate_plugin_settings(settings_with(inference_backend=self.fallback(**{field: value})))
+
+                    self.assertIn(field, str(caught.exception))
+
+    def test_an_authentication_method_outside_the_row_choices_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(inference_backend=self.fallback(authentication="basic")))
+
+        self.assertIn("authentication", str(caught.exception))
+
+    def test_an_empty_display_name_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(inference_backend=self.fallback(display_name="  ")))
+
+        self.assertIn("display_name", str(caught.exception))
+
+    def test_an_api_root_longer_than_the_column_is_rejected(self):
+        root = "https://backend.example.invalid:443/" + "p" * 500
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(inference_backend=self.fallback(api_root=root)))
+
+        self.assertIn("api_root", str(caught.exception))
 
     def test_a_non_mapping_fallback_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration):

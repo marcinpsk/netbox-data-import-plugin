@@ -9,7 +9,7 @@ never returns a secret value and never a Vault response body.
 
 from dataclasses import dataclass
 
-from .inference_backend import NoActiveInferenceBackend, resolve_active_backend
+from .inference_backend import NoActiveInferenceBackend, resolve_backend_by_key
 from .inference_credentials import CredentialFailure, credential_backend_for
 from .inference_settings import VAULT_SETTING, InvalidInferenceConfiguration
 
@@ -42,10 +42,10 @@ class ConnectionTestResult:
         }
 
 
-def run_connection_test() -> ConnectionTestResult:
-    """Resolve the active backend's credential once and report what happened."""
+def run_connection_test(backend_key: str) -> ConnectionTestResult:
+    """Resolve one named backend's credential once and report what happened."""
     try:
-        backend = resolve_active_backend()
+        backend = resolve_backend_by_key(backend_key)
     except NoActiveInferenceBackend as exc:
         return ConnectionTestResult("invalid_configuration", str(exc))
     except InvalidInferenceConfiguration as exc:

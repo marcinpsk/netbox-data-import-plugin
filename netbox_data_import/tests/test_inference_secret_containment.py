@@ -90,7 +90,7 @@ class SecretContainmentTest(TestCase):
         """Run one connection test against a Vault that serves the secret."""
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                return run_connection_test()
+                return run_connection_test("primary")
 
     def test_the_secret_resolves_so_the_sweep_is_meaningful(self):
         self.assertEqual(self.resolve_once().category, "ok")
@@ -118,7 +118,7 @@ class SecretContainmentTest(TestCase):
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
                 self.client.post(url)
                 # The view only queues, so an unrun body would leave the payload empty to assert on.
-                InferenceBackendConnectionTestJob.handle(Job.objects.get())
+                InferenceBackendConnectionTestJob.handle(Job.objects.get(), backend_key="primary")
 
         job = Job.objects.get()
         self.assertEqual(job.data.get("category"), "ok")

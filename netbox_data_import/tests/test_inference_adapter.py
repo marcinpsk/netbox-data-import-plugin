@@ -130,6 +130,21 @@ class ChatCompletionRequestTest(SimpleTestCase):
 
         self.assertEqual(seen[0]["path"], "/chat/completions")
 
+    def test_a_trailing_slash_in_the_api_root_is_refused_at_request_time(self):
+        """The boundary rejects a trailing slash, so the client must not normalize one away.
+
+        Normalizing in the constructor made the request-time recheck validate a value the form
+        boundary refuses, which is the whole point of rechecking.
+        """
+        with serving() as (root, seen, allowlist):
+            adapter = adapter_for(f"{root}/", allowlist)
+
+            with self.assertRaises(InvalidBackendConfiguration) as caught:
+                adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertIn("trailing slash", str(caught.exception))
+        self.assertEqual(seen, [])
+
     def test_the_configured_model_is_sent_and_never_chosen_at_run_time(self):
         with serving() as (root, seen, allowlist):
             adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)

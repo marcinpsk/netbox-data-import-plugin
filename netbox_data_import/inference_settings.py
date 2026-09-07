@@ -9,7 +9,12 @@ and fail at request time, so nothing here opens a socket.
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .inference_trust import InvalidInferenceConfiguration, validate_api_root, validate_origin
+from .inference_trust import (
+    InvalidInferenceConfiguration,
+    split_url as _split_url,
+    validate_api_root,
+    validate_origin,
+)
 
 ORIGIN_ALLOWLIST_SETTING = "inference_backend_origin_allowlist"
 FILE_FALLBACK_SETTING = "inference_backend"
@@ -30,6 +35,24 @@ FILE_FALLBACK_FIELDS = (
     "connect_timeout",
     "read_timeout",
 )
+
+# The InferenceBackend column choices, here because settings load before the app registry.
+ADAPTER_TYPES = (("openai_compatible", "OpenAI compatible"),)
+AUTHENTICATION_METHODS = (("bearer", "Bearer token"),)
+RESPONSE_MODES = (
+    ("prompt_json", "JSON asked for in the prompt"),
+    ("json_object", "JSON object mode"),
+    ("json_schema", "JSON schema mode"),
+)
+
+# The InferenceBackend column widths the fallback has to respect.
+API_ROOT_MAX_LENGTH = 500
+DISPLAY_NAME_MAX_LENGTH = 200
+MODEL_MAX_LENGTH = 200
+
+# PositiveIntegerField stores up to this. One second is the smallest timeout that can make a call.
+TIMEOUT_MIN = 1
+TIMEOUT_MAX = 2147483647
 
 VAULT_AUTH_METHODS = ("proxy", "token")
 VAULT_FIELDS = ("address", "auth_method", "namespace", "ca_bundle", "connect_timeout", "read_timeout")
@@ -71,6 +94,7 @@ def validate_vault_settings(value: Any) -> Mapping[str, Any]:
         raise InvalidInferenceConfiguration(f"Unknown '{VAULT_SETTING}' key(s): {', '.join(unknown)}.")
     if not mapping.get("address"):
         raise InvalidInferenceConfiguration(f"'{VAULT_SETTING}.address' is required.")
+    _validate_vault_address(mapping["address"])
     bundle = mapping.get("ca_bundle")
     if "ca_bundle" in mapping and (not isinstance(bundle, str) or not bundle.strip()):
         # requests reads a bool here as "skip verification", which this setting must never mean.
@@ -83,6 +107,22 @@ def validate_vault_settings(value: Any) -> Mapping[str, Any]:
             f"'{VAULT_SETTING}.auth_method' must be one of {', '.join(VAULT_AUTH_METHODS)}, got '{method}'."
         )
     return mapping
+
+
+def _validate_vault_address(value: Any) -> None:
+    """Reject a Vault address that carries a secret or that the read path would misassemble."""
+    label = f"'{VAULT_SETTING}.address'"
+    if not isinstance(value, str):
+        raise InvalidInferenceConfiguration(f"{label} must be a string URL, got {type(value).__name__}.")
+    for character in "?#":
+        # A bare delimiter parses as an empty component, and the appended read path lands inside it.
+        if character in value:
+            raise InvalidInferenceConfiguration(
+                f"{label} cannot contain '{character}', which would put the appended read path in "
+                f"the query or fragment."
+            )
+    # Unquoted: the message is persisted, and an address can carry a token in its userinfo.
+    _split_url(value, f"{VAULT_SETTING}.address", quote_value=False)
 
 
 _UNSAFE_PATH_SEGMENTS = frozenset({"", ".", ".."})
@@ -118,6 +158,48 @@ def validate_credential_reference(value: Any, label: str = "credential_reference
     return mapping
 
 
+def _validate_choice(mapping: Mapping[str, Any], field: str, choices) -> None:
+    """Reject a fallback value the matching InferenceBackend column would not accept."""
+    allowed = [value for value, _label in choices]
+    if mapping.get(field) not in allowed:
+        raise InvalidInferenceConfiguration(
+            f"'{FILE_FALLBACK_SETTING}.{field}' must be one of {', '.join(allowed)}, got '{mapping.get(field)}'."
+        )
+
+
+def _validate_text(mapping: Mapping[str, Any], field: str, max_length: int) -> None:
+    """Reject fallback text the matching column could not store, or that names nothing."""
+    value = mapping.get(field)
+    label = f"'{FILE_FALLBACK_SETTING}.{field}'"
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInferenceConfiguration(f"{label} must be a non-empty string, got {value!r}.")
+    if len(value) > max_length:
+        raise InvalidInferenceConfiguration(f"{label} is longer than the {max_length} characters the column holds.")
+
+
+def _validate_timeout(mapping: Mapping[str, Any], field: str) -> None:
+    """Reject a fallback timeout the matching PositiveIntegerField would not accept."""
+    value = mapping.get(field)
+    # bool is an int subclass, and True would otherwise read as a one second timeout.
+    if isinstance(value, bool) or not isinstance(value, int) or not TIMEOUT_MIN <= value <= TIMEOUT_MAX:
+        raise InvalidInferenceConfiguration(
+            f"'{FILE_FALLBACK_SETTING}.{field}' must be a whole number of seconds between "
+            f"{TIMEOUT_MIN} and {TIMEOUT_MAX}, got {value!r}."
+        )
+
+
+def _validate_fallback_fields(mapping: Mapping[str, Any]) -> None:
+    """Apply the InferenceBackend column constraints the fallback bypasses by not being a row."""
+    _validate_choice(mapping, "adapter_type", ADAPTER_TYPES)
+    _validate_choice(mapping, "authentication", AUTHENTICATION_METHODS)
+    _validate_choice(mapping, "response_mode", RESPONSE_MODES)
+    _validate_text(mapping, "api_root", API_ROOT_MAX_LENGTH)
+    _validate_text(mapping, "display_name", DISPLAY_NAME_MAX_LENGTH)
+    _validate_text(mapping, "model", MODEL_MAX_LENGTH)
+    _validate_timeout(mapping, "connect_timeout")
+    _validate_timeout(mapping, "read_timeout")
+
+
 def validate_file_fallback(value: Any, allowlist: Sequence[str]) -> Mapping[str, Any]:
     """Return the whole-backend fallback, rejecting a field set that is not exactly the row's."""
     mapping = _require_mapping(value, FILE_FALLBACK_SETTING)
@@ -129,6 +211,7 @@ def validate_file_fallback(value: Any, allowlist: Sequence[str]) -> Mapping[str,
         raise InvalidInferenceConfiguration(
             f"'{FILE_FALLBACK_SETTING}' is missing required key(s): {', '.join(missing)}."
         )
+    _validate_fallback_fields(mapping)
     validate_credential_reference(mapping["credential_reference"], f"{FILE_FALLBACK_SETTING}.credential_reference")
     validate_api_root(
         mapping["api_root"],

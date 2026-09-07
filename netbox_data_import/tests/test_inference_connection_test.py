@@ -23,6 +23,10 @@ SECRET = "sk-connection-test-secret"
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
 
 
+# The paths the Vault stand-in was asked for, so a test can assert which secret was read.
+SEEN_PATHS: list[str] = []
+
+
 class Vault(BaseHTTPRequestHandler):
     """Answer one KV v2 read with whatever the enclosing test configured."""
 
@@ -30,6 +34,7 @@ class Vault(BaseHTTPRequestHandler):
     payload: object = {"data": {"data": {"api_key": SECRET}}}
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler names the hook.
+        SEEN_PATHS.append(self.path)
         raw = self.payload if isinstance(self.payload, str) else json.dumps(self.payload)
         encoded = raw.encode()
         self.send_response(self.status)
@@ -51,6 +56,7 @@ def vault(status=200, payload=None):
 
     Handler.status = status
     Handler.payload = {"data": {"data": {"api_key": SECRET}}} if payload is None else payload
+    SEEN_PATHS.clear()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -98,7 +104,7 @@ class ConnectionTestResultTest(TestCase):
         make_row()
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test()
+                result = run_connection_test("primary")
 
         self.assertEqual(result.category, "ok")
 
@@ -106,7 +112,7 @@ class ConnectionTestResultTest(TestCase):
         make_row()
         with vault(status=403, payload={"errors": ["denied"]}) as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test()
+                result = run_connection_test("primary")
 
         self.assertEqual(result.category, "credential_denied")
 
@@ -115,7 +121,7 @@ class ConnectionTestResultTest(TestCase):
         unreachable = {"address": "http://127.0.0.1:1", "auth_method": "proxy", "connect_timeout": 1, "read_timeout": 1}
 
         with override_settings(PLUGINS_CONFIG=settings_for(unreachable)):
-            result = run_connection_test()
+            result = run_connection_test("primary")
 
         self.assertEqual(result.category, "credential_unavailable")
 
@@ -123,7 +129,7 @@ class ConnectionTestResultTest(TestCase):
         make_row()
         with vault(payload={"data": {"data": {"api_key": ""}}}) as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test()
+                result = run_connection_test("primary")
 
         self.assertEqual(result.category, "invalid_secret_material")
 
@@ -131,14 +137,14 @@ class ConnectionTestResultTest(TestCase):
         make_row(credential_reference={"backend": "vault_kv_v2"})
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test()
+                result = run_connection_test("primary")
 
         self.assertEqual(result.category, "invalid_credential_reference")
 
     def test_no_active_backend_reports_invalid_configuration(self):
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test()
+                result = run_connection_test("primary")
 
         self.assertEqual(result.category, "invalid_configuration")
 
@@ -146,7 +152,7 @@ class ConnectionTestResultTest(TestCase):
         make_row()
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                self.assertIn(run_connection_test().category, CONNECTION_TEST_CATEGORIES)
+                self.assertIn(run_connection_test("primary").category, CONNECTION_TEST_CATEGORIES)
 
     def test_the_result_never_carries_the_secret_or_a_vault_body(self):
         make_row()
@@ -161,7 +167,7 @@ class ConnectionTestResultTest(TestCase):
             with self.subTest(case=case):
                 with vault(**case) as vault_settings:
                     with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                        result = run_connection_test()
+                        result = run_connection_test("primary")
 
                 serialized = json.dumps(result.as_dict())
                 self.assertNotIn(SECRET, serialized)
@@ -171,12 +177,105 @@ class ConnectionTestResultTest(TestCase):
         make_row()
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test()
+                result = run_connection_test("primary")
 
         payload = result.as_dict()
         self.assertEqual(payload["backend_key"], "primary")
         self.assertNotIn("credential_reference", payload)
         self.assertNotIn("mount", json.dumps(payload))
+
+
+class SelectedBackendTest(TestCase):
+    """The view authorizes one row, so the worker has to test that row and no other."""
+
+    def test_the_named_backend_is_tested_rather_than_the_active_one(self):
+        """A second enabled row must not answer for the row the operator selected.
+
+        The two rows reference different Vault paths, so the assertion is which secret was read,
+        not merely which key the result names.
+        """
+        make_row(
+            backend_key="selected",
+            display_name="Selected",
+            enabled=False,
+            credential_reference={**REFERENCE, "path": "inference/selected"},
+        )
+        make_row(
+            backend_key="other-enabled",
+            display_name="Other",
+            enabled=True,
+            credential_reference={**REFERENCE, "path": "inference/other"},
+        )
+
+        with vault() as vault_settings:
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                result = run_connection_test("selected")
+
+        self.assertEqual(result.backend_key, "selected")
+        self.assertEqual([path for path in SEEN_PATHS if "inference/" in path], ["/v1/secret/data/inference/selected"])
+
+    def test_a_row_key_renamed_to_the_fallback_key_does_not_reach_the_deployment_credential(self):
+        """The view authorizes a row, so a key naming no row is a refusal, never the file fallback.
+
+        A key is editable. Renaming a row to the fallback key, queueing, then renaming it back
+        would otherwise make the worker resolve the deployment's own Vault reference.
+        """
+        make_row(backend_key="mine", display_name="Mine", enabled=False)
+        fallback = {
+            "display_name": "Deployment fallback",
+            "adapter_type": "openai_compatible",
+            "api_root": "https://backend.example.invalid:443",
+            "model": "m",
+            "authentication": "bearer",
+            "response_mode": "prompt_json",
+            "credential_reference": {**REFERENCE, "path": "inference/deployment"},
+            "connect_timeout": 5,
+            "read_timeout": 60,
+        }
+
+        with vault() as vault_settings:
+            config = settings_for(vault_settings)
+            config["netbox_data_import"]["inference_backend"] = fallback
+            with override_settings(PLUGINS_CONFIG=config):
+                result = run_connection_test("file-fallback")
+
+        self.assertEqual(result.category, "invalid_configuration")
+        self.assertNotIn("/v1/secret/data/inference/deployment", SEEN_PATHS)
+
+    def test_a_row_disabled_after_the_job_was_queued_is_still_the_one_tested(self):
+        """The operator tests a row to decide whether to enable it, so enabled is not the filter."""
+        make_row(backend_key="selected", display_name="Selected", enabled=False)
+
+        with vault() as vault_settings:
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                result = run_connection_test("selected")
+
+        self.assertEqual(result.category, "ok")
+        self.assertEqual(result.backend_key, "selected")
+
+    def test_a_key_no_backend_carries_is_invalid_configuration(self):
+        make_row(backend_key="primary")
+
+        with vault() as vault_settings:
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                result = run_connection_test("gone")
+
+        self.assertEqual(result.category, "invalid_configuration")
+        self.assertIn("gone", result.detail)
+
+    def test_the_view_hands_the_worker_the_key_of_the_row_it_authorized(self):
+        """Without this, reverting the view leaves the worker with no key and the job fails there."""
+        row = make_row(backend_key="selected", display_name="Selected", enabled=False)
+        permitted = user_with_object_permission("queuer", [(InferenceBackend, ["change"], {})])
+        self.client.force_login(permitted)
+
+        # NetBox enqueues through transaction.on_commit, so the real call is a captured partial.
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            self.client.post(reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[row.pk]))
+
+        keywords = [getattr(callback, "keywords", {}) for callback in callbacks]
+        self.assertIn("selected", [item.get("backend_key") for item in keywords])
+        self.assertNotIn(row.pk, [value for item in keywords for value in item.values()])
 
 
 class ConnectionTestAuthorizationTest(TestCase):

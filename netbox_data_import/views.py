@@ -528,6 +528,8 @@ class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
             name=InferenceBackendConnectionTestJob.Meta.name,
             instance=backend,
             user=request.user,
+            # The key, not the row id: it is stable, carries no secret, and names one backend.
+            backend_key=backend.backend_key,
         )
         messages.success(request, f"Connection test queued as job {job.pk}.")
         return redirect(backend.get_absolute_url())

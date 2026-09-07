@@ -6,6 +6,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import IntegrityError, models, transaction
 from django.urls import reverse
 from django.utils import timezone
@@ -25,6 +26,7 @@ from .adapters import (
 from . import plan
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
+from . import inference_settings as _inference_settings
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
@@ -1110,13 +1112,9 @@ class InferenceBackend(JobsMixin, NetBoxModel):
     configuration lives.
     """
 
-    ADAPTER_TYPES = (("openai_compatible", "OpenAI compatible"),)
-    AUTHENTICATION_METHODS = (("bearer", "Bearer token"),)
-    RESPONSE_MODES = (
-        ("prompt_json", "JSON asked for in the prompt"),
-        ("json_object", "JSON object mode"),
-        ("json_schema", "JSON schema mode"),
-    )
+    ADAPTER_TYPES = _inference_settings.ADAPTER_TYPES
+    AUTHENTICATION_METHODS = _inference_settings.AUTHENTICATION_METHODS
+    RESPONSE_MODES = _inference_settings.RESPONSE_MODES
 
     backend_key = models.SlugField(
         max_length=100,
@@ -1138,8 +1136,13 @@ class InferenceBackend(JobsMixin, NetBoxModel):
         help_text="Select a mode other than prompt_json only after verifying the exact backend and model.",
     )
     credential_reference = models.JSONField(help_text="A typed Vault KV v2 reference. It never holds a secret value.")
-    connect_timeout = models.PositiveIntegerField(default=5)
-    read_timeout = models.PositiveIntegerField(default=60)
+    # A zero timeout raises in the transport, so the row carries the same floor as the fallback.
+    connect_timeout = models.PositiveIntegerField(
+        default=5, validators=[MinValueValidator(_inference_settings.TIMEOUT_MIN)]
+    )
+    read_timeout = models.PositiveIntegerField(
+        default=60, validators=[MinValueValidator(_inference_settings.TIMEOUT_MIN)]
+    )
     enabled = models.BooleanField(default=False, help_text="Whether Ask AI may use this backend.")
 
     # Override tags reverse accessor to avoid clashes with other plugins

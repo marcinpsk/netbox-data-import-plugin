@@ -149,9 +149,9 @@ class VaultKvV2CredentialBackend:
                 allow_redirects=False,
             )
         except requests.RequestException as exc:
-            # The exception text can quote the request, so only its class is reported.
+            # This text reaches Job.data, so neither the address nor the URL is reported.
             raise CredentialUnavailable(
-                f"The credential store at {address} could not be reached ({type(exc).__name__})."
+                f"The credential store could not be reached ({type(exc).__name__}). Check the configured vault address."
             ) from None
 
     def resolve(self, reference: CredentialReference) -> str:
