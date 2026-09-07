@@ -85,6 +85,11 @@ def _targets() -> set[str]:
     return _FABRICATING_MOCKS | ({"AsyncMock"} if INCLUDE_ASYNCMOCK else set())
 
 
+def _is_actual_bound(value: ast.expr) -> bool:
+    # None is the default. False explicitly disables spec arguments.
+    return not (isinstance(value, ast.Constant) and (value.value is None or value.value is False))
+
+
 @dataclass(frozen=True)
 class Violation:
     """One flagged mock instantiation or unspecced first-party patch."""
@@ -285,6 +290,30 @@ class _Scanner(ast.NodeVisitor):
         a third-party or stdlib target is the endorsed way to stub a real boundary.
         """
         func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "multiple":
+            if not self._is_patch(func.value) or self._is_patch_bounded(node, new_position=None):
+                return None
+            if not node.args:
+                return None
+            patched = node.args[0]
+            base = patched
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(patched, ast.Constant) and isinstance(patched.value, str):
+                if patched.value.split(".")[0] != _FIRST_PARTY:
+                    return None
+                name = patched.value
+            elif isinstance(base, ast.Name) and base.id in self._first_party:
+                name = ast.unparse(patched)
+            else:
+                return None
+            members = (
+                f"{name}.{kw.arg}"
+                for kw in node.keywords
+                if kw.arg not in {None, "spec", "spec_set", "autospec", "new_callable", "create"}
+                and self._is_mock_default(kw.value)
+            )
+            return ", ".join(members) or None
         if isinstance(func, ast.Attribute) and func.attr == "object":
             # patch.object(target, "attribute"[, new]) — a third positional is `new`.
             if not self._is_patch(func.value) or self._is_patch_bounded(node, new_position=2):
@@ -310,20 +339,22 @@ class _Scanner(ast.NodeVisitor):
             return func.attr == "patch" and self._canonical_binding(func.value) == _MOCK_MODULE
         return self._canonical_binding(func) == "patch"
 
-    def _is_patch_bounded(self, node: ast.Call, new_position: int) -> bool:
-        replacement = next((kw.value for kw in node.keywords if kw.arg == "new"), None)
-        if replacement is None and len(node.args) > new_position:
-            replacement = node.args[new_position]
-        if replacement is not None and not self._is_mock_default(replacement):
-            return True
+    def _is_patch_bounded(self, node: ast.Call, new_position: int | None) -> bool:
+        if new_position is not None:
+            replacement = next((kw.value for kw in node.keywords if kw.arg == "new"), None)
+            if replacement is None and len(node.args) > new_position:
+                replacement = node.args[new_position]
+            if replacement is not None and not self._is_mock_default(replacement):
+                return True
 
         for kw in node.keywords:
             if kw.arg not in _PATCH_BOUNDING_KWARGS or kw.arg == "new":
                 continue
-            # None is the default. False explicitly disables spec arguments.
-            if isinstance(kw.value, ast.Constant) and (kw.value.value is None or kw.value.value is False):
+            # patch.multiple (new_position=None) has no `new`, and `wraps=` there names a member.
+            if new_position is None and kw.arg == "wraps":
                 continue
-            return True
+            if _is_actual_bound(kw.value):
+                return True
 
         factory = next((kw.value for kw in node.keywords if kw.arg == "new_callable"), None)
         if factory is None or (isinstance(factory, ast.Constant) and factory.value is None):
@@ -373,7 +404,7 @@ class _Scanner(ast.NodeVisitor):
 
     @staticmethod
     def _is_bounded(node: ast.Call) -> bool:
-        return any(kw.arg in _BOUNDING_KWARGS for kw in node.keywords)
+        return any(kw.arg in _BOUNDING_KWARGS and _is_actual_bound(kw.value) for kw in node.keywords)
 
     def _is_marked(self, node: ast.Call) -> bool:
         """True when `# mock-ok` sits inside the call's line span, or in the comment block above it."""

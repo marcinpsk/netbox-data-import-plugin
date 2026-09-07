@@ -70,6 +70,27 @@ def test_accepts_spec_bounded_mock():
     assert scan_source(src, "t.py") == []
 
 
+def test_flags_magicmock_with_none_spec():
+    src = "from unittest.mock import MagicMock\nMagicMock(spec=None)\n"
+    assert [h.mock for h in scan_source(src)] == ["MagicMock"]
+
+
+def test_flags_magicmock_with_none_wraps():
+    src = "from unittest.mock import MagicMock\nMagicMock(wraps=None)\n"
+    assert [h.mock for h in scan_source(src)] == ["MagicMock"]
+
+
+def test_flags_magicmock_with_false_spec():
+    src = "from unittest.mock import MagicMock\nMagicMock(spec=False)\n"
+    assert [h.mock for h in scan_source(src)] == ["MagicMock"]
+
+
+def test_accepts_mock_bound_expressions():
+    for value in ("SomeClass", "factory()", "module.SomeClass", "0", "''"):
+        src = f"from unittest.mock import MagicMock\nMagicMock(spec={value})\n"
+        assert scan_source(src) == [], value
+
+
 def test_accepts_wraps_and_spec_set():
     src = (
         "from unittest.mock import MagicMock\n\n"
@@ -181,6 +202,62 @@ def test_baseline_budget_allows_grandfathered_but_not_excess(tmp_path):
 
 
 _PATCH_IMPORT = "from unittest.mock import patch\n"
+
+
+def test_flags_patch_multiple_default_members():
+    for target in ('"netbox_data_import.views"', "views", "netbox_data_import.views"):
+        for default in ("DEFAULT", "sentinel", "mock.DEFAULT"):
+            src = (
+                "from unittest.mock import patch, DEFAULT, DEFAULT as sentinel, MagicMock\n"
+                "import unittest.mock as mock\n"
+                "import netbox_data_import.views\n"
+                "from netbox_data_import import views\n"
+                f"patch.multiple({target}, a={default}, other=object(), new_callable=MagicMock)\n"
+            )
+            hits = scan_source(src)
+            assert len(hits) == 1, (target, default)
+            assert hits[0].kind == "patch"
+            assert "views" in hits[0].mock
+            assert hits[0].mock.endswith(".a")
+            assert "other" not in hits[0].mock
+
+
+def test_accepts_bounded_patch_multiple():
+    for bound in ("autospec=True", "spec=SomeClass", "spec_set=SomeClass"):
+        src = (
+            "from unittest.mock import patch, DEFAULT\n"
+            f'patch.multiple("netbox_data_import.views", a=DEFAULT, {bound})\n'
+        )
+        assert scan_source(src) == [], bound
+
+
+def test_flags_patch_multiple_disabled_bounds():
+    for bound in ("autospec=False", "spec=None", "spec_set=False"):
+        src = (
+            "from unittest.mock import patch, DEFAULT\n"
+            f'patch.multiple("netbox_data_import.views", a=DEFAULT, {bound})\n'
+        )
+        assert [h.kind for h in scan_source(src)] == ["patch"], bound
+
+
+def test_accepts_patch_multiple_concrete_members_and_external_targets():
+    for call in (
+        'patch.multiple("netbox_data_import.views", a=object())',
+        'patch.multiple("requests", a=DEFAULT)',
+        "patch.multiple(requests, a=DEFAULT)",
+        'patch.dict("netbox_data_import.views.settings", a=DEFAULT)',
+    ):
+        src = f"from unittest.mock import patch, DEFAULT\nimport requests\n{call}\n"
+        assert scan_source(src) == [], call
+
+
+def test_accepts_patch_multiple_shadowed_default():
+    src = (
+        "from unittest.mock import patch, DEFAULT\n"
+        "DEFAULT = object()\n"
+        'patch.multiple("netbox_data_import.views", a=DEFAULT)\n'
+    )
+    assert scan_source(src) == []
 
 
 def test_flags_unspecced_patch_of_first_party_target():
