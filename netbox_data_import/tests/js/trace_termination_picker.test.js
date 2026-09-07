@@ -108,6 +108,21 @@ describe("trace termination picker", () => {
     expect(node("traceTerminationSubmit").disabled).toBe(true);
   });
 
+  it("drops the selection the moment the search changes, before the lookup returns", async () => {
+    const candidates = await openPicker();
+    candidates[0].click();
+    expect(node("traceTerminationSubmit").disabled).toBe(false);
+    const search = node("traceTerminationSearch");
+    search.value = "different";
+
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(node("traceTerminationSubmit").disabled).toBe(true);
+    expect(node("traceTerminationObjectId").value).toBe("");
+    expect(node("traceTerminationObjectType").value).toBe("");
+    expect(node("traceTerminationOfferedSearch").value).toBe("");
+  });
+
   it("declares the candidate count as a polite live region in the template", async () => {
     expect(node("traceTerminationCount").getAttribute("aria-live")).toBe("polite");
     await openPicker();
