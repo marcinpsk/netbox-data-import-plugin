@@ -75,6 +75,8 @@ _MOCK_MODULE = "unittest.mock"
 _UNITTEST_MODULE = "unittest"
 # Import prefix that marks a patch target as our own code rather than a real boundary.
 _FIRST_PARTY = "netbox_data_import"
+# The canonical binding a first-party import gets, so a later local rebinding shadows it.
+_FIRST_PARTY_BINDING = "<first-party>"
 # Inline opt-out marker (in a comment): `# mock-ok` or `# mock-ok: reason`.
 _MARKER = "mock-ok"
 # Files the scanner never inspects (itself + its own test).
@@ -134,12 +136,16 @@ class _MockBindingCollector(ast.NodeVisitor):
         self.bindings.setdefault(self._scopes[-1], {}).setdefault(name, []).append((lineno, canonical))
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = node.module or ""
         for alias in node.names:
             canonical = None
             if node.module == "unittest.mock":
                 canonical = alias.name
             elif node.module == "unittest" and alias.name == "mock":
                 canonical = _MOCK_MODULE
+            # A relative import counts: every test module lives inside the package.
+            elif node.level > 0 or module.split(".")[0] == _FIRST_PARTY:
+                canonical = _FIRST_PARTY_BINDING
             self._bind(alias.asname or alias.name, node.lineno, canonical)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -150,6 +156,8 @@ class _MockBindingCollector(ast.NodeVisitor):
                 canonical = _MOCK_MODULE if alias.asname else _UNITTEST_MODULE
             elif alias.name == "unittest":
                 canonical = _UNITTEST_MODULE
+            elif alias.name.split(".")[0] == _FIRST_PARTY:
+                canonical = _FIRST_PARTY_BINDING
             self._bind(name, node.lineno, canonical)
 
     def visit_Name(self, node: ast.Name) -> None:
@@ -191,26 +199,6 @@ def _mock_bindings(tree: ast.AST) -> dict[ast.AST, dict[str, list[tuple[int, str
     return collector.bindings
 
 
-def _first_party_names(tree: ast.AST) -> set[str]:
-    """Local names bound to something imported from this plugin.
-
-    Lets ``patch.object(Server, "get_client")`` be recognised as patching our own code,
-    the same as the dotted-string form ``patch("netbox_data_import.models.Server.get_client")``.
-    Relative imports count: every test module lives inside the package.
-    """
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if node.level > 0 or module.split(".")[0] == _FIRST_PARTY:
-                names.update(alias.asname or alias.name for alias in node.names)
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.split(".")[0] == _FIRST_PARTY:
-                    names.add((alias.asname or alias.name).split(".")[0])
-    return names
-
-
 class _Scanner(ast.NodeVisitor):
     """Collect fabricating-mock instantiations that are neither bounded nor marked."""
 
@@ -220,12 +208,10 @@ class _Scanner(ast.NodeVisitor):
         comments: dict[int, str],
         bindings: dict[ast.AST, dict[str, list[tuple[int, str | None]]]],
         module: ast.AST,
-        first_party: set[str],
     ):
         self._rel = rel
         self._comments = comments
         self._bindings = bindings
-        self._first_party = first_party
         self._scope: list[str] = []
         self._binding_scopes: list[ast.AST] = [module]
         self.hits: list[Violation] = []
@@ -291,37 +277,17 @@ class _Scanner(ast.NodeVisitor):
         """
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr == "multiple":
-            if not self._is_patch(func.value) or self._is_patch_bounded(node, new_position=None):
-                return None
-            if not node.args:
-                return None
-            patched = node.args[0]
-            base = patched
-            while isinstance(base, ast.Attribute):
-                base = base.value
-            if isinstance(patched, ast.Constant) and isinstance(patched.value, str):
-                if patched.value.split(".")[0] != _FIRST_PARTY:
-                    return None
-                name = patched.value
-            elif isinstance(base, ast.Name) and base.id in self._first_party:
-                name = ast.unparse(patched)
-            else:
-                return None
-            members = (
-                f"{name}.{kw.arg}"
-                for kw in node.keywords
-                if kw.arg not in {None, "spec", "spec_set", "autospec", "new_callable", "create"}
-                and self._is_mock_default(kw.value)
-            )
-            return ", ".join(members) or None
+            return self._unspecced_first_party_multiple(node, func)
         if isinstance(func, ast.Attribute) and func.attr == "object":
             # patch.object(target, "attribute"[, new]) — a third positional is `new`.
             if not self._is_patch(func.value) or self._is_patch_bounded(node, new_position=2):
                 return None
-            root = node.args[0] if node.args else None
+            if not node.args:
+                return None
+            root = node.args[0]
             while isinstance(root, ast.Attribute):
                 root = root.value
-            if isinstance(root, ast.Name) and root.id in self._first_party:
+            if self._canonical_binding(root) == _FIRST_PARTY_BINDING:
                 return ast.unparse(node.args[0])
             return None
         # patch("dotted.target"[, new]) — a second positional is `new`.
@@ -332,6 +298,33 @@ class _Scanner(ast.NodeVisitor):
             if target.value.split(".")[0] == _FIRST_PARTY:
                 return repr(target.value)
         return None
+
+    def _unspecced_first_party_multiple(self, node: ast.Call, func: ast.Attribute) -> str | None:
+        """Return the first-party members ``patch.multiple`` leaves as a fabricating mock."""
+        if not self._is_patch(func.value) or self._is_patch_bounded(node, new_position=None):
+            return None
+        if not node.args:
+            return None
+        patched = node.args[0]
+        base = patched
+        while isinstance(base, ast.Attribute):
+            base = base.value
+        if isinstance(patched, ast.Constant) and isinstance(patched.value, str):
+            if patched.value.split(".")[0] != _FIRST_PARTY:
+                return None
+            name = patched.value
+        elif self._canonical_binding(base) == _FIRST_PARTY_BINDING:
+            name = ast.unparse(patched)
+        else:
+            return None
+        # Every other keyword names a patched member; these are patch.multiple's own arguments.
+        members = (
+            f"{name}.{kw.arg}"
+            for kw in node.keywords
+            if kw.arg not in {None, "spec", "spec_set", "autospec", "new_callable", "create"}
+            and self._is_mock_default(kw.value)
+        )
+        return ", ".join(members) or None
 
     def _is_patch(self, func: ast.expr) -> bool:
         """True for ``patch``, an aliased import of it, or ``<module>.patch``."""
@@ -427,7 +420,6 @@ def scan_source(src: str, rel: str = "<source>") -> list[Violation]:
         _comment_lines(src),
         _mock_bindings(tree),
         tree,
-        _first_party_names(tree),
     )
     scanner.visit(tree)
     return scanner.hits

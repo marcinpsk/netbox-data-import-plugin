@@ -102,6 +102,35 @@ def test_accepts_autospec_on_patch_calls():
     assert scan_source(src) == []
 
 
+def test_ignores_a_first_party_alias_rebound_to_a_third_party_module():
+    """`views = requests` inside a test makes the patch an external boundary, not our own code."""
+    src = (
+        "from unittest.mock import patch\n"
+        "from netbox_data_import import views\n"
+        "import requests\n"
+        "def test_x():\n"
+        "    views = requests\n"
+        '    patch.object(views.Session, "get")\n'
+    )
+    assert scan_source(src) == []
+
+
+def test_a_rebinding_in_one_test_leaves_the_first_party_alias_intact_in_another():
+    """The rebinding is local, so the scanner must not lose the import for the whole module."""
+    src = (
+        "from unittest.mock import patch\n"
+        "from netbox_data_import import views\n"
+        "import requests\n"
+        "def test_a():\n"
+        "    views = requests\n"
+        '    patch.object(views.Session, "get")\n'
+        "def test_b():\n"
+        '    patch.object(views.helper, "run")\n'
+    )
+    hits = scan_source(src)
+    assert [hit.qualname for hit in hits] == ["test_b"]
+
+
 def test_flags_an_unbounded_patch_object_of_a_first_party_target():
     """The autospec case above only proves something while this one reports both calls."""
     src = (
