@@ -339,6 +339,35 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertRegex(response.content.decode(), r'<button\b[^>]*data-trace-action="sync"[^>]*\sdisabled(?=[\s>])')
         self.assertContains(response, "NetBox has changed. Re-read the preview before synchronizing.")
 
+    def test_sync_ends_the_preview_when_its_target_went_after_the_render(self):
+        """The replan the sync now makes reads the planning target, which can go while it is reviewed."""
+        from core.models import Job
+        from dcim.models import Location
+
+        location = Location.objects.create(name="Room 9", slug="room-9", site=self.site)
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
+        upload.name = "traces.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            follow=True,
+        )
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        chosen = workspace.context["traces"][0]
+        Location.objects.filter(pk=location.pk).delete()
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_sync"),
+            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            follow=True,
+        )
+
+        self.assertFalse(Job.objects.filter(data__job_type="netbox_data_import.import").exists())
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        self.assertContains(response, "The saved import target is no longer available.")
+        self.assertFalse(self.client.session["import_preview_pending"])
+
     def test_re_reading_clears_the_drift_strip(self):
         """The re-read action adopts the live plan, so the difference it reported is gone."""
         self.open_workspace(patched_path())
