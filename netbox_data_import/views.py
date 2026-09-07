@@ -96,9 +96,7 @@ from .preview_row_actions import (
     mark_preview_dirty,
     pending_preview_payload,
     record_recalculated_preview,
-    release_retained_sync,
     restore_preview_plan,
-    retain_sync_job,
     retained_sync_block_reason,
     retire_preview_revision,
     start_new_preview,
@@ -1621,8 +1619,6 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
 
     from .jobs import ImportJobRunner
 
-    # The second writer that can break the invariant: a queue while one is already retained.
-    assert_preview_may_move(request.session, request.user)
     if keep_preview:
         # `ImportPlan.revision` never advances, so the plan's own content is what tells two apart.
         idempotency_key = fingerprint_of({"plan": plan_data, "selection": sorted(selection)})
@@ -1630,7 +1626,10 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
         idempotency_key = request.session.get("import_idempotency_key") or uuid.uuid4().hex
         request.session["import_idempotency_key"] = idempotency_key
     _clear_restored_import_job(request)
-    with transaction.atomic():
+    # The profile row orders the check against every competing enqueue, so two cannot both pass it.
+    with locked_profile_policy(profile.pk):
+        # The second writer that can break the invariant: a queue while one is already retained.
+        assert_preview_may_move(request.session, request.user)
         job = ImportJobRunner.enqueue(
             name=ImportJobRunner.name,
             user=request.user,
@@ -1653,6 +1652,8 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
             "source_document_id": document.pk,
             "accepted_plan": plan_data,
             "context_data": ctx_data,
+            # What makes this Job hold the preview, so the guard finds it without the session.
+            "keeps_preview": keep_preview,
         }
         job.save(update_fields=["data"])
 
@@ -1660,9 +1661,7 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
     if keep_preview:
         # The write just made the reviewed plan stale, so the next command has to re-read first.
         mark_preview_dirty(request.session)
-        retain_sync_job(request.session, job.pk)
     else:
-        release_retained_sync(request.session)
         request.session["import_preview_pending"] = False
         request.session.pop("import_preview_source_job_id", None)
     return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))

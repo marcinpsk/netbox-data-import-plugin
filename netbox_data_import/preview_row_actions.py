@@ -16,7 +16,6 @@ PREVIEW_DIRTY_SESSION_KEY = "import_preview_dirty"
 PREVIEW_PLAN_SESSION_KEY = "import_plan"
 PREVIEW_REVISION_SESSION_KEY = "import_preview_revision"
 PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY = "import_preview_use_materialized_once"
-RETAINED_SYNC_JOB_SESSION_KEY = "import_retained_sync_job_id"
 
 
 def current_preview_revision(session) -> str:
@@ -43,22 +42,27 @@ class PreviewLocked(RuntimeError):
 
 
 def retained_sync_block_reason(session, user) -> str:
-    """Return why the retained trace sync holds this preview, or ``""``.
+    """Return why a retained trace sync holds this preview, or ``""``.
 
-    Scope: this reads one session and is consulted before the enqueue, so it orders one operator's
-    commands. It does not serialize two concurrent requests.
+    The Job rows are the record. A request that loses the race to enqueue still writes the session,
+    so a guard reading one remembered id can open a preview whose other sync is still writing.
     """
     from core.choices import JobStatusChoices
 
     from .jobs import ImportJobRunner
 
-    job_pk = session.get(RETAINED_SYNC_JOB_SESSION_KEY)
-    if not job_pk:
+    context = session.get("import_context")
+    if not isinstance(context, dict):
+        return ""
+    profile_id, document_id = context.get("profile_id"), context.get("source_document_id")
+    if not profile_id or not document_id:
         return ""
     retained = ImportJobRunner.get_jobs().filter(
-        pk=job_pk,
         user=user,
         data__job_type=ImportJobRunner.job_type,
+        data__keeps_preview=True,
+        data__profile_id=profile_id,
+        data__source_document_id=document_id,
         status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
     )
     return RETAINED_SYNC_BLOCK_REASON if retained.exists() else ""
@@ -88,10 +92,9 @@ def record_recalculated_preview(session, plan, *, user) -> str:
 def start_new_preview(session, plan) -> str:
     """Store the first preview of a newly uploaded source, replacing whatever came before.
 
-    Unguarded on purpose: this is a different import, so it inherits no earlier sync. Releasing the
-    retained key is what stops the previous preview's Job from refusing commands on this one.
+    Unguarded on purpose: this is a different import, so it inherits no earlier sync. The upload
+    stored its own Source Document, which is what stops the previous preview's Job from matching.
     """
-    session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
     return _store_preview(session, plan)
 
 
@@ -100,20 +103,9 @@ def restore_preview_plan(session, plan_data) -> None:
     session[PREVIEW_PLAN_SESSION_KEY] = plan_data
 
 
-def retain_sync_job(session, job_pk) -> None:
-    """Record the per-trace sync whose writes this preview is now waiting on."""
-    session[RETAINED_SYNC_JOB_SESSION_KEY] = job_pk
-
-
-def release_retained_sync(session) -> None:
-    """Forget the retained sync, because this preview no longer waits on one."""
-    session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
-
-
 def clear_preview_state(session) -> None:
-    """Drop the stored plan and any retained sync, for a preview that is being discarded."""
+    """Drop the stored plan, for a preview that is being discarded."""
     session.pop(PREVIEW_PLAN_SESSION_KEY, None)
-    session.pop(RETAINED_SYNC_JOB_SESSION_KEY, None)
 
 
 def retire_preview_revision(session) -> str:

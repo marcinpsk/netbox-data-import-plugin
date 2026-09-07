@@ -736,6 +736,75 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
         sync = next(action for action in response.context["traces"][0].actions if action.key == "sync")
         self.assertTrue(sync.enabled)
 
+    def _rival_sync_job(self, first):
+        """Enqueue the Job a second concurrent sync would create against this same preview."""
+        from core.choices import JobNotificationChoices
+
+        from netbox_data_import.jobs import ImportJobRunner
+
+        rival = ImportJobRunner.enqueue(
+            name=ImportJobRunner.name,
+            user=self.actor,
+            notifications=JobNotificationChoices.NOTIFICATION_NEVER,
+            job_timeout=3600,
+            profile_id=self.profile.pk,
+            source_document_id=first.data["source_document_id"],
+            accepted_plan=first.data["accepted_plan"],
+            selection=[],
+            idempotency_key="rival-selection",
+        )
+        rival.data = dict(first.data)
+        rival.save(update_fields=["data"])
+        return rival
+
+    def test_a_sync_that_finishes_first_does_not_unlock_one_that_is_still_running(self):
+        """Two syncs hold one preview, and the first to finish is not the last to write.
+
+        Nothing orders the two, so the Job a request happens to know about can reach a terminal state
+        while its rival is still writing. One of them holding the preview is not enough.
+        """
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.preview_row_actions import (
+            PREVIEW_PLAN_SESSION_KEY,
+            PreviewLocked,
+            record_recalculated_preview,
+        )
+
+        queued = self.queue_one_sync()
+        rival = self._rival_sync_job(queued)
+        Job.objects.filter(pk=queued.pk).update(status=JobStatusChoices.STATUS_COMPLETED)
+        self.assertEqual(Job.objects.get(pk=rival.pk).status, JobStatusChoices.STATUS_PENDING)
+        session = self.client.session
+
+        plan = ImportPlan.from_dict(session[PREVIEW_PLAN_SESSION_KEY])
+        with self.assertRaises(PreviewLocked):
+            record_recalculated_preview(session, plan, user=self.actor)
+
+    def test_a_fresh_session_is_refused_by_the_sync_it_never_queued(self):
+        """The Job holds the preview, so a session that was never told about it is refused too."""
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.preview_row_actions import (
+            PREVIEW_PLAN_SESSION_KEY,
+            PreviewLocked,
+            record_recalculated_preview,
+        )
+
+        self.queue_one_sync()
+        context = dict(self.client.session["import_context"])
+        plan_data = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+
+        self.client.logout()
+        self.client.force_login(self.actor)
+        fresh = self.client.session
+        fresh["import_context"] = context
+        fresh.save()
+
+        with self.assertRaises(PreviewLocked):
+            record_recalculated_preview(fresh, ImportPlan.from_dict(plan_data), user=self.actor)
+
     def test_a_new_upload_frees_the_workspace_of_the_previous_retained_sync(self):
         """A new preview owns no earlier sync, so the old Job must not refuse its commands."""
         self.queue_one_sync()
@@ -746,6 +815,99 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
         self.assertNotContains(response, "A trace synchronization is still running.")
         sync = next(action for action in response.context["traces"][0].actions if action.key == "sync")
         self.assertTrue(sync.enabled)
+
+
+class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):
+    """The guard is read under the profile row, so two syncs cannot both pass it and queue."""
+
+    def setUp(self):
+        """Build the shared topology this transactional case cannot inherit from class data."""
+        super().setUp()
+        self.build_topology()
+
+    @staticmethod
+    def _another_backend_waits_on_a_lock():
+        """Return whether another connection to this test database is blocked on a lock."""
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+                "WHERE NOT l.granted AND a.datname = current_database() AND a.pid <> pg_backend_pid()"
+            )
+            return cursor.fetchone()[0] > 0
+
+    def test_a_sync_queued_under_the_lock_refuses_the_one_waiting_behind_it(self):
+        """The competing Job commits as the row is released, and the waiting request has to see it."""
+        import threading
+        import time
+
+        from core.choices import JobNotificationChoices
+        from core.models import Job
+
+        from netbox_data_import.jobs import ImportJobRunner
+        from netbox_data_import.models import locked_profile_policy
+
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(direct_path(),)))
+        upload.name = "traces.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        chosen = workspace.context["traces"][0]
+        context = self.client.session["import_context"]
+        profile_pk, document_pk = self.profile.pk, context["source_document_id"]
+        holding = threading.Event()
+
+        def queue_the_competing_sync():
+            """Hold the profile row, then commit the Job the rival request would have queued."""
+            from django.db import connection
+
+            try:
+                with locked_profile_policy(profile_pk):
+                    holding.set()
+                    # Let the request under test reach the row and block on it before committing.
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline and not self._another_backend_waits_on_a_lock():
+                        time.sleep(0.05)
+                    rival = ImportJobRunner.enqueue(
+                        name=ImportJobRunner.name,
+                        user=self.actor,
+                        notifications=JobNotificationChoices.NOTIFICATION_NEVER,
+                        job_timeout=3600,
+                        profile_id=profile_pk,
+                        source_document_id=document_pk,
+                        accepted_plan={},
+                        selection=[],
+                        idempotency_key="rival-selection",
+                    )
+                    rival.data = {
+                        "job_type": ImportJobRunner.job_type,
+                        "profile_id": profile_pk,
+                        "source_document_id": document_pk,
+                        "keeps_preview": True,
+                    }
+                    rival.save(update_fields=["data"])
+            finally:
+                connection.close()
+
+        holder = threading.Thread(target=queue_the_competing_sync)
+        holder.start()
+        try:
+            self.assertTrue(holding.wait(10), "the competing connection never took the profile row")
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:trace_sync"),
+                {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+                follow=True,
+            )
+        finally:
+            holder.join(20)
+
+        self.assertContains(response, "A trace synchronization is still running.")
+        self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
 
 
 class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
