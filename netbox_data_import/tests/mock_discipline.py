@@ -294,9 +294,12 @@ class _Scanner(ast.NodeVisitor):
         if not self._is_patch(func) or self._is_patch_bounded(node, new_position=1):
             return None
         target = node.args[0] if node.args else None
-        if isinstance(target, ast.Constant) and isinstance(target.value, str):
-            if target.value.split(".")[0] == _FIRST_PARTY:
-                return repr(target.value)
+        if (
+            isinstance(target, ast.Constant)
+            and isinstance(target.value, str)
+            and target.value.split(".")[0] == _FIRST_PARTY
+        ):
+            return repr(target.value)
         return None
 
     def _unspecced_first_party_multiple(self, node: ast.Call, func: ast.Attribute) -> str | None:
@@ -448,8 +451,8 @@ def load_baseline(path: Path = _BASELINE_PATH) -> dict[str, int]:
     if not path.exists():
         return {}
     allowed: dict[str, int] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         site, _, count = line.rpartition("\t")
