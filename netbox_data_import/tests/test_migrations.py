@@ -8,6 +8,7 @@ from django.apps import apps
 from django.db import connection
 from django.db.migrations.autodetector import MigrationAutodetector
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations import Migration
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.questioner import NonInteractiveMigrationQuestioner
 from django.db.migrations.state import ProjectState
@@ -144,44 +145,56 @@ _SENTINELS = frozenset({"__first__", "__latest__"})
 _CONTROL_APP = "ipam"
 
 
-def _newest_live_ancestor_pin(loader, app_label, name, other_app, known, seen=None):
-    """Return the newest node of `other_app` this migration already reaches through its own app."""
+def _reachable_pins(disk, app_label, name, other_app, seen=None):
+    """Return every live node of `other_app` this migration reaches through its own app's chain."""
     seen = seen or set()
     reached = []
-    for parent in loader.disk_migrations[(app_label, name)].dependencies:
-        if parent[0] == other_app and parent in known:
+    for parent in disk[(app_label, name)].dependencies:
+        if parent[0] == other_app and parent in disk:
             reached.append(parent[1])
-        elif parent[0] == app_label and parent[1] not in seen:
+        elif parent[0] == app_label and parent[1] not in seen and parent in disk:
             seen.add(parent[1])
-            reached.extend(_newest_live_ancestor_pin(loader, app_label, parent[1], other_app, known, seen))
-    return max(reached, default=None)
+            reached.extend(_reachable_pins(disk, app_label, parent[1], other_app, seen))
+    return reached
 
 
-def _unresolved_dependencies(app_label):
-    """Return one report per dangling cross-app dependency, with what it takes to decide the fix.
+def _newest_live_ancestor_pin(disk, app_label, name, other_app):
+    """Return the newest node of `other_app` this migration already reaches, or None."""
+    return max(_reachable_pins(disk, app_label, name, other_app), default=None)
+
+
+def _dangling_reports(disk, app_label):
+    """Return one report per dangling cross-app dependency in `disk`, with what decides the fix.
 
     `initial` and the newest same-app ancestor pin are what separate the three remediations: a
-    non-initial migration that already reaches a newer node of that app can drop the edge, while an
-    initial one whose only edge this is has to keep the ordering through the `__first__` sentinel.
+    migration that already reaches a newer node of that app can drop the edge, while an initial one
+    whose only edge this is has to keep the ordering through the `__first__` sentinel. Reaching is
+    transitive, so an ancestor in this app's own chain counts.
+
+    Takes the mapping rather than reading one, so a test can state a graph and watch this report it.
     """
-    # `load=False` matters: `build_graph()` validates every installed app, not just this one.
-    loader = MigrationLoader(None, load=False, replace_migrations=False)
-    loader.load_disk()
-    known = set(loader.disk_migrations)
     missing = []
-    for key in sorted(node for node in known if node[0] == app_label):
-        migration = loader.disk_migrations[key]
+    for key in sorted(node for node in disk if node[0] == app_label):
+        migration = disk[key]
         for parent in migration.dependencies:
             if parent[0] == "__setting__" or parent[1] in _SENTINELS:
                 continue
-            if parent[0] != app_label and parent not in known:
-                ancestor = _newest_live_ancestor_pin(loader, app_label, key[1], parent[0], known)
+            if parent[0] != app_label and parent not in disk:
+                ancestor = _newest_live_ancestor_pin(disk, app_label, key[1], parent[0])
                 missing.append(
                     f"{key[1]} -> {parent[0]}.{parent[1]} "
                     f"(initial={bool(getattr(migration, 'initial', False))}, "
                     f"newest live {parent[0]} ancestor={ancestor or 'none'})"
                 )
     return missing
+
+
+def _unresolved_dependencies(app_label):
+    """Return the dangling cross-app dependencies this app ships on disk."""
+    # `load=False` matters: `build_graph()` validates every installed app, not just this one.
+    loader = MigrationLoader(None, load=False, replace_migrations=False)
+    loader.load_disk()
+    return _dangling_reports(loader.disk_migrations, app_label)
 
 
 class MigrationGraphResolvesWithoutReplacementTest(SimpleTestCase):
@@ -210,5 +223,26 @@ class MigrationGraphResolvesWithoutReplacementTest(SimpleTestCase):
         )
 
     def test_the_check_can_report_success(self):
-        """A known-good app must come back clean, or the test above proves nothing."""
+        """A known-good app comes back clean, so a false positive would show here."""
         self.assertEqual(_unresolved_dependencies(_CONTROL_APP), [])
+
+    def test_the_check_reports_a_dangling_edge_it_is_given(self):
+        """Both assertions above are `== []`, which a check that always returned [] would pass.
+
+        Only this one exercises detection, so it is what stops the guard from going quietly blind.
+        """
+        squash = Migration("0001_squashed", "extras")
+        first = Migration("0001_initial", APP)
+        first.initial = True
+        first.dependencies = [("extras", "0001_squashed")]
+        later = Migration("0002_later", APP)
+        later.dependencies = [(APP, "0001_initial"), ("extras", "9999_absent")]
+
+        reports = _dangling_reports(
+            {("extras", "0001_squashed"): squash, (APP, "0001_initial"): first, (APP, "0002_later"): later},
+            APP,
+        )
+
+        self.assertEqual(
+            reports, ["0002_later -> extras.9999_absent (initial=False, newest live extras ancestor=0001_squashed)"]
+        )
