@@ -274,8 +274,8 @@ class SelectedBackendTest(TestCase):
             self.client.post(reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[row.pk]))
 
         keywords = [getattr(callback, "keywords", {}) for callback in callbacks]
+        self.assertNotIn("pk", [key for item in keywords for key in item])
         self.assertIn("selected", [item.get("backend_key") for item in keywords])
-        self.assertNotIn(row.pk, [value for item in keywords for value in item.values()])
 
 
 class ConnectionTestQueuedPathTest(TestCase):
@@ -396,7 +396,7 @@ class BackendDetailPageTest(TestCase):
         response = self.client.get(self.row.get_absolute_url())
 
         self.assertContains(response, "inference/backend")
-        self.assertNotContains(response, "api_key_value")
+        self.assertNotContains(response, SECRET)
 
     def test_the_connection_test_redirect_lands_on_a_page_that_renders(self):
         response = self.client.post(

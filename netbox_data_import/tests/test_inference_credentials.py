@@ -12,6 +12,8 @@ import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import requests
+
 from django.test import SimpleTestCase
 
 from netbox_data_import.inference_credentials import (
@@ -59,10 +61,10 @@ class RecordingVault(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def serving(status=200, payload=None):
+def serving(status=200, payload=None, handler=RecordingVault):
     """Run a Vault stand-in on the loopback interface and yield its settings and request log."""
 
-    class Handler(RecordingVault):
+    class Handler(handler):
         pass
 
     Handler.status = status
@@ -166,6 +168,38 @@ class VaultReadTest(SimpleTestCase):
         """Resolve the reference through a backend built on the given vault settings."""
         backend = VaultKvV2CredentialBackend(settings)
         return backend.resolve(CredentialReference.from_mapping(reference or REFERENCE))
+
+    def test_close_clears_only_an_owned_session_pool(self):
+        for injected in (False, True):
+            with self.subTest(injected=injected), serving() as (settings, _seen):
+                with requests.Session() as session:
+                    backend = VaultKvV2CredentialBackend(settings, session=session if injected else None)
+                    self.addCleanup(backend._session.close)
+                    backend.resolve(CredentialReference.from_mapping(REFERENCE))
+                    pools = backend._session.get_adapter(settings["address"]).poolmanager.pools
+                    self.assertEqual(len(pools), 1)
+
+                    backend.close()
+
+                    self.assertEqual(len(pools), 1 if injected else 0)
+
+    def test_context_exit_clears_only_owned_pools_on_success_and_failure(self):
+        for injected in (False, True):
+            for status in (200, 403):
+                with self.subTest(injected=injected, status=status), serving(status=status) as (settings, _seen):
+                    with requests.Session() as session:
+                        backend = VaultKvV2CredentialBackend(settings, session=session if injected else None)
+                        self.addCleanup(backend._session.close)
+                        pools = backend._session.get_adapter(settings["address"]).poolmanager.pools
+                        try:
+                            with backend as store:
+                                self.assertIs(store, backend)
+                                store.resolve(CredentialReference.from_mapping(REFERENCE))
+                                self.assertEqual(len(pools), 1)
+                        except CredentialDenied:
+                            self.assertEqual(status, 403)
+
+                        self.assertEqual(len(pools), 1 if injected else 0)
 
     def test_the_configured_field_is_returned(self):
         with serving() as (settings, seen):
@@ -359,31 +393,11 @@ class VaultRedirectTest(SimpleTestCase):
             """Keep the test output quiet."""
 
     def test_a_redirect_is_reported_as_a_configuration_problem(self):
-        import threading
-        from http.server import ThreadingHTTPServer
-
-        class Handler(self.Redirecting):
-            pass
-
-        Handler.seen = []
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            settings = {
-                "address": f"http://127.0.0.1:{server.server_address[1]}",
-                "auth_method": "proxy",
-                "connect_timeout": 2,
-                "read_timeout": 2,
-            }
+        with serving(handler=self.Redirecting) as (settings, _seen):
             backend = VaultKvV2CredentialBackend(settings)
 
             with self.assertRaises(CredentialFailure) as caught:
                 backend.resolve(CredentialReference.from_mapping(REFERENCE))
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
 
         self.assertEqual(caught.exception.category, "invalid_configuration")
         self.assertIn("redirect", str(caught.exception))

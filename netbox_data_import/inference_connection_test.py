@@ -56,8 +56,8 @@ def run_connection_test(backend_key: str) -> ConnectionTestResult:
     from .inference_backend import plugin_settings
 
     try:
-        store = credential_backend_for(backend.credential_reference, plugin_settings().get(VAULT_SETTING, {}))
-        store.resolve(backend.credential_reference)
+        with credential_backend_for(backend.credential_reference, plugin_settings().get(VAULT_SETTING, {})) as store:
+            store.resolve(backend.credential_reference)
     except CredentialFailure as exc:
         return ConnectionTestResult(exc.category, str(exc), backend.backend_key, backend.source)
     return ConnectionTestResult(

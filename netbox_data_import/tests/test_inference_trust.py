@@ -158,16 +158,20 @@ class ResolvedAddressTest(SimpleTestCase):
         self.assertIn("private", str(caught.exception))
 
     def test_a_loopback_address_is_rejected(self):
-        with self.assertRaises(InvalidInferenceConfiguration):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
             assert_resolved_address_allowed(
                 "https://backend.example.invalid:443", allowlist=ALLOWLIST, addresses=("127.0.0.1",)
             )
 
+        self.assertIn("loopback", str(caught.exception))
+
     def test_a_link_local_address_is_rejected(self):
-        with self.assertRaises(InvalidInferenceConfiguration):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
             assert_resolved_address_allowed(
                 "https://backend.example.invalid:443", allowlist=ALLOWLIST, addresses=("169.254.1.1",)
             )
+
+        self.assertIn("link-local", str(caught.exception))
 
     def test_the_cloud_metadata_address_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:

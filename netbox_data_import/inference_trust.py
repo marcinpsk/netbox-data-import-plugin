@@ -175,14 +175,22 @@ def assert_resolved_address_allowed(
             )
         if approved_local:
             continue
-        if address.is_loopback or address.is_link_local:
+        category = next(
+            (
+                label
+                for matches, label in (
+                    (address.is_loopback, "loopback"),
+                    (address.is_link_local, "link-local"),
+                    (address.is_reserved, "reserved"),
+                    (address.is_private, "private"),
+                )
+                if matches
+            ),
+            None,
+        )
+        if category:
             raise InvalidInferenceConfiguration(
-                f"'{setting}' resolves to the private address {candidate}, which the allowlist does not approve "
-                f"as a local endpoint."
-            )
-        if address.is_private or address.is_reserved:
-            raise InvalidInferenceConfiguration(
-                f"'{setting}' resolves to the private address {candidate}, which the allowlist does not approve "
+                f"'{setting}' resolves to the {category} address {candidate}, which the allowlist does not approve "
                 f"as a local endpoint."
             )
 

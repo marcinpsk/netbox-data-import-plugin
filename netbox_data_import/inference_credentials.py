@@ -16,7 +16,8 @@ from urllib.parse import quote
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from types import TracebackType
+from typing import Any, Protocol, Self
 
 import requests
 
@@ -130,6 +131,19 @@ class CredentialBackend(Protocol):
 
     name: str
 
+    def close(self) -> None:
+        """Release resources owned by this backend."""
+        ...
+
+    def __enter__(self) -> Self: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
+
     def resolve(self, reference: CredentialReference) -> str:
         """Return the secret the reference names."""
         ...
@@ -145,7 +159,24 @@ class VaultKvV2CredentialBackend:
             self._settings = validate_vault_settings(settings)
         except InvalidInferenceConfiguration as exc:
             raise InvalidCredentialConfiguration(str(exc)) from exc
-        self._session = session or requests.Session()
+        self._owns_session = session is None
+        self._session = requests.Session() if session is None else session
+
+    def close(self) -> None:
+        """Close the session only when this backend created it."""
+        if self._owns_session:
+            self._session.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def _headers(self) -> dict[str, str]:
         """Return the request headers, reading a token only when the deployment selected one."""
