@@ -7,6 +7,7 @@ from django.test import SimpleTestCase
 from netbox_data_import.inference_settings import (
     FILE_FALLBACK_KEY,
     InvalidInferenceConfiguration,
+    validate_credential_reference,
     validate_plugin_settings,
 )
 
@@ -328,6 +329,46 @@ class PluginConfigStartupGateTest(SimpleTestCase):
         self.validate(config)
 
         self.assertEqual(config["inference_backend_origin_allowlist"], [])
+
+
+class CredentialReferenceTypeTest(SimpleTestCase):
+    """Every Vault reference field names text. A number only looks valid once something coerces it."""
+
+    def reference(self, **overrides):
+        """Return a valid credential reference with the named keys replaced."""
+        mapping = {"backend": "vault_kv_v2", "mount": "secret", "path": "ai/backend", "field": "api_key"}
+        mapping.update(overrides)
+        return mapping
+
+    def test_a_valid_reference_is_accepted(self):
+        self.assertEqual(validate_credential_reference(self.reference())["field"], "api_key")
+
+    def test_a_non_string_unknown_key_is_reported_not_raised(self):
+        """The unknown-key message sorts and joins the keys, which a number turned into a TypeError."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_credential_reference({**self.reference(), 5: "x"})
+
+        self.assertIn("Unknown", str(caught.exception))
+
+    def test_a_numeric_mount_is_rejected(self):
+        """`str(value)` would make 8200 a valid-looking mount that `quote()` then refuses."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_credential_reference(self.reference(mount=8200))
+
+        self.assertIn("mount", str(caught.exception))
+
+    def test_a_numeric_path_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_credential_reference(self.reference(path=42))
+
+        self.assertIn("path", str(caught.exception))
+
+    def test_a_numeric_field_is_rejected(self):
+        """Only truthiness was checked, so a number reached the Vault lookup as a key name."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_credential_reference(self.reference(field=1))
+
+        self.assertIn("field", str(caught.exception))
 
 
 class VaultCaBundleTest(SimpleTestCase):

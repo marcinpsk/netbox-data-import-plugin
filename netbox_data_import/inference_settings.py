@@ -89,7 +89,7 @@ def validate_vault_settings(value: Any) -> Mapping[str, Any]:
                 f"'{VAULT_SETTING}.{name}' is not accepted. Connection and machine identity data belong to the "
                 f"deployment, and the KV v2 mount belongs to the credential reference."
             )
-    unknown = sorted(set(mapping) - set(VAULT_FIELDS))
+    unknown = sorted(str(key) for key in set(mapping) - set(VAULT_FIELDS))
     if unknown:
         raise InvalidInferenceConfiguration(f"Unknown '{VAULT_SETTING}' key(s): {', '.join(unknown)}.")
     if not mapping.get("address"):
@@ -128,9 +128,19 @@ def _validate_vault_address(value: Any) -> None:
 _UNSAFE_PATH_SEGMENTS = frozenset({"", ".", ".."})
 
 
+def _require_text(value: Any, label: str) -> str:
+    """Return the value as text, rejecting one that only looks valid after coercion.
+
+    A number survives `str()` and reaches the Vault request as a path or a key name.
+    """
+    if not isinstance(value, str) or not value:
+        raise InvalidInferenceConfiguration(f"'{label}' must be a non-empty string.")
+    return value
+
+
 def _validate_vault_path(value: Any, label: str, *, segments: bool) -> None:
     """Reject a Vault path value that could change the request it is interpolated into."""
-    text = str(value)
+    text = _require_text(value, label)
     for character in "?#%":
         if character in text:
             raise InvalidInferenceConfiguration(f"'{label}' cannot contain '{character}'.")
@@ -143,7 +153,7 @@ def _validate_vault_path(value: Any, label: str, *, segments: bool) -> None:
 def validate_credential_reference(value: Any, label: str = "credential_reference") -> Mapping[str, Any]:
     """Return the typed Vault KV v2 reference, rejecting connection data and secret material."""
     mapping = _require_mapping(value, label)
-    unknown = sorted(set(mapping) - set(CREDENTIAL_REFERENCE_FIELDS))
+    unknown = sorted(str(key) for key in set(mapping) - set(CREDENTIAL_REFERENCE_FIELDS))
     if unknown:
         raise InvalidInferenceConfiguration(f"Unknown '{label}' key(s): {', '.join(unknown)}.")
     missing = [name for name in CREDENTIAL_REFERENCE_FIELDS if not mapping.get(name)]
@@ -155,6 +165,7 @@ def validate_credential_reference(value: Any, label: str = "credential_reference
         )
     _validate_vault_path(mapping["mount"], f"{label}.mount", segments=False)
     _validate_vault_path(mapping["path"], f"{label}.path", segments=True)
+    _require_text(mapping["field"], f"{label}.field")
     return mapping
 
 
@@ -203,7 +214,7 @@ def _validate_fallback_fields(mapping: Mapping[str, Any]) -> None:
 def validate_file_fallback(value: Any, allowlist: Sequence[str]) -> Mapping[str, Any]:
     """Return the whole-backend fallback, rejecting a field set that is not exactly the row's."""
     mapping = _require_mapping(value, FILE_FALLBACK_SETTING)
-    unknown = sorted(set(mapping) - set(FILE_FALLBACK_FIELDS))
+    unknown = sorted(str(key) for key in set(mapping) - set(FILE_FALLBACK_FIELDS))
     if unknown:
         raise InvalidInferenceConfiguration(f"Unknown '{FILE_FALLBACK_SETTING}' key(s): {', '.join(unknown)}.")
     missing = [name for name in FILE_FALLBACK_FIELDS if name not in mapping]

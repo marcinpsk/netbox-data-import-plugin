@@ -194,7 +194,8 @@ class VaultKvV2CredentialBackend:
         if reference.backend != self.name:
             raise InvalidCredentialReference(f"This backend resolves '{self.name}' references only.")
         response = self._read(reference)
-        if response.status_code in (301, 302, 303, 307, 308):
+        # Every 3xx, not a list of them: a 300 or 305 body shaped like KV would read as the secret.
+        if 300 <= response.status_code < 400:
             raise InvalidCredentialConfiguration(
                 f"The credential store redirected the read (HTTP {response.status_code}). "
                 f"Check the configured vault address."
@@ -209,6 +210,8 @@ class VaultKvV2CredentialBackend:
             envelope = response.json()
             data = envelope["data"]["data"]
         except (ValueError, KeyError, TypeError):
+            raise CredentialUnavailable("The credential store answered with an unreadable KV v2 envelope.") from None
+        if not isinstance(data, Mapping):
             raise CredentialUnavailable("The credential store answered with an unreadable KV v2 envelope.") from None
         if reference.field not in data:
             raise InvalidSecretMaterial("The referenced field is absent from the stored secret.")

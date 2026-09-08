@@ -145,7 +145,8 @@ def validate_api_root(
         raise InvalidInferenceConfiguration(
             f"'{setting}' must have no trailing slash. The client appends /chat/completions. Got '{api_root}'."
         )
-    if parts.query or parts.fragment:
+    # A bare `?` or `#` splits into an empty component, so the raw value is what shows it.
+    if parts.query or parts.fragment or "?" in api_root or "#" in api_root:
         raise InvalidInferenceConfiguration(
             f"'{setting}' carries no query or fragment component. The client appends /chat/completions to the "
             f"path, which either one would swallow. Got '{api_root}'."

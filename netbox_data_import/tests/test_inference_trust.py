@@ -99,6 +99,17 @@ class ApiRootAllowlistTest(SimpleTestCase):
 
         self.assertIn("trailing slash", str(caught.exception))
 
+    def test_a_bare_query_or_fragment_delimiter_is_rejected(self):
+        """`urlsplit` reports an empty query for a trailing `?`, so the truthiness check misses it."""
+        for value in (
+            "https://backend.example.invalid:443/v1?",
+            "https://backend.example.invalid:443/v1#",
+        ):
+            with self.subTest(value=value), self.assertRaises(InvalidInferenceConfiguration) as caught:
+                validate_api_root(value, allowlist=ALLOWLIST, authentication="bearer")
+
+            self.assertIn("query or fragment", str(caught.exception))
+
     def test_a_query_or_fragment_is_rejected(self):
         """The client appends /chat/completions as text, so a query would swallow the suffix."""
         for value in (

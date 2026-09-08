@@ -150,7 +150,11 @@ class SourceDocumentRetentionJob(JobRunner):
 
 
 class InferenceBackendConnectionTestJob(JobRunner):
-    """Resolve the active Inference Backend's credential on the worker (specification 8.6)."""
+    """Resolve the named backend's credential on the worker, so the web process never holds one.
+
+    The key names the row to test, enabled or not: an operator tests a backend to decide whether to
+    enable it (specification 8.6).
+    """
 
     job_type = "netbox_data_import.inference_connection_test"
 

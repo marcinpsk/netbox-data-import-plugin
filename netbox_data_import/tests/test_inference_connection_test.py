@@ -278,6 +278,50 @@ class SelectedBackendTest(TestCase):
         self.assertNotIn(row.pk, [value for item in keywords for value in item.values()])
 
 
+class ConnectionTestQueuedPathTest(TestCase):
+    """The whole queued path: the view enqueues, and the worker runs what the view authorized."""
+
+    def test_the_queued_job_tests_the_row_the_view_named_even_once_it_is_disabled(self):
+        """Resolution happens on the worker later, so the row's state can change before it runs."""
+        from core.models import Job
+
+        from netbox_data_import.jobs import InferenceBackendConnectionTestJob
+
+        row = make_row(
+            backend_key="selected",
+            display_name="Selected",
+            enabled=True,
+            credential_reference={**REFERENCE, "path": "inference/selected"},
+        )
+        # Only one row may be enabled, so this one waits to take over once `selected` steps down.
+        other = make_row(
+            backend_key="other-enabled",
+            display_name="Other",
+            enabled=False,
+            credential_reference={**REFERENCE, "path": "inference/other"},
+        )
+        self.client.force_login(user_with_object_permission("queuer", [(InferenceBackend, ["change"], {})]))
+
+        # NetBox pushes to the queue on commit; the Job row itself is written before that.
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            self.client.post(reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[row.pk]))
+
+        queued = next(keywords for callback in callbacks if (keywords := getattr(callback, "keywords", {})))
+        # The operator retires the tested row and promotes another before the worker picks the Job up.
+        InferenceBackend.objects.filter(pk=row.pk).update(enabled=False)
+        InferenceBackend.objects.filter(pk=other.pk).update(enabled=True)
+        job = Job.objects.get(name=InferenceBackendConnectionTestJob.Meta.name)
+
+        with vault() as vault_settings:
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                InferenceBackendConnectionTestJob.handle(job, backend_key=queued["backend_key"])
+
+        job.refresh_from_db()
+        self.assertEqual(job.data["backend_key"], "selected")
+        self.assertIn(job.data["category"], CONNECTION_TEST_CATEGORIES)
+        self.assertEqual([path for path in SEEN_PATHS if "inference/" in path], ["/v1/secret/data/inference/selected"])
+
+
 class ConnectionTestAuthorizationTest(TestCase):
     """One object permission on InferenceBackend authorizes the test; nothing else does."""
 

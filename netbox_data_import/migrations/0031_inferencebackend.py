@@ -7,9 +7,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        # The only cross-app reference is the tags M2M, and extras.Tag exists from the first
-        # migration, so the floor in netbox_data_import/__init__.py is what this has to name.
-        ("extras", "0001_initial"),
+        # No extras node of its own: 0020 already pins `extras.0140`, which this descends from.
         ("netbox_data_import", "0030_remove_device_type_creation_config"),
     ]
 

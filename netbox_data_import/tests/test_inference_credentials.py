@@ -229,6 +229,26 @@ class VaultFailureClassificationTest(SimpleTestCase):
                 self.resolve(settings)
         return caught.exception
 
+    def test_a_three_hundred_answer_is_never_read_as_a_secret(self):
+        """Only some 3xx codes were listed, so a KV-shaped 300 body was accepted as the secret."""
+        failure = self.failure(status=300, payload={"data": {"data": {"api_key": "sk-not-a-secret"}}})
+
+        self.assertIsInstance(failure, CredentialFailure)
+        self.assertNotIn("sk-not-a-secret", str(failure))
+
+    def test_a_not_modified_answer_is_never_read_as_a_secret(self):
+        self.assertIsInstance(self.failure(status=304, payload=None), CredentialFailure)
+
+    def test_a_kv_envelope_holding_no_mapping_is_credential_unavailable(self):
+        """The parse guard ends before the field lookup, so a list reached it and raised TypeError."""
+        failure = self.failure(status=200, payload={"data": {"data": ["api_key"]}})
+
+        self.assertIsInstance(failure, CredentialUnavailable)
+        self.assertEqual(failure.category, "credential_unavailable")
+
+    def test_a_kv_envelope_holding_a_scalar_is_credential_unavailable(self):
+        self.assertIsInstance(self.failure(status=200, payload={"data": {"data": 7}}), CredentialUnavailable)
+
     def test_a_denied_read_is_credential_denied(self):
         failure = self.failure(status=403, payload={"errors": ["permission denied"]})
 
