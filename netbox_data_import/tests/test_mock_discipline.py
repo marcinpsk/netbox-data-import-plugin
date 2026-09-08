@@ -717,3 +717,35 @@ def test_main_clean_tree_exits_zero(capsys):
     rc = md._main([])
     assert rc == 0
     assert "0 unapproved mock(s)" in capsys.readouterr().out
+
+
+def test_flags_a_partial_of_a_specless_mock_as_new_callable():
+    """`partial(MagicMock)` fabricates exactly like the class it wraps, so it is not a real factory."""
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', new_callable=functools.partial(MagicMock)):\n"
+        "        pass\n"
+    )
+    assert [h.mock for h in scan_source(src, "t.py")] == ["'netbox_data_import.views.thing'"]
+
+
+def test_accepts_a_partial_that_binds_the_mock_it_wraps():
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\nclass C: ...\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', new_callable=functools.partial(MagicMock, spec=C)):\n"
+        "        pass\n"
+    )
+    assert scan_source(src, "t.py") == []
+
+
+def test_accepts_a_factory_that_builds_a_real_object():
+    """A blanket marker requirement would reject this supported case, so it must stay accepted."""
+    src = (
+        "from unittest.mock import patch\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', new_callable=lambda: object()):\n"
+        "        pass\n"
+    )
+    assert scan_source(src, "t.py") == []

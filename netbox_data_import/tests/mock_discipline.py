@@ -87,6 +87,22 @@ def _targets() -> set[str]:
     return _FABRICATING_MOCKS | ({"AsyncMock"} if INCLUDE_ASYNCMOCK else set())
 
 
+def _partial_target(node: ast.expr) -> ast.expr | None:
+    """Return the callable a `functools.partial(...)` call wraps, or None for anything else."""
+    if not isinstance(node, ast.Call) or not node.args:
+        return None
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+    return node.args[0] if name == "partial" else None
+
+
+def _binds_a_mock(node: ast.expr) -> bool:
+    """Return whether a call's own keywords bound the mock it would build."""
+    if not isinstance(node, ast.Call):
+        return False
+    return any(kw.arg in _BOUNDING_KWARGS and _is_actual_bound(kw.value) for kw in node.keywords)
+
+
 def _is_actual_bound(value: ast.expr) -> bool:
     # None is the default. False explicitly disables spec arguments.
     return not (isinstance(value, ast.Constant) and (value.value is None or value.value is False))
@@ -355,6 +371,9 @@ class _Scanner(ast.NodeVisitor):
         factory = next((kw.value for kw in node.keywords if kw.arg == "new_callable"), None)
         if factory is None or (isinstance(factory, ast.Constant) and factory.value is None):
             return False
+        if (wrapped := _partial_target(factory)) is not None:
+            # `partial(MagicMock)` fabricates exactly like the class it wraps, unless it binds it.
+            return self._mock_class(wrapped) is None or _binds_a_mock(factory)
         return self._mock_class(factory) is None
 
     def _canonical_binding(self, node: ast.expr) -> str | None:
