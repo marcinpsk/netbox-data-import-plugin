@@ -122,9 +122,9 @@ def _from_file_fallback(mapping, allowlist) -> ResolvedInferenceBackend:
 def resolve_backend_by_key(backend_key: str) -> ResolvedInferenceBackend:
     """Return the backend one key names, whether or not it is the active one.
 
-    The connection test authorizes a single row, so the worker resolves that row rather than
-    whichever backend happens to be active when it runs. `enabled` is not a filter here: an
-    operator tests a backend in order to decide whether to enable it.
+    This lookup selects a row by its current key, independently of the active backend.
+    `enabled` is not a filter: an operator tests a backend to decide whether to enable it.
+    Queued connection tests use `resolve_backend_by_id` to preserve the authorized row identity.
 
     Rows only. A backend key is editable, so falling through to the file fallback would let an
     operator scoped to one row rename it to the fallback key, queue a test, rename it back, and
@@ -135,6 +135,21 @@ def resolve_backend_by_key(backend_key: str) -> ResolvedInferenceBackend:
     row = InferenceBackend.objects.filter(backend_key=backend_key).first()
     if row is None:
         raise NoActiveInferenceBackend(f"No Inference Backend row carries the key '{backend_key}'.")
+    return _from_row(row, origin_allowlist())
+
+
+def resolve_backend_by_id(pk: int) -> ResolvedInferenceBackend:
+    """Return exactly the authorized row, even when it is disabled.
+
+    An operator tests a backend to decide whether to enable it, so `enabled` is not a filter.
+    Rows only, never the file fallback: an editable key must not let a scoped operator resolve
+    the deployment's own credential reference. A deleted row cannot select its replacement.
+    """
+    from .models import InferenceBackend
+
+    row = InferenceBackend.objects.filter(pk=pk).first()
+    if row is None:
+        raise NoActiveInferenceBackend(f"No Inference Backend row has ID {pk}.")
     return _from_row(row, origin_allowlist())
 
 
@@ -161,6 +176,7 @@ __all__ = (
     "origin_allowlist",
     "plugin_settings",
     "resolve_active_backend",
+    "resolve_backend_by_id",
     "resolve_backend_by_key",
     "validate_backend_fields",
 )

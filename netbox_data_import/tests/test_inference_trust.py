@@ -86,6 +86,12 @@ class ApiRootAllowlistTest(SimpleTestCase):
         """The client appends /chat/completions, so a root may carry a base path."""
         validate_api_root("https://backend.example.invalid:443/v1", allowlist=ALLOWLIST, authentication="bearer")
 
+    def test_api_roots_with_surrounding_spaces_are_trimmed(self):
+        root = "https://backend.example.invalid:443/v1"
+        for value in (root + " ", " " + root):
+            with self.subTest(value=value):
+                self.assertEqual(validate_api_root(value, allowlist=ALLOWLIST), root)
+
     def test_a_root_outside_the_allowlist_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
             validate_api_root("https://elsewhere.example.invalid:443", allowlist=ALLOWLIST, authentication="bearer")
@@ -104,6 +110,8 @@ class ApiRootAllowlistTest(SimpleTestCase):
         for value in (
             "https://backend.example.invalid:443/v1?",
             "https://backend.example.invalid:443/v1#",
+            " https://backend.example.invalid:443/v1? ",
+            " https://backend.example.invalid:443/v1# ",
         ):
             with self.subTest(value=value), self.assertRaises(InvalidInferenceConfiguration) as caught:
                 validate_api_root(value, allowlist=ALLOWLIST, authentication="bearer")

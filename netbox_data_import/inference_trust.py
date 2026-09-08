@@ -11,6 +11,10 @@ Specification 8.3 asks for a recheck after resolution, which is what this module
 not pin the socket to the address it checked, so a name that answers differently between the check
 and the connect is a residual window. Closing it needs an address-pinned transport with its own TLS
 hostname handling, which is tracked in issue #147.
+
+A bearer credential may travel in cleartext over HTTP to an approved local endpoint.
+`is_local_endpoint` covers loopback, private and link-local addresses, so this includes a private
+network, not only loopback. This residual risk is an accepted deployment choice.
 """
 
 import ipaddress
@@ -140,6 +144,7 @@ def validate_api_root(
     setting: str = "api_root",
 ) -> str:
     """Return the validated API root, rejecting an origin the deployment has not approved."""
+    api_root = api_root.strip() if isinstance(api_root, str) else api_root
     parts = split_url(api_root, setting)
     if parts.path.endswith("/"):
         raise InvalidInferenceConfiguration(

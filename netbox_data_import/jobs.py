@@ -152,7 +152,7 @@ class SourceDocumentRetentionJob(JobRunner):
 class InferenceBackendConnectionTestJob(JobRunner):
     """Resolve the named backend's credential on the worker, so the web process never holds one.
 
-    The key names the row to test, enabled or not: an operator tests a backend to decide whether to
+    The row ID selects the backend to test, enabled or not: an operator tests a backend to decide whether to
     enable it (specification 8.6).
     """
 
@@ -161,11 +161,11 @@ class InferenceBackendConnectionTestJob(JobRunner):
     class Meta:
         name = "AI backend connection test"
 
-    def run(self, backend_key, *args, **kwargs):
+    def run(self, pk, backend_key, *args, **kwargs):
         """Run one connection test and record its typed category as job data."""
         from .inference_connection_test import run_connection_test
 
-        result = run_connection_test(backend_key)
+        result = run_connection_test(pk, backend_key)
         self.job.data = {**(self.job.data or {}), **result.as_dict()}
         self.job.save(update_fields=["data"])
         return result.category

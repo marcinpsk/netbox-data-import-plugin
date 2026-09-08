@@ -528,7 +528,8 @@ class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
             name=InferenceBackendConnectionTestJob.Meta.name,
             instance=backend,
             user=request.user,
-            # The key, not the row id: it is stable, carries no secret, and names one backend.
+            # The row ID binds authorization; the editable key is operator-facing text.
+            pk=backend.pk,
             backend_key=backend.backend_key,
         )
         messages.success(request, f"Connection test queued as job {job.pk}.")

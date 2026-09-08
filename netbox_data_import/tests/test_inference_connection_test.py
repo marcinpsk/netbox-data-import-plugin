@@ -101,61 +101,61 @@ class ConnectionTestResultTest(TestCase):
     """The test resolves the reference and returns one typed category, never a secret."""
 
     def test_a_readable_secret_is_ok(self):
-        make_row()
+        row = make_row()
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("primary")
+                result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "ok")
 
     def test_a_denied_read_reports_credential_denied(self):
-        make_row()
+        row = make_row()
         with vault(status=403, payload={"errors": ["denied"]}) as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("primary")
+                result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "credential_denied")
 
     def test_an_unreachable_store_reports_credential_unavailable(self):
-        make_row()
+        row = make_row()
         unreachable = {"address": "http://127.0.0.1:1", "auth_method": "proxy", "connect_timeout": 1, "read_timeout": 1}
 
         with override_settings(PLUGINS_CONFIG=settings_for(unreachable)):
-            result = run_connection_test("primary")
+            result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "credential_unavailable")
 
     def test_an_empty_field_reports_invalid_secret_material(self):
-        make_row()
+        row = make_row()
         with vault(payload={"data": {"data": {"api_key": ""}}}) as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("primary")
+                result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "invalid_secret_material")
 
     def test_a_malformed_reference_reports_invalid_credential_reference(self):
-        make_row(credential_reference={"backend": "vault_kv_v2"})
+        row = make_row(credential_reference={"backend": "vault_kv_v2"})
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("primary")
+                result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "invalid_credential_reference")
 
-    def test_no_active_backend_reports_invalid_configuration(self):
+    def test_a_missing_row_reports_invalid_configuration(self):
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("primary")
+                result = run_connection_test(0, "primary")
 
         self.assertEqual(result.category, "invalid_configuration")
 
     def test_every_category_is_one_the_specification_names(self):
-        make_row()
+        row = make_row()
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                self.assertIn(run_connection_test("primary").category, CONNECTION_TEST_CATEGORIES)
+                self.assertIn(run_connection_test(row.pk, "primary").category, CONNECTION_TEST_CATEGORIES)
 
     def test_the_result_never_carries_the_secret_or_a_vault_body(self):
-        make_row()
+        row = make_row()
         cases = (
             {"status": 403, "payload": {"errors": [f"denied {SECRET}"]}},
             {"status": 500, "payload": {"errors": [SECRET]}},
@@ -167,17 +167,17 @@ class ConnectionTestResultTest(TestCase):
             with self.subTest(case=case):
                 with vault(**case) as vault_settings:
                     with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                        result = run_connection_test("primary")
+                        result = run_connection_test(row.pk, "primary")
 
                 serialized = json.dumps(result.as_dict())
                 self.assertNotIn(SECRET, serialized)
                 self.assertNotIn("denied ", serialized)
 
     def test_a_successful_result_names_the_backend_but_not_its_reference(self):
-        make_row()
+        row = make_row()
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("primary")
+                result = run_connection_test(row.pk, "primary")
 
         payload = result.as_dict()
         self.assertEqual(payload["backend_key"], "primary")
@@ -194,7 +194,7 @@ class SelectedBackendTest(TestCase):
         The two rows reference different Vault paths, so the assertion is which secret was read,
         not merely which key the result names.
         """
-        make_row(
+        row = make_row(
             backend_key="selected",
             display_name="Selected",
             enabled=False,
@@ -209,18 +209,16 @@ class SelectedBackendTest(TestCase):
 
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("selected")
+                result = run_connection_test(row.pk, "selected")
 
         self.assertEqual(result.backend_key, "selected")
         self.assertEqual([path for path in SEEN_PATHS if "inference/" in path], ["/v1/secret/data/inference/selected"])
 
-    def test_a_row_key_renamed_to_the_fallback_key_does_not_reach_the_deployment_credential(self):
-        """The view authorizes a row, so a key naming no row is a refusal, never the file fallback.
-
-        A key is editable. Renaming a row to the fallback key, queueing, then renaming it back
-        would otherwise make the worker resolve the deployment's own Vault reference.
-        """
-        make_row(backend_key="mine", display_name="Mine", enabled=False)
+    def test_a_deleted_row_does_not_reach_the_deployment_credential(self):
+        """A missing authorized row is a refusal, even when its queued key names the file fallback."""
+        row = make_row(backend_key="file-fallback", display_name="Mine", enabled=False)
+        pk = row.pk
+        row.delete()
         fallback = {
             "display_name": "Deployment fallback",
             "adapter_type": "openai_compatible",
@@ -237,34 +235,34 @@ class SelectedBackendTest(TestCase):
             config = settings_for(vault_settings)
             config["netbox_data_import"]["inference_backend"] = fallback
             with override_settings(PLUGINS_CONFIG=config):
-                result = run_connection_test("file-fallback")
+                result = run_connection_test(pk, "file-fallback")
 
         self.assertEqual(result.category, "invalid_configuration")
         self.assertNotIn("/v1/secret/data/inference/deployment", SEEN_PATHS)
 
     def test_a_row_disabled_after_the_job_was_queued_is_still_the_one_tested(self):
         """The operator tests a row to decide whether to enable it, so enabled is not the filter."""
-        make_row(backend_key="selected", display_name="Selected", enabled=False)
+        row = make_row(backend_key="selected", display_name="Selected", enabled=False)
 
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("selected")
+                result = run_connection_test(row.pk, "selected")
 
         self.assertEqual(result.category, "ok")
         self.assertEqual(result.backend_key, "selected")
 
-    def test_a_key_no_backend_carries_is_invalid_configuration(self):
+    def test_a_missing_row_id_is_invalid_configuration(self):
         make_row(backend_key="primary")
 
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test("gone")
+                result = run_connection_test(0, "gone")
 
         self.assertEqual(result.category, "invalid_configuration")
         self.assertIn("gone", result.detail)
 
-    def test_the_view_hands_the_worker_the_key_of_the_row_it_authorized(self):
-        """Without this, reverting the view leaves the worker with no key and the job fails there."""
+    def test_the_view_hands_the_worker_the_pk_and_key_of_the_row_it_authorized(self):
+        """The worker needs the authorized row identity and its operator-facing key."""
         row = make_row(backend_key="selected", display_name="Selected", enabled=False)
         permitted = user_with_object_permission("queuer", [(InferenceBackend, ["change"], {})])
         self.client.force_login(permitted)
@@ -274,12 +272,42 @@ class SelectedBackendTest(TestCase):
             self.client.post(reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[row.pk]))
 
         keywords = [getattr(callback, "keywords", {}) for callback in callbacks]
-        self.assertNotIn("pk", [key for item in keywords for key in item])
+        self.assertIn(row.pk, [item.get("pk") for item in keywords])
         self.assertIn("selected", [item.get("backend_key") for item in keywords])
 
 
 class ConnectionTestQueuedPathTest(TestCase):
     """The whole queued path: the view enqueues, and the worker runs what the view authorized."""
+
+    def test_a_deleted_row_is_not_replaced_by_another_row_with_the_same_key(self):
+        from core.models import Job
+
+        from netbox_data_import.jobs import InferenceBackendConnectionTestJob
+
+        row = make_row()
+        self.client.force_login(user_with_object_permission("queuer", [(InferenceBackend, ["change"], {})]))
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[row.pk])
+            )
+        self.assertEqual(response.status_code, 302)
+        queued = next(keywords for callback in callbacks if (keywords := getattr(callback, "keywords", {})))
+        # The worker loads the Job before the backend deletion cascades to its database row.
+        job = Job.objects.get(name=InferenceBackendConnectionTestJob.Meta.name)
+        row.delete()
+        make_row(credential_reference={**REFERENCE, "path": "inference/replacement"})
+
+        with vault() as vault_settings:
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                InferenceBackendConnectionTestJob.handle(
+                    job, **{key: value for key, value in queued.items() if key != "job"}
+                )
+
+        job.refresh_from_db()
+        self.assertEqual(SEEN_PATHS, [])
+        self.assertEqual(job.data["category"], "invalid_configuration")
+        self.assertEqual(job.data["backend_key"], "primary")
+        self.assertIn("primary", job.data["detail"])
 
     def test_the_queued_job_tests_the_row_the_view_named_even_once_it_is_disabled(self):
         """Resolution happens on the worker later, so the row's state can change before it runs."""
@@ -314,7 +342,7 @@ class ConnectionTestQueuedPathTest(TestCase):
 
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                InferenceBackendConnectionTestJob.handle(job, backend_key=queued["backend_key"])
+                InferenceBackendConnectionTestJob.handle(job, pk=queued["pk"], backend_key=queued["backend_key"])
 
         job.refresh_from_db()
         self.assertEqual(job.data["backend_key"], "selected")

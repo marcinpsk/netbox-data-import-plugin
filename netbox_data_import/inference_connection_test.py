@@ -9,7 +9,7 @@ never returns a secret value and never a Vault response body.
 
 from dataclasses import dataclass
 
-from .inference_backend import NoActiveInferenceBackend, resolve_backend_by_key
+from .inference_backend import NoActiveInferenceBackend, resolve_backend_by_id
 from .inference_credentials import CredentialFailure, credential_backend_for
 from .inference_settings import VAULT_SETTING, InvalidInferenceConfiguration
 
@@ -42,16 +42,18 @@ class ConnectionTestResult:
         }
 
 
-def run_connection_test(backend_key: str) -> ConnectionTestResult:
-    """Resolve one named backend's credential once and report what happened."""
+def run_connection_test(pk: int, backend_key: str) -> ConnectionTestResult:
+    """Resolve the authorized row's credential and report with its queued display key."""
     try:
-        backend = resolve_backend_by_key(backend_key)
-    except NoActiveInferenceBackend as exc:
-        return ConnectionTestResult("invalid_configuration", str(exc))
+        backend = resolve_backend_by_id(pk)
+    except NoActiveInferenceBackend:
+        return ConnectionTestResult(
+            "invalid_configuration", f"Inference Backend '{backend_key}' no longer exists.", backend_key
+        )
     except InvalidInferenceConfiguration as exc:
-        return ConnectionTestResult("invalid_configuration", str(exc))
+        return ConnectionTestResult("invalid_configuration", str(exc), backend_key)
     except CredentialFailure as exc:
-        return ConnectionTestResult(exc.category, str(exc))
+        return ConnectionTestResult(exc.category, str(exc), backend_key)
 
     from .inference_backend import plugin_settings
 
@@ -59,11 +61,11 @@ def run_connection_test(backend_key: str) -> ConnectionTestResult:
         with credential_backend_for(backend.credential_reference, plugin_settings().get(VAULT_SETTING, {})) as store:
             store.resolve(backend.credential_reference)
     except CredentialFailure as exc:
-        return ConnectionTestResult(exc.category, str(exc), backend.backend_key, backend.source)
+        return ConnectionTestResult(exc.category, str(exc), backend_key, backend.source)
     return ConnectionTestResult(
         "ok",
         "The credential resolved and holds usable material.",
-        backend.backend_key,
+        backend_key,
         backend.source,
     )
 
