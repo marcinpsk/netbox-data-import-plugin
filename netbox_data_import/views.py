@@ -1615,7 +1615,8 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
     selection it queues. Reusing the wizard's own key would return the first execution and apply
     nothing. It also keeps the preview, which the operator returns to for the next trace.
     """
-    from core.choices import JobNotificationChoices
+    from core.choices import JobNotificationChoices, JobStatusChoices
+    from core.models import Job
 
     from .jobs import ImportJobRunner
 
@@ -1626,36 +1627,45 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
         idempotency_key = request.session.get("import_idempotency_key") or uuid.uuid4().hex
         request.session["import_idempotency_key"] = idempotency_key
     _clear_restored_import_job(request)
-    # The profile row orders the check against every competing enqueue, so two cannot both pass it.
-    with locked_profile_policy(profile.pk):
-        # The second writer that can break the invariant: a queue while one is already retained.
-        assert_preview_may_move(request.session, request.user)
-        job = ImportJobRunner.enqueue(
-            name=ImportJobRunner.name,
-            user=request.user,
-            notifications=JobNotificationChoices.NOTIFICATION_NEVER,
-            job_timeout=3600,
-            profile_id=profile.pk,
-            source_document_id=document.pk,
-            accepted_plan=plan_data,
-            selection=selection,
-            idempotency_key=idempotency_key,
-        )
-        job.data = {
-            "job_type": ImportJobRunner.job_type,
-            "phase": "queued",
-            "processed": 0,
-            "total": 0,
-            "filename": ctx_data.get("filename", ""),
-            "profile_id": profile.pk,
-            "profile_name": profile.name,
-            "source_document_id": document.pk,
-            "accepted_plan": plan_data,
-            "context_data": ctx_data,
-            # What makes this Job hold the preview, so the guard finds it without the session.
-            "keeps_preview": keep_preview,
-        }
-        job.save(update_fields=["data"])
+    job = None
+    try:
+        # The profile row orders the check against every competing enqueue, so two cannot both pass it.
+        with locked_profile_policy(profile.pk):
+            # The second writer that can break the invariant: a queue while one is already retained.
+            assert_preview_may_move(request.session, request.user)
+            job = ImportJobRunner.enqueue(
+                name=ImportJobRunner.name,
+                user=request.user,
+                notifications=JobNotificationChoices.NOTIFICATION_NEVER,
+                job_timeout=3600,
+                profile_id=profile.pk,
+                source_document_id=document.pk,
+                accepted_plan=plan_data,
+                selection=selection,
+                idempotency_key=idempotency_key,
+            )
+            job.data = {
+                "job_type": ImportJobRunner.job_type,
+                "phase": "queued",
+                "processed": 0,
+                "total": 0,
+                "filename": ctx_data.get("filename", ""),
+                "profile_id": profile.pk,
+                "profile_name": profile.name,
+                "source_document_id": document.pk,
+                "accepted_plan": plan_data,
+                "context_data": ctx_data,
+                # What makes this Job hold the preview, so the guard finds it without the session.
+                "keeps_preview": keep_preview,
+            }
+            job.save(update_fields=["data"])
+    except Exception:
+        # The queue push runs on commit, so a Job no worker will run must not hold the preview.
+        if job is not None:
+            Job.objects.filter(pk=job.pk, status=JobStatusChoices.STATUS_PENDING).update(
+                status=JobStatusChoices.STATUS_ERRORED
+            )
+        raise
 
     request.session["import_background_job_id"] = job.pk
     if keep_preview:
@@ -3842,6 +3852,10 @@ class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         refusal = self.refuse_unregistered_adapter(request, profile)
         if refusal is not None:
             return refusal
+        # Refuse before reading: a sync that ends mid-request would let a pre-write plan land clean.
+        if retained_reason := _retained_sync_block_reason(request):
+            messages.warning(request, retained_reason)
+            return redirect(next_url)
         live = self.live_plan(profile, document, request, planning_context)
         if live is None:
             return self.discard_unavailable_target(request)

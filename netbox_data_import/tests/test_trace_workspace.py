@@ -13,7 +13,7 @@ from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.models import ImportProfile, TerminationResolution
 from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
-from netbox_data_import.preview_row_actions import PREVIEW_DIRTY_SESSION_KEY
+from netbox_data_import.preview_row_actions import PREVIEW_DIRTY_SESSION_KEY, PREVIEW_PLAN_SESSION_KEY
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
     CableTopologyMixin,
@@ -805,6 +805,41 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
         with self.assertRaises(PreviewLocked):
             record_recalculated_preview(fresh, ImportPlan.from_dict(plan_data), user=self.actor)
 
+    def test_a_reread_is_refused_before_it_reads_while_the_sync_runs(self):
+        """The view reads NetBox and stores the result, and the sync can end between the two.
+
+        The read would then see NetBox as it was *before* the sync wrote, and the store would pass
+        because the Job has since gone terminal. The workspace would report a successful re-read and
+        mark that stale plan clean. The guard has to refuse before anything is read.
+        """
+        from unittest.mock import patch
+
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        from netbox_data_import import views
+
+        job = self.queue_one_sync()
+        stored_before = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        real_live_plan = views._TraceWorkspaceMixin.live_plan
+
+        def finish_the_sync_then_read(*args, **kwargs):
+            """Land the Job's completion exactly between the view's read and its store."""
+            Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_COMPLETED)
+            return real_live_plan(*args, **kwargs)
+
+        with patch.object(views._TraceWorkspaceMixin, "live_plan", autospec=True) as live_plan:
+            live_plan.side_effect = finish_the_sync_then_read
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:trace_workspace_reread"),
+                {"preview_revision": self.client.session["import_preview_revision"]},
+                follow=True,
+            )
+
+        self.assertContains(response, "A trace synchronization is still running.")
+        self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
+        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], stored_before)
+
     def test_a_new_upload_frees_the_workspace_of_the_previous_retained_sync(self):
         """A new preview owns no earlier sync, so the old Job must not refuse its commands."""
         self.queue_one_sync()
@@ -920,6 +955,53 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
 
         self.assertContains(response, "A trace synchronization is still running.")
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
+
+
+class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TransactionTestCase):
+    """The Job row commits before the queue push, so a push that fails must not hold the preview."""
+
+    def setUp(self):
+        """Build the shared topology this transactional case cannot inherit from class data."""
+        super().setUp()
+        self.build_topology()
+
+    def _upload_and_choose(self):
+        """Leave the wizard on a materialized preview and return the first trace."""
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(direct_path(),)))
+        upload.name = "traces.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        return workspace.context["traces"][0]
+
+    def test_a_queue_push_that_fails_leaves_no_job_holding_the_preview(self):
+        """NetBox pushes from `on_commit`, so the row outlives a refused push and would block."""
+        from unittest.mock import patch
+
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from django_rq.queues import DjangoRQ
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        from netbox_data_import.preview_row_actions import retained_sync_block_reason
+
+        chosen = self._upload_and_choose()
+        revision = self.client.session["import_preview_revision"]
+
+        with patch.object(DjangoRQ, "enqueue_call", autospec=True, side_effect=RedisConnectionError("queue down")):
+            with self.assertRaises(RedisConnectionError):
+                self.client.post(
+                    reverse("plugins:netbox_data_import:trace_sync"),
+                    {"identity": chosen.identity, "preview_revision": revision},
+                )
+
+        stranded = Job.objects.get(data__job_type="netbox_data_import.import")
+        self.assertEqual(stranded.status, JobStatusChoices.STATUS_ERRORED)
+        self.assertEqual(retained_sync_block_reason(self.client.session, self.actor), "")
 
 
 class TraceTerminationPickerTest(CableTopologyMixin, TestCase):

@@ -116,6 +116,7 @@ module = [
     "ipam.*",
     "netbox.*",
     "pytest",
+    "redis.*",
     "rest_framework.*",
     "rq",
     "strawberry.*",
