@@ -1311,6 +1311,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         # The session outlives an upgrade, so the stored profile can name a retired adapter.
         try:
             validate_registered_adapter(profile)
+            validate_adapter_target_module(profile.source_adapter)
         except ValidationError as exc:
             _discard_import_preview(request)
             messages.error(request, "; ".join(exc.messages))

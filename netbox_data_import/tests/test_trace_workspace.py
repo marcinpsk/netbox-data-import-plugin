@@ -636,6 +636,26 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "trace_workbook")
 
+    def test_the_preview_refuses_an_adapter_with_no_target_module(self):
+        """Preview reload refuses an unavailable Target Module before replanning."""
+        import dataclasses
+
+        from netbox_data_import import catalog as catalog_module
+        from netbox_data_import.catalog import TargetModuleKey
+
+        self.open_workspace(patched_path())
+        without_cable = tuple(
+            dataclasses.replace(module, implemented=False) if module.key == TargetModuleKey.CABLE else module
+            for module in catalog_module.TARGET_MODULES
+        )
+
+        with catalog_module.declared_modules_override(without_cable):
+            response = self.client.get(reverse("plugins:netbox_data_import:import_preview"), follow=True)
+
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        self.assertContains(response, "trace_workbook")
+        self.assertFalse(self.client.session["import_preview_pending"])
+
     def test_the_workspace_page_refuses_an_adapter_this_release_dropped(self):
         """Planning raises for an unregistered adapter, so the page has to refuse before it plans."""
         self.open_workspace(patched_path())
