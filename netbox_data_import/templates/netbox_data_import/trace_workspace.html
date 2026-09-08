@@ -109,7 +109,7 @@
       </div>
       <div class="text-end">
         {% for action in trace.actions %}
-          <form method="post" action="{% url 'plugins:netbox_data_import:trace_sync' %}" class="d-inline">
+          <form method="post" action="{% url action.url_name %}" class="d-inline">
             {% csrf_token %}
             <input type="hidden" name="identity" value="{{ trace.identity }}">
             <input type="hidden" name="preview_revision" value="{{ preview_revision }}">

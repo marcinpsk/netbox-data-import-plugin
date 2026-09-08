@@ -1309,6 +1309,7 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
 
         self.assertIsNotNone(workspace["logical_cable"])
         self.assertTrue(workspace["logical_cable"]["visible"])
+        self.assertTrue(workspace["deletes_logical_cable"])
 
     def test_an_exact_name_match_states_automatically_resolved(self):
         """The operator has to see which terminations the exact-name rule matched without help."""

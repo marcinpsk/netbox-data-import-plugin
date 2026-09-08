@@ -53,9 +53,26 @@ def _is_dict_call(node) -> bool:
     return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict"
 
 
+def _pair_sequence_keys(node) -> list[str]:
+    """Return the guarded keys a literal sequence of key/value pairs names.
+
+    `dict.update()` takes an iterable of pairs as readily as a mapping, so `[(KEY, value)]` is the
+    same write spelled another way.
+    """
+    if not isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return []
+    keys: list[str] = []
+    for pair in node.elts:
+        if isinstance(pair, (ast.Tuple, ast.List)) and pair.elts and (key := _guarded_key(pair.elts[0])):
+            keys.append(key)
+    return keys
+
+
 def _mapping_keys(node) -> list[str]:
     """Return the guarded keys one mapping expression names, through `**` and through `dict(...)`."""
     keys: list[str] = []
+    if pairs := _pair_sequence_keys(node):
+        return pairs
     if _is_dict_call(node):
         for argument in node.args:
             keys.extend(_mapping_keys(argument))
@@ -80,7 +97,7 @@ def _update_keys(node: ast.Call) -> list[str]:
     """Return the guarded keys one `session.update(...)` names, by mapping or by keyword."""
     keys: list[str] = []
     for argument in node.args:
-        if isinstance(argument, (ast.Dict, ast.Call)):
+        if isinstance(argument, (ast.Dict, ast.Call, ast.List, ast.Tuple, ast.Set)):
             keys.extend(_mapping_keys(argument))
         elif key := _guarded_key(argument):
             keys.append(key)
@@ -96,6 +113,15 @@ def _writes_in_source(source: str, name: str) -> list[str]:
     """Return one entry per statement in `source` that writes a guarded key through a session."""
     found: list[str] = []
     tree = ast.parse(source)
+    # The collection branch below is for keys gathered to be popped, not for an update's own keys.
+    claimed = {
+        id(inner)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update"
+        if _is_session(node.func.value)
+        for argument in [*node.args, *(keyword.value for keyword in node.keywords)]
+        for inner in ast.walk(argument)
+    }
     for node in ast.walk(tree):
         targets: list[ast.expr] = []
         if isinstance(node, ast.Assign):
@@ -123,7 +149,7 @@ def _writes_in_source(source: str, name: str) -> list[str]:
                 ):
                     found.append(f"{name}:{target.lineno}: deletes session[{key}]")
         # A guarded key inside a collection that is then iterated to pop is the same write.
-        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)) and id(node) not in claimed:
             keys = [key for element in node.elts if (key := _guarded_key(element))]
             if keys:
                 found.append(f"{name}:{node.lineno}: collects {', '.join(keys)} for removal")
@@ -213,4 +239,16 @@ class WritesScanTest(SimpleTestCase):
 
     def test_ignores_a_dict_call_naming_no_guarded_key(self):
         source = "def f(session, plan):\n    session.update(dict(import_rows=plan))\n"
+        self.assertEqual(_writes_in_source(source, "t.py"), [])
+
+    def test_finds_a_guarded_key_in_a_list_of_pairs_passed_to_update(self):
+        source = 'def f(session, plan):\n    session.update([("import_plan", plan)])\n'
+        self.assertEqual(_writes_in_source(source, "t.py"), ["t.py:2: session.update(import_plan)"])
+
+    def test_finds_a_guarded_key_in_a_tuple_of_pairs_passed_to_update(self):
+        source = "def f(session, plan):\n    session.update(((PREVIEW_PLAN_SESSION_KEY, plan),))\n"
+        self.assertEqual(_writes_in_source(source, "t.py"), ["t.py:2: session.update(PREVIEW_PLAN_SESSION_KEY)"])
+
+    def test_ignores_a_pair_sequence_naming_no_guarded_key(self):
+        source = 'def f(session, plan):\n    session.update([("import_rows", plan)])\n'
         self.assertEqual(_writes_in_source(source, "t.py"), [])

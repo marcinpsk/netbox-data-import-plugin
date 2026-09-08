@@ -616,6 +616,25 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         # The preview cannot be planned again in this release, so it is not left to be retried.
         self.assertFalse(self.client.session["import_preview_pending"])
 
+    def test_the_workspace_page_refuses_an_adapter_with_no_target_module(self):
+        """Planning raises the same error for an unimplemented Target Module, so the gate must cover it."""
+        import dataclasses
+
+        from netbox_data_import import catalog as catalog_module
+        from netbox_data_import.catalog import TargetModuleKey
+
+        self.open_workspace(patched_path())
+        without_cable = tuple(
+            dataclasses.replace(module, implemented=False) if module.key == TargetModuleKey.CABLE else module
+            for module in catalog_module.TARGET_MODULES
+        )
+
+        with catalog_module.declared_modules_override(without_cable):
+            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "trace_workbook")
+
     def test_the_workspace_page_refuses_an_adapter_this_release_dropped(self):
         """Planning raises for an unregistered adapter, so the page has to refuse before it plans."""
         self.open_workspace(patched_path())
@@ -625,6 +644,33 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "retired-adapter")
+
+
+class TraceActionRoutingTest(CableTopologyMixin, TestCase):
+    """Each review command posts to its own endpoint, so a new one cannot inherit another's."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build_topology()
+
+    def test_every_offered_action_names_the_endpoint_it_posts_to(self):
+        """The template routes on `action.url_name`, so an action cannot reach a command by default."""
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(direct_path(),)))
+        upload.name = "traces.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+            follow=True,
+        )
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        offered = [action for trace in response.context["traces"] for action in trace.actions]
+        self.assertTrue(offered)
+        for action in offered:
+            self.assertTrue(reverse(action.url_name), f"{action.key} names no endpoint")
+        self.assertContains(response, f'action="{reverse("plugins:netbox_data_import:trace_sync")}"')
 
 
 class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
@@ -811,34 +857,72 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
         The read would then see NetBox as it was *before* the sync wrote, and the store would pass
         because the Job has since gone terminal. The workspace would report a successful re-read and
         mark that stale plan clean. The guard has to refuse before anything is read.
-        """
-        from unittest.mock import patch
 
+        The Job is completed from a query wrapper on the live connection, so the sync lands exactly
+        when the planning read begins. Nothing is patched: the real view, ORM and planner all run.
+        """
         from core.choices import JobStatusChoices
         from core.models import Job
-
-        from netbox_data_import import views
+        from django.db import connection
 
         job = self.queue_one_sync()
         stored_before = self.client.session[PREVIEW_PLAN_SESSION_KEY]
-        real_live_plan = views._TraceWorkspaceMixin.live_plan
+        completed: list[str] = []
 
-        def finish_the_sync_then_read(*args, **kwargs):
-            """Land the Job's completion exactly between the view's read and its store."""
-            Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_COMPLETED)
-            return real_live_plan(*args, **kwargs)
+        def complete_the_sync_once_the_read_starts(execute, sql, params, many, context):
+            """End the retained sync at the planner's first read of live NetBox state."""
+            result = execute(sql, params, many, context)
+            if not completed and "dcim_" in sql:
+                completed.append(sql)
+                Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_COMPLETED)
+            return result
 
-        with patch.object(views._TraceWorkspaceMixin, "live_plan", autospec=True) as live_plan:
-            live_plan.side_effect = finish_the_sync_then_read
+        # Only the re-read request is watched; following its redirect would read NetBox legitimately.
+        with connection.execute_wrapper(complete_the_sync_once_the_read_starts):
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_workspace_reread"),
                 {"preview_revision": self.client.session["import_preview_revision"]},
-                follow=True,
             )
 
-        self.assertContains(response, "A trace synchronization is still running.")
+        self.assertEqual(response.status_code, 302)
+        self.assertContains(self.client.get(response.url), "A trace synchronization is still running.")
+        # The guard refused first, so the planner never read and the sync is still the live one.
+        self.assertEqual(completed, [])
         self.assertTrue(self.client.session[PREVIEW_DIRTY_SESSION_KEY])
         self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], stored_before)
+
+    def test_the_wizard_preview_answers_a_sync_that_starts_after_its_own_check(self):
+        """The preview checks the guard, then replans and stores, and a sync can arrive between.
+
+        The writer then refuses the store, and nothing caught that, so the operator met a 500 on an
+        ordinary page load. The sync is made live from a query wrapper at the planning read, which is
+        after the page's own check and before the store.
+        """
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from django.db import connection
+
+        job = self.queue_one_sync()
+        # Terminal at the page's check, so the page replans instead of adopting the stored plan.
+        Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_COMPLETED)
+        session = self.client.session
+        session[PREVIEW_DIRTY_SESSION_KEY] = False
+        session.save()
+        started: list[str] = []
+
+        def start_the_sync_once_the_replan_begins(execute, sql, params, many, context):
+            """Make the retained sync live again while the page is planning."""
+            result = execute(sql, params, many, context)
+            if not started and "dcim_" in sql:
+                started.append(sql)
+                Job.objects.filter(pk=job.pk).update(status=JobStatusChoices.STATUS_PENDING)
+            return result
+
+        with connection.execute_wrapper(start_the_sync_once_the_replan_begins):
+            response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertTrue(started, "the page never replanned, so the race was not reached")
+        self.assertLess(response.status_code, 500)
 
     def test_a_new_upload_frees_the_workspace_of_the_previous_retained_sync(self):
         """A new preview owns no earlier sync, so the old Job must not refuse its commands."""
@@ -907,7 +991,7 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
         profile_pk, document_pk = self.profile.pk, context["source_document_id"]
         # The test client runs the view on this connection, so this is the PID that will block.
         target_pid = self._backend_pid()
-        holding = threading.Event()
+        holding, waited = threading.Event(), []
 
         def queue_the_competing_sync():
             """Hold the profile row, then commit the Job the rival request would have queued."""
@@ -920,6 +1004,10 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
                     deadline = time.monotonic() + 10
                     while time.monotonic() < deadline and not self._is_blocked(target_pid):
                         time.sleep(0.05)
+                    waited.append(self._is_blocked(target_pid))
+                    if not waited[-1]:
+                        # Queueing anyway would let the request meet a Job it never waited for.
+                        return
                     rival = ImportJobRunner.enqueue(
                         name=ImportJobRunner.name,
                         user=self.actor,
@@ -953,6 +1041,7 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
         finally:
             holder.join(20)
 
+        self.assertEqual(waited, [True], "the request never waited on the profile row the enqueue holds")
         self.assertContains(response, "A trace synchronization is still running.")
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
 

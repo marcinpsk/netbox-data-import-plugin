@@ -62,6 +62,7 @@ from .models import (
     SourceResolution,
     stored_import_source,
     validate_contact_candidate_resolution,
+    validate_adapter_target_module,
     validate_registered_adapter,
     validate_source_resolution_fields,
 )
@@ -1278,6 +1279,22 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             use_materialized_result=use_materialized_result,
         )
 
+    def _replanned_preview(self, request, profile, document, planning_context):
+        """Return the freshly planned preview, or the response that ends this request instead."""
+        try:
+            plan = ImportEngine.plan(profile, document, request.user, planning_context)
+        except PlanningTargetUnavailable:
+            _discard_import_preview(request)
+            messages.warning(request, "The saved import target is no longer available. Start a new preview.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        try:
+            record_recalculated_preview(request.session, plan, user=request.user)
+        except PreviewLocked as exc:
+            # A sync started after the caller's check, so this fresh plan must not replace the stored one.
+            messages.warning(request, str(exc))
+            return redirect(reverse("plugins:netbox_data_import:trace_workspace"))
+        return plan
+
     def render_preview(self, request, preview_url, *, use_materialized_result=False):
         """Replan the stored source and render the Review Workspace."""
         ctx = request.session.get("import_context", {})
@@ -1323,13 +1340,10 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "location_id": ctx.get("location_id"),
                 "tenant_id": ctx.get("tenant_id"),
             }
-            try:
-                plan = ImportEngine.plan(profile, document, request.user, planning_context)
-            except PlanningTargetUnavailable:
-                _discard_import_preview(request)
-                messages.warning(request, "The saved import target is no longer available. Start a new preview.")
-                return redirect(reverse("plugins:netbox_data_import:import_setup"))
-            record_recalculated_preview(request.session, plan, user=request.user)
+            planned = self._replanned_preview(request, profile, document, planning_context)
+            if not isinstance(planned, ImportPlan):
+                return planned
+            plan = planned
         result = ReviewWorkspace(plan)
         rows = result.source_rows
         request.session["import_rows"] = rows
@@ -3759,6 +3773,8 @@ class _TraceWorkspaceMixin:
         """
         try:
             validate_registered_adapter(profile)
+            # Planning raises the same error for a registered adapter no Target Module implements.
+            validate_adapter_target_module(profile.source_adapter)
         except ValidationError as exc:
             _discard_import_preview(request)
             messages.warning(request, "; ".join(exc.messages))

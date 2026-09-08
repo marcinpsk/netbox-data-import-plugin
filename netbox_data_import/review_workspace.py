@@ -425,13 +425,21 @@ _SUMMARY_KEYS = {
 }
 
 
+_SYNC_URL_NAME = "plugins:netbox_data_import:trace_sync"
+
+
 @dataclass(frozen=True)
 class TraceAction:
-    """One review command, always visible, carrying its reason when it cannot run."""
+    """One review command, always visible, carrying its reason when it cannot run.
+
+    `url_name` has no default: the page posts every action to it, so a command that named none
+    would inherit whichever endpoint the template happened to hardcode.
+    """
 
     key: str
     label: str
     enabled: bool
+    url_name: str
     reason: str = ""
 
 
@@ -485,10 +493,12 @@ class TraceWorkspaceUnit:
         """Return every review command, each stating why it cannot run when it cannot."""
         blocking = next((item["message"] for item in findings if item["severity"] == Severity.ERROR), "")
         if unit.disposition == Disposition.ACTIONABLE:
-            sync = TraceAction(key="sync", label="Sync with dependencies", enabled=True)
+            sync = TraceAction(key="sync", label="Sync with dependencies", enabled=True, url_name=_SYNC_URL_NAME)
         else:
             reason = blocking or detail or f"This trace is {unit.disposition}."
-            sync = TraceAction(key="sync", label="Sync with dependencies", enabled=False, reason=reason)
+            sync = TraceAction(
+                key="sync", label="Sync with dependencies", enabled=False, url_name=_SYNC_URL_NAME, reason=reason
+            )
         return (sync,)
 
 
