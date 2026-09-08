@@ -749,3 +749,27 @@ def test_accepts_a_factory_that_builds_a_real_object():
         "        pass\n"
     )
     assert scan_source(src, "t.py") == []
+
+
+def test_flags_a_nested_partial_of_a_specless_mock():
+    """`partial(partial(MagicMock))` fabricates the same mock, one layer further down."""
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', "
+        "new_callable=functools.partial(functools.partial(MagicMock))):\n"
+        "        pass\n"
+    )
+    assert [h.mock for h in scan_source(src, "t.py")] == ["'netbox_data_import.views.thing'"]
+
+
+def test_accepts_a_nested_partial_bound_at_the_inner_layer():
+    """A bound anywhere in the chain still binds the mock that is finally built."""
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\nclass C: ...\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', "
+        "new_callable=functools.partial(functools.partial(MagicMock, spec=C))):\n"
+        "        pass\n"
+    )
+    assert scan_source(src, "t.py") == []

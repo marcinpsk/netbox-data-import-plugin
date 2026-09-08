@@ -87,17 +87,30 @@ def _targets() -> set[str]:
     return _FABRICATING_MOCKS | ({"AsyncMock"} if INCLUDE_ASYNCMOCK else set())
 
 
-def _partial_target(node: ast.expr) -> ast.expr | None:
-    """Return the callable a `functools.partial(...)` call wraps, or None for anything else."""
+def _is_partial(node: ast.expr) -> bool:
+    """Return whether one expression is a `functools.partial(...)` call carrying a callable."""
     if not isinstance(node, ast.Call) or not node.args:
-        return None
+        return False
     func = node.func
     name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-    return node.args[0] if name == "partial" else None
+    return name == "partial"
+
+
+def _partial_target(node: ast.expr) -> ast.expr | None:
+    """Return the callable a partial chain finally wraps, unwrapping every nested layer."""
+    if not _is_partial(node):
+        return None
+    while _is_partial(node):
+        node = node.args[0]  # type: ignore[attr-defined]
+    return node
 
 
 def _binds_a_mock(node: ast.expr) -> bool:
-    """Return whether a call's own keywords bound the mock it would build."""
+    """Return whether any layer of a partial chain bound the mock it would build."""
+    while _is_partial(node):
+        if any(kw.arg in _BOUNDING_KWARGS and _is_actual_bound(kw.value) for kw in node.keywords):  # type: ignore[attr-defined]
+            return True
+        node = node.args[0]  # type: ignore[attr-defined]
     if not isinstance(node, ast.Call):
         return False
     return any(kw.arg in _BOUNDING_KWARGS and _is_actual_bound(kw.value) for kw in node.keywords)
