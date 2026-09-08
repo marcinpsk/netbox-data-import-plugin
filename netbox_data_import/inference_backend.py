@@ -119,25 +119,6 @@ def _from_file_fallback(mapping, allowlist) -> ResolvedInferenceBackend:
     )
 
 
-def resolve_backend_by_key(backend_key: str) -> ResolvedInferenceBackend:
-    """Return the backend one key names, whether or not it is the active one.
-
-    This lookup selects a row by its current key, independently of the active backend.
-    `enabled` is not a filter: an operator tests a backend to decide whether to enable it.
-    Queued connection tests use `resolve_backend_by_id` to preserve the authorized row identity.
-
-    Rows only. A backend key is editable, so falling through to the file fallback would let an
-    operator scoped to one row rename it to the fallback key, queue a test, rename it back, and
-    have the worker resolve the deployment's own credential reference.
-    """
-    from .models import InferenceBackend
-
-    row = InferenceBackend.objects.filter(backend_key=backend_key).first()
-    if row is None:
-        raise NoActiveInferenceBackend(f"No Inference Backend row carries the key '{backend_key}'.")
-    return _from_row(row, origin_allowlist())
-
-
 def resolve_backend_by_id(pk: int) -> ResolvedInferenceBackend:
     """Return exactly the authorized row, even when it is disabled.
 
@@ -177,6 +158,5 @@ __all__ = (
     "plugin_settings",
     "resolve_active_backend",
     "resolve_backend_by_id",
-    "resolve_backend_by_key",
     "validate_backend_fields",
 )
