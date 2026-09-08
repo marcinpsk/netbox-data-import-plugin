@@ -1303,7 +1303,6 @@ class TraceWorkspaceDisplayTest(CableTopologyMixin, TestCase):
         """The proposed panel states the one deletion a Patched Path Replacement performs."""
         self.connect(self.eth0, self.eth1)
         self.connect(self.panel_1_rear, self.panel_2_rear)
-        CableClassMapping.objects.filter(profile=self.profile).update(cable_type="cat6")
 
         workspace = self.workspace(self.unit(patched_path()))
 

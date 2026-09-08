@@ -158,7 +158,7 @@ def _writes_in_source(source: str, name: str) -> list[str]:
 
 def _writes_in(path: pathlib.Path) -> list[str]:
     """Return one entry per statement in one file that writes a guarded key through a session."""
-    return _writes_in_source(path.read_text(encoding="utf-8"), path.name)
+    return _writes_in_source(path.read_text(encoding="utf-8"), str(path.relative_to(PACKAGE)))
 
 
 class PreviewStateHasOneWriterTest(SimpleTestCase):
@@ -166,8 +166,8 @@ class PreviewStateHasOneWriterTest(SimpleTestCase):
 
     def test_no_module_outside_the_owner_writes_a_guarded_session_key(self):
         offenders: list[str] = []
-        for path in sorted(PACKAGE.glob("*.py")):
-            if path.name == OWNER:
+        for path in sorted(PACKAGE.rglob("*.py")):
+            if path == PACKAGE / OWNER or (PACKAGE / "tests") in path.parents:
                 continue
             offenders.extend(_writes_in(path))
 

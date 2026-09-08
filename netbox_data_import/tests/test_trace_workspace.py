@@ -943,7 +943,12 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
             response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
 
         self.assertTrue(started, "the page never replanned, so the race was not reached")
-        self.assertLess(response.status_code, 500)
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:trace_workspace"),
+            fetch_redirect_response=False,
+        )
+        self.assertContains(self.client.get(response.url), "A trace synchronization is still running.")
 
     def test_a_new_upload_frees_the_workspace_of_the_previous_retained_sync(self):
         """A new preview owns no earlier sync, so the old Job must not refuse its commands."""
@@ -1467,6 +1472,8 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
 
     def test_a_second_trace_can_be_synchronized_after_the_first(self):
         """A per-trace command is repeatable, so it must not spend the whole preview on one trace."""
+        from core.models import Job
+
         second = Interface.objects.create(device=self.make_device("DEV-G"), name="eth0", type="1000base-t")
         other = Interface.objects.create(device=self.make_device("DEV-H"), name="eth0", type="1000base-t")
         independent = direct_path(
@@ -1476,24 +1483,47 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(direct_path(), independent)))
         upload.name = "traces.xlsx"
-        self.client.post(
+        setup = self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
             follow=True,
         )
 
-        for endpoint in ("DEV-A eth0", "DEV-G eth0"):
+        self.assertEqual(setup.status_code, 200, "the setup POST did not render")
+        self.assertTrue(self.client.session.get("import_preview_pending"), "setup stored no preview")
+
+        for step, endpoint in enumerate(("DEV-A eth0", "DEV-G eth0"), start=1):
             workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
             self.assertEqual(workspace.status_code, 200, "the workspace has to survive a per-trace sync")
             chosen = next(trace for trace in workspace.context["traces"] if trace.endpoints["from"] == endpoint)
-            self.client.post(
+            response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
                 {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
             )
+            queued = Job.objects.filter(data__job_type="netbox_data_import.import").order_by("pk")
+            self.assertEqual(queued.count(), step, f"step {step}: the sync queued no new job")
+            self.assertRedirects(
+                response,
+                reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": queued.last().pk}),
+                fetch_redirect_response=False,
+                msg_prefix=f"step {step}: synchronize",
+            )
             self.run_rq_jobs()
-            self.client.post(
+            reread = self.client.post(
                 reverse("plugins:netbox_data_import:trace_workspace_reread"),
                 {"preview_revision": self.client.session["import_preview_revision"]},
+            )
+
+            self.assertRedirects(
+                reread,
+                reverse("plugins:netbox_data_import:trace_workspace"),
+                fetch_redirect_response=False,
+                msg_prefix=f"step {step}: re-read",
+            )
+            self.assertContains(
+                self.client.get(reread.url),
+                "The workspace was re-read from NetBox.",
+                msg_prefix=f"step {step}: re-read",
             )
 
         self.assertTrue(cables_on(self.eth0).exists())
