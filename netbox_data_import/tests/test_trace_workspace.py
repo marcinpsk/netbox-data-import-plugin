@@ -5,7 +5,7 @@
 import re
 from io import BytesIO
 
-from dcim.models import Cable, Interface
+from dcim.models import Interface
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
@@ -21,6 +21,7 @@ from netbox_data_import.tests.test_cable_module import (
     patched_path,
 )
 from netbox_data_import.tests.helpers import (
+    cables_on,
     competing_write_during,
     trace_endpoint_line,
     trace_termination,
@@ -1440,9 +1441,9 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             fetch_redirect_response=False,
         )
         self.run_rq_jobs()
-        self.assertTrue(Cable.objects.filter(terminations__termination_id=self.eth0.pk).exists())
-        self.assertFalse(Cable.objects.filter(terminations__termination_id=second.pk).exists())
-        self.assertFalse(Cable.objects.filter(terminations__termination_id=other.pk).exists())
+        self.assertTrue(cables_on(self.eth0).exists())
+        self.assertFalse(cables_on(second).exists())
+        self.assertFalse(cables_on(other).exists())
 
     def test_a_second_trace_can_be_synchronized_after_the_first(self):
         """A per-trace command is repeatable, so it must not spend the whole preview on one trace."""
@@ -1475,9 +1476,9 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
                 {"preview_revision": self.client.session["import_preview_revision"]},
             )
 
-        self.assertTrue(Cable.objects.filter(terminations__termination_id=self.eth0.pk).exists())
-        self.assertTrue(Cable.objects.filter(terminations__termination_id=second.pk).exists())
-        self.assertTrue(Cable.objects.filter(terminations__termination_id=other.pk).exists())
+        self.assertTrue(cables_on(self.eth0).exists())
+        self.assertTrue(cables_on(second).exists())
+        self.assertTrue(cables_on(other).exists())
 
     def test_a_replanned_trace_is_executed_again_rather_than_reported_done(self):
         """One trace identity spans two workbooks, so the execution key cannot be the selection alone."""
@@ -1534,12 +1535,8 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
         self.assertNotEqual(keys[0], keys[1], "both steps built one execution key, so the second never ran")
 
         # The patched path replaces the direct Cable with its three physical segments.
-        self.assertFalse(
-            Cable.objects.filter(terminations__termination_id=self.eth0.pk)
-            .filter(terminations__termination_id=self.eth1.pk)
-            .exists()
-        )
-        self.assertTrue(Cable.objects.filter(terminations__termination_id=self.panel_1_rear.pk).exists())
+        self.assertFalse(cables_on(self.eth0, self.eth1).exists())
+        self.assertTrue(cables_on(self.panel_1_rear).exists())
 
 
 class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
