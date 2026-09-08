@@ -4734,6 +4734,7 @@ class SyncSingleRowView(_AjaxPermissionView):
             return JsonResponse({"ok": False, "error": "Import profile not found"}, status=400)
         try:
             validate_registered_adapter(profile)
+            validate_adapter_target_module(profile.source_adapter)
         except ValidationError as exc:
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
 
