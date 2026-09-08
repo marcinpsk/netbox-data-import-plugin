@@ -331,6 +331,59 @@ class PluginConfigStartupGateTest(SimpleTestCase):
         self.assertEqual(config["inference_backend_origin_allowlist"], [])
 
 
+class VaultAddressSchemeTest(SimpleTestCase):
+    """A Vault read carries a token, so its address follows the same scheme rule as an API root."""
+
+    def vault(self, address):
+        """Return a vault mapping with the given address."""
+        return {"address": address, "auth_method": "proxy"}
+
+    def test_https_is_accepted(self):
+        validate_plugin_settings(settings_with(vault=self.vault("https://vault.example.invalid:8200")))
+
+    def test_a_remote_http_address_is_rejected(self):
+        """`_read` sends the token to this address, so cleartext would put it on the wire."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(vault=self.vault("http://vault.example.invalid:8200")))
+
+        self.assertIn("https", str(caught.exception))
+
+    def test_a_loopback_http_address_is_accepted(self):
+        """The same exception the API root makes for a local endpoint, for the same reason."""
+        validate_plugin_settings(settings_with(vault=self.vault("http://127.0.0.1:8200")))
+
+
+class VaultTimeoutTest(SimpleTestCase):
+    """The Vault backend hands these to requests, so an unusable value cannot reach it."""
+
+    def vault(self, **overrides):
+        """Return a vault mapping with the named keys replaced."""
+        mapping = {"address": "https://vault.example.invalid:8200", "auth_method": "proxy"}
+        mapping.update(overrides)
+        return mapping
+
+    def test_absent_timeouts_are_accepted(self):
+        validate_plugin_settings(settings_with(vault=self.vault()))
+
+    def test_a_whole_number_of_seconds_is_accepted(self):
+        validate_plugin_settings(settings_with(vault=self.vault(connect_timeout=5, read_timeout=10)))
+
+    def test_a_null_timeout_is_rejected(self):
+        """requests reads None as 'no deadline', which is the one thing a timeout must never mean."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(vault=self.vault(connect_timeout=None)))
+
+        self.assertIn("connect_timeout", str(caught.exception))
+
+    def test_a_zero_timeout_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_plugin_settings(settings_with(vault=self.vault(read_timeout=0)))
+
+    def test_a_string_timeout_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_plugin_settings(settings_with(vault=self.vault(read_timeout="10")))
+
+
 class CredentialReferenceTypeTest(SimpleTestCase):
     """Every Vault reference field names text. A number only looks valid once something coerces it."""
 
@@ -349,6 +402,15 @@ class CredentialReferenceTypeTest(SimpleTestCase):
             validate_credential_reference({**self.reference(), 5: "x"})
 
         self.assertIn("Unknown", str(caught.exception))
+
+    def test_a_wrong_backend_is_refused_without_quoting_what_was_given(self):
+        """The message is persisted, so it names the expected value and never the supplied one."""
+        secret = "sk-should-never-be-echoed"
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_credential_reference(self.reference(backend=secret))
+
+        self.assertIn("backend", str(caught.exception))
+        self.assertNotIn(secret, str(caught.exception))
 
     def test_a_numeric_mount_is_rejected(self):
         """`str(value)` would make 8200 a valid-looking mount that `quote()` then refuses."""

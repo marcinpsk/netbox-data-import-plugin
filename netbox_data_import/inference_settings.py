@@ -11,6 +11,7 @@ from typing import Any
 
 from .inference_trust import (
     InvalidInferenceConfiguration,
+    is_local_endpoint,
     split_url as _split_url,
     validate_api_root,
     validate_origin,
@@ -101,6 +102,10 @@ def validate_vault_settings(value: Any) -> Mapping[str, Any]:
         raise InvalidInferenceConfiguration(
             f"'{VAULT_SETTING}.ca_bundle' must be a path to a CA bundle, got {type(bundle).__name__}."
         )
+    for field in ("connect_timeout", "read_timeout"):
+        # Optional here, unlike the fallback: absent means the backend's own default deadline.
+        if field in mapping:
+            _validate_timeout(mapping, field, setting=VAULT_SETTING)
     method = mapping.get("auth_method", "proxy")
     if method not in VAULT_AUTH_METHODS:
         raise InvalidInferenceConfiguration(
@@ -122,7 +127,12 @@ def _validate_vault_address(value: Any) -> None:
                 f"the query or fragment."
             )
     # Unquoted: the message is persisted, and an address can carry a token in its userinfo.
-    _split_url(value, f"{VAULT_SETTING}.address", quote_value=False)
+    parts = _split_url(value, f"{VAULT_SETTING}.address", quote_value=False)
+    # The read sends a token to this address, so it follows the api_root rule for a bearer token.
+    if parts.scheme.lower() != "https" and not is_local_endpoint(value):
+        raise InvalidInferenceConfiguration(
+            f"{label} must use https, unless it names a local endpoint, because the read sends a token to it."
+        )
 
 
 _UNSAFE_PATH_SEGMENTS = frozenset({"", ".", ".."})
@@ -160,9 +170,8 @@ def validate_credential_reference(value: Any, label: str = "credential_reference
     if missing:
         raise InvalidInferenceConfiguration(f"'{label}' is missing required key(s): {', '.join(missing)}.")
     if mapping["backend"] != CREDENTIAL_REFERENCE_BACKEND:
-        raise InvalidInferenceConfiguration(
-            f"'{label}.backend' must be '{CREDENTIAL_REFERENCE_BACKEND}', got '{mapping['backend']}'."
-        )
+        # The supplied value is not quoted back: this message is persisted and may hold secret material.
+        raise InvalidInferenceConfiguration(f"'{label}.backend' must be '{CREDENTIAL_REFERENCE_BACKEND}'.")
     _validate_vault_path(mapping["mount"], f"{label}.mount", segments=False)
     _validate_vault_path(mapping["path"], f"{label}.path", segments=True)
     _require_text(mapping["field"], f"{label}.field")
@@ -188,13 +197,13 @@ def _validate_text(mapping: Mapping[str, Any], field: str, max_length: int) -> N
         raise InvalidInferenceConfiguration(f"{label} is longer than the {max_length} characters the column holds.")
 
 
-def _validate_timeout(mapping: Mapping[str, Any], field: str) -> None:
-    """Reject a fallback timeout the matching PositiveIntegerField would not accept."""
+def _validate_timeout(mapping: Mapping[str, Any], field: str, setting: str = FILE_FALLBACK_SETTING) -> None:
+    """Reject a timeout the matching PositiveIntegerField would not accept."""
     value = mapping.get(field)
     # bool is an int subclass, and True would otherwise read as a one second timeout.
     if isinstance(value, bool) or not isinstance(value, int) or not TIMEOUT_MIN <= value <= TIMEOUT_MAX:
         raise InvalidInferenceConfiguration(
-            f"'{FILE_FALLBACK_SETTING}.{field}' must be a whole number of seconds between "
+            f"'{setting}.{field}' must be a whole number of seconds between "
             f"{TIMEOUT_MIN} and {TIMEOUT_MAX}, got {value!r}."
         )
 

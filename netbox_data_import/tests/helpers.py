@@ -441,8 +441,8 @@ def assert_action_link_is_named(test: TestCase, html: str, href: str, name: str)
     test.assertIn(name, match.group(1))
 
 
-# A faked rewind never touches the schema, so above this floor a restore is bookkeeping only.
-FAKED_REWIND_FLOOR = "0029_alter_cableimportsource_from_text_and_more"
+# Includes 0030 on purpose: faking that RunPython would leave the retired adapter_config key behind.
+FAKED_REWIND_FLOOR = "0030_remove_device_type_creation_config"
 
 
 def restore_plugin_migrations(floor=FAKED_REWIND_FLOOR):

@@ -105,7 +105,7 @@ def _allowlist_entry_for(origin: str, allowlist: Iterable[str]) -> str | None:
     return None
 
 
-def _is_local_endpoint(origin: str) -> bool:
+def is_local_endpoint(origin: str) -> bool:
     """Return whether an origin literally names a local address, which is the approval to reach one."""
     host = urlsplit(origin).hostname or ""
     if host.lower() in LOCAL_HOST_NAMES:
@@ -125,7 +125,7 @@ def _assert_origin_approved(url: str, allowlist: Sequence[str], authentication: 
         raise InvalidInferenceConfiguration(
             f"'{setting}' origin '{origin}' is not on the inference_backend_origin_allowlist."
         )
-    if parts.scheme.lower() != "https" and authentication == "bearer" and not _is_local_endpoint(origin):
+    if parts.scheme.lower() != "https" and authentication == "bearer" and not is_local_endpoint(origin):
         raise InvalidInferenceConfiguration(
             f"'{setting}' must use https when authentication is bearer, unless the allowlist approves it as a "
             f"local endpoint. Got '{url}'."
@@ -163,7 +163,7 @@ def assert_resolved_address_allowed(
 ) -> None:
     """Reject a destination whose resolved address NetBox must not reach."""
     origin = origin_of(api_root, setting)
-    approved_local = _is_local_endpoint(origin) and _allowlist_entry_for(origin, allowlist) is not None
+    approved_local = is_local_endpoint(origin) and _allowlist_entry_for(origin, allowlist) is not None
     resolved = tuple(addresses)
     if not resolved:
         raise InvalidInferenceConfiguration(f"'{setting}' host '{origin}' resolved to no address.")
@@ -202,6 +202,7 @@ __all__ = (
     "CLOUD_METADATA_ADDRESSES",
     "InvalidInferenceConfiguration",
     "assert_resolved_address_allowed",
+    "is_local_endpoint",
     "origin_of",
     "resolve_addresses",
     "split_url",
