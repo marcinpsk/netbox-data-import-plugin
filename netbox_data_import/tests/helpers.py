@@ -319,7 +319,7 @@ def setup_preview_with_device_matches(client, profile):
     from netbox_data_import.models import DeviceExistingMatch, SourceDocument
     from netbox_data_import.preview_row_actions import (
         PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-        record_recalculated_preview,
+        start_new_preview,
     )
     from netbox_data_import.review_workspace import ReviewWorkspace
 
@@ -364,7 +364,7 @@ def setup_preview_with_device_matches(client, profile):
     plan = ImportEngine.plan(profile, document, actor, planning_context)
     result = ReviewWorkspace(plan)
     session = client.session
-    record_recalculated_preview(session, plan)
+    start_new_preview(session, plan)
     session["import_rows"] = result.source_rows
     session["import_context"] = {
         "profile_id": profile.pk,
@@ -439,3 +439,21 @@ def assert_action_link_is_named(test: TestCase, html: str, href: str, name: str)
     if match is None:
         test.fail(f"The action link for {href} has no accessible name: {tag}")
     test.assertIn(name, match.group(1))
+
+
+def cables_on(*terminations):
+    """Return the Cables terminating on every one of these exact objects.
+
+    `termination_id` is half of a generic key. On a freshly created database an Interface and a
+    RearPort both start numbering at 1, so filtering on the id alone matches another type's cable.
+    """
+    from core.models import ObjectType
+    from dcim.models import Cable
+
+    found = Cable.objects.all()
+    for termination in terminations:
+        found = found.filter(
+            terminations__termination_type=ObjectType.objects.get_for_model(type(termination)),
+            terminations__termination_id=termination.pk,
+        )
+    return found

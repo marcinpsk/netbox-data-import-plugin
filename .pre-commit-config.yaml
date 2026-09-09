@@ -63,7 +63,7 @@ repos:
         entry: python3 scripts/check_diagnostic_wording.py
         language: system
         pass_filenames: false
-        files: ^netbox_data_import/(target_modules|review_workspace)\.py$
+        files: ^(netbox_data_import/(cable_target|target_modules|review_workspace)\.py|scripts/check_diagnostic_wording\.py)$
 
       - id: spec-diagnostics
         name: Normative spec tables list every diagnostic the planner emits

@@ -15,6 +15,7 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_REVISION_SESSION_KEY,
     record_recalculated_preview,
+    start_new_preview,
 )
 from netbox_data_import.tests.helpers import make_dcim_objects, store_workbook_document
 
@@ -46,7 +47,7 @@ class ContactResolutionSessionMixin:
         plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
         result = ReviewWorkspace(plan)
         session = self.client.session
-        record_recalculated_preview(session, plan)
+        record_recalculated_preview(session, plan, user=self.user)
         session["import_rows"] = result.source_rows
         session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
         session.save()
@@ -141,7 +142,7 @@ class ContactResolutionSessionMixin:
         plan = ImportEngine.plan(self.profile, self.document, user, self.planning_context)
         workspace = ReviewWorkspace(plan)
         session = self.client.session
-        record_recalculated_preview(session, plan)
+        start_new_preview(session, plan)
         session["import_rows"] = workspace.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,
@@ -535,7 +536,7 @@ class ContactResolutionAjaxTest(ContactResolutionSessionMixin, TestCase):
         self.assertEqual(device_row.extra_data.get("netbox_device_id"), device.pk)
 
         session = self.client.session
-        record_recalculated_preview(session, plan)
+        record_recalculated_preview(session, plan, user=self.user)
         session["import_rows"] = result.source_rows
         session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
         session.save()
@@ -696,7 +697,7 @@ class RefusedRowContactAssignmentTest(ContactResolutionSessionMixin, TestCase):
         plan = ImportEngine.plan(self.profile, self.document, self.user, self.planning_context)
         result = ReviewWorkspace(plan)
         session = self.client.session
-        record_recalculated_preview(session, plan)
+        record_recalculated_preview(session, plan, user=self.user)
         session["import_rows"] = result.source_rows
         session[PREVIEW_REVISION_SESSION_KEY] = "revision-two"
         session.save()

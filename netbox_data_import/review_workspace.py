@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import cached_property
 from types import MappingProxyType
 from typing import Any
 
+from .cable_target import UNRESOLVED
 from .import_engine import ImportEngine
 from .models import ImportProfile, TerminationResolution, locked_profile_policy
 from .object_permissions import save_permission_scoped_object
@@ -61,9 +63,40 @@ def save_termination_resolution_and_replan(
 
 
 _DIAGNOSTIC_MESSAGES = {
+    "cable.ambiguous_mapped_peer": (
+        "NetBox maps this port to several peer ports. Choose the peer port this trace continues through."
+    ),
+    "cable.attribute_drift": "The existing Cable carries attributes this import would not have written.",
+    "cable.cableclass_unmapped": "No Cable policy maps this CableClass. Map it on the import profile.",
+    "cable.multi_termination_conflict": (
+        "A Cable with several terminations on one side holds a port this trace needs. Correct that Cable in NetBox."
+    ),
+    "cable.pass_through_not_mapped": (
+        "No PortMapping joins these two ports, so the stated pass-through cannot be true. "
+        "Correct the source, or add the PortMapping in NetBox."
+    ),
+    "cable.pass_through_verified": "A PortMapping proves the stated pass-through.",
+    "cable.permission_denied": "Permission denied: you cannot make one of the Cable changes this trace needs.",
     "cable.planned_termination_conflict": (
         "Another Source Trace plans a Cable on this termination. Resolve this trace to a different termination."
     ),
+    "cable.resolved_segment_conflict": (
+        "Two Source Traces give one shared segment different Cable policies. Make their CableClass values agree."
+    ),
+    "cable.same_port_continuation": "A mapped peer port continues the path where the source repeats one port.",
+    "cable.segment_reused": "An existing Cable already proves this segment, so the import keeps it.",
+    "cable.segment_self_connection": "Both ends of this segment name one termination. Correct the source path.",
+    "cable.termination_kind_mismatch": (
+        "The saved selection is a different kind of port than the stated PortClass. Choose the termination again."
+    ),
+    "cable.termination_occupied": (
+        "Another Cable already occupies this termination. "
+        "Remove that Cable, or resolve this trace to a free termination."
+    ),
+    "cable.termination_unresolved": (
+        "No single port on the resolved Device matches this name. Choose the termination for it."
+    ),
+    "cable.unsupported_termination_kind": "A Cable can end on an Interface, a Front Port, or a Rear Port only.",
     "device.add_permission": "Permission denied: dcim.add_device",
     "device.already_bound": "Another source row is already linked to this device.",
     "device.ambiguous_asset_tag": "Multiple devices have this asset tag.",
@@ -103,6 +136,7 @@ _DIAGNOSTIC_MESSAGES = {
     "device.zero_u_review_conflict": "A saved review keeps a rack position on a 0U device type.",
     "device.unparseable_ip": "The source value is not a valid IP address.",
     "device.validation_failed": "The planned device does not pass NetBox validation.",
+    "profile.dangling_reference": "The import profile names something NetBox no longer offers.",
     "rack.add_permission": "Permission denied: dcim.add_rack",
     "rack.change_permission": "Permission denied: dcim.change_rack",
     "rack.duplicate_name": "The rack name appears more than once in this import.",
@@ -111,6 +145,11 @@ _DIAGNOSTIC_MESSAGES = {
     "rack.missing_name": "Missing rack name",
     "rack.ambiguous_name": "Multiple racks have this name at the import target.",
     "rack.validation_failed": "The planned rack does not pass NetBox validation.",
+    "trace.device_unresolved": "No single Device matches this name. Correct the source, or add the Device in NetBox.",
+    "trace.endpoint_evidence_only": (
+        "This trace states its two endpoints and no physical path, and no Cable joins them. "
+        "Add the Segment Evidence rows the path needs."
+    ),
 }
 
 _IDENTITY_CONFLICTS = {
@@ -183,6 +222,11 @@ def _object_type(unit: SynchronizationUnit) -> str:
 def _blocking(unit: SynchronizationUnit) -> list:
     """Return the unit's error diagnostics: the first states the row, the rest are what it needs."""
     return [item for item in unit.diagnostics if item.severity == Severity.ERROR]
+
+
+def _states_a_trace(unit: SynchronizationUnit) -> bool:
+    """Return whether one unit carries a Source Trace, which is what the workspace lists."""
+    return unit.display.get("trace") is not None
 
 
 def _diagnostic_message(diagnostic) -> str:
@@ -373,6 +417,91 @@ def _device_placement_differs(device, source_location_id, rack_name, position, f
     )
 
 
+_SUMMARY_KEYS = {
+    Disposition.ACTIONABLE: "actionable",
+    Disposition.BLOCKED: "blocked",
+    Disposition.INVALID: "invalid",
+    Disposition.NO_OP: "no_change",
+}
+
+
+_SYNC_URL_NAME = "plugins:netbox_data_import:trace_sync"
+
+
+@dataclass(frozen=True)
+class TraceAction:
+    """One review command, always visible, carrying its reason when it cannot run.
+
+    `url_name` has no default: the page posts every action to it, so a command that named none
+    would inherit whichever endpoint the template happened to hardcode.
+    """
+
+    key: str
+    label: str
+    enabled: bool
+    url_name: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class TraceWorkspaceUnit:
+    """One Source Trace as the review workspace shows it."""
+
+    identity: str
+    trace_identity: str
+    disposition: str
+    name: str
+    row_number: int | None
+    sheet: str
+    endpoints: dict[str, str]
+    segments: list[dict[str, Any]]
+    logical_cable: dict[str, Any] | None
+    deletes_logical_cable: bool
+    topology_known: bool
+    terminations: list[dict[str, Any]]
+    findings: list[dict[str, str]]
+    actions: tuple[TraceAction, ...]
+
+    @classmethod
+    def from_unit(cls, unit: SynchronizationUnit) -> TraceWorkspaceUnit:
+        """Build the workspace entry one trace unit states, without recomputing its plan."""
+        display = unit.to_dict()["display"]
+        workspace = dict(display.get("trace") or {})
+        findings = [
+            {"code": item.code, "message": _diagnostic_message(item), "severity": item.severity}
+            for item in unit.diagnostics
+        ]
+        return cls(
+            identity=unit.identity,
+            trace_identity=str(workspace.get("identity") or ""),
+            disposition=unit.disposition,
+            name=str(display.get("name") or ""),
+            row_number=display.get("row_number"),
+            sheet=str(display.get("sheet") or ""),
+            endpoints=dict(workspace.get("endpoints") or {}),
+            segments=[dict(segment) for segment in workspace.get("segments") or ()],
+            logical_cable=workspace.get("logical_cable"),
+            deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
+            topology_known=bool(workspace.get("topology_known")),
+            terminations=[dict(item) for item in workspace.get("terminations") or ()],
+            findings=findings,
+            actions=cls._actions(unit, findings, str(display.get("detail") or "")),
+        )
+
+    @staticmethod
+    def _actions(unit: SynchronizationUnit, findings: list[dict[str, str]], detail: str) -> tuple[TraceAction, ...]:
+        """Return every review command, each stating why it cannot run when it cannot."""
+        blocking = next((item["message"] for item in findings if item["severity"] == Severity.ERROR), "")
+        if unit.disposition == Disposition.ACTIONABLE:
+            sync = TraceAction(key="sync", label="Sync with dependencies", enabled=True, url_name=_SYNC_URL_NAME)
+        else:
+            reason = blocking or detail or f"This trace is {unit.disposition}."
+            sync = TraceAction(
+                key="sync", label="Sync with dependencies", enabled=False, url_name=_SYNC_URL_NAME, reason=reason
+            )
+        return (sync,)
+
+
 class ReviewWorkspace:
     """Read-only presentation of the accepted Import Plan."""
 
@@ -407,6 +536,62 @@ class ReviewWorkspace:
     def has_errors(self) -> bool:
         """Return whether any unit cannot execute."""
         return any(unit.action == "error" for unit in self.units)
+
+    @property
+    def has_traces(self) -> bool:
+        """Return whether the plan holds a Source Trace, without building one workspace entry."""
+        return any(_states_a_trace(unit) for unit in self.plan.units)
+
+    @cached_property
+    def traces(self) -> tuple[TraceWorkspaceUnit, ...]:
+        """Return one workspace entry per Source Trace, in plan order.
+
+        Cached because one page reads it twice, and each build reserializes every change.
+        """
+        return tuple(TraceWorkspaceUnit.from_unit(unit) for unit in self.plan.units if _states_a_trace(unit))
+
+    def sync_selection(self, identity: str) -> tuple[str, ...]:
+        """Return the unit and every unit owning a change it depends on, transitively.
+
+        `merge_changes` refuses a selection whose dependency is absent, so a review command that
+        synchronizes one trace has to carry the units its changes wait on.
+        """
+        units = {unit.identity: unit for unit in self.plan.units}
+        selected = units.get(identity)
+        if selected is None or selected.disposition != Disposition.ACTIONABLE:
+            return ()
+        owner_of = {change.identity: unit.identity for unit in self.plan.units for change in unit.changes}
+        chosen: list[str] = []
+        queue = [identity]
+        while queue:
+            current = queue.pop()
+            if current in chosen:
+                continue
+            chosen.append(current)
+            for change in units[current].changes:
+                for dependency in change.dependencies:
+                    owner = owner_of.get(dependency)
+                    if owner is not None and owner not in chosen:
+                        queue.append(owner)
+        return tuple(chosen)
+
+    @property
+    def trace_summary(self) -> dict[str, int]:
+        """Return the summary strip: what the reviewer still has to work through."""
+        traces = self.traces
+        summary = {
+            "traces": len(traces),
+            "unresolved_terminations": 0,
+            "resolved_terminations": 0,
+        }
+        # A template cannot resolve a key with a hyphen, so the strip names each disposition itself.
+        for disposition, key in _SUMMARY_KEYS.items():
+            summary[key] = sum(1 for trace in traces if trace.disposition == disposition)
+        for trace in traces:
+            for termination in trace.terminations:
+                key = "unresolved_terminations" if termination["state"] == UNRESOLVED else "resolved_terminations"
+                summary[key] += 1
+        return summary
 
     @property
     def rack_groups(self) -> dict:
