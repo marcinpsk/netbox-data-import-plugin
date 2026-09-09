@@ -382,6 +382,15 @@ class ConnectionTestAuthorizationTest(TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_a_view_only_user_may_not_run_the_test(self):
+        """Seeing a backend is not authority to make it call out; only `change` is."""
+        viewer = user_with_object_permission("view-only", [(InferenceBackend, ["view"], {})])
+        self.client.force_login(viewer)
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 403)
+
     def test_no_superuser_shortcut_replaces_the_permission(self):
         """Section 13.1: this one rule authorizes the action, with no separate administrator check."""
         import inspect
