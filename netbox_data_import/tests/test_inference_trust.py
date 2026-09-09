@@ -189,6 +189,11 @@ class ResolvedAddressTest(SimpleTestCase):
 
         self.assertIn("metadata", str(caught.exception))
 
+    def test_cloud_metadata_ipv6_spellings_are_rejected_for_an_approved_local_endpoint(self):
+        for address in ("fd00:ec2::254", "fd00:ec2:0:0:0:0:0:254"):
+            with self.subTest(address=address), self.assertRaisesRegex(InvalidInferenceConfiguration, "metadata"):
+                assert_resolved_address_allowed(LOCAL_ALLOWLIST[0], allowlist=LOCAL_ALLOWLIST, addresses=(address,))
+
     def test_an_ipv6_unique_local_address_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration):
             assert_resolved_address_allowed(

@@ -35,6 +35,9 @@ CLOUD_METADATA_ADDRESSES = frozenset(
     }
 )
 
+# Parsed from the exported strings, so an alternate spelling of the same address cannot slip past.
+_CLOUD_METADATA_IPS = frozenset(ipaddress.ip_address(address) for address in CLOUD_METADATA_ADDRESSES)
+
 LOCAL_HOST_NAMES = frozenset({"localhost", "localhost.localdomain"})
 
 
@@ -174,7 +177,7 @@ def assert_resolved_address_allowed(
         raise InvalidInferenceConfiguration(f"'{setting}' host '{origin}' resolved to no address.")
     for candidate in resolved:
         address = ipaddress.ip_address(candidate)
-        if candidate in CLOUD_METADATA_ADDRESSES:
+        if address in _CLOUD_METADATA_IPS:
             raise InvalidInferenceConfiguration(
                 f"'{setting}' resolves to the cloud metadata address {candidate}, which NetBox must not call."
             )
