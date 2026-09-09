@@ -53,9 +53,9 @@ def _chain_root(call, parents):
     node: ast.AST = call
     while True:
         parent = parents.get(node)
-        if isinstance(parent, ast.Attribute) and parent.value is node:
-            node = parent
-        elif isinstance(parent, ast.Call) and parent.func is node:
+        if (isinstance(parent, ast.Attribute) and parent.value is node) or (
+            isinstance(parent, ast.Call) and parent.func is node
+        ):
             node = parent
         else:
             return node

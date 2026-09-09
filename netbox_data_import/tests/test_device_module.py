@@ -266,7 +266,7 @@ class DeviceModuleBatchLoadingTest(DeviceModulePlanTestBase):
         asset_tag = self._device("asset-device", asset_tag="Identity-Tag")
         rows = [
             self._row(1, "D-1", "İdentity-name"),
-            self._row(2, "D-2", "different-name", asset_tag="ıdentity-tag"),
+            self._row(2, "D-2", "different-name", asset_tag="\u0131dentity-tag"),
             self._row(3, "D-3", "STRASSE-NAME"),
         ]
 
@@ -535,7 +535,7 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
     def test_an_existing_device_type_plans_and_imports_normally(self):
         """The Import Engine can create a Device when its Device Type already exists."""
 
-        plan, document, actor = self._engine_plan(self._row(2, "D-1", "srv-01", u_height="1"))
+        plan, _document, _actor = self._engine_plan(self._row(2, "D-1", "srv-01", u_height="1"))
         unit = plan.unit("device:source:D-1")
 
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
@@ -560,7 +560,7 @@ class DeviceModuleDependencyTest(DeviceModulePlanTestBase):
             netbox_manufacturer_slug=manufacturer.slug,
             netbox_device_type_slug=mapped_type.slug,
         )
-        plan, document, actor = self._engine_plan(self._row(2, "D-1", "mapped-device", make="Acme", model="Widget"))
+        plan, _document, _actor = self._engine_plan(self._row(2, "D-1", "mapped-device", make="Acme", model="Widget"))
         unit = plan.unit("device:source:D-1")
 
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)

@@ -503,13 +503,13 @@ def _topological_order(merged: dict, order: list[str]) -> tuple[PlannedChange, .
         if state.get(identity) == 2:
             return
         if state.get(identity) == 1:
-            cycle = " -> ".join(path[path.index(identity) :] + (identity,))
+            cycle = " -> ".join((*path[path.index(identity) :], identity))
             raise PlanInvalid(f"The Planned Change dependencies form a cycle: {cycle}.")
         state[identity] = 1
         for dependency in sorted(
             (dep for dep in merged[identity].dependencies if dep in merged), key=lambda dep: position[dep]
         ):
-            visit(dependency, path + (identity,))
+            visit(dependency, (*path, identity))
         state[identity] = 2
         result.append(merged[identity])
 

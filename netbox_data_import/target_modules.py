@@ -70,7 +70,7 @@ def _database_upper_values(values, *, collation: str | None = None) -> dict[str,
     collation_sql = f" COLLATE {connection.ops.quote_name(collation)}" if collation else ""
     with connection.cursor() as cursor:
         cursor.execute(
-            f"SELECT source_value, UPPER(source_value{collation_sql}) FROM unnest(%s::text[]) AS source_value",
+            f"SELECT source_value, UPPER(source_value{collation_sql}) FROM unnest(%s::text[]) AS source_value",  # noqa: S608 - The interpolated identifier uses quote_name; values use a query parameter.
             [unique_values],
         )
         return dict(cursor.fetchall())
@@ -1896,7 +1896,7 @@ class DeviceModule:
             },
         }
 
-    def apply(self, planned_change: PlannedChange, execution_context) -> Any:  # noqa: C901
+    def apply(self, planned_change: PlannedChange, execution_context) -> Any:
         """Apply one device change, having locked its row and rechecked its preconditions."""
         from dcim.models import Device, DeviceRole, Rack
 
@@ -2059,12 +2059,12 @@ class DeviceModule:
         for field in ("serial", "asset_tag"):
             if payload[field] and _text(getattr(device, field)) != payload[field]:
                 return True
-        if any(
-            not ip_assignment.already_assigned(device, field, address)
-            for field, address in (payload.get("ip_fields") or {}).items()
-        ):
-            return True
-        return False
+        return bool(
+            any(
+                not ip_assignment.already_assigned(device, field, address)
+                for field, address in (payload.get("ip_fields") or {}).items()
+            )
+        )
 
     @staticmethod
     def _change(
@@ -2199,10 +2199,10 @@ def runtime_for(key: str) -> Any | None:
 
 __all__ = (
     "DEFAULT_RACK_HEIGHT",
+    "MODULE_RUNTIMES",
     "CableModule",
     "DeviceModule",
     "ExecutionContext",
-    "MODULE_RUNTIMES",
     "PreconditionFailed",
     "RackModule",
     "TargetModuleRuntime",

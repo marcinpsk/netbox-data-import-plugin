@@ -32,7 +32,7 @@ REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/bac
 class Vault(BaseHTTPRequestHandler):
     """Serve the one secret this sweep hunts for."""
 
-    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler names the hook.
+    def do_GET(self):
         encoded = json.dumps({"data": {"data": {"api_key": SECRET}}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

@@ -8,7 +8,10 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ("extras", "0001_initial"),
+        # The tags M2M needs extras.Tag, which exists from the first migration. `makemigrations`
+        # named the newest extras node of the day, and NetBox squashed it away. A named squash is
+        # itself squashable, so the sentinel is what survives the next re-squash.
+        ("extras", "__first__"),
     ]
 
     operations = [

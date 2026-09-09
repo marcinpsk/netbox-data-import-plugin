@@ -43,7 +43,7 @@ class NetBoxDataImportConfig(PluginConfig):
         """Import the jobs module, which NetBox does not load, so its @system_job registration runs."""
         super().ready()
 
-        from . import jobs  # noqa: F401
+        from . import jobs
 
 
 config = NetBoxDataImportConfig

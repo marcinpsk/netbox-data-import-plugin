@@ -91,7 +91,7 @@ def _imports_target_modules(path: pathlib.Path) -> bool:
         if isinstance(node, ast.ImportFrom):
             if node.module in {"target_modules", "netbox_data_import.target_modules"}:
                 return True
-            package_import = node.module == "netbox_data_import" or node.level and node.module is None
+            package_import = node.module == "netbox_data_import" or (node.level and node.module is None)
             if package_import and any(name.name == "target_modules" for name in node.names):
                 return True
         if isinstance(node, ast.Import) and any(name.name.endswith("target_modules") for name in node.names):

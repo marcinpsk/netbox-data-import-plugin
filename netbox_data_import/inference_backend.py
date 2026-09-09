@@ -150,10 +150,10 @@ def resolve_active_backend() -> ResolvedInferenceBackend:
 
 
 __all__ = (
-    "NoActiveInferenceBackend",
-    "ResolvedInferenceBackend",
     "SOURCE_DATABASE",
     "SOURCE_FILE_FALLBACK",
+    "NoActiveInferenceBackend",
+    "ResolvedInferenceBackend",
     "origin_allowlist",
     "plugin_settings",
     "resolve_active_backend",

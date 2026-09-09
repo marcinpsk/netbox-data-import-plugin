@@ -42,7 +42,7 @@ def move_columns_into_adapter_config(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("tenancy", "0001_initial"),
+        # No tenancy node of its own: 0017 already pins `tenancy.0020`, which this descends from.
         ("netbox_data_import", "0021_importprofile_adapter_config"),
     ]
 

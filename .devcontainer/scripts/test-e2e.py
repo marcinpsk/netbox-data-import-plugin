@@ -11,7 +11,7 @@ Usage:
 
 Tests:
     1. librenms-sync page loads for the configured device
-    2. Module bays page shows Transceiver 0–35 with install links
+    2. Module bays page shows Transceiver 0-35 with install links
     3. Install QSFP-100G-SR4 into Transceiver 0 via UI (TomSelect widget)
     4. Interface 'swp0' auto-created by InterfaceNameRule [rule: .* → swp{bay_position_num}]
     5. Install QSFP-100G-SR4 into Transceiver 5, verify interface 'swp5'
@@ -121,7 +121,7 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
                 assert page.locator(f'a[href*="module_bay={bay_id}"]').count() > 0, (
                     f"no install link for bay {bay_id} ({bay_name})"
                 )
-            ok("module bays: Transceiver 0–35 visible with install links")
+            ok("module bays: Transceiver 0-35 visible with install links")
         except Exception as e:
             fail("module bays page", e)
 
@@ -156,7 +156,7 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
                 found = False
                 while time.monotonic() < deadline:
                     page.goto(f"{base_url}/dcim/devices/{device_id}/interfaces/")
-                    try:
+                    try:  # noqa: SIM105 - Suppressing Exception would conceal failures other than the expected timeout.
                         page.wait_for_load_state("networkidle", timeout=3000)
                     except Exception:
                         pass  # timeout is fine; proceed to check locator

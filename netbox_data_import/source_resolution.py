@@ -73,12 +73,14 @@ def derive_effective_rows(rows: list[dict], profile) -> list[dict]:
     for row in rows:
         source_id = _str_val(row.get("source_id"))
         if source_id and source_id in resolutions_by_source_id:
-            row = dict(row)
-            if "_conflicts" in row:
-                row["_conflicts"] = dict(row["_conflicts"])
+            effective_row = dict(row)
+            if "_conflicts" in effective_row:
+                effective_row["_conflicts"] = dict(effective_row["_conflicts"])
             for resolution in resolutions_by_source_id[source_id]:
-                _apply_one_resolution(row, resolution, source_to_targets, profile)
-        result.append(row)
+                _apply_one_resolution(effective_row, resolution, source_to_targets, profile)
+        else:
+            effective_row = row
+        result.append(effective_row)
     return result
 
 

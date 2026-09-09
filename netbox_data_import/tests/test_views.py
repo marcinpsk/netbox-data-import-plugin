@@ -7,7 +7,8 @@ from io import BytesIO
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.test import Client, TestCase, TransactionTestCase
+from django.core.files.uploadhandler import MemoryFileUploadHandler
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 
 from netbox_data_import.models import (
@@ -34,6 +35,35 @@ from netbox_data_import.tests.helpers import (
 User = get_user_model()
 
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
+
+
+class RefusedRowWriteLoggingTest(SimpleTestCase):
+    def test_database_error_is_logged_outside_an_exception_handler(self):
+        from django.db import DatabaseError
+
+        from netbox_data_import.views import _refused_row_write_response
+
+        error = DatabaseError("Storage failure")
+        with self.assertLogs("netbox_data_import.views", level="ERROR") as captured:
+            response = _refused_row_write_response(error, 1)
+        self.assertEqual(response.status_code, 400)
+        self.assertIs(captured.records[0].exc_info[1], error)
+
+
+class UnreadableUpload(BytesIO):
+    """Represent a file whose storage fails after the request upload completes."""
+
+    def read(self, *args, **kwargs):
+        raise RuntimeError("Unexpected upload storage failure")
+
+
+class UnreadableUploadHandler(MemoryFileUploadHandler):
+    """Receive a real multipart upload and supply unreadable storage to the view."""
+
+    def file_complete(self, file_size):
+        upload = super().file_complete(file_size)
+        upload.file = UnreadableUpload(upload.read())
+        return upload
 
 
 def _make_profile(name="ViewTest") -> ImportProfile:
@@ -758,7 +788,7 @@ class ImportPreviewViewContextTest(BaseViewTestCase):
     def test_device_match_context_multiple_matches(self):
         """Preview page context correctly includes multiple DeviceExistingMatch records."""
         profile = _make_profile("MultiProfile")
-        site, device1, device2, device_rows = self._setup_session_with_matches(profile)
+        _site, device1, device2, device_rows = self._setup_session_with_matches(profile)
 
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
@@ -922,7 +952,7 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
     def test_modal_current_link_json_data_passed(self):
         """Modal receives device_match_info with correct structure."""
         profile = _make_profile("ModalTestProfile3")
-        site, device1, device2 = self._setup_session_with_matches(profile)
+        _site, _device1, _device2 = self._setup_session_with_matches(profile)
 
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
@@ -932,7 +962,7 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
         device_match_info = resp.context["device_match_info"]
         self.assertGreater(len(device_match_info), 0)
 
-        for source_id, match_info in device_match_info.items():
+        for _source_id, match_info in device_match_info.items():
             self.assertIn("device_id", match_info)
             self.assertIn("device_name", match_info)
 
@@ -956,7 +986,7 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
     def test_modal_displays_current_device_serial(self):
         """Modal should display current device serial number (Task 6)."""
         profile = _make_profile("ModalTestProfile5")
-        site, device1, device2 = self._setup_session_with_matches(profile)
+        _site, device1, _device2 = self._setup_session_with_matches(profile)
 
         device1.serial = "SN-12345-ABC"
         device1.save()
@@ -977,7 +1007,7 @@ class ImportPreviewTemplateModalCurrentLinkTest(BaseViewTestCase):
     def test_modal_displays_serial_not_set_when_empty(self):
         """Modal should display 'Not set' when device has no serial (Task 6)."""
         profile = _make_profile("ModalTestProfile6")
-        site, device1, device2 = self._setup_session_with_matches(profile)
+        _site, device1, _device2 = self._setup_session_with_matches(profile)
 
         # search_objects returns the raw model value (null for no serial), while
         # device_match_info intentionally stores a blank string fallback for the modal.
@@ -1583,6 +1613,14 @@ manufacturer_mappings:
         bad.name = "bad.yaml"
         resp = self.client.post(url, {"yaml_file": bad})
         self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Failed to parse YAML:")
+
+    @override_settings(FILE_UPLOAD_HANDLERS=["netbox_data_import.tests.test_views.UnreadableUploadHandler"])
+    def test_yaml_upload_unexpected_read_failure_propagates(self):
+        upload = BytesIO(b"profile: {}")
+        upload.name = "profile.yaml"
+        with self.assertRaisesMessage(RuntimeError, "Unexpected upload storage failure"):
+            self.client.post(reverse("plugins:netbox_data_import:import_profile_yaml"), {"yaml_file": upload})
 
     def test_post_yaml_missing_profile_key_shows_error(self):
         """POST with YAML that has no 'profile' key shows error."""
@@ -3551,6 +3589,20 @@ column_mappings:
 
     # --- POST: hierarchical YAML via file upload ---
 
+    def test_bulk_upload_undecodable_file_shows_error(self):
+        upload = BytesIO(b"\xff")
+        upload.name = "profile.yaml"
+        response = self.client.post(self._url(), {"upload_file": upload}, follow=True)
+        self.assertRedirects(response, self._url())
+        self.assertContains(response, "Could not read uploaded file:")
+
+    @override_settings(FILE_UPLOAD_HANDLERS=["netbox_data_import.tests.test_views.UnreadableUploadHandler"])
+    def test_bulk_upload_unexpected_read_failure_propagates(self):
+        upload = BytesIO(b"profile: {}")
+        upload.name = "profile.yaml"
+        with self.assertRaisesMessage(RuntimeError, "Unexpected upload storage failure"):
+            self.client.post(self._url(), {"upload_file": upload})
+
     def test_post_hierarchical_yaml_via_file_upload(self):
         """POST hierarchical YAML as a file upload creates the profile."""
         f = BytesIO(self.HIERARCHICAL_YAML)
@@ -3755,17 +3807,17 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
             _apply_profile_yaml_data("just a string")  # type: ignore[arg-type]
 
     def test_profile_scalar_raises(self):
-        """Raises ValueError when profile value is a scalar, not a mapping."""
+        """Raises TypeError when profile value is a scalar, not a mapping."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TypeError):
             _apply_profile_yaml_data({"profile": "not-a-dict"})
 
     def test_profile_list_raises(self):
-        """Raises ValueError when profile value is a list, not a mapping."""
+        """Raises TypeError when profile value is a list, not a mapping."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TypeError):
             _apply_profile_yaml_data({"profile": ["item1", "item2"]})
 
     def test_missing_name_raises(self):
@@ -3817,14 +3869,14 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         self.assertFalse(ImportProfile.objects.filter(name="SectionTypeProfile").exists())
 
     def test_column_mappings_item_not_a_dict_raises(self):
-        """Raises ValueError when a section item is a scalar instead of a mapping."""
+        """Raises TypeError when a section item is a scalar instead of a mapping."""
         from netbox_data_import.views import _apply_profile_yaml_data
 
         bad_data = {
             "profile": {"name": "SectionItemProfile"},
             "column_mappings": ["just-a-string"],
         }
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TypeError):
             _apply_profile_yaml_data(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="SectionItemProfile").exists())
 
@@ -4129,7 +4181,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
                 },
             ],
         }
-        profile, stats = _apply_profile_yaml_data(data)
+        profile, _stats = _apply_profile_yaml_data(data)
         crm = ClassRoleMapping.objects.get(profile=profile, source_class="Cab")
         self.assertEqual(crm.rack_type_id, self.rack_type.pk)
 

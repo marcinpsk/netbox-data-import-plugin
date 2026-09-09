@@ -5,6 +5,7 @@
 import json
 import secrets
 import uuid
+from contextlib import suppress
 from io import BytesIO
 
 from core.models import ObjectType
@@ -1838,10 +1839,8 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
                 if thread_id in observed_threads:
                     return
                 observed_threads.add(thread_id)
-            try:
+            with suppress(BrokenBarrierError):
                 first_writes.wait(timeout=2)
-            except BrokenBarrierError:
-                pass
 
         def execute_plan(profile, document, plan):
             connections["default"].close()
@@ -1855,7 +1854,7 @@ class CableExecutionTest(CableTopologyMixin, TransactionTestCase):
                     str(uuid.uuid4()),
                     self.actor,
                 )
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - the thread transports every failure to the caller
                 outcomes.put(exc)
             else:
                 outcomes.put(execution)

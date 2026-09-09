@@ -8,6 +8,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 from io import BytesIO
+import itertools
 import json
 from typing import Iterable, Mapping, Sequence
 
@@ -426,10 +427,15 @@ def _parse_segments(block: _Block) -> tuple[tuple[_ParsedSegment, ...], list[Sou
             left = _termination_from_path(row.values, 0)
             cable_class = source_text(row.values[7])
             right = _termination_from_path(row.values, 8)
-            if not cable_class:
-                raise ValueError("A Segment Evidence row has an empty CableClass.")
         except (IndexError, ValueError) as exc:
             errors.append(_error(block, "trace.incomplete_block", str(exc), row.row_number))
+            continue
+        if not cable_class:
+            errors.append(
+                _error(
+                    block, "trace.incomplete_block", "A Segment Evidence row has an empty CableClass.", row.row_number
+                )
+            )
             continue
         parsed.append(_ParsedSegment(SegmentEvidence(left, cable_class, right), row.row_number))
     return tuple(parsed), errors
@@ -537,7 +543,7 @@ def _linearity_error(
                 "The Segment Evidence rows branch.",
                 parsed.row_number,
             )
-    for previous, following in zip(segments, segments[1:], strict=False):
+    for previous, following in itertools.pairwise(segments):
         if not same_device_and_cards(previous.evidence.right, following.evidence.left):
             return _error(
                 block,
@@ -551,7 +557,7 @@ def _linearity_error(
 def _pass_through_claims(segments: Sequence[SegmentEvidence]) -> tuple[PassThroughClaim, ...]:
     """Return the continuation each pair of consecutive segments claims."""
     claims = []
-    for previous, following in zip(segments, segments[1:], strict=False):
+    for previous, following in itertools.pairwise(segments):
         if not same_device_and_cards(previous.right, following.left):
             continue
         claims.append(
@@ -567,7 +573,7 @@ def _pass_through_claims(segments: Sequence[SegmentEvidence]) -> tuple[PassThrou
 
 def _pass_through_error(block: _Block, segments: Sequence[_ParsedSegment]) -> SourceDiagnostic | None:
     """Return a diagnostic for the first Pass-Through Claim at an interface PortClass."""
-    for previous, following in zip(segments, segments[1:], strict=False):
+    for previous, following in itertools.pairwise(segments):
         if not same_device_and_cards(previous.evidence.right, following.evidence.left):
             continue
         if (
@@ -599,7 +605,7 @@ def _expected_visits(segments: Sequence[SegmentEvidence]) -> tuple[tuple[Termina
     if not segments:
         return ()
     visits: list[tuple[TerminationReference, ...]] = [(segments[0].left,)]
-    visits.extend((previous.right, following.left) for previous, following in zip(segments, segments[1:], strict=False))
+    visits.extend((previous.right, following.left) for previous, following in itertools.pairwise(segments))
     visits.append((segments[-1].right,))
     return tuple(visits)
 
@@ -955,12 +961,12 @@ def interpret(content: bytes) -> tuple[tuple[SourceTrace, ...], tuple[SourceDiag
 
 
 __all__ = (
-    "EndpointSummary",
     "FRONT_PORT_CLASSES",
     "INTERFACE_PORT_CLASSES",
     "PORT_CLASSES",
-    "PassThroughClaim",
     "REAR_PORT_CLASSES",
+    "EndpointSummary",
+    "PassThroughClaim",
     "SegmentEvidence",
     "SourceTrace",
     "TerminationReference",

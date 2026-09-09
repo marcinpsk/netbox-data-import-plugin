@@ -70,14 +70,19 @@ def termination_field_key(*, device, cards, port, kind: str, role: str = TERMINA
     )
 
 
+def _validate_termination_field_data(data):
+    """Reject malformed termination field-key data before canonicalization."""
+    if not isinstance(data, dict) or set(data) != {"cards", "device", "kind", "port", "role"}:
+        raise ValueError
+    if not all(isinstance(data[name], str) for name in data):
+        raise ValueError
+
+
 def parse_termination_field_key(value: str) -> dict[str, str]:
     """Parse an exact canonical termination field key."""
     try:
         data = json.loads(value)
-        if not isinstance(data, dict) or set(data) != {"cards", "device", "kind", "port", "role"}:
-            raise ValueError
-        if not all(isinstance(data[name], str) for name in data):
-            raise ValueError
+        _validate_termination_field_data(data)
         canonical = termination_field_key(**data)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"'{value}' is not a canonical termination field key.") from exc

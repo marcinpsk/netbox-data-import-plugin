@@ -47,7 +47,7 @@ class RecordingBackend(BaseHTTPRequestHandler):
     seen: list = []
     delay = 0.0
 
-    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler names the hook.
+    def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length).decode() if length else ""
         type(self).seen.append(
