@@ -284,10 +284,7 @@ class ImportExecutionSerializer(serializers.ModelSerializer):
 class InferenceBackendSerializer(NetBoxModelSerializer):
     """Serialize one Inference Backend row, without its credential reference.
 
-    NetBox resolves this class by model name to freeze a delete event payload, so a backend could not
-    be deleted through the UI without it. `credential_reference` is deliberately absent: it names a
-    Vault mount and path, and specification 8.6 keeps that in one authoritative place rather than on
-    a second surface. The endpoint is read-only, so nothing needs to write the field either.
+    NetBox resolves this class by model name to freeze a delete event payload.
     """
 
     class Meta:

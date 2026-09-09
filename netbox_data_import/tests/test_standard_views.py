@@ -130,11 +130,10 @@ class InferenceBackendViewTestCase(
     ViewTestCases.DeleteObjectViewTestCase,
     ViewTestCases.ListObjectsViewTestCase,
 ):
-    """Exercise standard detail, list, CRUD and changelog views for AI backends.
+    """Exercise the UI detail, list, CRUD and changelog views for AI backends.
 
-    The mixins are named one by one rather than through `PrimaryObjectViewTestCase`, because
-    `InferenceBackend` registers no bulk-import, bulk-edit, bulk-delete or REST views. Adding any of
-    those means adding its mixin here too.
+    The mixins are named one by one because `InferenceBackend` registers no bulk views. The REST
+    endpoint is read-only and covered by `test_inference_secret_containment`.
     """
 
     model = InferenceBackend
