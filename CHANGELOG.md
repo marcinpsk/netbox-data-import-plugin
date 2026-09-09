@@ -2,6 +2,42 @@
 
 <!-- version list -->
 
+## v2.1.0 (2026-09-09)
+
+### Bug Fixes
+
+- **nav**: Gate the Import Profile menu entries on their view permissions
+  ([`1006394`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1006394e7ea9a5fad0cf70833619ff88f6264d20))
+
+- **trust**: Keep the brackets on an IPv6 origin
+  ([`0dcc31b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0dcc31b7ebc45c7ab2ff10449e70d4c5fc783f4a))
+
+- **views**: Register the InferenceBackend changelog route
+  ([`005d425`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/005d425c3032046525c12cf3696f8ab1c3a1f1b7))
+
+### Chores
+
+- **deps**: Bump the github-actions group with 2 updates
+  ([`2194145`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/21941453d44dd42331e70b0b9a2329eb95558230))
+
+- **deps-dev**: Bump build from 1.5.0 to 1.6.0
+  ([`3729dfe`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3729dfeeed45199594841b1daf611a20ede7afdf))
+
+- **deps-dev**: Bump python-semantic-release from 10.6.1 to 10.6.2
+  ([`d6f1c0b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d6f1c0b5eb171bc2994c979c8586bc07b840ef7a))
+
+- **deps-dev**: Bump ruff from 0.16.4 to 0.16.5
+  ([`ce74bee`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ce74bee4ce56161a51339bf63175c4b11b275755))
+
+### Testing
+
+- **inference**: Refuse the connection test to a view-only actor
+  ([`03f0705`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/03f0705ea9be4a8fb255d10c6b73ba6637cf6d7d))
+
+- **trace**: Read the preview revision through its exported constant
+  ([`a4bb86c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a4bb86c17221b205e94649d0e467c629aa4de8f7))
+
+
 ## v2.0.0 (2026-09-05)
 
 ### Bug Fixes
