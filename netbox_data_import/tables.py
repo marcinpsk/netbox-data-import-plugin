@@ -5,6 +5,7 @@ from netbox.tables import NetBoxTable, columns
 from .models import (
     CableClassMapping,
     ImportProfile,
+    InferenceBackend,
     ColumnMapping,
     ClassRoleMapping,
     DeviceTypeMapping,
@@ -223,3 +224,16 @@ class ColumnTransformRuleTable(tables.Table):
     class Meta:
         model = ColumnTransformRule
         fields = ("source_column", "pattern", "group_1_target", "group_2_target", "actions")
+
+
+class InferenceBackendTable(NetBoxTable):
+    """List AI backends with the decisions that select one."""
+
+    backend_key = tables.Column(linkify=True)
+    display_name = tables.Column()
+    enabled = columns.BooleanColumn()
+
+    class Meta(NetBoxTable.Meta):
+        model = InferenceBackend
+        fields = ("pk", "backend_key", "display_name", "adapter_type", "api_root", "model", "enabled")
+        default_columns = ("backend_key", "display_name", "adapter_type", "model", "enabled")

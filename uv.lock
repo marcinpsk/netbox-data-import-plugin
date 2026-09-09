@@ -961,6 +961,7 @@ dependencies = [
     { name = "google-re2" },
     { name = "openpyxl" },
     { name = "pyyaml" },
+    { name = "requests" },
 ]
 
 [package.dev-dependencies]
@@ -989,6 +990,7 @@ requires-dist = [
     { name = "google-re2", specifier = ">=1.1.20251105" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "requests", specifier = ">=2.32" },
 ]
 
 [package.metadata.requires-dev]

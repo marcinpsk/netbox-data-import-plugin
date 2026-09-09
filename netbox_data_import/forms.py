@@ -12,6 +12,7 @@ from .catalog import CATALOG
 from .models import (
     CableClassMapping,
     ImportProfile,
+    InferenceBackend,
     ColumnMapping,
     ClassRoleMapping,
     DeviceTypeMapping,
@@ -283,6 +284,32 @@ class ColumnTransformRuleForm(forms.ModelForm):
             stored = getattr(self.instance, name, "")
             preserved = _with_stored_target(choices, stored, output_kinds, allow_candidates=False)
             self.fields[name].choices = [("", "---------"), *preserved]
+
+
+class InferenceBackendForm(NetBoxModelForm):
+    """Create or edit one AI backend. Model validation applies the api_root trust boundary."""
+
+    class Meta:
+        model = InferenceBackend
+        fields = (
+            "backend_key",
+            "display_name",
+            "adapter_type",
+            "api_root",
+            "model",
+            "authentication",
+            "response_mode",
+            "credential_reference",
+            "connect_timeout",
+            "read_timeout",
+            "enabled",
+            "tags",
+        )
+        help_texts = {
+            "credential_reference": (
+                "A typed Vault KV v2 reference: backend, mount, path and field. It never holds a key value."
+            ),
+        }
 
 
 class ImportSetupForm(forms.Form):

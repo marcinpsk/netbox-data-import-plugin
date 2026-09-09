@@ -25,6 +25,7 @@ from utilities.views import ConditionalLoginRequiredMixin
 from .filters import ImportProfileFilterSet
 from .forms import (
     CableClassMappingForm,
+    InferenceBackendForm,
     ClassRoleMappingForm,
     ColumnMappingForm,
     ColumnTransformRuleForm,
@@ -47,6 +48,7 @@ from .values import (
 from . import __version__ as _plugin_version
 from .models import (
     CableClassMapping,
+    InferenceBackend,
     locked_profile_policy,
     locked_resolution_policy,
     ClassRoleMapping,
@@ -68,6 +70,7 @@ from .models import (
 )
 from .tables import (
     CableClassMappingTable,
+    InferenceBackendTable,
     ClassRoleMappingTable,
     ColumnMappingTable,
     ColumnTransformRuleTable,
@@ -482,6 +485,55 @@ class ImportProfileDeleteView(generic.ObjectDeleteView):
     """Delete an ImportProfile and all its child mappings."""
 
     queryset = ImportProfile.objects.all()
+
+
+class InferenceBackendListView(generic.ObjectListView):
+    """Every configured backend row. At most one may be enabled, and that one is the active backend."""
+
+    queryset = InferenceBackend.objects.all()
+    table = InferenceBackendTable
+
+
+class InferenceBackendView(generic.ObjectView):
+    """One backend row, as `resolve_active_backend` reads it while this row is the enabled one."""
+
+    queryset = InferenceBackend.objects.all()
+
+
+class InferenceBackendEditView(generic.ObjectEditView):
+    """Create or edit one backend row. Model validation applies the api_root trust boundary."""
+
+    queryset = InferenceBackend.objects.all()
+    form = InferenceBackendForm
+
+
+class InferenceBackendDeleteView(generic.ObjectDeleteView):
+    """Delete one backend row. With no enabled row left, the active backend is the plugin setting fallback."""
+
+    queryset = InferenceBackend.objects.all()
+
+
+class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
+    """Queue the connection test. Specification 13.1 authorizes it with this one permission."""
+
+    permission_required = "netbox_data_import.change_inferencebackend"
+
+    def post(self, request, pk):
+        """Enqueue the worker Job, so no web process ever resolves a credential."""
+        from .jobs import InferenceBackendConnectionTestJob
+
+        # restrict() applies the ObjectPermission constraints a model-level check would ignore.
+        backend = get_object_or_404(InferenceBackend.objects.restrict(request.user, "change"), pk=pk)
+        job = InferenceBackendConnectionTestJob.enqueue(
+            name=InferenceBackendConnectionTestJob.Meta.name,
+            instance=backend,
+            user=request.user,
+            # The row ID binds authorization; the editable key is operator-facing text.
+            pk=backend.pk,
+            backend_key=backend.backend_key,
+        )
+        messages.success(request, f"Connection test queued as job {job.pk}.")
+        return redirect(backend.get_absolute_url())
 
 
 class ImportProfileBulkEditView(generic.BulkEditView):

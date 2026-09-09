@@ -6,12 +6,14 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import IntegrityError, models, transaction
 from django.urls import reverse
 from django.utils import timezone
 from core.choices import JobStatusChoices
 from core.models import Job
 from netbox.models import NetBoxModel
+from netbox.models.features import JobsMixin
 from utilities.querysets import RestrictedQuerySet
 
 from .adapters import (
@@ -24,6 +26,7 @@ from .adapters import (
 from . import plan
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
+from . import inference_settings as _inference_settings
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
@@ -1100,6 +1103,85 @@ class ManufacturerMapping(PolicySectionModel):
 
     def __str__(self):
         return f"{self.source_make} → {self.netbox_manufacturer_slug}"
+
+
+class InferenceBackend(JobsMixin, NetBoxModel):
+    """One named Inference Backend definition; the enabled row is the active backend (section 8.2).
+
+    JobsMixin attaches the connection test to the row, so its typed result is read where the
+    configuration lives.
+    """
+
+    ADAPTER_TYPES = _inference_settings.ADAPTER_TYPES
+    AUTHENTICATION_METHODS = _inference_settings.AUTHENTICATION_METHODS
+    RESPONSE_MODES = _inference_settings.RESPONSE_MODES
+
+    backend_key = models.SlugField(
+        max_length=100,
+        unique=True,
+        help_text="The unique name of this backend, and the only identifier a job payload carries.",
+    )
+    display_name = models.CharField(max_length=200)
+    adapter_type = models.CharField(max_length=50, choices=ADAPTER_TYPES, default="openai_compatible")
+    api_root = models.CharField(
+        max_length=500,
+        help_text="Exact API root without a trailing slash. The client appends /chat/completions.",
+    )
+    model = models.CharField(max_length=200, help_text="Exact backend model id. The worker never chooses one.")
+    authentication = models.CharField(max_length=20, choices=AUTHENTICATION_METHODS, default="bearer")
+    response_mode = models.CharField(
+        max_length=20,
+        choices=RESPONSE_MODES,
+        default="prompt_json",
+        help_text="Select a mode other than prompt_json only after verifying the exact backend and model.",
+    )
+    credential_reference = models.JSONField(help_text="A typed Vault KV v2 reference. It never holds a secret value.")
+    # A zero timeout raises in the transport, so the row carries the same floor as the fallback.
+    connect_timeout = models.PositiveIntegerField(
+        default=5, validators=[MinValueValidator(_inference_settings.TIMEOUT_MIN)]
+    )
+    read_timeout = models.PositiveIntegerField(
+        default=60, validators=[MinValueValidator(_inference_settings.TIMEOUT_MIN)]
+    )
+    enabled = models.BooleanField(default=False, help_text="Whether Ask AI may use this backend.")
+
+    # Override tags reverse accessor to avoid clashes with other plugins
+    tags = models.ManyToManyField(to="extras.Tag", related_name="+", blank=True)
+
+    class Meta:
+        ordering = ["backend_key"]
+        constraints = [
+            # A partial unique index over one column value permits exactly one enabled row.
+            models.UniqueConstraint(
+                fields=["enabled"],
+                condition=models.Q(enabled=True),
+                name="ndi_inferencebackend_one_enabled",
+            ),
+        ]
+        verbose_name = "AI backend"
+        verbose_name_plural = "AI backends"
+
+    def __str__(self):
+        return self.display_name or self.backend_key
+
+    def get_absolute_url(self):
+        """Return the detail URL for this Inference Backend."""
+        return reverse("plugins:netbox_data_import:inferencebackend", args=[self.pk])
+
+    def clean(self):
+        """Reject a second enabled row, an unapproved api_root, and a reference that is not typed."""
+        super().clean()
+        from .inference_backend import validate_backend_fields
+
+        if self.enabled:
+            competing = type(self).objects.filter(enabled=True).exclude(pk=self.pk)
+            if competing.exists():
+                raise ValidationError({"enabled": "Another Inference Backend is already enabled. Disable it first."})
+        validate_backend_fields(
+            api_root=self.api_root,
+            authentication=self.authentication,
+            credential_reference=self.credential_reference,
+        )
 
 
 class IgnoredDevice(PolicySectionModel):
