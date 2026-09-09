@@ -589,7 +589,11 @@ class ReviewWorkspace:
             summary[key] = sum(1 for trace in traces if trace.disposition == disposition)
         for trace in traces:
             for termination in trace.terminations:
-                key = "unresolved_terminations" if termination["state"] == UNRESOLVED else "resolved_terminations"
+                key = (
+                    "unresolved_terminations"
+                    if termination.get("state", UNRESOLVED) == UNRESOLVED
+                    else "resolved_terminations"
+                )
                 summary[key] += 1
         return summary
 

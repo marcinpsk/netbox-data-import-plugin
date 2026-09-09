@@ -164,6 +164,17 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertEqual(summary["unresolved_terminations"], 1)
         self.assertEqual(summary["resolved_terminations"], 7)
 
+    def test_a_restored_termination_without_state_counts_as_unresolved(self):
+        data = self.plan(direct_path()).to_dict()
+        terminations = data["units"][0]["display"]["trace"]["terminations"]
+        del terminations[0]["state"]
+
+        summary = ReviewWorkspace.from_dict(data).trace_summary
+
+        self.assertEqual(summary["traces"], 1)
+        self.assertEqual(summary["unresolved_terminations"], 1)
+        self.assertEqual(summary["resolved_terminations"], len(terminations) - 1)
+
     def test_an_unresolved_termination_offers_its_picker(self):
         """The picker is the decision seam, so an open termination has to point at one."""
         missing = trace_termination("DEV-A", "", "absent-port", "Port")
