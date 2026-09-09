@@ -359,15 +359,20 @@ class _Scanner(ast.NodeVisitor):
         return node
 
     def _binds_a_mock(self, node: ast.expr) -> bool:
-        """Return whether merged keywords bind the mock, with outer partial layers taking precedence."""
+        """Return whether partial positionals or merged keywords bind the mock."""
         layers: list[list[ast.keyword]] = []
+        positional_layers: list[list[ast.expr]] = []
         while isinstance(node, ast.Call):
             layers.append(node.keywords)
             if not self._is_partial(node):
                 break
+            positional_layers.append(node.args[1:])
             node = node.args[0]
+        positionals = [arg for args in reversed(positional_layers) for arg in args]
         bounds = {kw.arg: kw.value for keywords in reversed(layers) for kw in keywords if kw.arg in _BOUNDING_KWARGS}
-        return any(_is_actual_bound(value) for value in bounds.values())
+        return (bool(positionals) and _is_actual_bound(positionals[0])) or any(
+            _is_actual_bound(value) for value in bounds.values()
+        )
 
     def _is_patch_bounded(self, node: ast.Call, new_position: int | None) -> bool:
         if new_position is not None:

@@ -828,3 +828,45 @@ def test_accepts_a_nested_partial_bound_at_the_outer_layer():
         "        pass\n"
     )
     assert scan_source(src, "t.py") == []
+
+
+def test_accepts_a_partial_with_a_positional_spec():
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\nclass C: ...\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', new_callable=functools.partial(MagicMock, C)):\n"
+        "        pass\n"
+    )
+    assert scan_source(src, "t.py") == []
+
+
+def test_accepts_a_nested_partial_with_an_outer_positional_spec():
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\nclass C: ...\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', "
+        "new_callable=functools.partial(functools.partial(MagicMock), C)):\n"
+        "        pass\n"
+    )
+    assert scan_source(src, "t.py") == []
+
+
+def test_accepts_a_nested_partial_with_an_inner_positional_spec():
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\nclass C: ...\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', "
+        "new_callable=functools.partial(functools.partial(MagicMock, C), object)):\n"
+        "        pass\n"
+    )
+    assert scan_source(src, "t.py") == []
+
+
+def test_flags_a_partial_with_a_positional_none_spec():
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', new_callable=functools.partial(MagicMock, None)):\n"
+        "        pass\n"
+    )
+    assert [h.mock for h in scan_source(src, "t.py")] == ["'netbox_data_import.views.thing'"]
