@@ -26,8 +26,10 @@ import os
 import re
 import sys
 import time
+from contextlib import suppress
 
 try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 except ImportError:
     print("ERROR: playwright not installed. Run: pip install playwright && playwright install chromium")
@@ -156,10 +158,8 @@ def run_tests(base_url: str) -> tuple[list[str], list[tuple[str, str]]]:
                 found = False
                 while time.monotonic() < deadline:
                     page.goto(f"{base_url}/dcim/devices/{device_id}/interfaces/")
-                    try:  # noqa: SIM105 - Suppressing Exception would conceal failures other than the expected timeout.
+                    with suppress(PlaywrightTimeoutError):
                         page.wait_for_load_state("networkidle", timeout=3000)
-                    except Exception:
-                        pass  # timeout is fine; proceed to check locator
                     if page.locator(f"text={expected_iface}").count() > 0:
                         found = True
                         break
