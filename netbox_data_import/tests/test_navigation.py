@@ -5,7 +5,7 @@
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 
-from netbox_data_import.models import InferenceBackend
+from netbox_data_import.models import ImportProfile, InferenceBackend
 from netbox_data_import.navigation import menu
 from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.test_inference_backend import make_row
@@ -74,3 +74,48 @@ class InferenceBackendConnectionTestNavigationTest(TestCase):
             reverse("plugins:netbox_data_import:inferencebackend_connection_test", kwargs={"pk": backend.pk}),
             status_code=200,
         )
+
+
+class ImportProfileNavigationTest(TestCase):
+    """Every Import Profile menu entry follows the permission its own view enforces."""
+
+    ENTRY_PERMISSION = {
+        # menu entry -> the permission its view requires
+        "importprofile_list": "view",
+        "device_type_analysis": "view",
+        "importprofile_add": "add",
+        "import_setup": "change",
+    }
+
+    def _sidebar(self, username, profile_actions):
+        """Render a page holding no Import Profile content, so the sidebar is the only link source."""
+        grants = [(InferenceBackend, ["view"], {})]
+        if profile_actions:
+            grants.append((ImportProfile, profile_actions, {}))
+        self.client.force_login(user_with_object_permission(username, grants))
+        return self.client.get(reverse("plugins:netbox_data_import:inferencebackend_list"))
+
+    def _assert_links(self, response, expected_actions):
+        """Assert each entry appears exactly when the actor holds the action its view requires."""
+        for entry, action in self.ENTRY_PERMISSION.items():
+            # A profile URL is a prefix of several others, so match the rendered href exactly.
+            href = f'href="{reverse(f"plugins:netbox_data_import:{entry}")}"'
+            with self.subTest(entry=entry):
+                if action in expected_actions:
+                    self.assertContains(response, href, status_code=200)
+                else:
+                    self.assertNotContains(response, href, status_code=200)
+
+    def test_actor_without_profile_permissions_sees_no_profile_entry(self):
+        """An ungated entry renders for anyone, so it offers links every profile view rejects."""
+        self._assert_links(self._sidebar("profile-outsider", []), expected_actions=set())
+
+    def test_view_permission_shows_only_the_read_only_entries(self):
+        """A misspelled permission would hide an entry from everyone, so assert both directions."""
+        self._assert_links(self._sidebar("profile-viewer", ["view"]), expected_actions={"view"})
+
+    def test_add_permission_shows_the_add_button(self):
+        self._assert_links(self._sidebar("profile-creator", ["view", "add"]), expected_actions={"view", "add"})
+
+    def test_change_permission_shows_run_import(self):
+        self._assert_links(self._sidebar("profile-editor", ["view", "change"]), expected_actions={"view", "change"})
