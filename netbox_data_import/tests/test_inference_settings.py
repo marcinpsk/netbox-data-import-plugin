@@ -164,62 +164,60 @@ class VaultSettingTest(SimpleTestCase):
         self.assertIn("scheme", self.rejects({"address": "vault.example.invalid:8200"}))
 
 
+def file_fallback(**overrides):
+    """Return a valid file-fallback mapping with the named keys replaced, or dropped when None."""
+    mapping = {
+        "display_name": "Fallback backend",
+        "adapter_type": "openai_compatible",
+        "api_root": "https://backend.example.invalid:443",
+        "model": "gpt-4o-mini",
+        "authentication": "bearer",
+        "response_mode": "prompt_json",
+        "credential_reference": {
+            "backend": "vault_kv_v2",
+            "mount": "secret",
+            "path": "inference/backend",
+            "field": "api_key",
+        },
+        "connect_timeout": 5,
+        "read_timeout": 60,
+    }
+    mapping.update(overrides)
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
 class FileFallbackSettingTest(SimpleTestCase):
     """The whole-backend fallback carries the row fields minus the backend key and enabled."""
 
-    def fallback(self, **overrides):
-        """Return a valid file-fallback mapping with the named keys replaced."""
-        mapping = {
-            "display_name": "Fallback backend",
-            "adapter_type": "openai_compatible",
-            "api_root": "https://backend.example.invalid:443",
-            "model": "gpt-4o-mini",
-            "authentication": "bearer",
-            "response_mode": "prompt_json",
-            "credential_reference": {
-                "backend": "vault_kv_v2",
-                "mount": "secret",
-                "path": "inference/backend",
-                "field": "api_key",
-            },
-            "connect_timeout": 5,
-            "read_timeout": 60,
-        }
-        mapping.update(overrides)
-        for key, value in list(mapping.items()):
-            if value is None:
-                del mapping[key]
-        return mapping
-
     def test_a_complete_fallback_is_accepted(self):
-        validate_plugin_settings(settings_with(inference_backend=self.fallback()))
+        validate_plugin_settings(settings_with(inference_backend=file_fallback()))
 
     def test_the_setting_is_optional(self):
         validate_plugin_settings(settings_with())
 
     def test_a_missing_field_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(model=None)))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(model=None)))
 
         self.assertIn("model", str(caught.exception))
 
     def test_an_unknown_field_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(enabled=True)))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(enabled=True)))
 
         self.assertIn("enabled", str(caught.exception))
 
     def test_a_backend_key_is_rejected(self):
         """The fallback's key is the fixed value, so the mapping cannot name its own."""
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(backend_key="mine")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(backend_key="mine")))
 
         self.assertIn("backend_key", str(caught.exception))
 
     def test_an_api_root_outside_the_allowlist_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
             validate_plugin_settings(
-                settings_with(inference_backend=self.fallback(api_root="https://elsewhere.example.invalid:443"))
+                settings_with(inference_backend=file_fallback(api_root="https://elsewhere.example.invalid:443"))
             )
 
         self.assertIn("allowlist", str(caught.exception))
@@ -227,26 +225,26 @@ class FileFallbackSettingTest(SimpleTestCase):
     def test_an_adapter_type_outside_the_row_choices_is_rejected(self):
         """The fallback is one whole backend row, so every field carries the row's constraint."""
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(adapter_type="anthropic")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(adapter_type="anthropic")))
 
         self.assertIn("adapter_type", str(caught.exception))
 
     def test_a_response_mode_outside_the_row_choices_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(response_mode="freeform")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(response_mode="freeform")))
 
         self.assertIn("response_mode", str(caught.exception))
 
     def test_an_empty_model_is_rejected(self):
         """The worker never chooses a model, so an empty one has no request to make."""
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(model="   ")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(model="   ")))
 
         self.assertIn("model", str(caught.exception))
 
     def test_a_model_longer_than_the_column_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(model="m" * 201)))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(model="m" * 201)))
 
         self.assertIn("model", str(caught.exception))
 
@@ -260,26 +258,26 @@ class FileFallbackSettingTest(SimpleTestCase):
             for value in (-1, 0, "five", 1.5, True, 2**31):
                 with self.subTest(field=field, value=value):
                     with self.assertRaises(InvalidInferenceConfiguration) as caught:
-                        validate_plugin_settings(settings_with(inference_backend=self.fallback(**{field: value})))
+                        validate_plugin_settings(settings_with(inference_backend=file_fallback(**{field: value})))
 
                     self.assertIn(field, str(caught.exception))
 
     def test_an_authentication_method_outside_the_row_choices_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(authentication="basic")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(authentication="basic")))
 
         self.assertIn("authentication", str(caught.exception))
 
     def test_an_empty_display_name_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(display_name="  ")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(display_name="  ")))
 
         self.assertIn("display_name", str(caught.exception))
 
     def test_an_api_root_longer_than_the_column_is_rejected(self):
         root = "https://backend.example.invalid:443/" + "p" * 500
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(api_root=root)))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(api_root=root)))
 
         self.assertIn("api_root", str(caught.exception))
 
@@ -306,7 +304,7 @@ class StartupContactTest(SimpleTestCase):
 
         socket.socket.connect = record
         try:
-            validate_plugin_settings(settings_with(inference_backend=FileFallbackSettingTest().fallback()))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback()))
         finally:
             socket.socket.connect = original
 
