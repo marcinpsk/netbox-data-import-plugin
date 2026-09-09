@@ -13,7 +13,11 @@ from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.models import ImportProfile, TerminationResolution
 from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
-from netbox_data_import.preview_row_actions import PREVIEW_DIRTY_SESSION_KEY, PREVIEW_PLAN_SESSION_KEY
+from netbox_data_import.preview_row_actions import (
+    PREVIEW_DIRTY_SESSION_KEY,
+    PREVIEW_PLAN_SESSION_KEY,
+    PREVIEW_REVISION_SESSION_KEY,
+)
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
     CableTopologyMixin,
@@ -354,7 +358,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            {"identity": chosen.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             follow=True,
         )
 
@@ -392,7 +396,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            {"identity": chosen.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             follow=True,
         )
 
@@ -408,7 +412,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         self.client.post(
             reverse("plugins:netbox_data_import:trace_workspace_reread"),
-            {"preview_revision": self.client.session["import_preview_revision"]},
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
         )
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
@@ -424,7 +428,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         chosen = response.context["traces"][0]
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            {"identity": chosen.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
         )
         return Job.objects.get(data__job_type="netbox_data_import.import")
 
@@ -434,7 +438,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         refused = self.client.post(
             reverse("plugins:netbox_data_import:trace_workspace_reread"),
-            {"preview_revision": self.client.session["import_preview_revision"]},
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             follow=True,
         )
 
@@ -448,7 +452,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.queue_one_sync()
         self.client.post(
             reverse("plugins:netbox_data_import:trace_workspace_reread"),
-            {"preview_revision": self.client.session["import_preview_revision"]},
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
         )
         workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
@@ -456,7 +460,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
             reverse("plugins:netbox_data_import:trace_sync"),
             {
                 "identity": workspace.context["traces"][0].identity,
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
             follow=True,
         )
@@ -485,7 +489,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         accepted = self.client.post(
             reverse("plugins:netbox_data_import:trace_workspace_reread"),
-            {"preview_revision": self.client.session["import_preview_revision"]},
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             follow=True,
         )
 
@@ -506,7 +510,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
             reverse("plugins:netbox_data_import:trace_sync"),
             {
                 "identity": workspace.context["traces"][0].identity,
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
         )
 
@@ -525,7 +529,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
                 refused = self.client.post(
                     reverse("plugins:netbox_data_import:trace_workspace_reread"),
-                    {"preview_revision": self.client.session["import_preview_revision"]},
+                    {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
                     follow=True,
                 )
 
@@ -598,7 +602,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
     def test_a_re_read_from_a_stale_tab_is_refused(self):
         """Every other workspace command checks the revision it is sent, so this one has to too."""
         self.open_workspace(patched_path())
-        current = self.client.session["import_preview_revision"]
+        current = self.client.session[PREVIEW_REVISION_SESSION_KEY]
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_workspace_reread"),
@@ -606,7 +610,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
             follow=True,
         )
 
-        self.assertEqual(self.client.session["import_preview_revision"], current)
+        self.assertEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], current)
         self.assertContains(response, "This preview is no longer the current one.")
 
     def test_a_sync_is_refused_when_this_release_dropped_the_source_adapter(self):
@@ -619,7 +623,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            {"identity": chosen.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             follow=True,
         )
 
@@ -734,7 +738,7 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
             reverse("plugins:netbox_data_import:trace_sync"),
             {
                 "identity": workspace.context["traces"][0].identity,
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
         )
         return Job.objects.get(data__job_type="netbox_data_import.import")
@@ -913,7 +917,7 @@ class RetainedTraceSyncTest(CableTopologyMixin, TestCase):
         with connection.execute_wrapper(complete_the_sync_once_the_read_starts):
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_workspace_reread"),
-                {"preview_revision": self.client.session["import_preview_revision"]},
+                {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             )
 
         self.assertEqual(response.status_code, 302)
@@ -1072,7 +1076,7 @@ class RetainedSyncEnqueueSerializationTest(IsolatedRQQueueTestMixin, CableTopolo
             self.assertTrue(holding.wait(10), "the competing connection never took the profile row")
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+                {"identity": chosen.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
                 follow=True,
             )
         finally:
@@ -1116,7 +1120,7 @@ class TraceSyncDispatchFailureTest(IsolatedRQQueueTestMixin, CableTopologyMixin,
         from netbox_data_import.preview_row_actions import retained_sync_block_reason
 
         chosen = self._upload_and_choose()
-        revision = self.client.session["import_preview_revision"]
+        revision = self.client.session[PREVIEW_REVISION_SESSION_KEY]
 
         with patch.object(DjangoRQ, "enqueue_call", autospec=True, side_effect=RedisConnectionError("queue down")):
             with self.assertRaises(RedisConnectionError):
@@ -1161,7 +1165,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
     def candidates(self, field_key, **params):
         """Ask the picker endpoint the way the picker itself asks: JSON, with the revision."""
-        params.setdefault("preview_revision", self.client.session["import_preview_revision"])
+        params.setdefault("preview_revision", self.client.session[PREVIEW_REVISION_SESSION_KEY])
         return self.client.get(
             reverse("plugins:netbox_data_import:trace_termination_candidates"),
             {"field_key": field_key, **params},
@@ -1239,7 +1243,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 "field_key": field_key,
                 "object_type": "dcim.interface",
                 "object_id": self.eth0.pk,
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
         )
 
@@ -1268,7 +1272,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         syncable = next(trace for trace in workspace.context["traces"] if trace.disposition == "actionable")
         self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": syncable.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            {"identity": syncable.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
         )
         self.assertEqual(Job.objects.filter(data__job_type="netbox_data_import.import").count(), 1)
 
@@ -1278,7 +1282,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 "field_key": field_key,
                 "object_type": "dcim.interface",
                 "object_id": Interface.objects.get(device__name="SRC-open", name="eth0").pk,
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
             headers={"accept": "application/json"},
         )
@@ -1303,7 +1307,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 "object_type": "dcim.interface",
                 "object_id": target.pk,
                 "search": "zz-target",
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
         )
 
@@ -1325,7 +1329,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 "field_key": elsewhere,
                 "object_type": "dcim.frontport",
                 "object_id": self.panel_1_fronts[0].pk,
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
             headers={"accept": "application/json"},
         )
@@ -1360,7 +1364,7 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 "field_key": field_key,
                 "object_type": "dcim.interface",
                 "object_id": self.eth1.pk,
-                "preview_revision": self.client.session["import_preview_revision"],
+                "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
             },
             headers={"accept": "application/json"},
         )
@@ -1467,7 +1471,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
 
         response = self.client.post(
             reverse("plugins:netbox_data_import:trace_sync"),
-            {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+            {"identity": chosen.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
         )
 
         job = Job.objects.get(data__job_type="netbox_data_import.import")
@@ -1509,7 +1513,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             chosen = next(trace for trace in workspace.context["traces"] if trace.endpoints["from"] == endpoint)
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+                {"identity": chosen.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             )
             queued = Job.objects.filter(data__job_type="netbox_data_import.import").order_by("pk")
             self.assertEqual(queued.count(), step, f"step {step}: the sync queued no new job")
@@ -1522,7 +1526,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             self.run_rq_jobs()
             reread = self.client.post(
                 reverse("plugins:netbox_data_import:trace_workspace_reread"),
-                {"preview_revision": self.client.session["import_preview_revision"]},
+                {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             )
 
             self.assertRedirects(
@@ -1569,7 +1573,7 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
             chosen = workspace.context["traces"][0]
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_sync"),
-                {"identity": chosen.identity, "preview_revision": self.client.session["import_preview_revision"]},
+                {"identity": chosen.identity, "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
             )
             queued = Job.objects.filter(data__job_type="netbox_data_import.import").order_by("pk")
             self.assertEqual(queued.count(), step, f"step {step}: the sync queued no new job")
@@ -1644,7 +1648,7 @@ class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):
                     "object_type": "dcim.interface",
                     "object_id": self.eth0.pk,
                     "search": "",
-                    "preview_revision": self.client.session["import_preview_revision"],
+                    "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
                 },
                 follow=True,
             )
