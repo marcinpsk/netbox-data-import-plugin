@@ -21,7 +21,7 @@ from netbox_data_import.models import (
     SourceDocument,
     SourceResolution,
 )
-from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY, record_recalculated_preview
+from netbox_data_import.preview_row_actions import PREVIEW_REVISION_SESSION_KEY, start_new_preview
 from netbox_data_import.review_workspace import ReviewWorkspace
 from netbox_data_import.tests.helpers import user_with_object_permission
 
@@ -117,7 +117,7 @@ class TargetNeutralDuplicateResolutionTest(TransactionTestCase):
         plan = ImportEngine.plan(self.profile, document, self.actor, planning_context)
         workspace = ReviewWorkspace(plan)
         session = self.client.session
-        record_recalculated_preview(session, plan)
+        start_new_preview(session, plan)
         session["import_rows"] = workspace.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,

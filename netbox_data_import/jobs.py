@@ -53,7 +53,7 @@ class ImportJobRunner(JobRunner):
         if execution is not None:
             values["import_execution_id"] = execution.pk
         self._save_data(**values)
-        raise JobFailed()
+        raise JobFailed
 
     @staticmethod
     def _publish_progress(processed, total):
@@ -149,4 +149,26 @@ class SourceDocumentRetentionJob(JobRunner):
         return self.purge()
 
 
-__all__ = ("ImportJobRunner", "SourceDocumentRetentionJob")
+class InferenceBackendConnectionTestJob(JobRunner):
+    """Resolve the named backend's credential on the worker, so the web process never holds one.
+
+    The row ID selects the backend to test, enabled or not: an operator tests a backend to decide whether to
+    enable it (specification 8.6).
+    """
+
+    job_type = "netbox_data_import.inference_connection_test"
+
+    class Meta:
+        name = "AI backend connection test"
+
+    def run(self, pk, backend_key, *args, **kwargs):
+        """Select by pk alone to prevent redirection to a recreated row; backend_key is display text only."""
+        from .inference_connection_test import run_connection_test
+
+        result = run_connection_test(pk, backend_key)
+        self.job.data = {**(self.job.data or {}), **result.as_dict()}
+        self.job.save(update_fields=["data"])
+        return result.category
+
+
+__all__ = ("ImportJobRunner", "InferenceBackendConnectionTestJob", "SourceDocumentRetentionJob")

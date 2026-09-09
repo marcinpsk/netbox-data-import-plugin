@@ -44,8 +44,11 @@ netbox-manage makemigrations netbox_data_import
 ## Testing
 
 Run Django tests inside the repository devcontainer. Use a unique PostgreSQL database and a
-dedicated Redis sidecar for each task. NetBox's `RQQueueTestMixin` calls Redis `FLUSHALL`, so a
-database number on the shared Redis service does not isolate one task from another.
+dedicated Redis sidecar for each task. On NetBox 4.6 `RQQueueTestMixin` calls Redis `FLUSHALL`, so a
+database number on the shared Redis service does not isolate one task from another. NetBox 4.7
+narrowed it to `FLUSHDB`, and `tests/mixins.py::IsolatedRQQueueTestMixin` does the same on both, but
+the suite still needs its own Redis instance: eight workers use two databases each, which is all
+sixteen a Redis instance offers.
 
 Start a temporary Redis container on the devcontainer network. Pass its container name as
 `TEST_REDIS_HOST`. Set `TEST_DB_NAME` to a unique name that starts with `test_`. The `netbox-test`
@@ -98,7 +101,14 @@ See [`docs/agents/domain.md`](docs/agents/domain.md).
 - Commits follow Conventional Commits format (enforced by a pre-commit hook).
 - Never add a `Co-authored-by` trailer to commit messages.
 - Schema migrations are generated artifacts. Change a model, then run
-  `netbox-manage makemigrations netbox_data_import`. Do not hand-edit a generated migration.
+  `netbox-manage makemigrations netbox_data_import`. Do not hand-edit a generated migration, with one
+  exception: a cross-app dependency. `makemigrations` pins the newest migration of the other app that
+  the generating machine has installed, which is usually newer than the `min_version` in
+  `netbox_data_import/__init__.py`. Every test then errors at setup with `NodeNotFoundError` on the
+  oldest job in the test matrix. Lower that one line by hand to the migration that actually provides
+  the referenced model, which for the `tags` field is `("extras", "0001_initial")`, and say so in the
+  commit message. `makemigrations --check` still reports no drift, because a dependency is not model
+  state.
 - A data migration is written by hand, because `makemigrations` generates no `RunPython`. Start it
   with `netbox-manage makemigrations netbox_data_import --empty`. Give it no reverse callable when
   the change cannot be undone, so Django refuses the rollback instead of losing data.

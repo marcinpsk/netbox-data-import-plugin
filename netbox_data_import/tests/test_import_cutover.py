@@ -779,12 +779,12 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
                 self.saved.append(self.meta["processed"])
 
         progress_job = ProgressJob()
-        with patch("netbox_data_import.jobs.get_current_job", return_value=progress_job):
+        with patch("netbox_data_import.jobs.get_current_job", autospec=True, return_value=progress_job):
             for processed in range(31):
                 ImportJobRunner._publish_progress(processed, 30)
         self.assertEqual(progress_job.saved, [0, 25, 30])
 
-        with patch("netbox_data_import.jobs.get_current_job", return_value=None):
+        with patch("netbox_data_import.jobs.get_current_job", autospec=True, return_value=None):
             ImportJobRunner._publish_progress(0, 1)
 
     def test_single_row_sync_rejects_invalid_session_and_row_inputs(self):
@@ -810,6 +810,29 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self._upload()
         SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
+
+    def test_single_row_sync_refuses_an_adapter_with_no_target_module(self):
+        """A changed profile can require a Target Module that this release cannot run."""
+        import dataclasses
+
+        from netbox_data_import import catalog as catalog_module
+        from netbox_data_import.catalog import TargetModuleKey
+
+        self._upload()
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="trace_workbook")
+        without_cable = tuple(
+            dataclasses.replace(module, implemented=False) if module.key == TargetModuleKey.CABLE else module
+            for module in catalog_module.TARGET_MODULES
+        )
+
+        with catalog_module.declared_modules_override(without_cable):
+            response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(
+            response.json(),
+            {"ok": False, "error": "This release cannot import from the 'trace_workbook' source adapter yet."},
+        )
 
     def test_single_row_sync_does_not_echo_a_database_error(self):
         """A database failure names no SQL to the operator and leaves its traceback in the log."""

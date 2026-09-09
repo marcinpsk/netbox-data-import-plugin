@@ -25,6 +25,12 @@ from ..models import (
 )
 
 
+def _validate_candidate_values(candidate_values):
+    """Require a JSON object at the Contact candidate boundary."""
+    if not isinstance(candidate_values, dict):
+        raise TypeError("Contact candidate values must be a JSON object.")
+
+
 class PolicySectionApplicabilityMixin:
     """Apply the shared policy-section applicability rule on the REST write path."""
 
@@ -222,8 +228,7 @@ class SourceResolutionSerializer(PolicySectionSerializer):
             resolved_fields = attrs.get("resolved_fields", getattr(instance, "resolved_fields", None))
             try:
                 candidate_values = json.loads(original_value)
-                if not isinstance(candidate_values, dict):
-                    raise ValueError
+                _validate_candidate_values(candidate_values)
                 configured_sources = profile.column_mappings.filter(target_field="candidate:contact").values_list(
                     "source_column", flat=True
                 )

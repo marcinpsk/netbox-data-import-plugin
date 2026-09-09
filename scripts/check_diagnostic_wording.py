@@ -15,17 +15,21 @@ import re
 import sys
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[1] / "netbox_data_import"
-CODE = re.compile(r"(device|rack)\.[a-z_]+")
+EMITTING_MODULES = ("cable_target.py", "target_modules.py")
+CODE = re.compile(r"(cable|device|profile|rack|trace)\.[a-z_]+")
 TABLE = "_DIAGNOSTIC_MESSAGES"
 
 
-def emitted_codes(source: pathlib.Path) -> set[str]:
-    """Return every diagnostic code the module names as a string constant."""
-    return {
-        node.value
-        for node in ast.walk(ast.parse(source.read_text()))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and CODE.fullmatch(node.value)
-    }
+def emitted_codes() -> set[str]:
+    """Return every diagnostic code a Target Module names as a string constant."""
+    codes: set[str] = set()
+    for name in EMITTING_MODULES:
+        codes.update(
+            node.value
+            for node in ast.walk(ast.parse((PACKAGE / name).read_text()))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and CODE.fullmatch(node.value)
+        )
+    return codes
 
 
 def answered_codes(source: pathlib.Path) -> set[str]:
@@ -41,7 +45,7 @@ def answered_codes(source: pathlib.Path) -> set[str]:
 
 def main() -> int:
     """Report each emitted code the wording table does not answer."""
-    emitted = emitted_codes(PACKAGE / "target_modules.py")
+    emitted = emitted_codes()
     if not emitted:
         print("check-diagnostic-wording: found no diagnostic codes, so the scan is broken", file=sys.stderr)
         return 1

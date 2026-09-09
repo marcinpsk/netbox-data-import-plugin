@@ -9,6 +9,7 @@ workbook, no column and no NetBox object type.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import cast
 
 from django.core.exceptions import ValidationError
@@ -201,7 +202,7 @@ class ImportEngine:
                 rolled_back=failure.rolled_back,
                 not_attempted=failure.not_attempted,
             )
-            raise failure.cause
+            raise failure.cause from failure
         except Exception as exc:
             # Every other failure after the reservation, so the row can never stay pending.
             cls._mark_failed(
@@ -335,10 +336,8 @@ class ImportEngine:
     @staticmethod
     def _mark_failed(execution, **detail) -> None:
         """Finish a failed row unless a concurrent finisher already chose its outcome."""
-        try:
+        with suppress(ValueError):
             execution.mark_failed(**detail)
-        except ValueError:
-            pass
 
     @staticmethod
     def _stored_source(profile, source_document) -> SourceDocument:

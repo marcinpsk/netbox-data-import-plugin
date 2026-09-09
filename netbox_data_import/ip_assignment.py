@@ -86,7 +86,8 @@ def parse_address(raw_value) -> str | None:
     whole = _normalized_ip(raw)
     if whole is not None:
         return whole
-    for token in _IP_TOKEN.findall(raw):
+    for raw_token in _IP_TOKEN.findall(raw):
+        token = raw_token
         while token:
             found = _normalized_ip(token)
             if found is not None:

@@ -11,11 +11,13 @@ menu = PluginMenu(
                 PluginMenuItem(
                     link="plugins:netbox_data_import:import_setup",
                     link_text="Run Import",
+                    permissions=("netbox_data_import.change_importprofile",),
                     buttons=(
                         PluginMenuButton(
                             link="plugins:netbox_data_import:import_setup",
                             title="Run Import",
                             icon_class="mdi mdi-database-import",
+                            permissions=("netbox_data_import.change_importprofile",),
                         ),
                     ),
                 ),
@@ -30,19 +32,35 @@ menu = PluginMenu(
             "Configuration",
             (
                 PluginMenuItem(
+                    link="plugins:netbox_data_import:inferencebackend_list",
+                    link_text="AI backends",
+                    permissions=("netbox_data_import.view_inferencebackend",),
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_data_import:inferencebackend_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                            permissions=("netbox_data_import.add_inferencebackend",),
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
                     link="plugins:netbox_data_import:importprofile_list",
                     link_text="Import Profiles",
+                    permissions=("netbox_data_import.view_importprofile",),
                     buttons=(
                         PluginMenuButton(
                             link="plugins:netbox_data_import:importprofile_add",
                             title="Add",
                             icon_class="mdi mdi-plus-thick",
+                            permissions=("netbox_data_import.add_importprofile",),
                         ),
                     ),
                 ),
                 PluginMenuItem(
                     link="plugins:netbox_data_import:device_type_analysis",
                     link_text="Device Type Analysis",
+                    permissions=("netbox_data_import.view_importprofile",),
                 ),
             ),
         ),

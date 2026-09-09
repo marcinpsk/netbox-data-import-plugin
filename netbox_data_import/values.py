@@ -116,9 +116,9 @@ __all__ = (
     "effective_device_name",
     "has_below_rack_position",
     "identity_text",
-    "source_text",
-    "source_position",
-    "status_map",
     "normalize_for_compare",
+    "source_position",
+    "source_text",
+    "status_map",
     "translation_maps",
 )

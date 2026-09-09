@@ -445,7 +445,7 @@ class PlanBoundaryTest(SimpleTestCase):
         units = tuple(_unit(identity=f"row:{index}") for index in range(3000))
         self.assertEqual(len(_plan(units=units).units), 3000)
         with self.assertRaises(PlanInvalid):
-            _plan(units=units + (_unit(identity="row:2999"),))
+            _plan(units=(*units, _unit(identity="row:2999")))
 
     def test_duplicate_unit_identities_are_rejected(self):
         """Selection resolves a unit by identity, so two units cannot share one."""

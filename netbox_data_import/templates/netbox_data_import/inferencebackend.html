@@ -1,0 +1,95 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load render_table from django_tables2 %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-6">
+    <div class="card">
+      <h2 class="card-header">AI backend</h2>
+      <table class="table table-hover attr-table">
+        <tr>
+          <th scope="row">Backend key</th>
+          <td>{{ object.backend_key }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Display name</th>
+          <td>{{ object.display_name }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Enabled</th>
+          <td>{% checkmark object.enabled %}</td>
+        </tr>
+        <tr>
+          <th scope="row">Adapter type</th>
+          <td>{{ object.get_adapter_type_display }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Model</th>
+          <td>{{ object.model }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Response mode</th>
+          <td>{{ object.get_response_mode_display }}</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+  <div class="col col-md-6">
+    <div class="card">
+      <h2 class="card-header">Destination</h2>
+      <table class="table table-hover attr-table">
+        <tr>
+          <th scope="row">API root</th>
+          <td>{{ object.api_root }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Authentication</th>
+          <td>{{ object.get_authentication_display }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Connect timeout</th>
+          <td>{{ object.connect_timeout }} seconds</td>
+        </tr>
+        <tr>
+          <th scope="row">Read timeout</th>
+          <td>{{ object.read_timeout }} seconds</td>
+        </tr>
+      </table>
+    </div>
+    <div class="card">
+      <h2 class="card-header">Credential reference</h2>
+      {# The reference is restricted configuration metadata. It never holds a key value. #}
+      <table class="table table-hover attr-table">
+        <tr>
+          <th scope="row">Backend</th>
+          <td>{{ object.credential_reference.backend|placeholder }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Mount</th>
+          <td>{{ object.credential_reference.mount|placeholder }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Path</th>
+          <td>{{ object.credential_reference.path|placeholder }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Field</th>
+          <td>{{ object.credential_reference.field|placeholder }}</td>
+        </tr>
+      </table>
+      {% if perms.netbox_data_import.change_inferencebackend %}
+      <div class="card-footer text-end">
+        <form method="post"
+              action="{% url 'plugins:netbox_data_import:inferencebackend_connection_test' pk=object.pk %}">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-sm btn-primary">Run connection test</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock content %}

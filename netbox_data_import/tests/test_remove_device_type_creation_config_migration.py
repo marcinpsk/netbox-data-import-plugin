@@ -10,6 +10,7 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import SimpleTestCase, TransactionTestCase
 
 from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
+from netbox_data_import.tests.helpers import restore_plugin_migrations
 
 APP = "netbox_data_import"
 BEFORE = "0029_alter_cableimportsource_from_text_and_more"
@@ -32,9 +33,7 @@ def _migrate(target, *, fake=False):
 
 def _restore_every_leaf():
     """Restore every leaf because a migration test can leave later worker tests incomplete."""
-    executor = MigrationExecutor(connection)
-    executor.loader.build_graph()
-    executor.migrate(list(executor.loader.graph.leaf_nodes(APP)))
+    restore_plugin_migrations()
 
 
 class DeviceTypeCreationConfigMigrationStructureTest(SimpleTestCase):

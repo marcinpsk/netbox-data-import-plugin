@@ -17,7 +17,7 @@ os.environ["REDIS_DATABASE"] = str(_tasks_redis_database)
 os.environ["REDIS_CACHE_DATABASE"] = str(_cache_redis_database)
 os.environ["NETBOX_CONFIGURATION"] = "netbox_data_import.tests.netbox_configuration"
 
-from netbox.settings import *  # noqa: E402, F403
+from netbox.settings import *  # noqa: E402 - Set the isolated environment before importing NetBox settings.
 
 
 # NetBox API test cases create v2 tokens and require one HMAC pepper.
@@ -28,4 +28,4 @@ if not _test_database_name.startswith("test_"):
     raise ValueError("TEST_DB_NAME must start with 'test_'.")
 
 # DATABASES comes from the starred NetBox settings, which mypy is not given.
-DATABASES["default"].setdefault("TEST", {})["NAME"] = _test_database_name  # type: ignore[name-defined]  # noqa: F405
+DATABASES["default"].setdefault("TEST", {})["NAME"] = _test_database_name  # type: ignore[name-defined]

@@ -76,7 +76,7 @@ def compatibility_rows() -> list[tuple[str, str, str]]:
             f"gen-compatibility: the test matrix tops out at NetBox {netbox_max}, below the {min_version} "
             f"the plugin requires at load. Raise the matrix or lower min_version."
         )
-    newest_release, newest_min, newest_max = RANGE_HISTORY[0]
+    _newest_release, newest_min, newest_max = RANGE_HISTORY[0]
     if (min_version, netbox_max) == (newest_min, newest_max):
         return list(RANGE_HISTORY)
     return [(version, min_version, netbox_max), *RANGE_HISTORY]
@@ -107,7 +107,7 @@ def render_markdown(rows: list[tuple[str, str, str]]) -> str:
     widths = [len(column) for column in MD_COLUMNS]
 
     def row(cells: tuple[str, ...], fill: str = " ") -> str:
-        return "| " + " | ".join(cell.ljust(width, fill) for cell, width in zip(cells, widths)) + " |"
+        return "| " + " | ".join(cell.ljust(width, fill) for cell, width in zip(cells, widths, strict=False)) + " |"
 
     lines = [
         "# Compatibility Matrix",

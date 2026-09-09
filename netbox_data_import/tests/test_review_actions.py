@@ -16,7 +16,7 @@ from netbox_data_import.models import (
     IgnoredFieldDifference,
     ImportProfile,
 )
-from netbox_data_import.preview_row_actions import record_recalculated_preview
+from netbox_data_import.preview_row_actions import start_new_preview
 from netbox_data_import.tests.helpers import plan_source_rows, run_on_separate_connection, user_with_object_permission
 
 
@@ -97,7 +97,7 @@ class TargetNeutralFieldReviewTest(TransactionTestCase):
         review_bucket = "field_ignored" if expect_ignored else "field_diff"
         self.assertEqual(device_unit.extra_data[review_bucket]["u_position"], {"netbox": "5", "file": "7"})
         session = self.client.session
-        record_recalculated_preview(session, workspace.plan)
+        start_new_preview(session, workspace.plan)
         session["import_rows"] = workspace.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,
@@ -654,7 +654,7 @@ class UnplacedNameMatchPlacementSyncTest(TransactionTestCase):
         workspace = plan_source_rows(self.rows, self.profile, self.site, actor=self.actor)
         self.device_unit = next(unit for unit in workspace.units if unit.object_type == "device")
         session = self.client.session
-        record_recalculated_preview(session, workspace.plan)
+        start_new_preview(session, workspace.plan)
         session["import_rows"] = workspace.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,

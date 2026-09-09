@@ -2,7 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 from django.urls import path
 from . import views
-from .models import ImportProfile
+from .models import ImportProfile, InferenceBackend
 
 urlpatterns = [
     # Import Profiles
@@ -51,6 +51,23 @@ urlpatterns = [
         "cable-class-mappings/<int:pk>/delete/",
         views.CableClassMappingDeleteView.as_view(),
         name="cableclassmapping_delete",
+    ),
+    # AI backends (Inference Backend, specification 8.2)
+    path("ai-backends/", views.InferenceBackendListView.as_view(), name="inferencebackend_list"),
+    path("ai-backends/add/", views.InferenceBackendEditView.as_view(), name="inferencebackend_add"),
+    path("ai-backends/<int:pk>/", views.InferenceBackendView.as_view(), name="inferencebackend"),
+    path("ai-backends/<int:pk>/edit/", views.InferenceBackendEditView.as_view(), name="inferencebackend_edit"),
+    path("ai-backends/<int:pk>/delete/", views.InferenceBackendDeleteView.as_view(), name="inferencebackend_delete"),
+    path(
+        "ai-backends/<int:pk>/changelog/",
+        views.InferenceBackendChangeLogView.as_view(),
+        name="inferencebackend_changelog",
+        kwargs={"model": InferenceBackend},
+    ),
+    path(
+        "ai-backends/<int:pk>/connection-test/",
+        views.InferenceBackendConnectionTestView.as_view(),
+        name="inferencebackend_connection_test",
     ),
     # Device Type Mappings
     path(
@@ -150,6 +167,20 @@ urlpatterns = [
     path("quick-create-role/", views.QuickCreateDeviceRoleView.as_view(), name="quick_create_role"),
     path("match-existing-device/", views.MatchExistingDeviceView.as_view(), name="match_existing_device"),
     path("auto-match-devices/", views.AutoMatchDevicesView.as_view(), name="auto_match_devices"),
+    # Trace Review Workspace (section 10.2)
+    path("trace-workspace/", views.TraceReviewWorkspaceView.as_view(), name="trace_workspace"),
+    path("trace-workspace/re-read/", views.TraceWorkspaceRereadView.as_view(), name="trace_workspace_reread"),
+    path(
+        "trace-workspace/candidates/",
+        views.TraceTerminationCandidatesView.as_view(),
+        name="trace_termination_candidates",
+    ),
+    path("trace-workspace/sync/", views.TraceSyncView.as_view(), name="trace_sync"),
+    path(
+        "trace-workspace/resolve-termination/",
+        views.TraceResolveTerminationView.as_view(),
+        name="trace_resolve_termination",
+    ),
     # Per-row sync
     path("sync-single-row/", views.SyncSingleRowView.as_view(), name="sync_single_row"),
     path("unlink-device/", views.UnlinkDeviceView.as_view(), name="unlink_device"),

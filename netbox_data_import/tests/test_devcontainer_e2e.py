@@ -22,6 +22,8 @@ def load_e2e_module():
     playwright = ModuleType("playwright")
     sync_api = ModuleType("playwright.sync_api")
     sync_api.sync_playwright = lambda: None
+    # The script suppresses this one, so the stub has to offer it as a real exception class.
+    sync_api.TimeoutError = type("TimeoutError", (Exception,), {})
 
     with patch.dict(sys.modules, {"playwright": playwright, "playwright.sync_api": sync_api}):
         spec.loader.exec_module(module)

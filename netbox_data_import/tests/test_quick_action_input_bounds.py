@@ -236,7 +236,7 @@ def _quick_action_write_seam_errors(source, routes):
             errors.append(f"{url_name}: {class_name}.post() does not call a scoped writer")
         for call in (node for node in ast.walk(view) if isinstance(node, ast.Call)):
             method = getattr(call.func, "attr", None)
-            if method in {"save", "delete"} or method in manager_mutations and _orm_receiver(call):
+            if method in {"save", "delete"} or (method in manager_mutations and _orm_receiver(call)):
                 errors.append(f"{url_name}: {class_name} calls direct .{method}() at line {call.lineno}")
 
     return errors
@@ -322,7 +322,7 @@ class QuickActionInputBoundsTest(TransactionTestCase):
     def _store_active_import(self, rows):
         """Store a real source document and accepted plan for deferred row actions."""
         from netbox_data_import.import_engine import ImportEngine
-        from netbox_data_import.preview_row_actions import record_recalculated_preview
+        from netbox_data_import.preview_row_actions import start_new_preview
         from netbox_data_import.review_workspace import ReviewWorkspace
 
         headers = [key for key in rows[0] if not key.startswith("_")]
@@ -338,7 +338,7 @@ class QuickActionInputBoundsTest(TransactionTestCase):
         result = ReviewWorkspace(plan)
 
         session = self.client.session
-        record_recalculated_preview(session, plan)
+        start_new_preview(session, plan)
         session["import_rows"] = result.source_rows
         session["import_context"] = {
             "profile_id": self.profile.pk,
@@ -517,7 +517,7 @@ class UpdatesMetadata(_PermissionScopedWriteMixin):
         for url_name, payload in ROW_ACTION_CONTROL_PAYLOADS.items():
             with self.subTest(url_name=url_name):
                 source_id = payload.get("source_id", f"CONTROL-{url_name}")
-                payload = self._prepare_row_action(
+                prepared_payload = self._prepare_row_action(
                     url_name,
                     payload,
                     source_id,
@@ -526,7 +526,7 @@ class UpdatesMetadata(_PermissionScopedWriteMixin):
                 before = _writer_database_state()
                 response = self.client.post(
                     reverse(f"plugins:netbox_data_import:{url_name}"),
-                    {"profile_id": self.profile.pk, **payload},
+                    {"profile_id": self.profile.pk, **prepared_payload},
                 )
 
                 self.assertLess(response.status_code, 500)
@@ -542,7 +542,7 @@ class UpdatesMetadata(_PermissionScopedWriteMixin):
             for index, payload in enumerate(payloads):
                 with self.subTest(url_name=url_name, payload=index):
                     source_id = payload.get("source_id", LONG)
-                    payload = self._prepare_row_action(
+                    prepared_payload = self._prepare_row_action(
                         url_name,
                         payload,
                         source_id,
@@ -551,7 +551,7 @@ class UpdatesMetadata(_PermissionScopedWriteMixin):
                     before = _writer_database_state()
                     response = self.client.post(
                         reverse(f"plugins:netbox_data_import:{url_name}"),
-                        {"profile_id": self.profile.pk, **payload},
+                        {"profile_id": self.profile.pk, **prepared_payload},
                     )
 
                     self.assertLess(

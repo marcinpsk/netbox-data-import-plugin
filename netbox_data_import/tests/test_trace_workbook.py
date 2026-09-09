@@ -571,6 +571,35 @@ class TraceWorkbookTaxonomyTest(SimpleTestCase):
         self.assertEqual(batch.rows, ())
         self.assertIn("trace.incomplete_block", _codes(batch))
 
+    def test_an_adapter_diagnostic_carries_its_own_operator_wording(self):
+        """The wording table answers Target Modules; a Source Adapter states its own message.
+
+        This is why `check_diagnostic_wording.EMITTING_MODULES` does not scan this module: a
+        `trace.*` code never reaches `_DIAGNOSTIC_MESSAGES`, so a table entry for it would be
+        wording no code path can read.
+        """
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.review_workspace import _DIAGNOSTIC_MESSAGES, _diagnostic_message
+
+        book = openpyxl.Workbook()
+        sheet = book.active
+        if not isinstance(sheet, Worksheet):
+            sheet = book.create_sheet()
+        sheet.title = "Trace List"
+        sheet.append(("Executed", "2026-08-31 12:00:00"))
+        sheet.append(())
+        sheet.append(("From", _endpoint_line(_termination("DEVICE-A", "", "PORT-A", "Port"))))
+        buffer = BytesIO()
+        book.save(buffer)
+
+        batch = _interpret(buffer.getvalue())
+
+        source = next(item for item in batch.diagnostics if item.code == "trace.incomplete_block")
+        self.assertNotIn(source.code, _DIAGNOSTIC_MESSAGES)
+        rendered = _diagnostic_message(ImportEngine._source_diagnostic(source))
+        self.assertEqual(rendered, source.message)
+        self.assertNotEqual(rendered, source.code)
+
     def test_fallback_occurrences_with_different_endpoint_evidence_conflict(self):
         """An Endpoint Summary fallback states no segment, so its endpoints carry all its evidence."""
         endpoint_b = _termination("DEVICE-B", "", "PORT-B", "NIC")

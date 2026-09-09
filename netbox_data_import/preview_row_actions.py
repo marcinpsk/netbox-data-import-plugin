@@ -27,13 +27,85 @@ def current_preview_revision(session) -> str:
     return revision
 
 
-def record_recalculated_preview(session, plan) -> str:
-    """Store one authoritative preview and return its new revision."""
+RETAINED_SYNC_BLOCK_REASON = (
+    "A trace synchronization is still running. Wait for it to finish before changing this workspace."
+)
+
+
+class PreviewLocked(RuntimeError):
+    """The preview may not move while the trace sync it queued is still running.
+
+    A per-trace sync keeps the preview open, so the operator stays on a page whose plan the queued
+    Job is about to invalidate. Recalculating adopts NetBox state that predates the Job's writes and
+    clears the guard that stops a second queue, so both are refused until the Job is terminal.
+    """
+
+
+def retained_sync_block_reason(session, user) -> str:
+    """Return why a retained trace sync holds this preview, or ``""``.
+
+    The Job rows are the record. A request that loses the race to enqueue still writes the session,
+    so a guard reading one remembered id can open a preview whose other sync is still writing.
+    """
+    from core.choices import JobStatusChoices
+
+    from .jobs import ImportJobRunner
+
+    context = session.get("import_context")
+    if not isinstance(context, dict):
+        return ""
+    profile_id, document_id = context.get("profile_id"), context.get("source_document_id")
+    if not profile_id or not document_id:
+        return ""
+    retained = ImportJobRunner.get_jobs().filter(
+        user=user,
+        data__job_type=ImportJobRunner.job_type,
+        data__keeps_preview=True,
+        data__profile_id=profile_id,
+        data__source_document_id=document_id,
+        status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
+    )
+    return RETAINED_SYNC_BLOCK_REASON if retained.exists() else ""
+
+
+def assert_preview_may_move(session, user) -> None:
+    """Raise `PreviewLocked` when the retained trace sync still holds this preview."""
+    if reason := retained_sync_block_reason(session, user):
+        raise PreviewLocked(reason)
+
+
+def _store_preview(session, plan) -> str:
+    """Write one authoritative preview and return its new revision."""
     revision = secrets.token_urlsafe(18)
     session[PREVIEW_PLAN_SESSION_KEY] = plan.to_dict()
     session[PREVIEW_DIRTY_SESSION_KEY] = False
     session[PREVIEW_REVISION_SESSION_KEY] = revision
     return revision
+
+
+def record_recalculated_preview(session, plan, *, user) -> str:
+    """Replace the current preview with a freshly read one, refusing while a sync holds it."""
+    assert_preview_may_move(session, user)
+    return _store_preview(session, plan)
+
+
+def start_new_preview(session, plan) -> str:
+    """Store the first preview of a newly uploaded source, replacing whatever came before.
+
+    Unguarded on purpose: this is a different import, so it inherits no earlier sync. The upload
+    stored its own Source Document, which is what stops the previous preview's Job from matching.
+    """
+    return _store_preview(session, plan)
+
+
+def restore_preview_plan(session, plan_data) -> None:
+    """Adopt the accepted plan a failed Job stored, so its preview can be reviewed again."""
+    session[PREVIEW_PLAN_SESSION_KEY] = plan_data
+
+
+def clear_preview_state(session) -> None:
+    """Drop the stored plan, for a preview that is being discarded."""
+    session.pop(PREVIEW_PLAN_SESSION_KEY, None)
 
 
 def retire_preview_revision(session) -> str:
@@ -59,7 +131,9 @@ def load_cached_preview(request):
         return None
     revision = current_preview_revision(request.session)
     if "application/json" in request.headers.get("Accept", ""):
-        if request.POST.get("preview_revision") != revision:
+        # A read carries its revision in the query, because a GET has no posted body to hold it.
+        posted = request.POST.get("preview_revision", request.GET.get("preview_revision"))
+        if posted != revision:
             return None
     profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
     if profile is None:

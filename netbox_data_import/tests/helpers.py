@@ -258,7 +258,7 @@ def run_on_separate_connection(target):
         connections["default"].close()
         try:
             target()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - the thread transports every failure to the caller
             errors.put(exc)
         finally:
             connections["default"].close()
@@ -319,7 +319,7 @@ def setup_preview_with_device_matches(client, profile):
     from netbox_data_import.models import DeviceExistingMatch, SourceDocument
     from netbox_data_import.preview_row_actions import (
         PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
-        record_recalculated_preview,
+        start_new_preview,
     )
     from netbox_data_import.review_workspace import ReviewWorkspace
 
@@ -364,7 +364,7 @@ def setup_preview_with_device_matches(client, profile):
     plan = ImportEngine.plan(profile, document, actor, planning_context)
     result = ReviewWorkspace(plan)
     session = client.session
-    record_recalculated_preview(session, plan)
+    start_new_preview(session, plan)
     session["import_rows"] = result.source_rows
     session["import_context"] = {
         "profile_id": profile.pk,
@@ -439,3 +439,42 @@ def assert_action_link_is_named(test: TestCase, html: str, href: str, name: str)
     if match is None:
         test.fail(f"The action link for {href} has no accessible name: {tag}")
     test.assertIn(name, match.group(1))
+
+
+# Includes 0030 on purpose: faking that RunPython would leave the retired adapter_config key behind.
+FAKED_REWIND_FLOOR = "0030_remove_device_type_creation_config"
+
+
+def restore_plugin_migrations(floor=FAKED_REWIND_FLOOR):
+    """Return the plugin app to its leaf state, faking above *floor* because the tables still exist."""
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    app = "netbox_data_import"
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    plan = executor.migration_plan([(app, floor)])
+    # Forwards only: reversing here would drop a table the faked rewind left in place.
+    if plan and not any(backwards for _migration, backwards in plan):
+        executor.migrate([(app, floor)])
+    executor = MigrationExecutor(connection)
+    executor.loader.build_graph()
+    executor.migrate(list(executor.loader.graph.leaf_nodes(app)), fake=True)
+
+
+def cables_on(*terminations):
+    """Return the Cables terminating on every one of these exact objects.
+
+    `termination_id` is half of a generic key. On a freshly created database an Interface and a
+    RearPort both start numbering at 1, so filtering on the id alone matches another type's cable.
+    """
+    from core.models import ObjectType
+    from dcim.models import Cable
+
+    found = Cable.objects.all()
+    for termination in terminations:
+        found = found.filter(
+            terminations__termination_type=ObjectType.objects.get_for_model(type(termination)),
+            terminations__termination_id=termination.pk,
+        )
+    return found
