@@ -8,6 +8,7 @@ from django.urls import reverse
 from netbox_data_import.models import InferenceBackend
 from netbox_data_import.navigation import menu
 from netbox_data_import.tests.helpers import user_with_object_permission
+from netbox_data_import.tests.test_inference_backend import make_row
 
 
 class ImportHistoryNavigationTest(SimpleTestCase):
@@ -45,3 +46,31 @@ class InferenceBackendNavigationTest(TestCase):
         response = self.client.get(reverse("plugins:netbox_data_import:inferencebackend_list"))
 
         self.assertContains(response, reverse("plugins:netbox_data_import:inferencebackend_add"), status_code=200)
+
+
+class InferenceBackendConnectionTestNavigationTest(TestCase):
+    def test_view_only_user_does_not_see_connection_test(self):
+        backend = make_row()
+        user = user_with_object_permission("viewer", [(InferenceBackend, ["view"], {})])
+        self.client.force_login(user)
+
+        response = self.client.get(backend.get_absolute_url())
+
+        self.assertNotContains(
+            response,
+            reverse("plugins:netbox_data_import:inferencebackend_connection_test", kwargs={"pk": backend.pk}),
+            status_code=200,
+        )
+
+    def test_user_with_view_and_change_permissions_sees_connection_test(self):
+        backend = make_row()
+        user = user_with_object_permission("editor", [(InferenceBackend, ["view", "change"], {})])
+        self.client.force_login(user)
+
+        response = self.client.get(backend.get_absolute_url())
+
+        self.assertContains(
+            response,
+            reverse("plugins:netbox_data_import:inferencebackend_connection_test", kwargs={"pk": backend.pk}),
+            status_code=200,
+        )

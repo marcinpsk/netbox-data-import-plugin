@@ -80,6 +80,7 @@
           <td>{{ object.credential_reference.field|placeholder }}</td>
         </tr>
       </table>
+      {% if perms.netbox_data_import.change_inferencebackend %}
       <div class="card-footer text-end">
         <form method="post"
               action="{% url 'plugins:netbox_data_import:inferencebackend_connection_test' pk=object.pk %}">
@@ -87,6 +88,7 @@
           <button type="submit" class="btn btn-sm btn-primary">Run connection test</button>
         </form>
       </div>
+      {% endif %}
     </div>
   </div>
 </div>
