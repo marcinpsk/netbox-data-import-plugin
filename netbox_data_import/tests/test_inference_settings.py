@@ -117,6 +117,23 @@ class VaultSettingTest(SimpleTestCase):
         """A truthy non-string reaches the request as `str(value)`, which is not a URL."""
         self.assertIn("address", self.rejects({"address": 8200, "auth_method": "proxy"}))
 
+    def test_a_non_string_namespace_is_rejected(self):
+        message = self.rejects({"address": "https://vault.example.invalid:8200", "namespace": ["team-a"]})
+
+        self.assertIn("namespace", message)
+
+    def test_an_empty_namespace_is_rejected(self):
+        for namespace in ("", "   "):
+            with self.subTest(namespace=namespace):
+                message = self.rejects({"address": "https://vault.example.invalid:8200", "namespace": namespace})
+
+                self.assertIn("namespace", message)
+
+    def test_a_non_empty_namespace_is_accepted(self):
+        validate_plugin_settings(
+            settings_with(vault={"address": "https://vault.example.invalid:8200", "namespace": "team-a"})
+        )
+
     def test_an_address_carrying_a_credential_is_rejected(self):
         """Userinfo in the address is secret material in a setting that must hold none."""
         message = self.rejects({"address": "https://user:token@vault.example.invalid:8200", "auth_method": "proxy"})

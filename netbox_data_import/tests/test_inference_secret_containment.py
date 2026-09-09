@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 
 from core.models import Job
+from django.apps import apps
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
@@ -194,7 +195,7 @@ class SecretContainmentTest(TestCase):
 
         holders = [
             model
-            for model in (InferenceBackend,)
+            for model in apps.get_app_config("netbox_data_import").get_models()
             if any("credential_reference" in field.name for field in model._meta.get_fields() if hasattr(field, "name"))
         ]
 

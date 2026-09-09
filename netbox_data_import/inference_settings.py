@@ -96,6 +96,11 @@ def validate_vault_settings(value: Any) -> Mapping[str, Any]:
     if not mapping.get("address"):
         raise InvalidInferenceConfiguration(f"'{VAULT_SETTING}.address' is required.")
     _validate_vault_address(mapping["address"])
+    namespace = mapping.get("namespace")
+    if "namespace" in mapping and (not isinstance(namespace, str) or not namespace.strip()):
+        raise InvalidInferenceConfiguration(
+            f"'{VAULT_SETTING}.namespace' must be a non-empty string, got {type(namespace).__name__}."
+        )
     bundle = mapping.get("ca_bundle")
     if "ca_bundle" in mapping and (not isinstance(bundle, str) or not bundle.strip()):
         # requests reads a bool here as "skip verification", which this setting must never mean.

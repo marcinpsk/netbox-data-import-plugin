@@ -3,6 +3,7 @@
 """The connection test: a worker Job, a typed result, and one object permission (specification 8.6, 13.1)."""
 
 import json
+import socket
 import threading
 
 from contextlib import contextmanager
@@ -118,12 +119,19 @@ class ConnectionTestResultTest(TestCase):
 
     def test_an_unreachable_store_reports_credential_unavailable(self):
         row = make_row()
-        unreachable = {"address": "http://127.0.0.1:1", "auth_method": "proxy", "connect_timeout": 1, "read_timeout": 1}
+        with socket.socket() as bound_socket:
+            bound_socket.bind(("127.0.0.1", 0))
+            unreachable = {
+                "address": f"http://127.0.0.1:{bound_socket.getsockname()[1]}",
+                "auth_method": "proxy",
+                "connect_timeout": 1,
+                "read_timeout": 1,
+            }
 
-        with override_settings(PLUGINS_CONFIG=settings_for(unreachable)):
-            result = run_connection_test(row.pk, "primary")
+            with override_settings(PLUGINS_CONFIG=settings_for(unreachable)):
+                result = run_connection_test(row.pk, "primary")
 
-        self.assertEqual(result.category, "credential_unavailable")
+            self.assertEqual(result.category, "credential_unavailable")
 
     def test_an_empty_field_reports_invalid_secret_material(self):
         row = make_row()

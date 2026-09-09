@@ -162,7 +162,7 @@ class InferenceBackendConnectionTestJob(JobRunner):
         name = "AI backend connection test"
 
     def run(self, pk, backend_key, *args, **kwargs):
-        """Run one connection test and record its typed category as job data."""
+        """Select by pk alone to prevent redirection to a recreated row; backend_key is display text only."""
         from .inference_connection_test import run_connection_test
 
         result = run_connection_test(pk, backend_key)
