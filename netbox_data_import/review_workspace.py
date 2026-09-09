@@ -417,6 +417,7 @@ def _device_placement_differs(device, source_location_id, rack_name, position, f
     )
 
 
+# EXCLUDED is absent because only `cable_target` sets `display["trace"]`, and it assigns none.
 _SUMMARY_KEYS = {
     Disposition.ACTIONABLE: "actionable",
     Disposition.BLOCKED: "blocked",
