@@ -18,7 +18,7 @@ from netbox_data_import.preview_row_actions import (
     PREVIEW_PLAN_SESSION_KEY,
     PREVIEW_REVISION_SESSION_KEY,
 )
-from netbox_data_import.review_workspace import ReviewWorkspace
+from netbox_data_import.review_workspace import _SUMMARY_KEYS, ReviewWorkspace
 from netbox_data_import.tests.test_cable_module import (
     CableTopologyMixin,
     direct_path,
@@ -167,6 +167,16 @@ class TraceWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertEqual(summary["actionable"], 1)
         self.assertEqual(summary["unresolved_terminations"], 1)
         self.assertEqual(summary["resolved_terminations"], 7)
+
+    def test_every_trace_is_counted_under_exactly_one_disposition(self):
+        """A disposition absent from `_SUMMARY_KEYS` would drop its traces from the strip silently."""
+        summary = ReviewWorkspace(self.plan(patched_path(), self.separate_blocked_path("S"))).trace_summary
+
+        self.assertEqual(sum(summary[key] for key in _SUMMARY_KEYS.values()), summary["traces"])
+
+    def test_the_summary_names_every_disposition_a_trace_can_carry(self):
+        """Only `cable_target` states a trace, and it never assigns EXCLUDED; a new member must decide."""
+        self.assertEqual(set(_SUMMARY_KEYS), set(Disposition.ALL) - {Disposition.EXCLUDED})
 
     def test_a_restored_termination_without_state_counts_as_unresolved(self):
         data = self.plan(direct_path()).to_dict()
