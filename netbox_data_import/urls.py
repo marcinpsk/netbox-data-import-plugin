@@ -2,7 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 from django.urls import path
 from . import views
-from .models import ImportProfile
+from .models import ImportProfile, InferenceBackend
 
 urlpatterns = [
     # Import Profiles
@@ -58,6 +58,12 @@ urlpatterns = [
     path("ai-backends/<int:pk>/", views.InferenceBackendView.as_view(), name="inferencebackend"),
     path("ai-backends/<int:pk>/edit/", views.InferenceBackendEditView.as_view(), name="inferencebackend_edit"),
     path("ai-backends/<int:pk>/delete/", views.InferenceBackendDeleteView.as_view(), name="inferencebackend_delete"),
+    path(
+        "ai-backends/<int:pk>/changelog/",
+        views.InferenceBackendChangeLogView.as_view(),
+        name="inferencebackend_changelog",
+        kwargs={"model": InferenceBackend},
+    ),
     path(
         "ai-backends/<int:pk>/connection-test/",
         views.InferenceBackendConnectionTestView.as_view(),

@@ -5,6 +5,7 @@
 from django.core.exceptions import ValidationError
 from django.db.utils import IntegrityError
 from django.test import TestCase, override_settings
+from django.urls import reverse
 
 from netbox_data_import.inference_backend import (
     NoActiveInferenceBackend,
@@ -13,6 +14,7 @@ from netbox_data_import.inference_backend import (
 from netbox_data_import.inference_credentials import InvalidCredentialReference
 from netbox_data_import.inference_settings import FILE_FALLBACK_KEY, InvalidInferenceConfiguration
 from netbox_data_import.models import InferenceBackend
+from netbox_data_import.tests.helpers import user_with_object_permission
 
 ALLOWLIST = ["https://backend.example.invalid:443"]
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -278,3 +280,46 @@ class ActiveBackendResolutionTest(TestCase):
 
         self.assertNotIn("credential_reference", metadata)
         self.assertEqual(metadata["backend_key"], FILE_FALLBACK_KEY)
+
+
+class InferenceBackendListViewTest(TestCase):
+    """The list view renders its rows, which is where NetBox's actions column runs."""
+
+    def test_the_list_renders_when_a_row_exists(self):
+        """`ActionsColumn` renders per row, so an empty table never reaches its changelog link."""
+        make_row()
+        user = user_with_object_permission("list-viewer", [(InferenceBackend, ["view"], {})])
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("plugins:netbox_data_import:inferencebackend_list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Primary backend")
+
+    def test_the_changelog_route_answers_for_one_row(self):
+        """`ActionsColumn` links this route unconditionally, so it has to resolve and answer."""
+        backend = make_row()
+        user = user_with_object_permission("changelog-viewer", [(InferenceBackend, ["view"], {})])
+        self.client.force_login(user)
+
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:inferencebackend_changelog", kwargs={"pk": backend.pk})
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_the_actions_column_renders_although_meta_fields_omits_it(self):
+        """`NetBoxTable` declares `actions`, and a class-declared column survives a narrower `Meta.fields`."""
+        backend = make_row()
+        user = user_with_object_permission("editor", [(InferenceBackend, ["view", "change", "delete"], {})])
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("plugins:netbox_data_import:inferencebackend_list"))
+
+        for action in ("edit", "delete"):
+            with self.subTest(action=action):
+                self.assertContains(
+                    response,
+                    reverse(f"plugins:netbox_data_import:inferencebackend_{action}", kwargs={"pk": backend.pk}),
+                    status_code=200,
+                )

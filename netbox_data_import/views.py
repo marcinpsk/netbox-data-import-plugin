@@ -513,6 +513,12 @@ class InferenceBackendDeleteView(generic.ObjectDeleteView):
     queryset = InferenceBackend.objects.all()
 
 
+class InferenceBackendChangeLogView(generic.ObjectChangeLogView):
+    """Display the change log for one InferenceBackend."""
+
+    queryset = InferenceBackend.objects.all()
+
+
 class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
     """Queue the connection test. Specification 13.1 authorizes it with this one permission."""
 
