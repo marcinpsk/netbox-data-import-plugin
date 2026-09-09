@@ -38,6 +38,7 @@ menu = PluginMenu(
                             link="plugins:netbox_data_import:inferencebackend_add",
                             title="Add",
                             icon_class="mdi mdi-plus-thick",
+                            permissions=("netbox_data_import.add_inferencebackend",),
                         ),
                     ),
                 ),
