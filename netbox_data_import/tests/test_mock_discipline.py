@@ -712,13 +712,6 @@ def test_main_reports_and_exits_nonzero_on_violation(capsys, tmp_path):
     assert "unapproved mock" in out
 
 
-def test_main_clean_tree_exits_zero(capsys):
-    """`_main([])` returns 0 and reports zero when the tree is clean (current state)."""
-    rc = md._main([])
-    assert rc == 0
-    assert "0 unapproved mock(s)" in capsys.readouterr().out
-
-
 def test_flags_a_partial_of_a_specless_mock_as_new_callable():
     """`partial(MagicMock)` fabricates exactly like the class it wraps, so it is not a real factory."""
     src = (

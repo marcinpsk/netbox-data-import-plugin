@@ -192,7 +192,7 @@ def _dangling_reports(disk, app_label):
 def _unresolved_dependencies(app_label):
     """Return the dangling cross-app dependencies this app ships on disk."""
     # `load=False` matters: `build_graph()` validates every installed app, not just this one.
-    loader = MigrationLoader(None, load=False, replace_migrations=False)
+    loader = MigrationLoader(None, load=False)
     loader.load_disk()
     return _dangling_reports(loader.disk_migrations, app_label)
 
