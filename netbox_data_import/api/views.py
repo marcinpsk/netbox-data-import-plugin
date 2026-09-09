@@ -3,7 +3,7 @@
 """DRF viewsets for the data-import plugin API."""
 
 from django.http import Http404
-from netbox.api.viewsets import NetBoxModelViewSet
+from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import viewsets, permissions
 from rest_framework.permissions import DjangoModelPermissions
 
@@ -18,6 +18,7 @@ from ..models import (
     ColumnTransformRule,
     SourceResolution,
     ImportExecution,
+    InferenceBackend,
 )
 from .serializers import (
     ImportProfileSerializer,
@@ -28,6 +29,7 @@ from .serializers import (
     ColumnTransformRuleSerializer,
     SourceResolutionSerializer,
     ImportExecutionSerializer,
+    InferenceBackendSerializer,
 )
 
 
@@ -207,3 +209,14 @@ class ImportExecutionViewSet(viewsets.ReadOnlyModelViewSet):
         if profile_id:
             qs = qs.filter(profile_id=profile_id)
         return qs
+
+
+class InferenceBackendViewSet(NetBoxReadOnlyModelViewSet):
+    """Read-only viewset for Inference Backend rows.
+
+    Read-only on purpose: a backend row carries the destination NetBox itself calls, and the UI form
+    is the one place that validates the `api_root` trust boundary against the allowlist.
+    """
+
+    queryset = InferenceBackend.objects.prefetch_related("tags")
+    serializer_class = InferenceBackendSerializer
