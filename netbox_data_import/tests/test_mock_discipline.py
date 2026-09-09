@@ -764,12 +764,67 @@ def test_flags_a_nested_partial_of_a_specless_mock():
 
 
 def test_accepts_a_nested_partial_bound_at_the_inner_layer():
-    """A bound anywhere in the chain still binds the mock that is finally built."""
+    """The inner binding survives because no outer layer overrides it."""
     src = (
         "import functools\nfrom unittest.mock import MagicMock, patch\nclass C: ...\n\n"
         "def test_x():\n"
         "    with patch('netbox_data_import.views.thing', "
         "new_callable=functools.partial(functools.partial(MagicMock, spec=C))):\n"
+        "        pass\n"
+    )
+    assert scan_source(src, "t.py") == []
+
+
+def test_flags_an_aliased_partial_of_a_specless_mock():
+    src = (
+        "from functools import partial as make_partial\n"
+        "from unittest.mock import MagicMock, patch\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', new_callable=make_partial(MagicMock)):\n"
+        "        pass\n"
+    )
+    assert [h.mock for h in scan_source(src, "t.py")] == ["'netbox_data_import.views.thing'"]
+
+
+def test_accepts_a_local_partial_that_returns_a_real_object():
+    src = (
+        "from unittest.mock import MagicMock, patch\n\n"
+        "def partial(factory):\n"
+        "    return object()\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', new_callable=partial(MagicMock)):\n"
+        "        pass\n"
+    )
+    assert scan_source(src, "t.py") == []
+
+
+def test_flags_a_partial_of_a_specless_mock_through_a_module_alias():
+    src = (
+        "import functools as ft\nfrom unittest.mock import MagicMock, patch\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', new_callable=ft.partial(MagicMock)):\n"
+        "        pass\n"
+    )
+    assert [h.mock for h in scan_source(src, "t.py")] == ["'netbox_data_import.views.thing'"]
+
+
+def test_flags_a_nested_partial_with_an_outer_none_spec_override():
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\nclass C: ...\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', "
+        "new_callable=functools.partial(functools.partial(MagicMock, spec=C), spec=None)):\n"
+        "        pass\n"
+    )
+    assert [h.mock for h in scan_source(src, "t.py")] == ["'netbox_data_import.views.thing'"]
+
+
+def test_accepts_a_nested_partial_bound_at_the_outer_layer():
+    src = (
+        "import functools\nfrom unittest.mock import MagicMock, patch\nclass C: ...\n\n"
+        "def test_x():\n"
+        "    with patch('netbox_data_import.views.thing', "
+        "new_callable=functools.partial(functools.partial(MagicMock), spec=C)):\n"
         "        pass\n"
     )
     assert scan_source(src, "t.py") == []

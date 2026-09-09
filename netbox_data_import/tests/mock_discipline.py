@@ -73,6 +73,8 @@ _PATCH_BOUNDING_KWARGS = _BOUNDING_KWARGS | {"new", "autospec"}
 # Canonical values stored in the lexical binding table for module imports.
 _MOCK_MODULE = "unittest.mock"
 _UNITTEST_MODULE = "unittest"
+_FUNCTOOLS_MODULE = "functools"
+_FUNCTOOLS_PARTIAL = "functools.partial"
 # Import prefix that marks a patch target as our own code rather than a real boundary.
 _FIRST_PARTY = "netbox_data_import"
 # The canonical binding a first-party import gets, so a later local rebinding shadows it.
@@ -85,35 +87,6 @@ _SELF = {"mock_discipline.py", "test_mock_discipline.py"}
 
 def _targets() -> set[str]:
     return _FABRICATING_MOCKS | ({"AsyncMock"} if INCLUDE_ASYNCMOCK else set())
-
-
-def _is_partial(node: ast.expr) -> bool:
-    """Return whether one expression is a `functools.partial(...)` call carrying a callable."""
-    if not isinstance(node, ast.Call) or not node.args:
-        return False
-    func = node.func
-    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-    return name == "partial"
-
-
-def _partial_target(node: ast.expr) -> ast.expr | None:
-    """Return the callable a partial chain finally wraps, unwrapping every nested layer."""
-    if not _is_partial(node):
-        return None
-    while _is_partial(node):
-        node = node.args[0]  # type: ignore[attr-defined]
-    return node
-
-
-def _binds_a_mock(node: ast.expr) -> bool:
-    """Return whether any layer of a partial chain bound the mock it would build."""
-    while _is_partial(node):
-        if any(kw.arg in _BOUNDING_KWARGS and _is_actual_bound(kw.value) for kw in node.keywords):  # type: ignore[attr-defined]
-            return True
-        node = node.args[0]  # type: ignore[attr-defined]
-    if not isinstance(node, ast.Call):
-        return False
-    return any(kw.arg in _BOUNDING_KWARGS and _is_actual_bound(kw.value) for kw in node.keywords)
 
 
 def _is_actual_bound(value: ast.expr) -> bool:
@@ -172,6 +145,8 @@ class _MockBindingCollector(ast.NodeVisitor):
                 canonical = alias.name
             elif node.module == "unittest" and alias.name == "mock":
                 canonical = _MOCK_MODULE
+            elif node.module == _FUNCTOOLS_MODULE and alias.name == "partial":
+                canonical = _FUNCTOOLS_PARTIAL
             # A relative import counts: every test module lives inside the package.
             elif node.level > 0 or module.split(".")[0] == _FIRST_PARTY:
                 canonical = _FIRST_PARTY_BINDING
@@ -185,6 +160,8 @@ class _MockBindingCollector(ast.NodeVisitor):
                 canonical = _MOCK_MODULE if alias.asname else _UNITTEST_MODULE
             elif alias.name == "unittest":
                 canonical = _UNITTEST_MODULE
+            elif alias.name == _FUNCTOOLS_MODULE:
+                canonical = _FUNCTOOLS_MODULE
             elif alias.name.split(".")[0] == _FIRST_PARTY:
                 canonical = _FIRST_PARTY_BINDING
             self._bind(name, node.lineno, canonical)
@@ -364,6 +341,34 @@ class _Scanner(ast.NodeVisitor):
             return func.attr == "patch" and self._canonical_binding(func.value) == _MOCK_MODULE
         return self._canonical_binding(func) == "patch"
 
+    def _is_partial(self, node: ast.expr) -> bool:
+        """Return whether one expression is a `functools.partial(...)` call carrying a callable."""
+        if not isinstance(node, ast.Call) or not node.args:
+            return False
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            return func.attr == "partial" and self._canonical_binding(func.value) == _FUNCTOOLS_MODULE
+        return self._canonical_binding(func) == _FUNCTOOLS_PARTIAL
+
+    def _partial_target(self, node: ast.expr) -> ast.expr | None:
+        """Return the callable a partial chain finally wraps, unwrapping every nested layer."""
+        if not self._is_partial(node):
+            return None
+        while self._is_partial(node):
+            node = node.args[0]  # type: ignore[attr-defined]
+        return node
+
+    def _binds_a_mock(self, node: ast.expr) -> bool:
+        """Return whether merged keywords bind the mock, with outer partial layers taking precedence."""
+        layers: list[list[ast.keyword]] = []
+        while isinstance(node, ast.Call):
+            layers.append(node.keywords)
+            if not self._is_partial(node):
+                break
+            node = node.args[0]
+        bounds = {kw.arg: kw.value for keywords in reversed(layers) for kw in keywords if kw.arg in _BOUNDING_KWARGS}
+        return any(_is_actual_bound(value) for value in bounds.values())
+
     def _is_patch_bounded(self, node: ast.Call, new_position: int | None) -> bool:
         if new_position is not None:
             replacement = next((kw.value for kw in node.keywords if kw.arg == "new"), None)
@@ -384,9 +389,9 @@ class _Scanner(ast.NodeVisitor):
         factory = next((kw.value for kw in node.keywords if kw.arg == "new_callable"), None)
         if factory is None or (isinstance(factory, ast.Constant) and factory.value is None):
             return False
-        if (wrapped := _partial_target(factory)) is not None:
+        if (wrapped := self._partial_target(factory)) is not None:
             # `partial(MagicMock)` fabricates exactly like the class it wraps, unless it binds it.
-            return self._mock_class(wrapped) is None or _binds_a_mock(factory)
+            return self._mock_class(wrapped) is None or self._binds_a_mock(factory)
         return self._mock_class(factory) is None
 
     def _canonical_binding(self, node: ast.expr) -> str | None:
