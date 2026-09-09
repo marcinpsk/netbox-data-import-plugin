@@ -21,7 +21,7 @@ import ipaddress
 import socket
 
 from collections.abc import Iterable, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 SUPPORTED_SCHEMES = ("https", "http")
 
@@ -91,7 +91,11 @@ def origin_of(value: str, setting: str) -> str:
     if port < 1:
         # urlsplit returns zero rather than raising, and no connection can use it.
         raise InvalidInferenceConfiguration(unusable)
-    return f"{parts.scheme.lower()}://{parts.hostname.lower()}:{port}"
+    host = parts.hostname.lower()
+    # urlsplit strips the brackets, and only an IPv6 literal can leave a colon in a hostname.
+    if ":" in host:
+        host = f"[{host}]"
+    return urlunsplit((parts.scheme.lower(), f"{host}:{port}", "", "", ""))
 
 
 def validate_origin(value: str, setting: str) -> str:

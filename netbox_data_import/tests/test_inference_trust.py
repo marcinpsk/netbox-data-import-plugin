@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The `api_root` trust boundary: allowlist, scheme rules, resolution and redirects (specification 8.3)."""
 
+from urllib.parse import urlsplit
+
 from django.test import SimpleTestCase
 
 from netbox_data_import.inference_trust import (
@@ -147,6 +149,27 @@ class ApiRootAllowlistTest(SimpleTestCase):
     def test_http_is_allowed_for_an_approved_local_endpoint(self):
         """An allowlist entry that literally names a local address is the approval."""
         validate_api_root("http://127.0.0.1:11434", allowlist=LOCAL_ALLOWLIST, authentication="bearer")
+
+    def test_http_is_allowed_for_an_approved_ipv6_local_endpoint(self):
+        """An IPv6 loopback is as local as 127.0.0.1, so the same bearer approval applies."""
+        validate_api_root("http://[::1]:11434", allowlist=("http://[::1]:11434",), authentication="bearer")
+
+
+class OriginReparseTest(SimpleTestCase):
+    """An origin is re-parsed by `is_local_endpoint` and by every allowlist comparison."""
+
+    def test_every_origin_re_parses_to_the_host_and_port_it_names(self):
+        """An origin that does not survive a round trip silently changes the host later readers see."""
+        for entry, host, port in (
+            ("https://a.example.invalid:443", "a.example.invalid", 443),
+            ("http://127.0.0.1:11434", "127.0.0.1", 11434),
+            ("http://[::1]:11434", "::1", 11434),
+            ("http://[fd00::1]:8080", "fd00::1", 8080),
+        ):
+            with self.subTest(entry=entry):
+                parts = urlsplit(validate_origin(entry, setting="x"))
+                self.assertEqual(parts.hostname, host)
+                self.assertEqual(parts.port, port)
 
 
 class ResolvedAddressTest(SimpleTestCase):
