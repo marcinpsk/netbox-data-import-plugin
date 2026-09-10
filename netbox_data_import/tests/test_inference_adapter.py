@@ -598,6 +598,19 @@ class ResponseDiagnosticTest(SimpleTestCase):
         self.assertEqual(caught.exception.diagnostic.receipt, BODY_ABSENT)
         self.assertIsNone(caught.exception.diagnostic.text)
 
+    def test_an_escaped_key_is_redacted_too(self):
+        """A JSON escape hides the key from a literal search but not from whoever decodes the body."""
+        escaped = API_KEY.replace("-", "\\u002d")
+
+        with serving(status=500, payload=f'{{"error": "key {escaped} rejected"}}') as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.diagnostic.redacted)
+        self.assertNotIn(API_KEY, caught.exception.diagnostic.text)
+        # The escaped form has to be gone too, or the key is one `json.loads` away.
+        self.assertNotIn("u002d", caught.exception.diagnostic.text)
+
     def test_no_diagnostic_carries_the_api_key(self):
         """The body is a new persistence surface, so the containment rule reaches it too."""
         for status in (401, 500):
