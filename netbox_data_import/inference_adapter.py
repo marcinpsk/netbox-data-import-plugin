@@ -58,13 +58,23 @@ class ResponseDiagnostic:
 ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
 
 
+def _echoes_key(text: str, api_key: str) -> bool:
+    """Return whether the body carries the credential, literally or behind a JSON escape."""
+    if api_key in text:
+        return True
+    try:
+        return api_key in json.dumps(json.loads(text), ensure_ascii=False)
+    except (ValueError, RecursionError):
+        return False
+
+
 def _diagnostic(response, api_key: str) -> ResponseDiagnostic:
     """Return the diagnostic one answered call carries, with the credential taken out of it."""
     try:
         text = response.text
     except Exception:  # noqa: BLE001 - a body that cannot be decoded is a lost body, not a new failure
         return ResponseDiagnostic(receipt=BODY_INTERRUPTED, status_code=response.status_code)
-    if api_key and api_key in text:
+    if api_key and _echoes_key(text, api_key):
         return ResponseDiagnostic(receipt=BODY_PRESENT, text=_REDACTED, status_code=response.status_code, redacted=True)
     receipt = BODY_PRESENT if text else BODY_EMPTY
     return ResponseDiagnostic(receipt=receipt, text=text, status_code=response.status_code)
