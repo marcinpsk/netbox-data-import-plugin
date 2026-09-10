@@ -40,6 +40,7 @@ BODY_PRESENT = "present"
 TRANSIENT_STATUSES = (500, 502, 503, 504)
 
 _REDACTED = "[redacted: the backend echoed the credential]"
+_UNDECODABLE = "[redacted: the response could not be decoded, so its content could not be established]"
 
 
 @dataclass(frozen=True)
@@ -59,16 +60,22 @@ class ResponseDiagnostic:
 ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
 
 
-_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
 _JSON_ESCAPE = re.compile(r'\\(u[0-9a-fA-F]{4}|["\\/bfnrt])')
 
 
-def _unescaped(text: str) -> str:
-    """Return *text* with JSON escape sequences resolved, for comparison only."""
-    return _JSON_ESCAPE.sub(
-        lambda match: chr(int(match.group(1)[1:], 16)) if match.group(1)[0] == "u" else _JSON_ESCAPES[match.group(1)],
-        text,
-    )
+def _decidable(text: str) -> bool:
+    """Return whether what this body says can be established, which is what makes keeping it safe.
+
+    Escapes can be layered without limit, so a body carrying them is only safe to keep when it
+    decodes and the walk below can read every string it holds.
+    """
+    if not _JSON_ESCAPE.search(text):
+        return True
+    try:
+        json.loads(text)
+    except (ValueError, RecursionError):
+        return False
+    return True
 
 
 def _echoes_key(text: str, api_key: str) -> bool:
@@ -77,8 +84,7 @@ def _echoes_key(text: str, api_key: str) -> bool:
     while pending:
         value = pending.pop()
         if isinstance(value, str):
-            # Escapes are resolved without decoding, so a body that never parses is covered too.
-            if api_key in value or api_key in _unescaped(value):
+            if api_key in value:
                 return True
             try:
                 # Members are flattened into the list so a key echoed as a member name is seen too.
@@ -100,6 +106,10 @@ def _diagnostic(response, api_key: str) -> ResponseDiagnostic:
         return ResponseDiagnostic(receipt=BODY_INTERRUPTED, status_code=response.status_code)
     if api_key and _echoes_key(text, api_key):
         return ResponseDiagnostic(receipt=BODY_PRESENT, text=_REDACTED, status_code=response.status_code, redacted=True)
+    if api_key and not _decidable(text):
+        return ResponseDiagnostic(
+            receipt=BODY_PRESENT, text=_UNDECODABLE, status_code=response.status_code, redacted=True
+        )
     receipt = BODY_PRESENT if text else BODY_EMPTY
     return ResponseDiagnostic(receipt=receipt, text=text, status_code=response.status_code)
 

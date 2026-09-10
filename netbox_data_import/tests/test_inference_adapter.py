@@ -638,6 +638,30 @@ class ResponseDiagnosticTest(SimpleTestCase):
         self.assertTrue(caught.exception.diagnostic.redacted)
         self.assertNotIn("u002d", caught.exception.diagnostic.text)
 
+    def test_a_body_that_cannot_be_decoded_is_not_retained(self):
+        """Escapes can be layered without limit, so an undecodable body is refused, not searched."""
+        doubled = API_KEY.replace("-", "\\\\u002d")
+
+        with serving(status=500, payload=f'{{"error": "key {doubled} rejected"') as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.diagnostic.redacted)
+        self.assertNotIn("u002d", caught.exception.diagnostic.text)
+
+    def test_a_plain_body_that_is_not_json_is_still_retained(self):
+        """Failing closed applies to escape sequences, not to every body that is not JSON."""
+        with serving(status=500, payload="upstream connect error, no healthy backend") as (
+            root,
+            _seen,
+            allowlist,
+        ):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.diagnostic.redacted)
+        self.assertIn("no healthy backend", caught.exception.diagnostic.text)
+
     def test_no_diagnostic_carries_the_api_key(self):
         """The body is a new persistence surface, so the containment rule reaches it too."""
         for status in (401, 500):
