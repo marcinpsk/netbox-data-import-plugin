@@ -190,7 +190,9 @@ class SelectTerminationTaskTest(TestCase):
             profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
         )
 
-        receipt = self.task.write_resolution(profile=self.profile, field_key=self.field_key, entry=snapshot.entries[1])
+        receipt = self.task.write_resolution(
+            actor=self.actor, profile=self.profile, field_key=self.field_key, entry=snapshot.entries[1]
+        )
 
         written = TerminationResolution.objects.get(pk=receipt.written_resolution_id)
         self.assertEqual(written.selected_object_id, self.interfaces[1].pk)
@@ -201,9 +203,13 @@ class SelectTerminationTaskTest(TestCase):
         snapshot = self.task.current(
             profile=self.profile, field_key=self.field_key, netbox_reader=self.reader(), limit=64
         )
-        first = self.task.write_resolution(profile=self.profile, field_key=self.field_key, entry=snapshot.entries[0])
+        first = self.task.write_resolution(
+            actor=self.actor, profile=self.profile, field_key=self.field_key, entry=snapshot.entries[0]
+        )
 
-        second = self.task.write_resolution(profile=self.profile, field_key=self.field_key, entry=snapshot.entries[2])
+        second = self.task.write_resolution(
+            actor=self.actor, profile=self.profile, field_key=self.field_key, entry=snapshot.entries[2]
+        )
 
         self.assertEqual(first.written_resolution_id, second.written_resolution_id)
         self.assertEqual(TerminationResolution.objects.filter(profile=self.profile).count(), 1)

@@ -68,26 +68,33 @@ class SelectTerminationTask:
         self._require_termination_role(field_key)
         return resolved_device_for(field_key, netbox_reader)
 
-    def write_resolution(self, *, profile, field_key, entry) -> DecisionReceipt:
+    def require_decision_permission(self, actor) -> None:
+        """Require the permission to create a manual Row Resolution for either decision."""
+        from .object_permissions import ObjectPermissionDenied
+
+        permission = "netbox_data_import.add_terminationresolution"
+        if actor is None or not actor.has_perm(permission):
+            raise ObjectPermissionDenied(permission)
+
+    def write_resolution(self, *, profile, field_key, entry, actor) -> DecisionReceipt:
         """Upsert the Row Resolution the accepted candidate names, and return only its id."""
         from core.models import ObjectType
 
-        from .models import TerminationResolution, index_digest
+        from .models import TerminationResolution
+        from .object_permissions import save_permission_scoped_object
 
         app_label, model = entry.object_type.split(".", 1)
         object_type = ObjectType.objects.get(app_label=app_label, model=model)
-        resolution, _created = TerminationResolution.objects.update_or_create(
-            profile=profile,
-            task_type=self.task_type,
-            field_key_digest=index_digest(field_key),
-            defaults={
-                "field_key": field_key,
-                "selected_object_type": object_type,
-                "selected_object_id": entry.object_id,
-                "selected_display_name": entry.display_name,
-            },
-        )
-        return DecisionReceipt(written_resolution_id=resolution.pk)
+        lookup = {"profile": profile, "task_type": self.task_type, "field_key": field_key}
+        values = {
+            "selected_object_type": object_type,
+            "selected_object_id": entry.object_id,
+            "selected_display_name": entry.display_name,
+        }
+        candidate = TerminationResolution(**lookup, **values)
+        candidate.full_clean(validate_unique=False, validate_constraints=False)
+        saved = save_permission_scoped_object(actor, TerminationResolution, lookup, values)
+        return DecisionReceipt(written_resolution_id=saved.instance.pk)
 
 
 register_proposal_task(SELECT_TERMINATION_TASK, SelectTerminationTask())
