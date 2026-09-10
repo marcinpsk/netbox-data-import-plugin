@@ -795,12 +795,16 @@ transaction. There are no change-signal listeners and no background sweeper.
 
 ### 7.5 Jobs and failures
 
-The job receives the Resolution Proposal id and the stable Inference Backend key, which is the
-backend's unique name. It never receives a database id for the backend and never receives a secret.
-The worker resolves the key itself: it reads the database row with that key first, and falls back to
-the `inference_backend` plugin setting with the same `name` only when no database row exists. The
-worker records which source it used in backend metadata, so an operator can tell a database-configured
-run from a file-configured run.
+The job receives the Resolution Proposal id alone. It never receives an Inference Backend key, a
+database id for a backend, or a secret. The worker resolves the active backend itself: the enabled
+database row, or the `inference_backend` plugin setting when no row is enabled. The worker records
+which source it used in backend metadata, so an operator can tell a database-configured run from a
+file-configured run.
+
+A value an operator can edit must never select a credential. A backend key in the payload is such a
+value, and the same-name file fallback would let a scoped operator steer resolution onto the
+deployment's own credential reference. Which backend is active is a deployment-level choice, so the
+worker makes it and the request does not carry it.
 
 The job issues one Inference Backend request at a time through the existing NetBox job system. Vault
 credentials resolve in the worker.
@@ -1279,11 +1283,13 @@ Three job types run through the NetBox job system:
 | Job | Input | Output |
 | --- | --- | --- |
 | Import execution | Import Profile id, `source_document`, accepted serialized plan, selection, idempotency key, actor | An `ImportExecution` row linked one-to-one from the native NetBox Job |
-| Inference proposal | Resolution Proposal id and the stable Inference Backend key | A completed, failed, or cancelled Resolution Proposal |
+| Inference proposal | Resolution Proposal id | A completed, failed, or cancelled Resolution Proposal |
 | Inference Backend connection test | The stable Inference Backend key | A typed result category, never a secret value or a Vault response body |
 
-No job receives a secret value or a database id for an Inference Backend. Import execution progress
-counts Synchronization Units and Planned Changes.
+No job receives a secret value or a database id for an Inference Backend. The connection test still
+carries a backend key, because an administrator starts it against one named row; a proposal carries
+none, because a scoped operator starts it from an editable field (section 7.5). Import execution
+progress counts Synchronization Units and Planned Changes.
 
 ### 10.7 Audit
 
