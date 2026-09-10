@@ -1,14 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 
-"""Apply NetBox's standard UI and API test contracts to import profiles."""
+"""Apply NetBox's standard UI and API test contracts to the plugin's own models."""
 
+import json
+
+from django.test import override_settings
 from utilities.testing import APIViewTestCases, ViewTestCases
 
 from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
-from netbox_data_import.models import ImportProfile
+from netbox_data_import.models import ImportProfile, InferenceBackend
 
 BASE_URL = "plugins:netbox_data_import:importprofile_{}"
+INFERENCE_BASE_URL = "plugins:netbox_data_import:inferencebackend_{}"
+
+# `clean()` validates `api_root` against this setting, so the contract needs it for every request.
+INFERENCE_ALLOWLIST = ("https://backend.example.invalid:443",)
+INFERENCE_REFERENCE = {
+    "backend": "vault_kv_v2",
+    "mount": "secret",
+    "path": "inference/backend",
+    "field": "api_key",
+}
 
 
 class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
@@ -104,3 +117,78 @@ class ImportProfileAPIViewTestCase(APIViewTestCases.APIViewTestCase):
         }
         # Lets NetBox run test_bulk_update_objects_validation_error, which needs a failing row.
         cls.bulk_update_invalid_data = {"source_adapter": "no_such_adapter"}
+
+
+@override_settings(
+    PLUGINS_CONFIG={"netbox_data_import": {"inference_backend_origin_allowlist": list(INFERENCE_ALLOWLIST)}}
+)
+class InferenceBackendViewTestCase(
+    ViewTestCases.GetObjectViewTestCase,
+    ViewTestCases.GetObjectChangelogViewTestCase,
+    ViewTestCases.CreateObjectViewTestCase,
+    ViewTestCases.EditObjectViewTestCase,
+    ViewTestCases.DeleteObjectViewTestCase,
+    ViewTestCases.ListObjectsViewTestCase,
+):
+    """Exercise the UI detail, list, CRUD and changelog views for AI backends.
+
+    The mixins are named one by one because `InferenceBackend` registers no bulk views. The REST
+    endpoint is read-only and covered by `test_inference_secret_containment`.
+    """
+
+    model = InferenceBackend
+    maxDiff = None
+    # Postgres orders jsonb keys by length, so the tests below compare the parsed mapping instead.
+    validation_excluded_fields = ["credential_reference"]
+
+    def _get_base_url(self):
+        return INFERENCE_BASE_URL
+
+    def test_create_object_with_permission(self):
+        """The create view stores the typed reference the form submitted."""
+        super().test_create_object_with_permission()
+        created = InferenceBackend.objects.get(backend_key=self.form_data["backend_key"])
+        self.assertEqual(created.credential_reference, INFERENCE_REFERENCE)
+
+    def test_edit_object_with_permission(self):
+        """The edit view stores the typed reference the form submitted."""
+        super().test_edit_object_with_permission()
+        edited = InferenceBackend.objects.get(backend_key=self.form_data["backend_key"])
+        self.assertEqual(edited.credential_reference, INFERENCE_REFERENCE)
+
+    @classmethod
+    def setUpTestData(cls):
+        # Every fixture stays disabled: a partial unique index permits only one enabled row.
+        InferenceBackend.objects.bulk_create(
+            [
+                InferenceBackend(
+                    backend_key=f"standard-backend-{index}",
+                    display_name=f"Standard backend {index}",
+                    adapter_type="openai_compatible",
+                    api_root=INFERENCE_ALLOWLIST[0],
+                    model="row-model",
+                    authentication="bearer",
+                    response_mode="prompt_json",
+                    credential_reference=INFERENCE_REFERENCE,
+                    connect_timeout=5,
+                    read_timeout=60,
+                    enabled=False,
+                )
+                for index in (1, 2, 3)
+            ]
+        )
+
+        cls.form_data = {
+            "backend_key": "standard-created-backend",
+            "display_name": "Standard created backend",
+            "adapter_type": "openai_compatible",
+            "api_root": INFERENCE_ALLOWLIST[0],
+            "model": "created-model",
+            "authentication": "bearer",
+            "response_mode": "prompt_json",
+            # A plain JSONField renders a textarea, so the contract submits the reference as JSON text.
+            "credential_reference": json.dumps(INFERENCE_REFERENCE),
+            "connect_timeout": 5,
+            "read_timeout": 60,
+            "enabled": False,
+        }

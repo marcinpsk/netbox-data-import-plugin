@@ -19,6 +19,7 @@ from ..models import (
     ColumnTransformRule,
     SourceResolution,
     ImportExecution,
+    InferenceBackend,
     validate_adapter_target_module,
     validate_contact_candidate_resolution,
     validate_section_applicability,
@@ -278,3 +279,33 @@ class ImportExecutionSerializer(serializers.ModelSerializer):
             "failure_detail",
         ]
         read_only_fields = fields
+
+
+class InferenceBackendSerializer(NetBoxModelSerializer):
+    """Serialize one Inference Backend row, without its credential reference.
+
+    NetBox resolves this class by model name to freeze a delete event payload.
+    """
+
+    class Meta:
+        model = InferenceBackend
+        fields = [
+            "id",
+            "url",
+            "display",
+            "backend_key",
+            "display_name",
+            "adapter_type",
+            "api_root",
+            "model",
+            "authentication",
+            "response_mode",
+            "connect_timeout",
+            "read_timeout",
+            "enabled",
+            "tags",
+            "custom_fields",
+            "created",
+            "last_updated",
+        ]
+        brief_fields = ["id", "url", "display", "backend_key", "display_name", "enabled"]
