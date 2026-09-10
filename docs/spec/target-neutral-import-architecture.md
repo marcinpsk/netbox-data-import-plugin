@@ -1458,6 +1458,10 @@ transaction.
 | Backend refusal: `finish_reason` `stop` with empty content or a refusal payload | Non-transient, typed reason `backend_refusal` | Set the row to `failed`, retain the raw response, never produce a candidate outcome, no automatic retry |
 | Invalid backend response: content is present but fails JSON parsing, schema validation, or candidate-id validation. A malformed envelope or a non-`stop` finish reason classifies here too | Non-transient, typed reason `invalid_response` | Set the row to `failed`, retain the raw response, never produce a candidate outcome, no automatic retry |
 
+The transient HTTP statuses are the four this table names. Every other status at or above 400 is
+non-transient, including any this table does not mention, so an unlisted status fails closed with its
+diagnostic instead of consuming the retry budget.
+
 A credential or backend failure affects only the Resolution Proposal request. Device, Rack, Cable, and
 Source Trace preview and import workflows stay available.
 

@@ -199,9 +199,10 @@ Three spec amendments are required and are the operator's call, not this design'
 - Section 7.5's editable-key lookup with same-name file fallback, and the job-payload summary in
   section 10.6. Both diverge from the ratified backend selection. The operator decided on
   2026-09-10 that they land inside T8's first pull request, with the code that diverges from them.
-- Section 13.3 does not name HTTP 408 Request Timeout. Round 5 inverted the adapter's default, so
-  408 is now non-transient. RFC 9110 permits a retry there but does not require one, so this is a
-  policy question for the specification rather than a defect.
+- ~~Section 13.3 does not name HTTP 408 Request Timeout.~~ **Decided 2026-09-10:** 408 stays
+  non-transient. RFC 9110 permits a retry there but does not require one. Rather than special-case
+  one status, 13.3 now states the rule the adapter implements: the four statuses it names are the
+  transient ones, and every other status at or above 400 fails closed with its diagnostic.
 
 ## Round 5 and revision r6
 
