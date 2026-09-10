@@ -35,8 +35,7 @@ BODY_INTERRUPTED = "interrupted"
 BODY_EMPTY = "empty"
 BODY_PRESENT = "present"
 
-# Specification 13.3: a request the operator must repair, as opposed to a backend that is busy.
-NON_TRANSIENT_STATUSES = (400, 404, 405)
+# Specification 13.3 enumerates the transient statuses. Every other error status is the request.
 TRANSIENT_STATUSES = (500, 502, 503, 504)
 
 _REDACTED = "[redacted: the backend echoed the credential]"
@@ -264,17 +263,17 @@ class OpenAICompatibleAdapter:
             raise RateLimited(
                 "The backend rate limited the call.", retry_after=_retry_after(response), diagnostic=diagnostic
             )
-        if status in NON_TRANSIENT_STATUSES:
+        if status in TRANSIENT_STATUSES:
+            raise TransportFailure(f"The backend answered HTTP {status}.", diagnostic=diagnostic)
+        if status >= 400:
             raise InvalidBackendConfiguration(
                 f"The backend rejected the request (HTTP {status}), which repeating cannot fix.",
                 diagnostic=diagnostic,
             )
-        if status >= 400:
-            # Every other error status is treated as the busy backend 13.3 describes.
-            raise TransportFailure(f"The backend answered HTTP {status}.", diagnostic=diagnostic)
         try:
             envelope = response.json()
-        except ValueError:
+        except (ValueError, RecursionError):
+            # Below Python 3.14 the decoder recurses, so deep nesting raises outside the ValueError tree.
             raise MalformedEnvelope(
                 "The backend answered with a body that is not JSON.", diagnostic=diagnostic
             ) from None
