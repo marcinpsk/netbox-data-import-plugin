@@ -3,7 +3,7 @@
 
 # T8 Resolution Proposal: design record
 
-Revision r5 (merged, after adversarial rounds 1-4). Split: the adapter diagnostic mechanism is deferred to #94. Scope: issue #95, the 13 acceptance criteria of ticket T8. Design only; no
+Revision r6 (RATIFIED at round 5, after adversarial rounds 1-5). The adapter diagnostic mechanism was split to #94 and is now an implemented prerequisite, not a deferral. Scope: issue #95, the 13 acceptance criteria of ticket T8. Design only; no T8
 production code exists yet.
 
 ## Problem, as a class
@@ -176,11 +176,7 @@ adapter work.
 
 ## Status
 
-**Blocked on one item.** Round 4 returned a split verdict on Scope A with the setting predicate and
-the diagnostic-carriage split CLOSED, and the retry-classification contract NOT-CLOSED. r5 revises
-that requirement per the stated closure condition. Under this skill's rules a split core gets one
-counted verdict round, so this is reported blocked rather than re-split; one further round against r5
-would settle it.
+**RATIFIED.** See "Round 5 and revision r6" below for the verdict and its scope.
 
 ## Split (round 3)
 
@@ -198,5 +194,76 @@ core design is ratifiable; the *delivery* of T8 waits on #94.
 
 ## Open work
 
-Two spec amendments are required and are the operator's call, not this design's: section 7.5's
-editable-key lookup with same-name file fallback, and the job-payload summary in section 10.6.
+Three spec amendments are required and are the operator's call, not this design's:
+
+- Section 7.5's editable-key lookup with same-name file fallback, and the job-payload summary in
+  section 10.6. Both diverge from the ratified backend selection. The operator decided on
+  2026-09-10 that they land inside T8's first pull request, with the code that diverges from them.
+- Section 13.3 does not name HTTP 408 Request Timeout. Round 5 inverted the adapter's default, so
+  408 is now non-transient. RFC 9110 permits a retry there but does not require one, so this is a
+  policy question for the specification rather than a defect.
+
+## Round 5 and revision r6
+
+Round 5 reviewed r5 against the implemented prerequisite and returned **BLOCKED**. It closed the
+design half of the retry requirement and blocked on two defects in the adapter itself.
+
+**Half B belongs to T8's first increment, not to this ratification.** The r5 requirement asked for
+contract tests "through real T8 persistence". Round 5 accepted that requiring them before any T8 code
+exists confuses design acceptance with delivery acceptance. They stay mandatory as acceptance
+conditions on T8's first increment: real adapter, real worker, real proposal row, proving one outbound
+attempt for 400/404/405 and three after repeated transient failures, with the terminal failure and its
+diagnostic stored.
+
+**Two defects in the prerequisite, both verified here before being accepted, both fixed in `ce49271`.**
+
+| # | Defect | Verification | Resolution |
+| --- | --- | --- | --- |
+| 5.1 | Every error status outside 400/404/405 was retryable | Reproduced 406, 409, 413, 415, 422 and 501 as `TransportFailure(retryable=True)` against a real local HTTP server | The default is inverted. Specification 13.3 enumerates the transient statuses and nothing else, so `TRANSIENT_STATUSES` decides and every other status at or above 400 is non-transient |
+| 5.2 | A decoder failure escaped `complete()` untyped | `response.json()` on `[`x10000 `0` `]`x10000, real `requests.Response`: **3.12.14 and 3.13.5 raise `RecursionError`, 3.14.4 parses it** | Caught with `ValueError`. Two tests, because the suite's own interpreter cannot reproduce the raise |
+
+5.2 carries a trap worth stating plainly: `requires-python` is `>=3.12.0`, so the defect is real on
+supported deployments, but the NetBox image the suite runs in ships Python 3.14.4, where CPython's
+decoder no longer recurses. An end-to-end test of that input alone would be an assertion incapable of
+failing. The guard that can fail on any interpreter drives the real `_read` with a `requests.Response`
+subclass whose `json()` raises, and removing `RecursionError` from the catch fails it.
+
+The unused-constant finding closed as a side effect of 5.1: `NON_TRANSIENT_STATUSES` is deleted, and
+specification 13.3's transient list now has one declaration that both `_read` and the test read.
+
+**New open question for the specification.** 13.3 does not name HTTP 408 Request Timeout. Under the
+inverted default it is now non-transient. That is the operator's call, not this design's.
+
+## Verdict
+
+`RATIFY — revision r5 core, prerequisite at ce49271`, returned after findings 5.1, 5.2 and the
+unused-constant finding closed against that commit and the independence objection was re-answered
+with the record in scope.
+
+The reviewer's reasoning on independence is recorded because it decides how this protocol treats a
+prerequisite: the rule that a retained core must stand "without the deferred mechanism" permits
+dependencies on established implementations, or an ordinary dependency on NetBox or the database
+would defeat every ratification. The adapter is still a correctness dependency of T8. Its required
+function is no longer deferred, because it is built, reviewed and lands first. The r5 text calling
+that mechanism "deferred", at lines 194-197, describes the state before ce49271 and is superseded.
+
+Ratification is not a claim that T8 passes its acceptance tests. It must still prove failure
+persistence through this interface.
+
+## First implementable increment
+
+The `ResolutionProposal` model, a hand-written migration, and the transition service.
+
+Observable acceptance conditions:
+
+- The five statuses and the edge table, each edge enforced by a conditional `UPDATE` whose rowcount
+  is the refusal.
+- The partial unique index refuses a second active row for one key.
+- Check constraints refuse a half-attributed decision, a `no_match` carrying a selection, and a
+  terminal row with no content.
+- `field_key_digest` is populated on write.
+- The migration depends on `("extras", "0001_initial")`, so the oldest job in the test matrix does
+  not error at setup.
+
+Carried into that increment, per the operator on 2026-09-10: the specification amendments to 7.5 and
+10.6, so the sections and the code that diverges from them change together.
