@@ -7,6 +7,8 @@ import json
 import pathlib
 import threading
 
+import requests
+
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -25,6 +27,7 @@ from netbox_data_import.inference_adapter import (
     OpenAICompatibleAdapter,
     RateLimited,
     TransportFailure,
+    TRANSIENT_STATUSES,
 )
 
 API_KEY = "sk-adapter-secret"
@@ -486,12 +489,21 @@ class RetryClassificationTest(SimpleTestCase):
                 self.assertFalse(failure.retryable)
 
     def test_a_temporary_backend_failure_is_retryable(self):
-        for status in (500, 502, 503, 504):
+        for status in TRANSIENT_STATUSES:
             with self.subTest(status=status):
                 failure = self.failure(status)
 
                 self.assertIsInstance(failure, TransportFailure)
                 self.assertTrue(failure.retryable)
+
+    def test_any_other_error_status_is_not_retryable(self):
+        """13.3 names four transient statuses; everything else at 400 and above is the request."""
+        for status in (406, 409, 413, 415, 422, 501):
+            with self.subTest(status=status):
+                failure = self.failure(status)
+
+                self.assertIsInstance(failure, InvalidBackendConfiguration)
+                self.assertFalse(failure.retryable)
 
     def test_a_credential_refusal_is_not_retryable(self):
         for status in (401, 403):
@@ -613,6 +625,35 @@ class InterruptedAndMalformedTransportTest(SimpleTestCase):
 
         self.assertEqual(caught.exception.diagnostic.receipt, BODY_INTERRUPTED)
         self.assertTrue(caught.exception.retryable)
+
+    def test_a_deeply_nested_body_stays_typed(self):
+        """On 3.12 and 3.13 the decoder recurses and raises; 3.14 parses it and the envelope fails."""
+        payload = "[" * 10000 + "0" + "]" * 10000
+
+        with serving(payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+        self.assertTrue(caught.exception.diagnostic.text.startswith("[[["))
+
+    def test_a_decode_failure_outside_the_value_error_tree_is_typed(self):
+        """The interpreter under test parses the body above, so the raise it makes is reproduced here."""
+
+        class Recursing(requests.Response):
+            def json(self, **kwargs):
+                raise RecursionError("maximum recursion depth exceeded")
+
+        response = Recursing()
+        response.status_code = 200
+        response._content = b'{"deep": true}'
+
+        with self.assertRaises(MalformedEnvelope) as caught:
+            adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])._read(response, API_KEY)
+
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.diagnostic.text, '{"deep": true}')
 
     def test_a_malformed_redirect_target_is_typed(self):
         """`requests` raises a bare ValueError while preparing it, which no caller can classify."""
