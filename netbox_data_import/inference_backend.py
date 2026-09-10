@@ -17,8 +17,11 @@ from .inference_settings import (
     FILE_FALLBACK_KEY,
     FILE_FALLBACK_SETTING,
     ORIGIN_ALLOWLIST_SETTING,
+    PROPOSAL_CANDIDATE_LIMIT_DEFAULT,
+    PROPOSAL_CANDIDATE_LIMIT_SETTING,
     validate_credential_reference,
     validate_file_fallback,
+    validate_proposal_candidate_limit,
 )
 from .inference_trust import InvalidInferenceConfiguration, validate_api_root
 
@@ -37,6 +40,14 @@ def plugin_settings() -> dict[str, Any]:
     from django.conf import settings
 
     return dict(settings.PLUGINS_CONFIG.get(PLUGIN_NAME, {}))
+
+
+def proposal_candidate_limit() -> int:
+    """Return the deployment's candidate bound, defaulted only when the key is omitted."""
+    config = plugin_settings()
+    if PROPOSAL_CANDIDATE_LIMIT_SETTING not in config:
+        return PROPOSAL_CANDIDATE_LIMIT_DEFAULT
+    return validate_proposal_candidate_limit(config[PROPOSAL_CANDIDATE_LIMIT_SETTING])
 
 
 def origin_allowlist() -> tuple[str, ...]:
@@ -156,6 +167,7 @@ __all__ = (
     "ResolvedInferenceBackend",
     "origin_allowlist",
     "plugin_settings",
+    "proposal_candidate_limit",
     "resolve_active_backend",
     "resolve_backend_by_id",
     "validate_backend_fields",

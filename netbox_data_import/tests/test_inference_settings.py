@@ -2,13 +2,18 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The three Inference Backend plugin settings and the startup shape gate (specification 8.2.1)."""
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
+from netbox_data_import.inference_backend import proposal_candidate_limit
 from netbox_data_import.inference_settings import (
     FILE_FALLBACK_KEY,
+    PROPOSAL_CANDIDATE_LIMIT_DEFAULT,
+    PROPOSAL_CANDIDATE_LIMIT_MAX,
+    PROPOSAL_CANDIDATE_LIMIT_SETTING,
     InvalidInferenceConfiguration,
     validate_credential_reference,
     validate_plugin_settings,
+    validate_proposal_candidate_limit,
 )
 
 
@@ -478,3 +483,55 @@ class VaultCaBundleTest(SimpleTestCase):
     def test_a_non_string_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration):
             validate_plugin_settings(settings_with(vault=self.vault(ca_bundle=["/a/b.pem"])))
+
+
+class ProposalCandidateLimitTest(SimpleTestCase):
+    """The candidate bound is a deployment setting, validated at startup (section 7.3)."""
+
+    def test_a_positive_integer_is_accepted(self):
+        self.assertEqual(validate_proposal_candidate_limit(96), 96)
+
+    def test_the_upper_bound_is_accepted(self):
+        self.assertEqual(validate_proposal_candidate_limit(PROPOSAL_CANDIDATE_LIMIT_MAX), PROPOSAL_CANDIDATE_LIMIT_MAX)
+
+    def test_a_value_past_the_range_is_rejected(self):
+        """`10**100` must never reach a database slice, because the retrieval materializes it."""
+        for value in (PROPOSAL_CANDIDATE_LIMIT_MAX + 1, 10**100):
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_proposal_candidate_limit(value)
+
+    def test_zero_and_negatives_are_rejected(self):
+        for value in (0, -1):
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_proposal_candidate_limit(value)
+
+    def test_a_boolean_is_rejected(self):
+        """`True` is numerically 1 and would silently admit a one-candidate set."""
+        for value in (True, False):
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_proposal_candidate_limit(value)
+
+    def test_a_float_a_string_and_none_are_rejected(self):
+        for value in (64.0, "64", None):
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_proposal_candidate_limit(value)
+
+    def test_startup_validation_reaches_it_without_any_other_inference_setting(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_plugin_settings({PROPOSAL_CANDIDATE_LIMIT_SETTING: 0})
+
+    def test_the_default_applies_only_when_the_key_is_omitted(self):
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {}}):
+            self.assertEqual(proposal_candidate_limit(), PROPOSAL_CANDIDATE_LIMIT_DEFAULT)
+
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: 128}}):
+            self.assertEqual(proposal_candidate_limit(), 128)
+
+    def test_a_configured_value_is_validated_when_it_is_read(self):
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: True}}):
+            with self.assertRaises(InvalidInferenceConfiguration):
+                proposal_candidate_limit()
