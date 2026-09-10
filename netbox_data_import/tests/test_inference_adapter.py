@@ -611,6 +611,25 @@ class ResponseDiagnosticTest(SimpleTestCase):
         # The escaped form has to be gone too, or the key is one `json.loads` away.
         self.assertNotIn("u002d", caught.exception.diagnostic.text)
 
+    def test_a_key_holding_json_syntax_is_redacted_too(self):
+        """A quote or a backslash is re-escaped by the encoder, so a literal search misses it.
+
+        A key holding a newline is not covered: `requests` raises `InvalidHeader` before the call, so
+        no backend ever receives it.
+        """
+        for secret in ('sk-"quote', "sk-back\\slash", "sk-tab\there"):
+            with self.subTest(secret=secret):
+                with serving(status=500, payload={"error": {"message": f"rejected {secret}"}}) as (
+                    root,
+                    _seen,
+                    allowlist,
+                ):
+                    with self.assertRaises(TransportFailure) as caught:
+                        adapter_for(root, allowlist).complete(REQUEST, api_key=secret)
+
+                self.assertTrue(caught.exception.diagnostic.redacted)
+                self.assertNotIn(secret, caught.exception.diagnostic.text)
+
     def test_no_diagnostic_carries_the_api_key(self):
         """The body is a new persistence surface, so the containment rule reaches it too."""
         for status in (401, 500):

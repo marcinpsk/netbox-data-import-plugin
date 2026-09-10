@@ -60,12 +60,22 @@ ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
 
 def _echoes_key(text: str, api_key: str) -> bool:
     """Return whether the body carries the credential, literally or behind a JSON escape."""
-    if api_key in text:
-        return True
-    try:
-        return api_key in json.dumps(json.loads(text), ensure_ascii=False)
-    except (ValueError, RecursionError):
-        return False
+    pending: list[object] = [text]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str):
+            if api_key in value:
+                return True
+            try:
+                # Members are flattened into the list so a key echoed as a member name is seen too.
+                pending.append(
+                    json.loads(value, object_pairs_hook=lambda pairs: [item for pair in pairs for item in pair])
+                )
+            except (ValueError, RecursionError):
+                continue
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False
 
 
 def _diagnostic(response, api_key: str) -> ResponseDiagnostic:
