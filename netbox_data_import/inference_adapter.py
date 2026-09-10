@@ -11,6 +11,7 @@ content means belongs to the application service, not here.
 """
 
 import json
+import re
 
 from dataclasses import dataclass
 from collections.abc import Sequence
@@ -58,13 +59,26 @@ class ResponseDiagnostic:
 ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
 
 
+_JSON_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_JSON_ESCAPE = re.compile(r'\\(u[0-9a-fA-F]{4}|["\\/bfnrt])')
+
+
+def _unescaped(text: str) -> str:
+    """Return *text* with JSON escape sequences resolved, for comparison only."""
+    return _JSON_ESCAPE.sub(
+        lambda match: chr(int(match.group(1)[1:], 16)) if match.group(1)[0] == "u" else _JSON_ESCAPES[match.group(1)],
+        text,
+    )
+
+
 def _echoes_key(text: str, api_key: str) -> bool:
     """Return whether the body carries the credential, literally or behind a JSON escape."""
     pending: list[object] = [text]
     while pending:
         value = pending.pop()
         if isinstance(value, str):
-            if api_key in value:
+            # Escapes are resolved without decoding, so a body that never parses is covered too.
+            if api_key in value or api_key in _unescaped(value):
                 return True
             try:
                 # Members are flattened into the list so a key echoed as a member name is seen too.
