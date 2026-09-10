@@ -498,7 +498,7 @@ class RetryClassificationTest(SimpleTestCase):
 
     def test_any_other_error_status_is_not_retryable(self):
         """13.3 names four transient statuses; everything else at 400 and above is the request."""
-        for status in (406, 409, 413, 415, 422, 501):
+        for status in (406, 408, 409, 413, 415, 422, 501):
             with self.subTest(status=status):
                 failure = self.failure(status)
 
@@ -612,11 +612,8 @@ class ResponseDiagnosticTest(SimpleTestCase):
         self.assertNotIn("u002d", caught.exception.diagnostic.text)
 
     def test_a_key_holding_json_syntax_is_redacted_too(self):
-        """A quote or a backslash is re-escaped by the encoder, so a literal search misses it.
-
-        A key holding a newline is not covered: `requests` raises `InvalidHeader` before the call, so
-        no backend ever receives it.
-        """
+        """A quote or a backslash is re-escaped by the encoder, so a literal search misses it."""
+        # A key holding a newline never reaches a backend, so it cannot be echoed back.
         for secret in ('sk-"quote', "sk-back\\slash", "sk-tab\there"):
             with self.subTest(secret=secret):
                 with serving(status=500, payload={"error": {"message": f"rejected {secret}"}}) as (
