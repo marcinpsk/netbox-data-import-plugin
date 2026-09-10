@@ -11,7 +11,6 @@ content means belongs to the application service, not here.
 """
 
 import json
-import re
 
 from dataclasses import dataclass
 from collections.abc import Sequence
@@ -60,16 +59,14 @@ class ResponseDiagnostic:
 ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
 
 
-_JSON_ESCAPE = re.compile(r'\\(u[0-9a-fA-F]{4}|["\\/bfnrt])')
-
-
 def _decidable(text: str) -> bool:
     """Return whether what this body says can be established, which is what makes keeping it safe.
 
-    Escapes can be layered without limit, so a body carrying them is only safe to keep when it
-    decodes and the walk below can read every string it holds.
+    A backslash introduces an escape in every notation worth worrying about, and escapes can be
+    layered without limit. A body carrying one is only safe to keep when it decodes, because the
+    walk below then reads every string it holds.
     """
-    if not _JSON_ESCAPE.search(text):
+    if "\\" not in text:
         return True
     try:
         json.loads(text)
