@@ -641,3 +641,121 @@ class PolicySerializerNetBoxBaseTest(BaseAPITestCase):
 
         row = ColumnMapping.objects.create(profile=self.profile, source_column="Nested", target_field="device_name")
         self.assertIs(ColumnMappingSerializer(nested=True).validate(row), row)
+
+
+class RegisteredAPIQuerySetTest(TestCase):
+    """Every registered resource must enforce its effective queryset contract."""
+
+    def test_registered_viewsets_apply_object_restriction(self):
+        from django.core.exceptions import EmptyResultSet
+        from rest_framework.test import APIRequestFactory, force_authenticate
+
+        from netbox_data_import.api.urls import router
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        for prefix, viewset, _basename in router.registry:
+            with self.subTest(viewset=viewset.__name__):
+                user = user_with_object_permission(
+                    f"restricted_{prefix}", [(viewset.queryset.model, ["view"], {"pk__in": []})]
+                )
+                raw_request = APIRequestFactory().get(f"/api/plugins/data-import/{prefix}/")
+                force_authenticate(raw_request, user=user)
+                view = viewset()
+                view.action_map = {"get": "list"}
+                view.args = ()
+                view.kwargs = {}
+                view.request = view.initialize_request(raw_request)
+                view.initial(view.request)
+
+                # Compilation must refuse all rows even when the model's table is empty.
+                with self.assertRaises(EmptyResultSet, msg=viewset.__name__):
+                    view.get_queryset().query.sql_with_params()
+
+    def test_registered_profile_viewsets_reject_noninteger_profile_id(self):
+        from rest_framework.test import APIClient
+
+        from netbox_data_import.api.urls import router
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        for prefix, viewset, _basename in router.registry:
+            model = viewset.queryset.model
+            if not any(field.attname == "profile_id" for field in model._meta.concrete_fields):
+                continue
+            with self.subTest(viewset=viewset.__name__):
+                client = APIClient()
+                client.force_authenticate(
+                    user=user_with_object_permission(f"invalid_{prefix}", [(model, ["view"], None)])
+                )
+                response = client.get(f"/api/plugins/data-import/{prefix}/", {"profile_id": "abc"})
+
+                self.assertEqual(response.status_code, 400, viewset.__name__)
+                self.assertIn("profile_id", response.json(), viewset.__name__)
+
+
+class ConstrainedProfileAPITest(TestCase):
+    """Object constraints must hold on both policy rows and execution history."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from netbox_data_import.models import ImportExecution
+
+        cls.allowed_profile = _make_profile("Allowed API Profile")
+        cls.hidden_profile = _make_profile("Hidden API Profile")
+        cls.rows = []
+        for profile in (cls.allowed_profile, cls.hidden_profile):
+            cls.rows.append(
+                (
+                    ColumnMapping.objects.create(profile=profile, source_column="Name", target_field="device_name"),
+                    ImportExecution.objects.create(profile=profile, input_filename="inventory.xlsx"),
+                )
+            )
+
+    def _endpoints(self):
+        from rest_framework.test import APIClient
+
+        from netbox_data_import.api.urls import router
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        for allowed, hidden in zip(*self.rows, strict=True):
+            model = type(allowed)
+            prefix = next(prefix for prefix, viewset, _basename in router.registry if viewset.queryset.model is model)
+            client = APIClient()
+            client.force_authenticate(
+                user=user_with_object_permission(
+                    f"constrained_{prefix}", [(model, ["view"], {"profile_id": self.allowed_profile.pk})]
+                )
+            )
+            yield client, f"/api/plugins/data-import/{prefix}/", allowed, hidden
+
+    def test_lists_exclude_objects_outside_the_constraint(self):
+        for client, url, allowed, _hidden in self._endpoints():
+            with self.subTest(endpoint=url):
+                response = client.get(url)
+                self.assertEqual(
+                    (response.status_code, [row["id"] for row in response.json()["results"]]), (200, [allowed.pk])
+                )
+
+    def test_details_hide_objects_outside_the_constraint(self):
+        for client, url, _allowed, hidden in self._endpoints():
+            with self.subTest(endpoint=url):
+                self.assertEqual(client.get(f"{url}{hidden.pk}/").status_code, 404)
+
+    def test_allowed_details_remain_visible(self):
+        for client, url, allowed, _hidden in self._endpoints():
+            with self.subTest(endpoint=url):
+                response = client.get(f"{url}{allowed.pk}/")
+                self.assertEqual((response.status_code, response.json().get("id")), (200, allowed.pk))
+
+    def test_invalid_profile_filters_return_a_field_error(self):
+        for client, url, _allowed, _hidden in self._endpoints():
+            for value in ("abc", "1.5", ""):
+                with self.subTest(endpoint=url, value=value):
+                    response = client.get(url, {"profile_id": value})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("profile_id", response.json())
+
+    def test_profile_filter_cannot_expand_object_access(self):
+        for client, url, _allowed, _hidden in self._endpoints():
+            with self.subTest(endpoint=url):
+                response = client.get(url, {"profile_id": self.hidden_profile.pk})
+                self.assertEqual((response.status_code, response.json()["results"]), (200, []))
