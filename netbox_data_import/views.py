@@ -3898,6 +3898,30 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
 
         summary["saved_decisions"] = TerminationResolution.objects.filter(profile=profile).count()
         summary["preview_state"] = self._preview_state(request, drift)
+        from .proposal_presentation import ProposalPresentation
+
+        reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
+        proposal_fields = proposal_display.fields(selected.terminations if selected else [])
+        if selected is not None:
+            selected = replace(
+                selected,
+                terminations=[
+                    {**field, "proposal": proposal_fields[field["field_key"]]["presentation"]}
+                    for field in selected.terminations
+                ],
+            )
+        from .models import ProposalStatus, ResolutionProposal
+
+        if proposal_display.view_reason:
+            summary["active_proposals"] = "Not permitted"
+        else:
+            summary["active_proposals"] = ResolutionProposal.objects.filter(
+                profile=profile,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key__in=_workspace_field_keys(workspace),
+                status__in=ProposalStatus.ACTIVE,
+            ).count()
         return render(
             request,
             "netbox_data_import/trace_workspace.html",
@@ -3905,6 +3929,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "profile": profile,
                 "traces": traces,
                 "selected_trace": selected,
+                "proposal_fields": proposal_fields,
                 "summary": summary,
                 "drift": drift,
                 "retained_sync_reason": retained_reason,
@@ -4152,31 +4177,6 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
         reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
         return profile, document, workspace, planning_context, reader
 
-    @staticmethod
-    def proposal_payload(proposal, reader):
-        """Return the audit record with both computed freshness triggers."""
-        from .api.serializers import ResolutionProposalSerializer
-        from .proposal_decisions import proposal_staleness
-
-        record = ResolutionProposalSerializer(proposal).data
-        if reader is None:
-            return {
-                "ok": True,
-                "proposal": record,
-                "staleness": None,
-                "staleness_error": "The saved import target is gone or outside your view scope.",
-            }
-        stale = proposal_staleness(proposal, netbox_reader=reader)
-        return {
-            "ok": True,
-            "proposal": record,
-            "staleness": {
-                "is_stale": stale.is_stale,
-                "resolved_device_changed": stale.resolved_device_changed,
-                "candidates_changed": stale.candidates_changed,
-            },
-        }
-
     def dispatch(self, request, *args, **kwargs):
         """Translate domain refusals into the workspace JSON envelope."""
         from .proposal_tasks import UnusableCandidateSet
@@ -4277,7 +4277,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
 
 
 class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
-    """Read the most recent attempt for a field, independent of its originating plan."""
+    """Read all attempts for a field, independent of their originating plans."""
 
     permission_required = "netbox_data_import.view_importprofile"
     preview_profile_action = "view"
@@ -4285,23 +4285,21 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
     def get(self, request):
         """Return the current proposal and name each freshness trigger."""
         from .field_keys import parse_termination_field_key
-        from .models import ResolutionProposal
+        from .proposal_presentation import ProposalPresentation
 
-        profile, _document, _workspace, planning_context = self.proposal_preview(request)
+        profile, _document, workspace, planning_context = self.proposal_preview(request)
         field_key = request.GET.get("field_key", "").strip()
         parse_termination_field_key(field_key)
-        proposal = (
-            ResolutionProposal.objects.filter(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key)
-            .order_by("-created", "-pk")
-            .first()
+        field = next(
+            (item for trace in workspace.traces for item in trace.terminations if item["field_key"] == field_key),
+            {"field_key": field_key, "state": "", "offered": False},
         )
-        if proposal is None:
-            return JsonResponse({"ok": True, "proposal": None, "staleness": None})
         try:
             reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
         except PlanningTargetUnavailable:
             reader = None
-        return JsonResponse(self.proposal_payload(proposal, reader))
+        presentation = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
+        return JsonResponse(presentation.fields([field])[field_key])
 
 
 class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, View):
