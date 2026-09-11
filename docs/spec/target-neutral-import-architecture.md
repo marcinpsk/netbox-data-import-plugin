@@ -1232,14 +1232,16 @@ Proposal card contract:
 | --- | --- |
 | Completed with a candidate | A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, backend metadata with attempt count, and explicit Accept and Reject buttons |
 | Completed and stale | The same card with a "Proposal - stale, not applied" badge and a disabled Accept action showing its reason |
-| Completed with no match | The backend's own explanation of why the evidence did not distinguish the candidates, and no accept action |
+| Completed with no match | The backend's own explanation of why the evidence did not distinguish the candidates, and a disabled accept action naming that reason |
 | Failed | The typed failure reason, including `backend_refusal` for a refusal or an empty-content completion, and an Ask AI again action that creates a new proposal |
 | Queued or running | Live progress refreshed in place, with its own cancel action |
 
 A pending card polls its own state every 3 seconds and stops on a terminal state (spec default). The
 operator never leaves the field to learn what the Inference Backend is doing.
 
-Every action is always visible. An illegal action renders disabled with its reason underneath.
+Every action is always visible. An illegal action renders disabled with its reason underneath, never
+hidden: an absent control tells the operator nothing about why it is absent. The proposal card itself
+appears only once a proposal exists, so Accept and Reject are card actions and not field actions.
 
 A per-field proposal history list shows every attempt, its status, and its outcome.
 
@@ -1794,7 +1796,7 @@ permissions at the view boundary.
 - A completed card shows the "Proposal - not applied" badge, the candidate with its kind, the
   explanation, the backend metadata with attempt count, and explicit Accept and Reject buttons.
 - A stale card shows the stale badge and a disabled Accept with its reason.
-- A no-match card has no accept action; a failed card offers Ask AI again.
+- A no-match card has a disabled accept action with its reason; a failed card offers Ask AI again.
 - Accepting writes a `TerminationResolution` row, marks the termination `accepted`, and triggers a
   replan.
 - Cancel is offered to any operator with request permission, not only the requester.
