@@ -874,6 +874,8 @@ class ImportExecution(models.Model):
     #: A synchronous attempt cannot outlive the web request bound, so an older pending row is gone.
     SYNCHRONOUS_BOUND = timedelta(minutes=10)
 
+    objects = RestrictedQuerySet.as_manager()
+
     profile = models.ForeignKey(
         ImportProfile,
         on_delete=models.SET_NULL,
