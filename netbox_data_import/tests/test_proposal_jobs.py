@@ -14,9 +14,9 @@ from http.server import ThreadingHTTPServer
 from core.models import Job, ObjectType
 
 from django.db import connections
-from django.test import TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 
-from netbox_data_import import inference_adapter, inference_credentials
+from netbox_data_import import inference_adapter, inference_credentials, proposal_jobs
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
 from netbox_data_import.jobs import ResolutionProposalJob
 from netbox_data_import.models import InferenceBackend, ProposalFailureReason, ProposalOutcome, ProposalStatus
@@ -39,6 +39,29 @@ def answer(outcome="candidate", candidate_id="candidate-0001", **changes):
             **changes,
         }
     )
+
+
+class ProposalRetryDelayTest(SimpleTestCase):
+    def test_retry_delay_clamps_rate_limit(self):
+        error = inference_adapter.RateLimited("Rate limited.", retry_after=86400)
+        for attempt in (0, 1):
+            with self.subTest(attempt=attempt):
+                self.assertEqual(proposal_jobs._retry_delay(attempt, error), proposal_jobs.MAX_RETRY_AFTER_SECONDS)
+
+    def test_retry_delay_honors_rate_limit_within_cap(self):
+        error = inference_adapter.RateLimited("Rate limited.", retry_after=5)
+        self.assertEqual(proposal_jobs._retry_delay(0, error), 5)
+
+    def test_retry_delay_uses_exponential_backoff(self):
+        for error in (
+            inference_adapter.TransportFailure("Unavailable."),
+            inference_adapter.RateLimited("Rate limited."),
+        ):
+            for attempt in (0, 1):
+                with self.subTest(error=type(error).__name__, attempt=attempt):
+                    delay = proposal_jobs._retry_delay(attempt, error)
+                    self.assertGreaterEqual(delay, 2**attempt)
+                    self.assertLess(delay, 2**attempt + 1)
 
 
 class WorkerFixture:
