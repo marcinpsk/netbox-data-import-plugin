@@ -1,0 +1,30 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+<div class="ndi-proposal-card mt-2" data-proposal-display>
+  <div role="status" aria-live="polite">
+    <span class="badge ndi-proposal-badge" data-proposal-badge>{{ termination.proposal.badge }}</span>
+    <span data-proposal-progress {% if not termination.proposal.pending %}hidden{% endif %}>
+      <i class="mdi mdi-loading mdi-spin" aria-hidden="true"></i> Waiting for the backend...
+    </span>
+  </div>
+  <p class="fw-bold mt-2 mb-1" data-proposal-candidate>{{ termination.proposal.candidate }}</p>
+  <p class="mb-2" data-proposal-explanation>{{ termination.proposal.explanation }}</p>
+  <p class="text-danger" data-proposal-failure>{{ termination.proposal.failure }}</p>
+  <div class="text-secondary small" data-proposal-attempts>Backend attempts: {{ termination.proposal.attempt_count }}</div>
+  <ul class="list-unstyled text-secondary small" data-proposal-metadata>
+    {% for item in termination.proposal.metadata %}<li>{{ item.label }}: {{ item.value }}</li>{% endfor %}
+  </ul>
+  <div class="ndi-trace-actions mt-2">
+    {% for action in termination.proposal.actions|slice:"2:" %}
+      {% include 'netbox_data_import/_proposal_action.html' %}
+    {% endfor %}
+  </div>
+</div>
+<details class="mt-2" data-proposal-history-disclosure>
+  <summary>Proposal history</summary>
+  <ul class="list-unstyled small" data-proposal-history>
+    {% for attempt in termination.proposal_history %}
+      <li>#{{ attempt.id }} · {{ attempt.created }} · {{ attempt.status }} · {{ attempt.outcome }}{% if attempt.decision %} · {{ attempt.decision }}{% endif %}{% if attempt.failure %} · {{ attempt.failure }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+</details>

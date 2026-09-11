@@ -44,7 +44,27 @@
     var badge = node(card, 'state');
     badge.textContent = display.field_state;
     badge.className = 'badge ' + badge.dataset.proposalStatePrefix + display.state_style;
-    node(card, 'display').hidden = !payload.proposal;
+    var content = node(card, 'content');
+    if (payload.proposal && !node(card, 'display')) {
+      content.appendChild(node(card, 'template').content.cloneNode(true));
+    } else if (!payload.proposal) {
+      content.replaceChildren();
+    }
+    if (payload.proposal) renderProposal(card, payload);
+    display.actions.forEach(function (action) {
+      var button = card.querySelector('[data-proposal-action="' + action.key + '"]');
+      if (!button) return;
+      button.textContent = action.label;
+      button.disabled = state.busy || Boolean(action.reason);
+      var reason = card.querySelector('[data-proposal-reason="' + action.key + '"]');
+      reason.textContent = action.reason;
+      reason.hidden = !action.reason;
+    });
+    schedule(card);
+  }
+
+  function renderProposal(card, payload) {
+    var display = payload.presentation;
     ['badge', 'candidate', 'explanation'].forEach(function (name) {
       node(card, name).textContent = display[name];
     });
@@ -59,14 +79,6 @@
       row.textContent = item.label + ': ' + item.value;
       metadata.appendChild(row);
     });
-    display.actions.forEach(function (action) {
-      var button = card.querySelector('[data-proposal-action="' + action.key + '"]');
-      button.textContent = action.label;
-      button.disabled = state.busy || Boolean(action.reason);
-      var reason = card.querySelector('[data-proposal-reason="' + action.key + '"]');
-      reason.textContent = action.reason;
-      reason.hidden = !action.reason;
-    });
     var history = node(card, 'history');
     history.replaceChildren();
     payload.history_display.forEach(function (attempt) {
@@ -76,8 +88,7 @@
         + (attempt.failure ? ' · ' + attempt.failure : '');
       history.appendChild(row);
     });
-    node(card, 'empty-history').hidden = payload.history_display.length > 0;
-    schedule(card);
+    node(card, 'history-disclosure').hidden = payload.history_display.length === 0;
   }
 
   async function readResponse(response) {

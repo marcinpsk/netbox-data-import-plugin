@@ -36,6 +36,18 @@ export function completed(overrides = {}) {
 }
 
 export function fixture(initial = payload()) {
+  const actions = items => items.map(action => `
+    <button type="button" data-proposal-action="${action.key}">${action.label}</button>
+    <div data-proposal-reason="${action.key}" hidden></div>`).join('');
+  const proposal = `
+    <div data-proposal-display>
+      <span data-proposal-badge></span><span data-proposal-progress hidden>Waiting for the backend...</span>
+      <div data-proposal-candidate></div><div data-proposal-explanation></div><div data-proposal-failure></div>
+      <div data-proposal-attempts></div><ul data-proposal-metadata></ul>
+      ${actions(initial.presentation.actions.slice(2))}
+    </div>
+    <details open data-proposal-history-disclosure><summary>Proposal history</summary>
+      <ul data-proposal-history></ul></details>`;
   return `
     <base href="http://preview.test/">
     <style>[hidden] { display: none !important; }</style>
@@ -44,16 +56,9 @@ export function fixture(initial = payload()) {
     <script type="application/json" id="traceProposalFields">${JSON.stringify({field: initial}).replaceAll('<', '\\u003c')}</script>
     <div data-proposal-field="field" data-proposal-url="/proposal/" data-preview-revision="revision-1">
       <span class="badge ndi-trace-state-unknown" data-proposal-state data-proposal-state-prefix="ndi-trace-state-"></span>
-      ${initial.presentation.actions.map(action => `
-        <button type="button" data-proposal-action="${action.key}">${action.label}</button>
-        <div data-proposal-reason="${action.key}" hidden></div>`).join('')}
-      <div data-proposal-display hidden>
-        <span data-proposal-badge></span><span data-proposal-progress hidden>Waiting for the backend...</span>
-        <div data-proposal-candidate></div><div data-proposal-explanation></div><div data-proposal-failure></div>
-        <div data-proposal-attempts></div><ul data-proposal-metadata></ul>
-      </div>
-      <details open><summary>Proposal history</summary><ul data-proposal-history></ul>
-        <div data-proposal-empty-history>No attempts.</div></details>
+      <div data-proposal-content>${initial.proposal ? proposal : ''}</div>
+      <template data-proposal-template>${proposal}</template>
+      <div data-proposal-field-actions>${actions(initial.presentation.actions.slice(0, 2))}</div>
       <div data-proposal-error hidden></div>
     </div>`;
 }

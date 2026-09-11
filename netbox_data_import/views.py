@@ -3898,7 +3898,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
 
         summary["saved_decisions"] = TerminationResolution.objects.filter(profile=profile).count()
         summary["preview_state"] = self._preview_state(request, drift)
-        from .proposal_presentation import ProposalPresentation
+        from .proposal_presentation import ProposalPresentation, group_terminations
 
         reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
         proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
@@ -3907,10 +3907,15 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             selected = replace(
                 selected,
                 terminations=[
-                    {**field, "proposal": proposal_fields[field["field_key"]]["presentation"]}
+                    {
+                        **field,
+                        "proposal": proposal_fields[field["field_key"]]["presentation"],
+                        "proposal_history": proposal_fields[field["field_key"]]["history_display"],
+                    }
                     for field in selected.terminations
                 ],
             )
+        attention, settled = group_terminations(selected.terminations if selected else [])
         from .models import ProposalStatus, ResolutionProposal
 
         if proposal_display.view_reason:
@@ -3930,6 +3935,8 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "traces": traces,
                 "selected_trace": selected,
                 "proposal_fields": proposal_fields,
+                "attention_terminations": attention,
+                "settled_terminations": settled,
                 "summary": summary,
                 "drift": drift,
                 "retained_sync_reason": retained_reason,

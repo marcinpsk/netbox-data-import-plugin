@@ -719,6 +719,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["attempt_count"], 1)
         self.assertEqual(data["metadata"], [{"label": "backend model", "value": "fixture-model"}])
         self.assertEqual(data["actions"][0]["label"], "Ask AI again")
+        for action in data["actions"][2:]:
+            self.assertEqual(action["reason"], "The proposal failed: Backend refusal (backend_refusal).")
 
     def test_candidate_missing_from_the_snapshot_reads_as_unacceptable(self):
         """The reader must refuse what acceptance refuses, not fail the whole workspace."""
@@ -868,19 +870,15 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
         proposal = self.completed(no_match=True)
         response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
-        html = response.content.decode()
+        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
         buttons = re.findall(r'<button\b[^>]*data-proposal-action="([^"]+)"([^>]*)>', html)
         self.assertEqual(
             [(key, "disabled" in attributes, "hidden" in attributes) for key, attributes in buttons],
             [
-                ("request", True, False),
-                ("cancel", True, False),
                 ("accept", True, False),
                 ("reject", False, False),
                 ("request", True, False),
                 ("cancel", True, False),
-                ("accept", True, False),
-                ("reject", True, False),
             ],
         )
         reason = response.context["proposal_fields"][self.field_key]["presentation"]["actions"][2]["reason"]
@@ -890,3 +888,74 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertRegex(html, r'<script src="[^"]*/trace_proposals.js[^"]*"></script>')
         script = re.search(r'<script id="traceProposalFields" type="application/json">(.*?)</script>', html)
         self.assertEqual(json.loads(script.group(1))[self.field_key]["proposal"]["id"], proposal.pk)
+
+    def test_no_proposal_has_only_field_actions_and_no_history(self):
+        import re
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
+        field = re.search(r"<li\b[^>]*data-proposal-field=.*?</li>", html, re.DOTALL).group()
+        self.assertNotIn('data-proposal-action="accept"', field)
+        self.assertNotIn('data-proposal-action="reject"', field)
+        self.assertNotIn('class="ndi-proposal-card', field)
+        self.assertNotIn("Proposal history", field)
+        self.assertIn("Choose termination</button>", field)
+        for key, reason in [
+            ("request", "No Inference Backend is enabled or configured as a fallback."),
+            ("cancel", "There is no active proposal."),
+        ]:
+            self.assertRegex(field, rf'<button\b[^>]*data-proposal-action="{key}"[^>]*disabled')
+            self.assertRegex(
+                field, rf'<div\b(?![^>]*\bhidden\b)[^>]*data-proposal-reason="{key}"[^>]*>{re.escape(reason)}</div>'
+            )
+
+    def test_settled_terminations_collapse_below_the_topology_panels(self):
+        import re
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
+        settled = re.search(r"<details\b[^>]*data-trace-settled.*?</details>", html, re.DOTALL)
+        self.assertIsNotNone(settled)
+        group = settled.group()
+        self.assertNotRegex(group.split(">", 1)[0], r"\bopen\b")
+        self.assertIn("1 termination(s) resolved automatically by exact name match", group)
+        self.assertIn("DEV-B eth1", group)
+        self.assertIn("interface", group)
+        self.assertIn("<td>eth1</td>", group)
+        self.assertIn('class="badge ndi-trace-state-auto"', group)
+        self.assertNotIn("data-proposal-field", group)
+        self.assertNotIn("<button", group)
+        self.assertNotIn("DEV-A absent-port", group)
+        attention = html[html.index("data-trace-terminations") : settled.start()]
+        self.assertRegex(attention, r">\s*DEV-A absent-port\s*<span")
+        self.assertNotIn("DEV-B eth1", attention)
+        self.assertLess(html.index("Proposed physical topology"), html.index("data-trace-terminations"))
+        self.assertRegex(html, r'</div>\s*</div>\s*<section class="mt-3" data-trace-terminations>')
+
+    def test_automatic_match_with_history_stays_in_attention(self):
+        proposal = self.completed(no_match=True)
+        resolved = termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
+        ResolutionProposal.objects.filter(pk=proposal.pk).update(field_key=resolved)
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertNotContains(response, "data-trace-settled")
+        self.assertContains(response, "data-proposal-field=", count=2)
+
+    def test_all_settled_terminations_explain_that_none_need_attention(self):
+        Interface.objects.create(device=self.device_a, name="absent-port", type="1000base-t")
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY]},
+        )
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertContains(response, "Every termination on this trace resolves to a NetBox port.")
+        self.assertContains(response, "2 termination(s) resolved automatically by exact name match")
+        self.assertNotContains(response, "data-proposal-field=")
+
+    def test_decided_proposal_explains_both_disabled_decisions(self):
+        proposal = self.completed(no_match=True)
+        self.call("reject_proposal", proposal_id=proposal.pk)
+        self.operator(view_only=True)
+        self.assertEqual(
+            [action["reason"] for action in self.presentation()["actions"][2:]],
+            ["This proposal already has a decision.", "This proposal already has a decision."],
+        )
