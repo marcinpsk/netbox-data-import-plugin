@@ -515,6 +515,15 @@ class RetryClassificationTest(SimpleTestCase):
     def test_a_rate_limit_is_retryable(self):
         self.assertTrue(self.failure(429).retryable)
 
+    def test_a_timeout_is_retryable(self):
+        with serving(delay=3) as (root, _seen, allowlist):
+            adapter = adapter_for(root, allowlist, read_timeout=1)
+
+            with self.assertRaises(BackendTimeout) as caught:
+                adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.retryable)
+
     def test_an_unreachable_backend_is_retryable(self):
         adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])
 
@@ -711,6 +720,28 @@ class ResponseDiagnosticTest(SimpleTestCase):
                 self.assertTrue(caught.exception.diagnostic.redacted)
                 self.assertNotIn("adapter", caught.exception.diagnostic.text)
                 self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_an_undecodable_inner_escape_is_not_retained(self):
+        payload = json.dumps({"error": API_KEY.replace("s", "\\u0073", 1)})
+
+        with serving(status=500, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.diagnostic.redacted)
+        self.assertNotIn(API_KEY, caught.exception.diagnostic.text)
+        self.assertNotIn("0073", caught.exception.diagnostic.text)
+        self.assertNotIn("adapter", caught.exception.diagnostic.text)
+
+    def test_an_escaped_key_takes_precedence_over_an_undecodable_inner_escape(self):
+        payload = json.dumps({"error": API_KEY, "detail": "\\x73"}).replace(API_KEY, API_KEY.replace("s", "\\u0073", 1))
+
+        with serving(status=500, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.diagnostic.redacted)
+        self.assertEqual(caught.exception.diagnostic.text, "[redacted: the backend echoed the credential]")
 
     def test_a_plain_body_that_is_not_json_is_still_retained(self):
         """Failing closed applies to escape sequences, not to every body that is not JSON."""
