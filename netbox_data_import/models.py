@@ -704,6 +704,28 @@ def index_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+class DigestIndexedMixin(models.Model):
+    """Keep a source field and its fixed-width index digest synchronized."""
+
+    DIGEST_SOURCE_FIELD: str
+    DIGEST_FIELD: str
+
+    class Meta:
+        abstract = True
+
+    def _derive_digest(self):
+        """Derive the configured index digest from the current source text."""
+        setattr(self, self.DIGEST_FIELD, index_digest(getattr(self, self.DIGEST_SOURCE_FIELD)))
+
+    def save(self, *args, **kwargs):
+        """Derive the digest and include it when a partial save writes its source."""
+        self._derive_digest()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and self.DIGEST_SOURCE_FIELD in update_fields:
+            kwargs["update_fields"] = {*update_fields, self.DIGEST_FIELD}
+        return super().save(*args, **kwargs)
+
+
 def _canonical_termination_field_key(value):
     """Return *value* when it is an exact canonical termination field key."""
     try:
@@ -716,10 +738,12 @@ def _canonical_termination_field_key(value):
     return value
 
 
-class TerminationResolution(PolicySectionModel):
+class TerminationResolution(DigestIndexedMixin, PolicySectionModel):
     """Store one selected NetBox termination for a trace field-key role."""
 
     POLICY_SECTION = "termination_resolutions"
+    DIGEST_SOURCE_FIELD = "field_key"
+    DIGEST_FIELD = "field_key_digest"
 
     profile = models.ForeignKey(
         ImportProfile,
@@ -763,17 +787,7 @@ class TerminationResolution(PolicySectionModel):
             _canonical_termination_field_key(self.field_key)
         except ValidationError as exc:
             raise ValidationError({"field_key": exc}) from exc
-        # Before validate_unique, which reads the constraint's own fields.
-        self.field_key_digest = index_digest(self.field_key)
-
-    def save(self, *args, **kwargs):
-        """Derive the index key, so no caller can store one that disagrees with the field key."""
-        self.field_key_digest = index_digest(self.field_key)
-        update_fields = kwargs.get("update_fields")
-        # A partial save of the key alone would leave the constraint on the digest it replaced.
-        if update_fields is not None and "field_key" in update_fields:
-            kwargs["update_fields"] = {*update_fields, "field_key_digest"}
-        super().save(*args, **kwargs)
+        self._derive_digest()
 
     def __str__(self):
         return f"{self.task_type}: {self.selected_display_name}"
@@ -1548,12 +1562,15 @@ class DeviceImportSource(models.Model):
         return f"{self.source_id or '(no source ID)'} → Device #{self.device_id}"
 
 
-class CableImportSource(models.Model):
+class CableImportSource(DigestIndexedMixin):
     """Import provenance the plugin keeps for one Cable and one contributing Source Trace.
 
     Two Source Traces that state one identical segment share one created Cable, so the Cable
     reference is a plain foreign key and the row is keyed by the trace as well (section 5.7).
     """
+
+    DIGEST_SOURCE_FIELD = "trace_identity"
+    DIGEST_FIELD = "trace_key"
 
     cable = models.ForeignKey(
         to="dcim.Cable",
@@ -1594,16 +1611,7 @@ class CableImportSource(models.Model):
     def clean(self):
         """Derive the index key before validate_unique reads the constraint's own fields."""
         super().clean()
-        self.trace_key = index_digest(self.trace_identity)
-
-    def save(self, *args, **kwargs):
-        """Derive the index key, so no caller can store one that disagrees with the identity."""
-        self.trace_key = index_digest(self.trace_identity)
-        update_fields = kwargs.get("update_fields")
-        # A partial save of the identity alone would leave the constraint on the digest it replaced.
-        if update_fields is not None and "trace_identity" in update_fields:
-            kwargs["update_fields"] = {*update_fields, "trace_key"}
-        super().save(*args, **kwargs)
+        self._derive_digest()
 
     class Meta:
         ordering = ["cable", "profile", "trace_identity"]
