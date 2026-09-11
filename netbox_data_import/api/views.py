@@ -6,6 +6,7 @@ from django.http import Http404
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import viewsets, permissions
 from rest_framework.permissions import DjangoModelPermissions
+from rest_framework.exceptions import ValidationError
 
 from ..models import (
     locked_profile_policy,
@@ -58,7 +59,23 @@ class ImportProfileViewSet(NetBoxModelViewSet):
     serializer_class = ImportProfileSerializer
 
 
-class _PluginModelViewSet(viewsets.ModelViewSet):
+class _ProfileScopedQuerySetMixin(viewsets.GenericViewSet):
+    """Restrict profile-owned rows and validate their optional profile filter."""
+
+    def get_queryset(self):
+        """Return viewable rows, filtered by a valid profile ID when supplied."""
+        qs = super().get_queryset().restrict(self.request.user, "view")
+        profile_id = self.request.query_params.get("profile_id")
+        if profile_id is not None:
+            try:
+                profile_id = int(profile_id)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError({"profile_id": "Enter a whole number."}) from exc
+            qs = qs.filter(profile_id=profile_id)
+        return qs
+
+
+class _PluginModelViewSet(_ProfileScopedQuerySetMixin, viewsets.ModelViewSet):
     """Base class for plain-model viewsets in this plugin."""
 
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
@@ -70,28 +87,12 @@ class ColumnMappingViewSet(_PluginModelViewSet):
     queryset = ColumnMapping.objects.select_related("profile")
     serializer_class = ColumnMappingSerializer
 
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
-
 
 class ClassRoleMappingViewSet(_PluginModelViewSet):
     """CRUD viewset for ClassRoleMapping."""
 
     queryset = ClassRoleMapping.objects.select_related("profile", "rack_type")
     serializer_class = ClassRoleMappingSerializer
-
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
 
 
 class DeviceTypeMappingViewSet(_PluginModelViewSet):
@@ -100,14 +101,6 @@ class DeviceTypeMappingViewSet(_PluginModelViewSet):
     queryset = DeviceTypeMapping.objects.select_related("profile")
     serializer_class = DeviceTypeMappingSerializer
 
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
-
 
 class IgnoredDeviceViewSet(_PluginModelViewSet):
     """CRUD viewset for IgnoredDevice."""
@@ -115,28 +108,12 @@ class IgnoredDeviceViewSet(_PluginModelViewSet):
     queryset = IgnoredDevice.objects.select_related("profile")
     serializer_class = IgnoredDeviceSerializer
 
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
-
 
 class ColumnTransformRuleViewSet(_PluginModelViewSet):
     """CRUD viewset for ColumnTransformRule."""
 
     queryset = ColumnTransformRule.objects.select_related("profile")
     serializer_class = ColumnTransformRuleSerializer
-
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
 
 
 def _revalidate_against_the_stored_row(serializer):
@@ -186,29 +163,13 @@ class SourceResolutionViewSet(_PluginModelViewSet):
         except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
             raise Http404 from None
 
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
 
-
-class ImportExecutionViewSet(viewsets.ReadOnlyModelViewSet):
+class ImportExecutionViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModelViewSet):
     """Read-only viewset for the Import Execution audit history."""
 
     queryset = ImportExecution.objects.select_related("profile")
     serializer_class = ImportExecutionSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
-
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
 
 
 class InferenceBackendViewSet(NetBoxReadOnlyModelViewSet):
