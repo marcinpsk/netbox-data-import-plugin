@@ -315,7 +315,10 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
     def test_read_without_an_attempt_returns_null(self):
         response = self.call("proposal", field_key=self.field_key)
-        self.assertEqual(response.json(), {"ok": True, "proposal": None, "staleness": None})
+        self.assertEqual(
+            {key: response.json()[key] for key in ("ok", "proposal", "staleness", "history")},
+            {"ok": True, "proposal": None, "staleness": None, "history": []},
+        )
 
     def test_cancel_queued_and_running_by_another_operator(self):
         for running in (False, True):
@@ -566,3 +569,239 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(response.json()["proposal"]["id"], proposal.pk)
         self.assertIsNone(response.json()["staleness"])
         self.assertIn("outside your view scope", response.json()["staleness_error"])
+
+    def presentation(self, field_key=None):
+        return self.call("proposal", field_key=field_key or self.field_key).json()["presentation"]
+
+    def test_history_returns_every_attempt_newest_first_with_status_and_outcome(self):
+        first = self.completed(no_match=True)
+        second = self.request_proposal()
+        cancel_proposal(second.pk)
+        latest = self.request_proposal()
+        payload = self.call("proposal", field_key=self.field_key).json()
+        self.assertEqual(payload["proposal"]["id"], latest.pk)
+        self.assertEqual(
+            [(row["id"], row["status"], row["outcome"]) for row in payload["history"]],
+            [
+                (latest.pk, ProposalStatus.QUEUED, ""),
+                (second.pk, ProposalStatus.CANCELLED, ""),
+                (first.pk, ProposalStatus.COMPLETED, ProposalOutcome.NO_MATCH),
+            ],
+        )
+
+        self.assertEqual(
+            [(row["id"], row["status"], row["outcome"]) for row in payload["history_display"]],
+            [
+                (latest.pk, "Queued", "No outcome"),
+                (second.pk, "Cancelled", "No outcome"),
+                (first.pk, "Completed", "No match"),
+            ],
+        )
+
+    def test_history_excludes_other_profiles_and_fields(self):
+        other = self.completed()
+        other_profile = ImportProfile.objects.create(name="Other history", source_adapter="trace_workbook")
+        ResolutionProposal.objects.filter(pk=other.pk).update(profile=other_profile)
+        wrong_field = self.completed()
+        ResolutionProposal.objects.filter(pk=wrong_field.pk).update(
+            field_key=termination_field_key(device="DEV-B", cards="", port="absent-port", kind="interface")
+        )
+        own = self.completed()
+        payload = self.call("proposal", field_key=self.field_key).json()
+        self.assertEqual([row["id"] for row in payload["history"]], [own.pk])
+        self.operator(view_only=True, profile_scope=other_profile.pk)
+        response = self.call("proposal", field_key=self.field_key)
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn("history", response.json())
+
+    def test_profile_view_only_can_read_history_without_target_access(self):
+        proposal = self.completed()
+        actor = user_with_object_permission("history-viewer", [(ImportProfile, ["view"], {"pk": self.profile.pk})])
+        self.login_with_preview(actor)
+        payload = self.call("proposal", field_key=self.field_key).json()
+        self.assertEqual([row["id"] for row in payload["history"]], [proposal.pk])
+        self.assertIsNone(payload["staleness"])
+        self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
+
+    def test_workspace_supplies_affordances_without_editing_the_plan(self):
+        from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
+
+        before = self.client.session[PREVIEW_PLAN_SESSION_KEY]
+        with override_settings(
+            PLUGINS_CONFIG={
+                "netbox_data_import": {
+                    "inference_backend": FALLBACK,
+                    "inference_backend_origin_allowlist": ALLOWLIST,
+                }
+            }
+        ):
+            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        fields = response.context["proposal_fields"]
+        self.assertEqual(fields[self.field_key]["presentation"]["actions"][0]["reason"], "")
+        resolved = termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
+        self.assertIn("already resolved", fields[resolved]["presentation"]["actions"][0]["reason"])
+        self.assertEqual(self.client.session[PREVIEW_PLAN_SESSION_KEY], before)
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {}}):
+            self.assertIn("No Inference Backend", self.presentation()["actions"][0]["reason"])
+
+    def test_active_proposal_disables_request_and_allows_another_operator_to_cancel(self):
+        self.request_proposal()
+        self.operator()
+        actions = {row["key"]: row for row in self.presentation()["actions"]}
+        self.assertIn("active proposal", actions["request"]["reason"])
+        self.assertEqual(actions["cancel"]["reason"], "")
+        self.assertTrue(self.presentation()["pending"])
+        self.assertEqual(self.presentation()["field_state"], "proposed")
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertEqual(response.context["summary"]["active_proposals"], 1)
+        self.assertTrue(response.context["selected_trace"].terminations[0]["proposal"]["pending"])
+        self.operator(device=False)
+        actions = {row["key"]: row for row in self.presentation()["actions"]}
+        self.assertIn("Device", actions["cancel"]["reason"])
+
+    def test_candidate_actions_follow_decision_permission_and_staleness(self):
+        self.completed()
+        self.operator()
+        data = self.presentation()
+        self.assertEqual(data["badge"], "Proposal - not applied")
+        self.assertEqual(data["candidate"], "eth0 (Interface)")
+        actions = {row["key"]: row for row in data["actions"]}
+        self.assertIn("permission", actions["accept"]["reason"])
+        self.assertEqual(actions["reject"]["reason"], "")
+        self.operator(decide=True)
+        self.assertEqual(self.presentation()["actions"][2]["reason"], "")
+        self.eth0.name = "renamed"
+        self.eth0.save()
+        data = self.presentation()
+        self.assertEqual(data["badge"], "Proposal - stale, not applied")
+        self.assertEqual(data["field_state"], "stale")
+        self.assertIn("changed", data["actions"][2]["reason"])
+
+    def test_no_match_has_disabled_accept_and_explanation(self):
+        self.completed(no_match=True)
+        data = self.presentation()
+        self.assertIn("no match", data["actions"][2]["reason"])
+        self.assertEqual(data["explanation"], "The candidate matches the source label.")
+        self.assertFalse(data["pending"])
+
+    def test_accept_then_reread_presents_accepted_termination(self):
+        proposal = self.completed()
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 200)
+        before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {
+                "preview_revision": before,
+            },
+            follow=True,
+        )
+        self.assertNotEqual(self.client.session[PREVIEW_REVISION_SESSION_KEY], before)
+        data = response.context["proposal_fields"][self.field_key]["presentation"]
+        self.assertEqual(data["field_state"], "accepted")
+        self.assertEqual(data["badge"], "Accepted")
+        self.assertIn("already resolved", data["actions"][0]["reason"])
+
+    def test_failed_card_retains_typed_reason_backend_and_attempt_count(self):
+        from netbox_data_import.models import ProposalFailureReason
+        from netbox_data_import.resolution_proposals import fail_proposal
+
+        proposal = self.request_proposal()
+        claim_proposal(proposal.pk)
+        fail_proposal(
+            proposal.pk,
+            reason=ProposalFailureReason.BACKEND_REFUSAL,
+            backend_metadata={"backend_model": "fixture-model", "attempts": [{"attempt": 1}]},
+        )
+        data = self.presentation()
+        self.assertEqual(data["failure_code"], ProposalFailureReason.BACKEND_REFUSAL)
+        self.assertEqual(data["field_state"], ProposalStatus.FAILED)
+        self.assertEqual(data["failure"], "Backend refusal")
+        self.assertEqual(data["attempt_count"], 1)
+        self.assertEqual(data["metadata"], [{"label": "backend model", "value": "fixture-model"}])
+        self.assertEqual(data["actions"][0]["label"], "Ask AI again")
+
+    def test_backend_resolution_runs_once_for_all_displayed_fields(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_data_import.tests.test_inference_backend import ALLOWLIST, make_row
+
+        make_row(enabled=True)
+        with (
+            override_settings(
+                PLUGINS_CONFIG={
+                    "netbox_data_import": {
+                        "inference_backend_origin_allowlist": ALLOWLIST,
+                    }
+                }
+            ),
+            CaptureQueriesContext(connection) as queries,
+        ):
+            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        fields = response.context["proposal_fields"]
+        self.assertGreater(len(fields), 1)
+        self.assertEqual(fields[self.field_key]["presentation"]["actions"][0]["reason"], "")
+        backend_reads = [query for query in queries if 'FROM "netbox_data_import_inferencebackend"' in query["sql"]]
+        self.assertEqual(len(backend_reads), 1)
+
+    def test_profile_view_permission_disables_request_and_reject(self):
+        self.completed()
+        self.operator(view_only=True)
+        actions = {row["key"]: row for row in self.presentation()["actions"]}
+        self.assertIn("permission", actions["request"]["reason"])
+        self.assertIn("permission", actions["reject"]["reason"])
+
+    def test_mapped_peer_has_a_manual_reason(self):
+        from netbox_data_import.field_keys import MAPPED_PEER_ROLE
+
+        key = termination_field_key(
+            device="DEV-A", cards="", port="absent-port", kind="interface", role=MAPPED_PEER_ROLE
+        )
+        data = self.presentation(key)
+        self.assertTrue(data["actions"][0]["reason"])
+        self.assertIn("mapped peer", data["actions"][1]["reason"])
+
+    def test_history_for_a_field_outside_the_preview_disables_every_command(self):
+        proposal = self.completed()
+        other_key = termination_field_key(device="DEV-A", cards="", port="older-port", kind="interface")
+        ResolutionProposal.objects.filter(pk=proposal.pk).update(field_key=other_key)
+        payload = self.call("proposal", field_key=other_key).json()
+        self.assertEqual([row["id"] for row in payload["history"]], [proposal.pk])
+        self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
+
+    def test_active_history_outside_the_preview_disables_cancel(self):
+        proposal = self.request_proposal()
+        other_key = termination_field_key(device="DEV-A", cards="", port="older-port", kind="interface")
+        ResolutionProposal.objects.filter(pk=proposal.pk).update(field_key=other_key)
+        payload = self.call("proposal", field_key=other_key).json()
+        self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
+
+    def test_workspace_history_requires_profile_view_scope_even_with_preview_access(self):
+        from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
+
+        self.completed()
+        other = ImportProfile.objects.create(name="Visible profile", source_adapter="trace_workbook")
+        actor = user_with_object_permission(
+            "preview-without-history",
+            [
+                (ImportProfile, ["change"], {"pk": self.profile.pk}),
+                (ImportProfile, ["view"], {"pk": other.pk}),
+                (Site, ["view"], {}),
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+            ],
+        )
+        self.login_with_preview(actor)
+        with override_settings(
+            PLUGINS_CONFIG={
+                "netbox_data_import": {
+                    "inference_backend": FALLBACK,
+                    "inference_backend_origin_allowlist": ALLOWLIST,
+                }
+            }
+        ):
+            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        payload = response.context["proposal_fields"][self.field_key]
+        self.assertEqual((payload["proposal"], payload["history"]), (None, []))
+        self.assertEqual(response.context["summary"]["active_proposals"], "Not permitted")
+        self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
