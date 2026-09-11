@@ -115,7 +115,7 @@ def retire_preview_revision(session) -> str:
     return revision
 
 
-def load_cached_preview(request, *, profile_action="change"):
+def load_cached_preview(request, *, profile_action="change", require_revision=False):
     """Return the active Import Profile and materialized Review Workspace."""
     from .models import ImportProfile
     from .plan import PlanError
@@ -130,7 +130,7 @@ def load_cached_preview(request, *, profile_action="change"):
     ):
         return None
     revision = current_preview_revision(request.session)
-    if "application/json" in request.headers.get("Accept", ""):
+    if require_revision or "application/json" in request.headers.get("Accept", ""):
         # A read carries its revision in the query, because a GET has no posted body to hold it.
         posted = request.POST.get("preview_revision", request.GET.get("preview_revision"))
         if posted != revision:

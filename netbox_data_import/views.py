@@ -3801,10 +3801,15 @@ class _TraceWorkspaceMixin:
     """Load the reviewed preview a trace workspace request acts on."""
 
     preview_profile_action = "change"
+    requires_preview_revision = False
 
     def reviewed_preview(self, request):
         """Return the profile, the stored document and the reviewed workspace, or None."""
-        preview = load_cached_preview(request, profile_action=self.preview_profile_action)
+        preview = load_cached_preview(
+            request,
+            profile_action=self.preview_profile_action,
+            require_revision=self.requires_preview_revision,
+        )
         if preview is None:
             return None
         profile, workspace = preview
@@ -4124,12 +4129,18 @@ class InvalidProposalId(ValueError):
 class _TraceProposalMixin(_TraceWorkspaceMixin):
     """Bind proposal operations to the acting operator's preview and inventory scope."""
 
-    def proposal_context(self, request):
-        """Return the preview and scoped reader, refusing requests without a preview."""
+    requires_preview_revision = True
+
+    def proposal_preview(self, request):
+        """Return the reviewed context, refusing requests without a preview."""
         loaded = self.reviewed_preview(request)
         if loaded is None:
             raise PreviewActionInvalid("No import preview in progress.")
-        profile, document, workspace, planning_context = loaded
+        return loaded
+
+    def proposal_context(self, request):
+        """Return the preview and scoped reader, refusing requests without a preview."""
+        profile, document, workspace, planning_context = self.proposal_preview(request)
         reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
         return profile, document, workspace, planning_context, reader
 
@@ -4253,10 +4264,7 @@ class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
         from .field_keys import parse_termination_field_key
         from .models import ResolutionProposal
 
-        loaded = self.reviewed_preview(request)
-        if loaded is None:
-            raise PreviewActionInvalid("No import preview in progress.")
-        profile, _document, _workspace, planning_context = loaded
+        profile, _document, _workspace, planning_context = self.proposal_preview(request)
         field_key = request.GET.get("field_key", "").strip()
         parse_termination_field_key(field_key)
         proposal = (
@@ -4277,12 +4285,17 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
     """Locate a proposal within this preview's profile before applying a decision."""
 
     permission_required = "netbox_data_import.change_importprofile"
+    requires_reader = True
 
     def post(self, request):
         """Refuse an unavailable attempt or a transition that another operator already took."""
         from .models import ResolutionProposal
 
-        profile, _document, workspace, _context, reader = self.proposal_context(request)
+        if self.requires_reader:
+            profile, _document, workspace, _context, reader = self.proposal_context(request)
+        else:
+            profile, _document, workspace, _context = self.proposal_preview(request)
+            reader = None
         try:
             proposal_id = int(request.POST.get("proposal_id", ""))
         except ValueError:
@@ -4339,6 +4352,8 @@ class TraceAcceptProposalView(_TraceProposalActionView):
 
 class TraceRejectProposalView(_TraceProposalActionView):
     """Record the explicit rejection without binding it to the requesting operator."""
+
+    requires_reader = False
 
     def apply(self, proposal, request, reader):
         """Reject through the permission-checked decision service."""
