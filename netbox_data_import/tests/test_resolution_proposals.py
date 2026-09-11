@@ -138,6 +138,13 @@ class ProposalEdgeTableTest(ProposalFixture):
                     self.assertEqual(self.status_of(proposal), target)
                     proposal.delete()
 
+    def test_a_second_claim_is_refused(self):
+        proposal = self.make_proposal()
+        self.assertIs(claim_proposal(proposal.pk), True)
+        self.assertEqual(self.status_of(proposal), ProposalStatus.RUNNING)
+
+        self.assertIs(claim_proposal(proposal.pk), False)
+
     def test_every_other_transition_is_refused(self):
         """The rowcount is the refusal, so a forbidden edge returns False and leaves the row alone."""
         moves = (ProposalStatus.RUNNING, ProposalStatus.COMPLETED, ProposalStatus.FAILED, ProposalStatus.CANCELLED)
@@ -169,6 +176,14 @@ class OneActiveProposalTest(ProposalFixture):
         second = self.make_proposal(field_key=self.other_field_key)
 
         self.assertEqual(second.status, ProposalStatus.QUEUED)
+
+    def test_duplicate_request_keeps_the_callers_transaction_usable(self):
+        with transaction.atomic():
+            first = self.make_proposal()
+            with self.assertRaises(ActiveProposalExists):
+                self.make_proposal()
+
+            self.assertEqual(ResolutionProposal.objects.get(pk=first.pk).status, ProposalStatus.QUEUED)
 
     def test_a_new_proposal_is_allowed_once_the_first_is_terminal(self):
         """A retry is always a new row, so the index must stop blocking the key at a terminal status."""

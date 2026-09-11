@@ -6,7 +6,7 @@ Every ordering-dependent rule is a conditional `UPDATE` whose rowcount is the re
 by a write would let a cancellation and a late worker response both believe they won.
 """
 
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import (
@@ -59,7 +59,8 @@ def request_proposal(
         requested_by=requested_by,
     )
     try:
-        proposal.save()
+        with transaction.atomic():
+            proposal.save()
     except IntegrityError as exc:
         if "ndi_resolutionproposal_one_active" not in str(exc):
             raise

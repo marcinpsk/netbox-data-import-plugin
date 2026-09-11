@@ -96,8 +96,21 @@ def run_proposal(proposal_id):
     """Claim, call and record one proposal. Conditional transitions let cancellation win."""
     if not claim_proposal(proposal_id):
         return
-    proposal = ResolutionProposal.objects.get(pk=proposal_id)
     metadata = {"attempts": []}
+    try:
+        _run_claimed_proposal(proposal_id, metadata)
+    except Exception:
+        fail_proposal(
+            proposal_id,
+            reason=ProposalFailureReason.TEMPORARY_BACKEND_FAILURE,
+            backend_metadata=metadata,
+        )
+        raise
+
+
+def _run_claimed_proposal(proposal_id, metadata):
+    """Resolve credentials and execute a proposal whose worker owns the claim."""
+    proposal = ResolutionProposal.objects.get(pk=proposal_id)
     try:
         backend = resolve_active_backend()
         metadata.update(backend.metadata())
@@ -113,7 +126,7 @@ def run_proposal(proposal_id):
     except CredentialFailure as exc:
         fail_proposal(
             proposal_id,
-            reason=CREDENTIAL_FAILURE_REASONS[exc.category],
+            reason=CREDENTIAL_FAILURE_REASONS.get(exc.category, ProposalFailureReason.CREDENTIAL_UNAVAILABLE),
             response_diagnostic=asdict(ABSENT_DIAGNOSTIC),
             backend_metadata=metadata,
         )
@@ -154,7 +167,7 @@ def run_proposal(proposal_id):
                 diagnostic = asdict(exc.diagnostic)
                 retryable = exc.retryable
             else:
-                reason = CREDENTIAL_FAILURE_REASONS[exc.category]
+                reason = CREDENTIAL_FAILURE_REASONS.get(exc.category, ProposalFailureReason.CREDENTIAL_UNAVAILABLE)
                 diagnostic = asdict(ABSENT_DIAGNOSTIC)
                 retryable = isinstance(exc, CredentialUnavailable)
             metadata["attempts"].append({"attempt": attempt + 1, "reason": reason, "diagnostic": diagnostic})

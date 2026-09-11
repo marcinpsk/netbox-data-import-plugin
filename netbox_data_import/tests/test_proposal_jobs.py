@@ -16,11 +16,11 @@ from core.models import Job, ObjectType
 from django.db import connections
 from django.test import TransactionTestCase, override_settings
 
-from netbox_data_import import inference_adapter
+from netbox_data_import import inference_adapter, inference_credentials
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
 from netbox_data_import.jobs import ResolutionProposalJob
-from netbox_data_import.models import ProposalFailureReason, ProposalOutcome, ProposalStatus
-from netbox_data_import.proposal_jobs import ADAPTER_FAILURE_REASONS, run_proposal
+from netbox_data_import.models import InferenceBackend, ProposalFailureReason, ProposalOutcome, ProposalStatus
+from netbox_data_import.proposal_jobs import ADAPTER_FAILURE_REASONS, CREDENTIAL_FAILURE_REASONS, run_proposal
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, request_proposal
 from netbox_data_import.tests.test_inference_adapter import RecordingBackend, completion, serving, serving_truncated
 from netbox_data_import.tests.test_inference_connection_test import make_row
@@ -120,6 +120,73 @@ class WorkerFixture:
 
 
 class ProposalWorkerTest(WorkerFixture, ProposalFixture):
+    def test_every_credential_category_has_an_explicit_mapping(self):
+        categories = {
+            cls.category
+            for _, cls in inspect.getmembers(inference_credentials, inspect.isclass)
+            if issubclass(cls, inference_credentials.CredentialFailure)
+        }
+        self.assertEqual(set(CREDENTIAL_FAILURE_REASONS), categories)
+
+    def omit_credential_mapping(self, category):
+        reason = CREDENTIAL_FAILURE_REASONS.pop(category)
+        self.addCleanup(CREDENTIAL_FAILURE_REASONS.__setitem__, category, reason)
+
+    def test_unmapped_reference_failure_reaches_a_terminal_status(self):
+        self.omit_credential_mapping("invalid_credential_reference")
+        proposal = self.frozen_proposal()
+        with serving() as (root, _seen, allowed), self.configured(root, allowed):
+            InferenceBackend.objects.update(credential_reference={})
+            run_proposal(proposal.pk)
+
+        proposal.refresh_from_db()
+        self.assertEqual(
+            (proposal.status, proposal.failure_reason),
+            (ProposalStatus.FAILED, ProposalFailureReason.CREDENTIAL_UNAVAILABLE),
+        )
+
+    def test_unmapped_store_failure_reaches_a_terminal_status(self):
+        self.omit_credential_mapping("credential_denied")
+        proposal = self.frozen_proposal()
+        with serving() as (root, _seen, allowed), self.configured(root, allowed, vault_status=403):
+            run_proposal(proposal.pk)
+
+        proposal.refresh_from_db()
+        self.assertEqual(
+            (proposal.status, proposal.failure_reason),
+            (ProposalStatus.FAILED, ProposalFailureReason.CREDENTIAL_UNAVAILABLE),
+        )
+
+    def test_unexpected_snapshot_error_fails_and_releases_the_active_slot(self):
+        proposal = self.frozen_proposal()
+        proposal.candidate_snapshot = {}
+        proposal.save()
+        with serving() as (root, _seen, allowed), self.configured(root, allowed):
+            with self.assertRaises(KeyError):
+                run_proposal(proposal.pk)
+
+        proposal.refresh_from_db()
+        self.assertEqual(
+            (proposal.status, proposal.failure_reason),
+            (ProposalStatus.FAILED, ProposalFailureReason.TEMPORARY_BACKEND_FAILURE),
+        )
+        self.assertEqual(self.frozen_proposal().status, ProposalStatus.QUEUED)
+
+    def test_unexpected_selection_error_fails_and_releases_the_active_slot(self):
+        proposal = self.frozen_proposal()
+        proposal.candidate_snapshot["candidates"][0]["object_type"] = "dcim.missing"
+        proposal.save()
+        with serving(payload=completion(answer())) as (root, _seen, allowed), self.configured(root, allowed):
+            with self.assertRaises(ObjectType.DoesNotExist):
+                run_proposal(proposal.pk)
+
+        proposal.refresh_from_db()
+        self.assertEqual(
+            (proposal.status, proposal.failure_reason),
+            (ProposalStatus.FAILED, ProposalFailureReason.TEMPORARY_BACKEND_FAILURE),
+        )
+        self.assertEqual(self.frozen_proposal().status, ProposalStatus.QUEUED)
+
     def test_every_adapter_error_has_an_explicit_mapping(self):
         errors = {
             cls
