@@ -27,6 +27,18 @@ STATE_STYLES = {
 }
 
 
+def group_terminations(fields):
+    """Keep exact matches without proposal history in the compact settled group."""
+    attention, settled = [], []
+    for field in fields:
+        display = field["proposal"]
+        group = (
+            settled if display["field_state"] == AUTOMATICALLY_RESOLVED and not field["proposal_history"] else attention
+        )
+        group.append(field)
+    return attention, settled
+
+
 def _action(key, label, reason):
     return {
         "key": key,
@@ -199,10 +211,12 @@ class ProposalPresentation:
         if not field.get("offered", True):
             request_reason = "This preview asked no question about that termination."
         decision_reason = "" if completed else "Wait for a completed proposal."
+        if proposal is not None and proposal.status == ProposalStatus.FAILED:
+            decision_reason = (
+                f"The proposal failed: {proposal.get_failure_reason_display()} ({proposal.failure_reason})."
+            )
         if not field.get("offered", True):
             decision_reason = "This preview asked no question about that termination."
-        if proposal is not None and proposal.decision:
-            decision_reason = "This proposal already has a decision."
         accept_reason = decision_reason
         if not accept_reason and proposal.outcome == ProposalOutcome.NO_MATCH:
             accept_reason = "The backend found no match. There is no candidate to accept."
@@ -210,6 +224,8 @@ class ProposalPresentation:
         if not self.preview_allowed or not proposal_task(SELECT_TERMINATION_TASK).has_decision_permission(self.actor):
             accept_reason = "You do not have permission to save a termination resolution."
         reject_reason = decision_reason if self.preview_allowed else "You do not have permission to reject proposals."
+        if proposal is not None and proposal.decision:
+            accept_reason = reject_reason = "This proposal already has a decision."
         actions = [
             _action(
                 "request",

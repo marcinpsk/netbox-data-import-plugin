@@ -176,3 +176,25 @@ test('a saved acceptance explains why an active sync prevents the replan', async
   await expect(slot(page, 'error')).toHaveText('The resolution was saved. Re-read the workspace when the active sync finishes.');
   expect(await page.evaluate(() => window.replans)).toBe(0);
 });
+
+test('a first request adds the card and history while field actions stay outside it', async ({page}) => {
+  const initial = completed({field_state: 'unresolved', state_style: 'unresolved'});
+  initial.proposal = null;
+  initial.history_display = [];
+  await serve(page, payload());
+  await page.route('**/request/', route => route.fulfill({json: {ok: true, proposal_id: 7}}));
+  await mount(page, initial);
+  await expect(slot(page, 'display')).toHaveCount(0);
+  await expect(action(page, 'accept')).toHaveCount(0);
+  await expect(action(page, 'reject')).toHaveCount(0);
+  await expect(slot(page, 'history')).toHaveCount(0);
+  await expect(action(page, 'request')).toBeVisible();
+  await expect(action(page, 'cancel')).toBeDisabled();
+  await expect(page.locator('[data-proposal-reason="cancel"]')).toHaveText('There is no active proposal.');
+  await action(page, 'request').click();
+  await expect(slot(page, 'display')).toBeVisible();
+  await expect(slot(page, 'display').locator('[data-proposal-action]')).toHaveText(['Accept', 'Reject']);
+  await expect(slot(page, 'progress')).toBeVisible();
+  await expect(action(page, 'cancel')).toBeEnabled();
+  await expect(slot(page, 'history').locator('li')).toHaveCount(1);
+});

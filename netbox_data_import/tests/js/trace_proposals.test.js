@@ -82,7 +82,7 @@ it('renders candidate details as text and every history attempt', () => {
     '#7 · 2026-09-11T08:00:00+00:00 · Queued · No outcome',
     '#6 · earlier · Failed · No outcome · Timeout',
   ]);
-  expect(node('empty-history').hidden).toBe(true);
+  expect(node('history-disclosure').hidden).toBe(false);
 });
 
 it('keeps stale and no-match accept buttons visible and disabled with their reason', () => {
