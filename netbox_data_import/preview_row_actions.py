@@ -115,7 +115,7 @@ def retire_preview_revision(session) -> str:
     return revision
 
 
-def load_cached_preview(request):
+def load_cached_preview(request, *, profile_action="change"):
     """Return the active Import Profile and materialized Review Workspace."""
     from .models import ImportProfile
     from .plan import PlanError
@@ -135,7 +135,7 @@ def load_cached_preview(request):
         posted = request.POST.get("preview_revision", request.GET.get("preview_revision"))
         if posted != revision:
             return None
-    profile = ImportProfile.objects.restrict(request.user, "change").filter(pk=context.get("profile_id")).first()
+    profile = ImportProfile.objects.restrict(request.user, profile_action).filter(pk=context.get("profile_id")).first()
     if profile is None:
         return None
     try:
