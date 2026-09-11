@@ -160,6 +160,35 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
                 self.assertEqual(row["backend_metadata"], self.proposal.backend_metadata)
                 self.assertEqual(row["backend_metadata"]["backend_source"], "database")
 
+    def test_constrained_viewer_lists_only_permitted_profile_proposals(self):
+        self.profile = ImportProfile.objects.create(name="Permitted Proposal Profile", source_adapter="trace_workbook")
+        permitted = self.frozen_proposal()
+        viewer = user_with_object_permission(
+            "constrained-proposal-viewer", [(ResolutionProposal, ["view"], {"profile_id": self.profile.pk})]
+        )
+        self.client.force_login(viewer)
+
+        response = self.client.get(self.list_url)
+
+        self.assertEqual([row["id"] for row in response.json()["results"]], [permitted.pk])
+
+    def test_constrained_viewer_cannot_read_another_profile_proposal(self):
+        other = ImportProfile.objects.create(name="Permitted Proposal Profile", source_adapter="trace_workbook")
+        viewer = user_with_object_permission(
+            "constrained-proposal-viewer", [(ResolutionProposal, ["view"], {"profile_id": other.pk})]
+        )
+        self.client.force_login(viewer)
+
+        response = self.client.get(self.detail_url)
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_non_numeric_profile_filter_returns_bad_request(self):
+        response = self.client.get(self.list_url, {"profile_id": "abc"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"profile_id": ["Enter a valid integer."]})
+
     def test_proposals_are_absent_from_graphql(self):
         response = self.client.post(
             "/graphql/",
