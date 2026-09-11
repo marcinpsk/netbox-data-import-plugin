@@ -113,6 +113,7 @@ class WorkerFixture:
                 "text": text,
                 "status_code": status,
                 "redacted": False,
+                "truncated": False,
             },
         )
         self.assertEqual(proposal.backend_metadata["backend_source"], "database")
@@ -209,6 +210,20 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
                 )
                 self.assert_failure(proposal, reason, seen, 3, status, "temporary")
                 proposal.delete()
+
+    def test_an_oversized_failure_body_is_stored_bounded_and_marked(self):
+        """The adapter's bound has to reach the column, which is where the body actually persists."""
+        from netbox_data_import.inference_adapter import DIAGNOSTIC_TEXT_LIMIT
+
+        payload = "x" * (DIAGNOSTIC_TEXT_LIMIT + 500)
+        with serving(status=400, payload=payload) as (root, _seen, allowed):
+            proposal = self.frozen_proposal()
+            with self.configured(root, allowed):
+                run_proposal(proposal.pk)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(len(proposal.response_diagnostic["text"]), DIAGNOSTIC_TEXT_LIMIT)
+        self.assertTrue(proposal.response_diagnostic["truncated"])
 
     def test_non_transient_statuses_send_exactly_one_request(self):
         for status in (400, 404, 405, 408, 422, 501, 401, 403):
@@ -457,6 +472,7 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
                 "text": None,
                 "status_code": None,
                 "redacted": False,
+                "truncated": False,
             },
         )
         self.assertEqual(len(proposal.backend_metadata["attempts"]), 3)
