@@ -20,6 +20,7 @@ from ..models import (
     SourceResolution,
     ImportExecution,
     InferenceBackend,
+    ResolutionProposal,
 )
 from .serializers import (
     ImportProfileSerializer,
@@ -31,6 +32,7 @@ from .serializers import (
     SourceResolutionSerializer,
     ImportExecutionSerializer,
     InferenceBackendSerializer,
+    ResolutionProposalSerializer,
 )
 
 
@@ -170,6 +172,22 @@ class ImportExecutionViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModel
     queryset = ImportExecution.objects.select_related("profile")
     serializer_class = ImportExecutionSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
+
+
+class ResolutionProposalViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only viewset for Resolution Proposal history."""
+
+    queryset = ResolutionProposal.objects.select_related("profile")
+    serializer_class = ResolutionProposalSerializer
+    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
+
+    def get_queryset(self):
+        """Filter by profile_id query param if provided."""
+        qs = super().get_queryset()
+        profile_id = self.request.query_params.get("profile_id")
+        if profile_id:
+            qs = qs.filter(profile_id=profile_id)
+        return qs
 
 
 class InferenceBackendViewSet(NetBoxReadOnlyModelViewSet):
