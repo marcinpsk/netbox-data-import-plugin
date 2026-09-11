@@ -19,6 +19,10 @@ __all__ = [
 ]
 
 
+#: The one permission an acceptance needs, read by the workspace card and by the writer.
+DECISION_PERMISSION = "netbox_data_import.add_terminationresolution"
+
+
 class UnsupportedProposalRole(Exception):
     """Proposals are requested for the termination role in this delivery (section 7.1)."""
 
@@ -68,13 +72,16 @@ class SelectTerminationTask:
         self._require_termination_role(field_key)
         return resolved_device_for(field_key, netbox_reader)
 
+    def has_decision_permission(self, actor) -> bool:
+        """Answer the same question the workspace card asks before it offers Accept."""
+        return actor is not None and actor.has_perm(DECISION_PERMISSION)
+
     def require_decision_permission(self, actor) -> None:
         """Require the permission to create a manual Row Resolution for either decision."""
         from .object_permissions import ObjectPermissionDenied
 
-        permission = "netbox_data_import.add_terminationresolution"
-        if actor is None or not actor.has_perm(permission):
-            raise ObjectPermissionDenied(permission)
+        if not self.has_decision_permission(actor):
+            raise ObjectPermissionDenied(DECISION_PERMISSION)
 
     def write_resolution(self, *, profile, field_key, entry, actor) -> DecisionReceipt:
         """Upsert the Row Resolution the accepted candidate names, and return only its id."""

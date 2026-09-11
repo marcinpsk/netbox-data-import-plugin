@@ -41,7 +41,9 @@
     var state = cards.get(card);
     state.payload = payload;
     var display = payload.presentation;
-    node(card, 'state').textContent = display.field_state;
+    var badge = node(card, 'state');
+    badge.textContent = display.field_state;
+    badge.className = 'badge ' + badge.dataset.proposalStatePrefix + display.state_style;
     node(card, 'display').hidden = !payload.proposal;
     ['badge', 'candidate', 'explanation'].forEach(function (name) {
       node(card, name).textContent = display[name];

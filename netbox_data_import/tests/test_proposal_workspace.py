@@ -720,6 +720,62 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(data["metadata"], [{"label": "backend model", "value": "fixture-model"}])
         self.assertEqual(data["actions"][0]["label"], "Ask AI again")
 
+    def test_candidate_missing_from_the_snapshot_reads_as_unacceptable(self):
+        """The reader must refuse what acceptance refuses, not fail the whole workspace."""
+        proposal = self.request_proposal()
+        self.assertTrue(claim_proposal(proposal.pk))
+        entry = proposal.candidate_snapshot["candidates"][0]
+        self.assertTrue(
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.CANDIDATE,
+                explanation="The candidate matches the source label.",
+                selected_candidate_id="absent-from-the-snapshot",
+                selected_object_type=ObjectType.objects.get_for_model(Interface),
+                selected_object_id=entry["object_id"],
+            )
+        )
+        data = self.presentation()
+        self.assertEqual(data["candidate"], "")
+        self.assertIn("snapshot", data["actions"][2]["reason"])
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertEqual(response.status_code, 200)
+
+    def test_the_reader_and_acceptance_agree_on_a_missing_snapshot_candidate(self):
+        """A card that offered Accept here would offer an action the writer always refuses."""
+        proposal = self.request_proposal()
+        self.assertTrue(claim_proposal(proposal.pk))
+        entry = proposal.candidate_snapshot["candidates"][0]
+        self.assertTrue(
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.CANDIDATE,
+                explanation="The candidate matches the source label.",
+                selected_candidate_id="absent-from-the-snapshot",
+                selected_object_type=ObjectType.objects.get_for_model(Interface),
+                selected_object_id=entry["object_id"],
+            )
+        )
+        self.operator(decide=True)
+        self.assertNotEqual(self.presentation()["actions"][2]["reason"], "")
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 409)
+        self.assert_unwritten(proposal)
+
+    def test_every_field_state_wears_its_own_badge_modifier(self):
+        """Specification 10.2 needs automatically resolved to read differently from manually resolved."""
+        from netbox_data_import.proposal_presentation import STATE_STYLES
+
+        self.assertEqual(len(set(STATE_STYLES.values())), len(STATE_STYLES))
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        resolved = termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
+        rendered = response.content.decode()
+        self.assertEqual(response.context["proposal_fields"][resolved]["presentation"]["state_style"], "auto")
+        self.assertIn('class="badge ndi-trace-state-auto"', rendered)
+        self.assertIn('class="badge ndi-trace-state-unresolved"', rendered)
+        # A dark-theme override carries the same class name, so each rule is matched at its own line.
+        for style in set(STATE_STYLES.values()):
+            self.assertRegex(rendered, rf"(?m)^\s*\.ndi-trace-state-{style} \{{")
+
     def test_backend_resolution_runs_once_for_all_displayed_fields(self):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext

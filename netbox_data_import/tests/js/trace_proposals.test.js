@@ -159,3 +159,12 @@ it('reports a non-JSON response instead of treating a login page as success', as
   await vi.advanceTimersByTimeAsync(3000);
   expect(node('error').textContent).toBe('The proposal response could not be read. Reload the workspace.');
 });
+
+it('moves the field badge onto the class of the state the read reports', async () => {
+  fetch.mockResolvedValue(response(completed({field_state: 'accepted', state_style: 'accepted'})));
+  mount();
+  expect(node('state').className).toBe('badge ndi-trace-state-proposed');
+  await vi.advanceTimersByTimeAsync(3000);
+  expect([node('state').className, node('state').textContent])
+    .toEqual(['badge ndi-trace-state-accepted', 'accepted']);
+});

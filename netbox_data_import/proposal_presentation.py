@@ -12,7 +12,19 @@ from .inference_trust import InvalidInferenceConfiguration
 from .models import ImportProfile, ProposalDecision, ProposalOutcome, ProposalStatus, ResolutionProposal
 from .proposal_decisions import proposal_staleness
 from .proposal_tasks import proposal_task
-from .review_workspace import UNRESOLVED
+from .cable_target import AUTOMATICALLY_RESOLVED, MANUALLY_RESOLVED, UNRESOLVED
+
+#: The badge modifier each field state wears, so the template needs no state vocabulary of its own.
+STATE_STYLES = {
+    "": "unknown",
+    UNRESOLVED: "unresolved",
+    AUTOMATICALLY_RESOLVED: "auto",
+    MANUALLY_RESOLVED: "manual",
+    "proposed": "proposed",
+    ProposalDecision.ACCEPTED: "accepted",
+    "stale": "stale",
+    ProposalStatus.FAILED: "failed",
+}
 
 
 def _action(key, label, reason):
@@ -121,20 +133,16 @@ class ProposalPresentation:
         stale_reason = payload.get("staleness_error", "")
         if stale and stale["is_stale"]:
             stale_reason = "The resolved Device or eligible candidates changed. Request a new proposal."
+        candidate, missing = self.selected_candidate(proposal)
+        if missing:
+            # Acceptance refuses this row, so the card must not offer an action the writer declines.
+            stale_reason = "The selected candidate is no longer in the request snapshot. Request a new proposal."
         actions = self.actions(field, proposal, state, pending, completed, stale_reason)
         badge = proposal.get_status_display() if proposal is not None else "No proposal"
         if completed:
             badge = "Proposal - stale, not applied" if stale_reason else "Proposal - not applied"
         if proposal is not None and proposal.decision:
             badge = proposal.get_decision_display()
-        candidate = ""
-        if proposal is not None and proposal.outcome == ProposalOutcome.CANDIDATE:
-            entry = next(
-                row
-                for row in proposal.candidate_snapshot["candidates"]
-                if row["candidate_id"] == proposal.selected_candidate_id
-            )
-            candidate = f"{entry['display_name']} ({str(proposal.selected_object_type.name).capitalize()})"
         if state == UNRESOLVED and proposal is not None and not proposal.decision:
             if pending or proposal.outcome == ProposalOutcome.CANDIDATE:
                 state = "proposed"
@@ -147,6 +155,7 @@ class ProposalPresentation:
             "has_proposal": proposal is not None,
             "pending": pending,
             "field_state": state,
+            "state_style": STATE_STYLES[state],
             "badge": badge,
             "candidate": candidate,
             "explanation": proposal.explanation if proposal is not None else "",
@@ -160,6 +169,23 @@ class ProposalPresentation:
             "attempt_count": len(metadata.get("attempts", [])),
             "actions": actions,
         }
+
+    @staticmethod
+    def selected_candidate(proposal):
+        """Return the chosen candidate's display, and whether the snapshot no longer holds it."""
+        if proposal is None or proposal.outcome != ProposalOutcome.CANDIDATE:
+            return "", False
+        entry = next(
+            (
+                row
+                for row in proposal.candidate_snapshot["candidates"]
+                if row["candidate_id"] == proposal.selected_candidate_id
+            ),
+            None,
+        )
+        if entry is None:
+            return "", True
+        return f"{entry['display_name']} ({str(proposal.selected_object_type.name).capitalize()})", False
 
     def actions(self, field, proposal, state, pending, completed, stale_reason):
         """Return every command with its current permission and lifecycle refusal."""
@@ -181,7 +207,7 @@ class ProposalPresentation:
         if not accept_reason and proposal.outcome == ProposalOutcome.NO_MATCH:
             accept_reason = "The backend found no match. There is no candidate to accept."
         accept_reason = accept_reason or stale_reason
-        if not self.preview_allowed or not self.actor.has_perm("netbox_data_import.add_terminationresolution"):
+        if not self.preview_allowed or not proposal_task(SELECT_TERMINATION_TASK).has_decision_permission(self.actor):
             accept_reason = "You do not have permission to save a termination resolution."
         reject_reason = decision_reason if self.preview_allowed else "You do not have permission to reject proposals."
         actions = [
