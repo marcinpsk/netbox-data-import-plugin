@@ -805,3 +805,32 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual((payload["proposal"], payload["history"]), (None, []))
         self.assertEqual(response.context["summary"]["active_proposals"], "Not permitted")
         self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
+
+    def test_workspace_renders_actions_reasons_and_the_controller_contract(self):
+        import json
+        import re
+
+        proposal = self.completed(no_match=True)
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        html = response.content.decode()
+        buttons = re.findall(r'<button\b[^>]*data-proposal-action="([^"]+)"([^>]*)>', html)
+        self.assertEqual(
+            [(key, "disabled" in attributes, "hidden" in attributes) for key, attributes in buttons],
+            [
+                ("request", True, False),
+                ("cancel", True, False),
+                ("accept", True, False),
+                ("reject", False, False),
+                ("request", True, False),
+                ("cancel", True, False),
+                ("accept", True, False),
+                ("reject", True, False),
+            ],
+        )
+        reason = response.context["proposal_fields"][self.field_key]["presentation"]["actions"][2]["reason"]
+        self.assertRegex(
+            html, rf'<div\b(?![^>]*\bhidden\b)[^>]*data-proposal-reason="accept"[^>]*>{re.escape(reason)}</div>'
+        )
+        self.assertRegex(html, r'<script src="[^"]*/trace_proposals.js[^"]*"></script>')
+        script = re.search(r'<script id="traceProposalFields" type="application/json">(.*?)</script>', html)
+        self.assertEqual(json.loads(script.group(1))[self.field_key]["proposal"]["id"], proposal.pk)
