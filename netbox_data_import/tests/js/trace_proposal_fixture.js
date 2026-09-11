@@ -6,7 +6,7 @@ export function payload(overrides = {}) {
     ok: true,
     proposal: {id: 7},
     presentation: {
-      pending: true, field_state: 'proposed', badge: 'Queued', candidate: '', explanation: '',
+      pending: true, field_state: 'proposed', state_style: 'proposed', badge: 'Queued', candidate: '', explanation: '',
       failure: '', failure_code: '', attempt_count: 0, metadata: [],
       actions: [
         {key: 'request', label: 'Ask AI', reason: 'An active proposal exists.', url: '/request/'},
@@ -22,7 +22,7 @@ export function payload(overrides = {}) {
 
 export function completed(overrides = {}) {
   return payload({
-    pending: false, field_state: 'proposed', badge: 'Proposal - not applied',
+    pending: false, field_state: 'proposed', state_style: 'proposed', badge: 'Proposal - not applied',
     candidate: 'eth0 (Interface)', explanation: 'The labels name the same port.',
     attempt_count: 2, metadata: [{label: 'backend model', value: 'fixture-model'}],
     actions: [
@@ -43,7 +43,7 @@ export function fixture(initial = payload()) {
     <form id="traceTerminationForm"><input name="csrfmiddlewaretoken" value="fixture-token"></form>
     <script type="application/json" id="traceProposalFields">${JSON.stringify({field: initial}).replaceAll('<', '\\u003c')}</script>
     <div data-proposal-field="field" data-proposal-url="/proposal/" data-preview-revision="revision-1">
-      <span data-proposal-state></span>
+      <span class="badge ndi-trace-state-unknown" data-proposal-state data-proposal-state-prefix="ndi-trace-state-"></span>
       ${initial.presentation.actions.map(action => `
         <button type="button" data-proposal-action="${action.key}">${action.label}</button>
         <div data-proposal-reason="${action.key}" hidden></div>`).join('')}

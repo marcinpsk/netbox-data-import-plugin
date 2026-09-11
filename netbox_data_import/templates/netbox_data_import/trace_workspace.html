@@ -9,6 +9,15 @@
 {# htmx boost swaps the body and discards the response head, so this renders here. #}
 <style>
   .ndi-proposal-badge { background: var(--tblr-bg-surface-secondary); color: var(--tblr-body-color); }
+  .ndi-trace-state-unknown { background: var(--tblr-bg-surface-secondary); color: var(--tblr-body-color); }
+  .ndi-trace-state-unresolved { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  .ndi-trace-state-manual { background-color: var(--tblr-primary) !important; color: #fff !important; }
+  .ndi-trace-state-auto { background-color: var(--tblr-info) !important; color: #fff !important; }
+  .ndi-trace-state-proposed { background-color: var(--tblr-purple) !important; color: #fff !important; }
+  .ndi-trace-state-accepted { background-color: var(--tblr-success) !important; color: #fff !important; }
+  .ndi-trace-state-stale { background-color: var(--tblr-warning) !important; color: #000 !important; }
+  .ndi-trace-state-failed { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  [data-bs-theme="dark"] .ndi-trace-state-auto { color: #08283a !important; }
   .ndi-proposal-card { overflow-wrap: anywhere; border: 1px solid var(--tblr-border-color); border-radius: var(--tblr-border-radius); padding: .75rem; }
   .ndi-proposal-card p { overflow-wrap: anywhere; white-space: pre-wrap; }
   .ndi-proposal-request { min-width: 0; }
@@ -177,7 +186,8 @@
                       data-proposal-url="{% url 'plugins:netbox_data_import:trace_proposal' %}"
                       data-preview-revision="{{ preview_revision }}">
                     {{ termination.label }}
-                    <span class="badge ndi-proposal-badge" data-proposal-state>{{ termination.proposal.field_state }}</span>
+                    <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}"
+                          data-proposal-state data-proposal-state-prefix="ndi-trace-state-">{{ termination.proposal.field_state }}</span>
                     {% if termination.selected %}
                       <span class="text-secondary">{{ termination.selected }}</span>
                     {% endif %}
