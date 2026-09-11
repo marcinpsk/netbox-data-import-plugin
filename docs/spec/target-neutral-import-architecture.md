@@ -1063,7 +1063,7 @@ The typed credential reference is different from a secret value. It lives in exa
 place: the enabled `InferenceBackend` row, or the `inference_backend` file fallback when no enabled
 row exists. It is restricted configuration metadata, never copied elsewhere.
 
-The inference job receives only the stable backend key and resolves the credential itself. The
+The connection-test job receives only the stable backend key and resolves the credential itself. The
 request-handling process never resolves a secret and passes it to the worker.
 
 Plugin audit and job state may record the backend key, the proposal job id, the credential backend
