@@ -62,9 +62,7 @@ ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
 def _decidable(text: str) -> bool:
     """Return whether what this body says can be established, which is what makes keeping it safe.
 
-    A backslash introduces an escape in every notation worth worrying about, and escapes can be
-    layered without limit. A body carrying one is only safe to keep when it decodes, because the
-    walk below then reads every string it holds.
+    A backslash means an escape in some notation, and escapes layer, so an escaped body has to decode.
     """
     if "\\" not in text:
         return True
