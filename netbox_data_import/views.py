@@ -4117,6 +4117,10 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         return redirect(next_url)
 
 
+class InvalidProposalId(ValueError):
+    """A proposal action received no integer id, with wording this plugin owns."""
+
+
 class _TraceProposalMixin(_TraceWorkspaceMixin):
     """Bind proposal operations to the acting operator's preview and inventory scope."""
 
@@ -4162,6 +4166,8 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
 
         try:
             return super().dispatch(request, *args, **kwargs)
+        except InvalidProposalId as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
         except (PreviewActionInvalid, ActiveProposalExists) as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=409)
         except UnusableCandidateSet as exc:
@@ -4277,9 +4283,13 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         from .models import ResolutionProposal
 
         profile, _document, workspace, _context, reader = self.proposal_context(request)
+        try:
+            proposal_id = int(request.POST.get("proposal_id", ""))
+        except ValueError:
+            raise InvalidProposalId("Enter a valid proposal_id integer.") from None
         proposal = get_object_or_404(
             ResolutionProposal,
-            pk=int(request.POST.get("proposal_id", "")),
+            pk=proposal_id,
             profile=profile,
             task_type=SELECT_TERMINATION_TASK,
         )

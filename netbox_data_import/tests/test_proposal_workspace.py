@@ -149,6 +149,15 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(response.json()["proposal"]["id"], retry.pk)
 
+    def test_proposal_actions_report_missing_or_non_numeric_ids(self):
+        for action in ("cancel_proposal", "accept_proposal", "reject_proposal"):
+            for data in ({}, {"proposal_id": "abc"}):
+                with self.subTest(action=action, data=data):
+                    response = self.call(action, **data)
+
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json(), {"ok": False, "error": "Enter a valid proposal_id integer."})
+
     def test_request_refuses_automatically_resolved_field(self):
         response = self.call(
             "request_proposal", field_key=termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
