@@ -5,6 +5,7 @@
 from django.http import Http404
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import viewsets, permissions
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import DjangoModelPermissions
 from rest_framework.exceptions import ValidationError
 
@@ -177,15 +178,19 @@ class ImportExecutionViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModel
 class ResolutionProposalViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only viewset for Resolution Proposal history."""
 
-    queryset = ResolutionProposal.objects.select_related("profile")
+    queryset = ResolutionProposal.objects.all()
     serializer_class = ResolutionProposalSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
     def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
+        """Restrict proposal history to the viewer and an optional profile_id."""
+        qs = super().get_queryset().restrict(self.request.user, "view").select_related("profile")
         profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
+        if profile_id is not None:
+            try:
+                profile_id = int(profile_id)
+            except ValueError:
+                raise ValidationError({"profile_id": ["Enter a valid integer."]}) from None
             qs = qs.filter(profile_id=profile_id)
         return qs
 
