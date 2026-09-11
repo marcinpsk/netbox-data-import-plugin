@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 
 from django.db import transaction
+from utilities.permissions import get_permission_for_model
 
 from .inference_backend import proposal_candidate_limit
 from .models import (
@@ -15,6 +16,7 @@ from .models import (
     ResolutionProposal,
     locked_profile_policy,
 )
+from .object_permissions import ObjectPermissionDenied
 from .proposal_tasks import CandidateSnapshot, UnusableCandidateSet, proposal_task
 from .resolution_proposals import decide_proposal
 
@@ -98,10 +100,15 @@ def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
 
 
 def reject_proposal(proposal_id, *, operator) -> bool:
-    """Record one rejection without changing status or requiring fresh inventory."""
+    """Record one rejection without changing status or requiring fresh inventory.
+
+    Rejection writes no Row Resolution, so it takes the workspace permission and not the permission
+    to create one (specification 7.6).
+    """
     profile_id = ResolutionProposal.objects.values_list("profile_id", flat=True).get(pk=proposal_id)
+    if not ImportProfile.objects.restrict(operator, "change").filter(pk=profile_id).exists():
+        raise ObjectPermissionDenied(get_permission_for_model(ImportProfile, "change"))
     with locked_profile_policy(profile_id):
         proposal = ResolutionProposal.objects.select_for_update().get(pk=proposal_id, profile_id=profile_id)
-        proposal_task(proposal.task_type).require_decision_permission(operator)
         decided = decide_proposal(proposal.pk, decision=ProposalDecision.REJECTED, operator=operator)
     return decided

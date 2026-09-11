@@ -259,6 +259,42 @@ class ProposalAcceptanceTest(DecisionInventory, TestCase):
             self.accept(proposal, actor)
         self.assert_unwritten(proposal)
 
+    def test_rejection_takes_the_workspace_permission_not_the_resolution_one(self):
+        """Rejection writes no Row Resolution, so it is scoped by the profile (specification 7.6)."""
+        proposal = self.proposal()
+        actor = user_with_object_permission(
+            "workspace-rejecter",
+            [
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (ImportProfile, ["change"], {"pk": self.profile.pk}),
+                (TerminationResolution, ["add"], {"profile_id": self.profile.pk + 1}),
+            ],
+        )
+
+        self.assertTrue(reject_proposal(proposal.pk, operator=actor))
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, ProposalDecision.REJECTED)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
+    def test_rejection_is_refused_outside_the_operators_profile_scope(self):
+        proposal = self.proposal()
+        actor = user_with_object_permission(
+            "other-profile-rejecter",
+            [
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (ImportProfile, ["change"], {"pk": self.profile.pk + 1}),
+            ],
+        )
+
+        with self.assertRaises(ObjectPermissionDenied):
+            reject_proposal(proposal.pk, operator=actor)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, "")
+
     def test_scoped_add_permission_can_write_inside_its_profile(self):
         proposal = self.proposal()
         actor = user_with_object_permission(

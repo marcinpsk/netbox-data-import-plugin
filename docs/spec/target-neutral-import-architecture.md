@@ -826,7 +826,8 @@ results appear in the next preview. After a failure, the operator re-requests ma
 | Request a proposal | Preview access to the Import Profile, including view rights on the resolved Device |
 | View proposals | Import Profile view access |
 | Cancel a queued or running proposal | The same permission as requesting a proposal, not restricted to the requesting operator |
-| Accept or reject | The same permission as creating a manual Row Resolution, not restricted to the requesting operator |
+| Accept | The same permission as creating a manual Row Resolution, not restricted to the requesting operator |
+| Reject | Preview access to the Import Profile, not restricted to the requesting operator |
 
 Plan ownership under ADR 0001 is untouched. Acceptance only writes the decision. The operator still
 replans their own preview.
@@ -844,7 +845,9 @@ The last explicit operator action wins across proposals for that key. A `no_matc
 informational and cannot be accepted. A proposal never changes NetBox and never applies itself.
 
 Rejection sets the same one-shot decision fields, records the operator and time, and does not block
-re-requesting a fresh proposal for the same key. Neither acceptance nor rejection changes the status.
+re-requesting a fresh proposal for the same key. It writes no Row Resolution, so it takes the preview
+permission rather than the permission to create one: an operator who may work this preview may
+dismiss a suggestion made for it. Neither acceptance nor rejection changes the status.
 
 All proposal rows are retained indefinitely in this delivery. Cleanup tooling is future scope.
 
@@ -1423,7 +1426,8 @@ runner.
 | Delete a Logical Cable, create a Cable | The corresponding NetBox Cable permissions, checked at planning and again inside the transaction |
 | Request a Resolution Proposal | Preview access to the profile, including view rights on the resolved Device |
 | Cancel a queued or running Resolution Proposal | The same permission as requesting one, not requester-bound |
-| Accept or reject a Resolution Proposal | The same permission as creating a manual Row Resolution |
+| Accept a Resolution Proposal | The same permission as creating a manual Row Resolution |
+| Reject a Resolution Proposal | Preview access to the Import Profile |
 | Change an Inference Backend or run the connection test | The dedicated NetBox object permission on the `InferenceBackend` model. This one rule authorizes both actions; there is no separate administrator or superuser check. |
 
 An accepted plan belongs to its operator. A background job executes as that operator and rechecks
