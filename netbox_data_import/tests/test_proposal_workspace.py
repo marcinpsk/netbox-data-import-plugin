@@ -61,12 +61,14 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(response.status_code, 200)
         self.assertIn(PREVIEW_PLAN_SESSION_KEY, self.client.session)
 
-    def call(self, action, **data):
+    def call(self, action, *, accept="application/json", **data):
         data.setdefault("preview_revision", self.client.session.get(PREVIEW_REVISION_SESSION_KEY, ""))
+        if data["preview_revision"] is None:
+            data.pop("preview_revision")
         url = reverse(f"plugins:netbox_data_import:trace_{action}")
         method = self.client.get if action == "proposal" else self.client.post
         with self.captureOnCommitCallbacks(execute=True):
-            return method(url, data, headers={"accept": "application/json"})
+            return method(url, data, headers={} if accept is None else {"accept": accept})
 
     def request_proposal(self):
         response = self.call("request_proposal", field_key=self.field_key)
@@ -120,6 +122,63 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertIsNone(proposal.decided_by_id)
         self.assertIsNone(proposal.decided_at)
         self.assertIsNone(proposal.written_resolution_id)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
+    def test_request_without_accept_requires_preview_revision(self):
+        for revision in (None, "obsolete"):
+            with self.subTest(revision=revision):
+                response = self.call(
+                    "request_proposal", accept=None, field_key=self.field_key, preview_revision=revision
+                )
+                self.assertEqual(response.status_code, 409, response.content)
+                self.assertEqual(response.json(), {"ok": False, "error": "No import preview in progress."})
+                self.assertFalse(ResolutionProposal.objects.exists())
+
+    def test_cancel_without_accept_requires_preview_revision(self):
+        proposal = self.request_proposal()
+        for revision in (None, "obsolete"):
+            with self.subTest(revision=revision):
+                response = self.call("cancel_proposal", accept=None, proposal_id=proposal.pk, preview_revision=revision)
+                self.assertEqual(response.status_code, 409, response.content)
+                self.assertEqual(response.json(), {"ok": False, "error": "No import preview in progress."})
+                proposal.refresh_from_db()
+                self.assertEqual(proposal.status, ProposalStatus.QUEUED)
+                self.assertEqual(ResolutionProposal.objects.count(), 1)
+
+    def test_request_and_cancel_without_accept_allow_current_preview_revision(self):
+        response = self.call("request_proposal", accept=None, field_key=self.field_key)
+        self.assertEqual(response.status_code, 200, response.content)
+        proposal = ResolutionProposal.objects.get(pk=response.json()["proposal_id"])
+        self.assertEqual(proposal.status, ProposalStatus.QUEUED)
+        response = self.call("cancel_proposal", accept=None, proposal_id=proposal.pk)
+        self.assertEqual(response.status_code, 200, response.content)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.CANCELLED)
+
+    def test_reject_without_planning_target_access_preserves_accept_permission_check(self):
+        proposal = self.completed()
+        actor = user_with_object_permission(
+            "profile-decider",
+            [
+                (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                (Device, ["view"], {"site_id": self.site.pk}),
+                (Interface, ["view"], {}),
+                (TerminationResolution, ["add"], {"profile_id": self.profile.pk}),
+            ],
+        )
+        self.login_with_preview(actor)
+        self.assertFalse(Site.objects.restrict(actor, "view").filter(pk=self.site.pk).exists())
+        response = self.call("accept_proposal", proposal_id=proposal.pk)
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json(), {"ok": False, "error": "That termination cannot be resolved here."})
+        self.assert_unwritten(proposal)
+
+        response = self.call("reject_proposal", proposal_id=proposal.pk)
+        self.assertEqual(response.status_code, 200, response.content)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, "rejected")
+        self.assertEqual(proposal.decided_by_id, actor.pk)
+        self.assertIsNotNone(proposal.decided_at)
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
     def test_request_creates_queued_attempt_and_real_job_with_id_only(self):
