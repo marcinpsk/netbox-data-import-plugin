@@ -20,6 +20,7 @@ from ..models import (
     SourceResolution,
     ImportExecution,
     InferenceBackend,
+    ResolutionProposal,
     validate_adapter_target_module,
     validate_contact_candidate_resolution,
     validate_section_applicability,
@@ -277,6 +278,42 @@ class ImportExecutionSerializer(serializers.ModelSerializer):
             "selected_units",
             "applied_changes",
             "failure_detail",
+        ]
+        read_only_fields = fields
+
+
+class ResolutionProposalSerializer(serializers.ModelSerializer):
+    """Read-only serializer for the Resolution Proposal audit record."""
+
+    class Meta:
+        model = ResolutionProposal
+        fields = [
+            "id",
+            "profile",
+            "task_type",
+            "field_key",
+            "status",
+            "source_evidence",
+            "resolved_device_type",
+            "resolved_device_id",
+            "prompt_version",
+            "response_schema_version",
+            "candidate_snapshot",
+            "requested_by",
+            "created",
+            "last_updated",
+            "outcome",
+            "selected_candidate_id",
+            "selected_object_type",
+            "selected_object_id",
+            "explanation",
+            "backend_metadata",
+            "response_diagnostic",
+            "failure_reason",
+            "decision",
+            "decided_by",
+            "decided_at",
+            "written_resolution",
         ]
         read_only_fields = fields
 
