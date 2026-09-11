@@ -25,6 +25,7 @@ from .inference_trust import (
 )
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"
+DIAGNOSTIC_TEXT_LIMIT = 4096
 
 # Section 8.4 rejects every other terminal reason: only a completed answer is a completion.
 ACCEPTED_FINISH_REASONS = ("stop",)
@@ -46,14 +47,16 @@ _UNDECODABLE = "[redacted: the response could not be decoded, so its content cou
 class ResponseDiagnostic:
     """What one call received, for an operator to read when it failed.
 
-    `text` is the decoded body, captured before any validation, and is None unless the receipt is
-    `empty` or `present`. `redacted` records that the credential appeared and the text was replaced.
+    `text` is the decoded body after credential checks, bounded by DIAGNOSTIC_TEXT_LIMIT.
+    It is None unless the receipt is `empty` or `present`. `redacted` records that the body was
+    replaced for credential safety. `truncated` records that the retained text is incomplete.
     """
 
     receipt: str
     text: str | None = None
     status_code: int | None = None
     redacted: bool = False
+    truncated: bool = False
 
 
 ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
@@ -106,7 +109,12 @@ def _diagnostic(response, api_key: str) -> ResponseDiagnostic:
             receipt=BODY_PRESENT, text=_UNDECODABLE, status_code=response.status_code, redacted=True
         )
     receipt = BODY_PRESENT if text else BODY_EMPTY
-    return ResponseDiagnostic(receipt=receipt, text=text, status_code=response.status_code)
+    return ResponseDiagnostic(
+        receipt=receipt,
+        text=text[:DIAGNOSTIC_TEXT_LIMIT],
+        status_code=response.status_code,
+        truncated=len(text) > DIAGNOSTIC_TEXT_LIMIT,
+    )
 
 
 class InferenceBackendError(Exception):

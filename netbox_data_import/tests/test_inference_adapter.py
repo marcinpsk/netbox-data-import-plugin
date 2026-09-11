@@ -19,6 +19,7 @@ from netbox_data_import.inference_adapter import (
     BODY_EMPTY,
     BODY_INTERRUPTED,
     BODY_PRESENT,
+    DIAGNOSTIC_TEXT_LIMIT,
     AuthenticationFailure,
     BackendTimeout,
     InferenceRequest,
@@ -489,6 +490,7 @@ class RetryClassificationTest(SimpleTestCase):
                 self.assertFalse(failure.retryable)
 
     def test_a_temporary_backend_failure_is_retryable(self):
+        self.assertEqual(set(TRANSIENT_STATUSES), {500, 502, 503, 504})
         for status in TRANSIENT_STATUSES:
             with self.subTest(status=status):
                 failure = self.failure(status)
@@ -532,6 +534,61 @@ class RetryClassificationTest(SimpleTestCase):
 
 class ResponseDiagnosticTest(SimpleTestCase):
     """A failed proposal stores the raw response, so the adapter has to carry one out."""
+
+    def test_a_large_error_body_is_retained_truncated(self):
+        payload = "x" * (DIAGNOSTIC_TEXT_LIMIT + 1)
+        with serving(status=500, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.text, payload[:DIAGNOSTIC_TEXT_LIMIT])
+        self.assertTrue(caught.exception.diagnostic.truncated)
+
+    def test_a_body_within_the_budget_is_retained_whole(self):
+        for size in (DIAGNOSTIC_TEXT_LIMIT - 1, DIAGNOSTIC_TEXT_LIMIT):
+            with self.subTest(size=size):
+                payload = "x" * size
+                with serving(status=500, payload=payload) as (root, _seen, allowlist):
+                    with self.assertRaises(TransportFailure) as caught:
+                        adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+                self.assertEqual(caught.exception.diagnostic.text, payload)
+                self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_a_key_past_the_budget_is_still_redacted(self):
+        for secret in (API_KEY, API_KEY.replace("-", "\\u002d")):
+            with self.subTest(secret=secret):
+                payload = '{"error": "' + "x" * DIAGNOSTIC_TEXT_LIMIT + secret + '"}'
+                with serving(status=500, payload=payload) as (root, _seen, allowlist):
+                    with self.assertRaises(TransportFailure) as caught:
+                        adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+                self.assertEqual(caught.exception.diagnostic.text, "[redacted: the backend echoed the credential]")
+                self.assertTrue(caught.exception.diagnostic.redacted)
+                self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_an_undecodable_escape_past_the_budget_is_still_redacted(self):
+        payload = "x" * DIAGNOSTIC_TEXT_LIMIT + "\\x2d"
+        with serving(status=500, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(
+            caught.exception.diagnostic.text,
+            "[redacted: the response could not be decoded, so its content could not be established]",
+        )
+        self.assertTrue(caught.exception.diagnostic.redacted)
+        self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_a_large_completion_keeps_its_content_and_bounds_its_diagnostic(self):
+        content = "x" * (DIAGNOSTIC_TEXT_LIMIT + 1)
+        payload = json.dumps(completion(content=content))
+        with serving(payload=payload) as (root, _seen, allowlist):
+            answer = adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(answer.content_text, content)
+        self.assertEqual(answer.diagnostic.text, payload[:DIAGNOSTIC_TEXT_LIMIT])
+        self.assertTrue(answer.diagnostic.truncated)
 
     def test_a_credential_refusal_carries_the_body_it_received(self):
         with serving(status=401, payload={"error": {"message": "token expired"}}) as (root, _seen, allowlist):
@@ -588,6 +645,7 @@ class ResponseDiagnosticTest(SimpleTestCase):
 
         self.assertEqual(caught.exception.diagnostic.receipt, BODY_EMPTY)
         self.assertEqual(caught.exception.diagnostic.text, "")
+        self.assertFalse(caught.exception.diagnostic.truncated)
 
     def test_a_call_that_never_answered_reports_an_absent_body(self):
         adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])
@@ -652,6 +710,7 @@ class ResponseDiagnosticTest(SimpleTestCase):
 
                 self.assertTrue(caught.exception.diagnostic.redacted)
                 self.assertNotIn("adapter", caught.exception.diagnostic.text)
+                self.assertFalse(caught.exception.diagnostic.truncated)
 
     def test_a_plain_body_that_is_not_json_is_still_retained(self):
         """Failing closed applies to escape sequences, not to every body that is not JSON."""
@@ -692,6 +751,7 @@ class InterruptedAndMalformedTransportTest(SimpleTestCase):
                 adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
 
         self.assertEqual(caught.exception.diagnostic.receipt, BODY_INTERRUPTED)
+        self.assertFalse(caught.exception.diagnostic.truncated)
         self.assertTrue(caught.exception.retryable)
 
     def test_a_deeply_nested_body_stays_typed(self):
