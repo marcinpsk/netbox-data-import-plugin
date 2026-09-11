@@ -42,6 +42,10 @@ TRANSIENT_STATUSES = (500, 502, 503, 504)
 _REDACTED = "[redacted: the backend echoed the credential]"
 _UNDECODABLE = "[redacted: the response could not be decoded, so its content could not be established]"
 
+_BODY_CLEAN = "clean"
+_BODY_ECHOES = "echoes"
+_BODY_UNDECIDABLE = "undecidable"
+
 
 @dataclass(frozen=True)
 class ResponseDiagnostic:
@@ -62,38 +66,26 @@ class ResponseDiagnostic:
 ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
 
 
-def _decidable(text: str) -> bool:
-    """Return whether what this body says can be established, which is what makes keeping it safe.
-
-    A backslash means an escape in some notation, and escapes layer, so an escaped body has to decode.
-    """
-    if "\\" not in text:
-        return True
-    try:
-        json.loads(text)
-    except (ValueError, RecursionError):
-        return False
-    return True
-
-
-def _echoes_key(text: str, api_key: str) -> bool:
-    """Return whether the body carries the credential, literally or behind a JSON escape."""
+def _inspect(text: str, api_key: str) -> str:
+    """Return whether the body echoes the key, cannot be decoded, or is clean."""
     pending: list[object] = [text]
+    undecidable = False
     while pending:
         value = pending.pop()
         if isinstance(value, str):
             if api_key in value:
-                return True
+                return _BODY_ECHOES
             try:
                 # Members are flattened into the list so a key echoed as a member name is seen too.
                 pending.append(
                     json.loads(value, object_pairs_hook=lambda pairs: [item for pair in pairs for item in pair])
                 )
             except (ValueError, RecursionError):
-                continue
+                if "\\" in value:
+                    undecidable = True
         elif isinstance(value, list):
             pending.extend(value)
-    return False
+    return _BODY_UNDECIDABLE if undecidable else _BODY_CLEAN
 
 
 def _diagnostic(response, api_key: str) -> ResponseDiagnostic:
@@ -102,9 +94,10 @@ def _diagnostic(response, api_key: str) -> ResponseDiagnostic:
         text = response.text
     except Exception:  # noqa: BLE001 - a body that cannot be decoded is a lost body, not a new failure
         return ResponseDiagnostic(receipt=BODY_INTERRUPTED, status_code=response.status_code)
-    if api_key and _echoes_key(text, api_key):
+    verdict = _inspect(text, api_key) if api_key else _BODY_CLEAN
+    if verdict == _BODY_ECHOES:
         return ResponseDiagnostic(receipt=BODY_PRESENT, text=_REDACTED, status_code=response.status_code, redacted=True)
-    if api_key and not _decidable(text):
+    if verdict == _BODY_UNDECIDABLE:
         return ResponseDiagnostic(
             receipt=BODY_PRESENT, text=_UNDECODABLE, status_code=response.status_code, redacted=True
         )
