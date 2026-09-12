@@ -1256,6 +1256,7 @@ class ProposalFailureReason:
     INVALID_RESPONSE = "invalid_response"
     RATE_LIMIT = "rate_limit"
     TEMPORARY_BACKEND_FAILURE = "temporary_backend_failure"
+    QUEUE_UNAVAILABLE = "queue_unavailable"
     TIMEOUT = "timeout"
     AUTHENTICATION_FAILURE = "authentication_failure"
     INVALID_CONFIGURATION = "invalid_configuration"
@@ -1268,6 +1269,7 @@ class ProposalFailureReason:
         (INVALID_RESPONSE, "Invalid backend response"),
         (RATE_LIMIT, "Rate limited"),
         (TEMPORARY_BACKEND_FAILURE, "Temporary backend failure"),
+        (QUEUE_UNAVAILABLE, "Queue unavailable"),
         (TIMEOUT, "Timeout"),
         (AUTHENTICATION_FAILURE, "Backend authentication failure"),
         (INVALID_CONFIGURATION, "Invalid configuration"),

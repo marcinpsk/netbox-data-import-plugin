@@ -315,6 +315,16 @@ class ProposalConstraintTest(ProposalFixture):
     def test_an_outcome_needs_a_completed_row(self):
         self.assert_refused(outcome=ProposalOutcome.NO_MATCH)
 
+    def test_queue_unavailable_is_a_valid_failure_reason(self):
+        proposal = self.make_proposal()
+
+        self.assertTrue(fail_proposal(proposal.pk, reason="queue_unavailable"))
+
+        proposal.refresh_from_db()
+        proposal.full_clean()
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(proposal.get_failure_reason_display(), "Queue unavailable")
+
     def test_a_failed_row_needs_a_reason(self):
         self.assert_refused(status=ProposalStatus.FAILED)
 
