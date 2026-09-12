@@ -4,6 +4,7 @@
 
 import uuid
 from io import BytesIO
+from unittest.mock import patch
 
 from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
@@ -11,11 +12,13 @@ from dcim.models import Device, Interface, Site
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django_rq import get_queue
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
 from netbox_data_import.models import (
     ImportProfile,
+    ProposalFailureReason,
     ProposalOutcome,
     ProposalStatus,
     ResolutionProposal,
@@ -207,6 +210,29 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertNotEqual(proposal.pk, retry.pk)
         response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(response.json()["proposal"]["id"], retry.pk)
+
+    def test_request_refuses_retired_adapter_and_discards_preview(self):
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired-adapter")
+
+        response = self.call("request_proposal", field_key=self.field_key)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.json()["ok"])
+        self.assertIn("retired-adapter", response.json()["error"])
+        self.assertFalse(ResolutionProposal.objects.exists())
+        self.assertFalse(self.client.session["import_preview_pending"])
+
+    def test_enqueue_failure_fails_attempt_and_allows_retry(self):
+        with patch.object(ResolutionProposalJob, "enqueue", autospec=True, side_effect=RedisConnectionError):
+            with self.assertRaises(RedisConnectionError):
+                self.call("request_proposal", field_key=self.field_key)
+
+        proposal = ResolutionProposal.objects.get(profile=self.profile, field_key=self.field_key)
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(proposal.failure_reason, ProposalFailureReason.QUEUE_UNAVAILABLE)
+        retry = self.request_proposal()
+        self.assertNotEqual(retry.pk, proposal.pk)
+        self.assertEqual(retry.status, ProposalStatus.QUEUED)
 
     def test_proposal_actions_report_missing_or_non_numeric_ids(self):
         for action in ("cancel_proposal", "accept_proposal", "reject_proposal"):
