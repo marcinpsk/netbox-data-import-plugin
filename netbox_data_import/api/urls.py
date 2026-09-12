@@ -2,6 +2,7 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """URL router for the data-import plugin API."""
 
+from django.urls import path
 from netbox.api.routers import NetBoxRouter
 
 from .views import (
@@ -29,7 +30,13 @@ router.register("source-resolutions", SourceResolutionViewSet)
 router.register("executions", ImportExecutionViewSet)
 router.register("ai-backends", InferenceBackendViewSet)
 router.register("resolution-proposals", ResolutionProposalViewSet)
-router.register("resolution-proposal-history", ResolutionProposalHistoryViewSet, basename="resolutionproposalhistory")
 
 app_name = "netbox_data_import"
-urlpatterns = router.urls
+urlpatterns = [
+    path(
+        "resolution-proposal-history/",
+        ResolutionProposalHistoryViewSet.as_view({"get": "list"}),
+        name="resolutionproposalhistory-list",
+    ),
+    *router.urls,
+]
