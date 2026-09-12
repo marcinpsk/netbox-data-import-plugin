@@ -94,14 +94,18 @@ The final design uses two CTEs:
 - The world CTE selects the physical table without the candidate primary key, then adds the
   candidate row.
 
-The cloned Django query maps its base alias to the candidate CTE. It maps every other alias for the
-same model table to the world CTE. Other tables remain unchanged. The query root is therefore one
-candidate, while cyclic paths see the database as it would exist after the save.
+The cloned Django query maps its base alias to the candidate CTE. It normally maps every other
+alias for the same model table to the world CTE. Other tables remain unchanged. The query root is
+therefore one candidate, while cyclic paths see the database as it would exist after the save.
 
 A create uses a collision-free negative automatic primary key. The assessment supports known
-`isnull` and exact-null predicates for that key. It denies only a constraint arm that depends on
-the unknown generated numeric value, including one reached through a cyclic relation. Another
-valid OR arm can still grant the operation.
+`isnull` and exact-null predicates for that key. A root predicate that depends on the unknown
+numeric value cannot grant the operation. When a cyclic predicate depends on that value, the query
+maps only the compiled alias that carries that predicate to the physical table. This prevents the
+synthetic candidate from granting access while a matching saved sibling can still grant it. Other
+cyclic aliases continue to see the prospective world. Another valid OR arm can also grant the
+operation. Detection reads the compiled lookup tree, so explicit `__pk` paths and implicit terminal
+relation lookups use the same rule.
 
 All candidate and constraint values stay parameterized. Table names, columns, and casts come from
 Django model metadata. Compilation or database errors fail closed. The assessment performs one

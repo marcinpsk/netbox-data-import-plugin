@@ -585,6 +585,89 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 403)
         self.assert_unwritten(proposal)
 
+    def test_accept_detects_an_implicit_related_primary_key_lookup(self):
+        proposal = self.completed()
+        actor = user_with_object_permission(
+            "implicit-primary-key-decider",
+            [
+                (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                (Site, ["view"], {}),
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (TerminationResolution, ["add"], {"profile__termination_resolutions": -1}),
+            ],
+        )
+        self.login_with_preview(actor)
+
+        self.assertIn("permission", self.presentation()["actions"][2]["reason"])
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 403)
+        self.assert_unwritten(proposal)
+
+    def test_accept_allows_a_cyclic_primary_key_constraint_with_a_saved_witness(self):
+        proposal = self.completed()
+        sibling = TerminationResolution.objects.create(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=termination_field_key(device="dev-a", cards="", port="other-port", kind="interface"),
+            selected_object_type=ObjectType.objects.get_for_model(Interface),
+            selected_object_id=self.eth0.pk,
+            selected_display_name="Existing selection",
+        )
+        actor = user_with_object_permission(
+            "primary-key-witness-decider",
+            [
+                (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                (Site, ["view"], {}),
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (TerminationResolution, ["add"], {"profile__termination_resolutions__pk": sibling.pk}),
+            ],
+        )
+        self.login_with_preview(actor)
+
+        self.assertEqual(self.presentation()["actions"][2]["reason"], "")
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 200)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, "accepted")
+        self.assertEqual(TerminationResolution.objects.filter(profile=self.profile).count(), 2)
+
+    def test_a_primary_key_witness_does_not_hide_the_candidate_from_another_cyclic_path(self):
+        proposal = self.completed()
+        sibling = TerminationResolution.objects.create(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=termination_field_key(device="dev-a", cards="", port="other-port", kind="interface"),
+            selected_object_type=ObjectType.objects.get_for_model(Interface),
+            selected_object_id=self.eth0.pk,
+            selected_display_name="Existing selection",
+        )
+        actor = user_with_object_permission(
+            "nested-primary-key-witness-decider",
+            [
+                (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                (Site, ["view"], {}),
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (
+                    TerminationResolution,
+                    ["add"],
+                    {
+                        "profile__termination_resolutions__pk": sibling.pk,
+                        "profile__termination_resolutions__profile__termination_resolutions__field_key": (
+                            self.field_key
+                        ),
+                    },
+                ),
+            ],
+        )
+        self.login_with_preview(actor)
+
+        self.assertEqual(self.presentation()["actions"][2]["reason"], "")
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 200)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, "accepted")
+        self.assertEqual(TerminationResolution.objects.filter(profile=self.profile).count(), 2)
+
     def test_proposal_survives_replanning_after_its_field_leaves_the_preview(self):
         proposal = self.completed()
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
