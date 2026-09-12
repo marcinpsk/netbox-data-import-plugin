@@ -66,7 +66,6 @@ def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
     with locked_profile_policy(profile_id):
         proposal = ResolutionProposal.objects.select_for_update().get(pk=proposal_id, profile_id=profile_id)
         task = proposal_task(proposal.task_type)
-        task.require_decision_permission(operator)
         if (
             proposal.status != ProposalStatus.COMPLETED
             or proposal.outcome != ProposalOutcome.CANDIDATE
@@ -75,14 +74,22 @@ def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
             # atomic-exit-safe: proposal-refused-before-write
             return False
         proposal.profile = ImportProfile.objects.get(pk=profile_id)
-        if proposal_staleness(proposal, netbox_reader=netbox_reader).is_stale:
-            # atomic-exit-safe: proposal-refused-before-write
-            return False
         snapshot = CandidateSnapshot.from_json(proposal.candidate_snapshot)
         entry = next(
             (entry for entry in snapshot.entries if entry.candidate_id == proposal.selected_candidate_id), None
         )
         if entry is None:
+            # atomic-exit-safe: proposal-refused-before-write
+            return False
+        assessment = task.assess_resolution_write(
+            profile=proposal.profile,
+            field_key=proposal.field_key,
+            entry=entry,
+            actor=operator,
+        )
+        if not assessment.allowed:
+            raise ObjectPermissionDenied(assessment.permission)
+        if proposal_staleness(proposal, netbox_reader=netbox_reader).is_stale:
             # atomic-exit-safe: proposal-refused-before-write
             return False
         receipt = task.write_resolution(
