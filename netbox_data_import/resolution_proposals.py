@@ -16,6 +16,7 @@ from .models import (
     ProposalStatus,
     ResolutionProposal,
 )
+from .proposal_tasks import CandidateSnapshot
 
 __all__ = [
     "ActiveProposalExists",
@@ -42,10 +43,12 @@ def request_proposal(
     resolved_device_id,
     prompt_version,
     response_schema_version,
-    candidate_snapshot,
+    candidate_snapshot: CandidateSnapshot,
     requested_by=None,
 ) -> ResolutionProposal:
     """Create the queued row that is also the attempt record, before any backend call."""
+    if not isinstance(candidate_snapshot, CandidateSnapshot):
+        raise TypeError("candidate_snapshot must be a CandidateSnapshot.")
     proposal = ResolutionProposal(
         profile=profile,
         task_type=task_type,
@@ -56,7 +59,7 @@ def request_proposal(
         resolved_device_id=resolved_device_id,
         prompt_version=prompt_version,
         response_schema_version=response_schema_version,
-        candidate_snapshot=candidate_snapshot,
+        candidate_snapshot=candidate_snapshot.as_json(),
         requested_by=requested_by,
     )
     try:

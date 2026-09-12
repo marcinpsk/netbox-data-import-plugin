@@ -20,6 +20,7 @@ from netbox_data_import.models import (
     TerminationResolution,
     index_digest,
 )
+from netbox_data_import.proposal_tasks import CandidateSnapshot, CandidateSnapshotEntry
 from netbox_data_import.resolution_proposals import (
     ActiveProposalExists,
     cancel_proposal,
@@ -65,8 +66,20 @@ class ProposalFixture(TestCase):
             role=TERMINATION_ROLE,
         )
 
-    def make_proposal(self, field_key=None):
+    def make_proposal(self, field_key=None, candidate_snapshot=None):
         """Create one queued proposal through the public request path."""
+        if candidate_snapshot is None:
+            candidate_snapshot = CandidateSnapshot(
+                entries=(
+                    CandidateSnapshotEntry(
+                        candidate_id="candidate-0001",
+                        object_type="dcim.interface",
+                        object_id=self.interface.pk,
+                        display_name=str(self.interface),
+                    ),
+                ),
+                total=1,
+            )
         return request_proposal(
             profile=self.profile,
             task_type=SELECT_TERMINATION_TASK,
@@ -76,7 +89,7 @@ class ProposalFixture(TestCase):
             resolved_device_id=self.device.pk,
             prompt_version=1,
             response_schema_version=1,
-            candidate_snapshot={"total": 1, "candidates": [{"candidate_id": "candidate-0001"}]},
+            candidate_snapshot=candidate_snapshot,
             requested_by=self.operator,
         )
 
@@ -170,6 +183,24 @@ class OneActiveProposalTest(ProposalFixture):
 
         with self.assertRaises(ActiveProposalExists):
             self.make_proposal()
+
+    def test_a_serialized_candidate_snapshot_is_refused_at_the_interface(self):
+        snapshot = {
+            "total": 1,
+            "candidates": [
+                {
+                    "candidate_id": "candidate-0001",
+                    "object_type": "dcim.interface",
+                    "object_id": self.interface.pk,
+                    "display_name": str(self.interface),
+                }
+            ],
+        }
+
+        with self.assertRaises(TypeError):
+            self.make_proposal(candidate_snapshot=snapshot)
+
+        self.assertFalse(ResolutionProposal.objects.exists())
 
     def test_another_key_is_unaffected(self):
         self.make_proposal()
