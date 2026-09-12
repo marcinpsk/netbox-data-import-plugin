@@ -196,6 +196,29 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
         )
         self.assertEqual(self.frozen_proposal().status, ProposalStatus.QUEUED)
 
+    def test_duplicate_candidate_ids_fail_as_invalid_configuration(self):
+        proposal = self.frozen_proposal()
+        proposal.candidate_snapshot["candidates"].append(dict(proposal.candidate_snapshot["candidates"][0]))
+        proposal.candidate_snapshot["total"] = 2
+        proposal.save()
+        job = Job.objects.create(
+            name=ResolutionProposalJob.Meta.name,
+            job_id=uuid.uuid4(),
+            user=self.operator,
+            object_type=ObjectType.objects.get_for_model(proposal),
+            object_id=proposal.pk,
+        )
+
+        with serving() as (root, seen, allowed), self.configured(root, allowed) as vault_seen:
+            ResolutionProposalJob.handle(job, proposal_id=proposal.pk)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(proposal.failure_reason, ProposalFailureReason.INVALID_CONFIGURATION)
+        self.assertEqual(seen, [])
+        self.assertEqual(vault_seen, [])
+        self.assertEqual(proposal.backend_metadata["attempts"], [])
+
     def test_unexpected_selection_error_fails_and_releases_the_active_slot(self):
         proposal = self.frozen_proposal()
         proposal.candidate_snapshot["candidates"][0]["object_type"] = "dcim.missing"
