@@ -157,6 +157,10 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
         reason = CREDENTIAL_FAILURE_REASONS.pop(category)
         self.addCleanup(CREDENTIAL_FAILURE_REASONS.__setitem__, category, reason)
 
+    def omit_adapter_mapping(self, error_type):
+        reason = ADAPTER_FAILURE_REASONS.pop(error_type)
+        self.addCleanup(ADAPTER_FAILURE_REASONS.__setitem__, error_type, reason)
+
     def test_unmapped_reference_failure_reaches_a_terminal_status(self):
         self.omit_credential_mapping("invalid_credential_reference")
         proposal = self.frozen_proposal()
@@ -180,6 +184,36 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
         self.assertEqual(
             (proposal.status, proposal.failure_reason),
             (ProposalStatus.FAILED, ProposalFailureReason.CREDENTIAL_UNAVAILABLE),
+        )
+
+    def test_unmapped_non_transient_adapter_failure_fails_closed(self):
+        self.omit_adapter_mapping(inference_adapter.InvalidBackendConfiguration)
+        proposal = self.frozen_proposal()
+        with serving(status=400, payload="unmapped") as (root, seen, allowed), self.configured(root, allowed):
+            run_proposal(proposal.pk)
+
+        self.assert_failure(
+            proposal,
+            ProposalFailureReason.INVALID_CONFIGURATION,
+            seen,
+            1,
+            400,
+            "unmapped",
+        )
+
+    def test_unmapped_transient_adapter_failure_uses_the_safe_fallback(self):
+        self.omit_adapter_mapping(inference_adapter.TransportFailure)
+        proposal = self.frozen_proposal()
+        with serving(status=503, payload="unmapped") as (root, seen, allowed), self.configured(root, allowed):
+            run_proposal(proposal.pk)
+
+        self.assert_failure(
+            proposal,
+            ProposalFailureReason.TEMPORARY_BACKEND_FAILURE,
+            seen,
+            3,
+            503,
+            "unmapped",
         )
 
     def test_unexpected_snapshot_error_fails_and_releases_the_active_slot(self):
