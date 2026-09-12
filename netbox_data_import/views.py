@@ -3830,21 +3830,29 @@ class _TraceWorkspaceMixin:
         messages.warning(request, "The saved import target is no longer available. Start a new preview.")
         return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-    def refuse_unregistered_adapter(self, request, profile):
-        """Return the response that ends a request this release cannot plan for, or None.
-
-        Planning raises UnknownSourceAdapter, so a workspace request that reaches it without this
-        gate answers a 500. The preview is discarded because no release-side decision revives it.
-        """
+    @staticmethod
+    def unregistered_adapter_reason(profile):
+        """Return why this release cannot plan for the profile's adapter, or None."""
         try:
             validate_registered_adapter(profile)
             # Planning raises the same error for a registered adapter no Target Module implements.
             validate_adapter_target_module(profile.source_adapter)
         except ValidationError as exc:
-            _discard_import_preview(request)
-            messages.warning(request, "; ".join(exc.messages))
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+            return "; ".join(exc.messages)
         return None
+
+    def refuse_unregistered_adapter(self, request, profile):
+        """Return the response that ends a request this release cannot plan for, or None.
+
+        Planning raises UnknownSourceAdapter, so a request that reaches it without this gate answers
+        a 500. The preview is discarded because no release-side decision revives it.
+        """
+        reason = self.unregistered_adapter_reason(profile)
+        if reason is None:
+            return None
+        _discard_import_preview(request)
+        messages.warning(request, reason)
+        return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
     @staticmethod
     def live_plan(profile, document, request, planning_context):
@@ -4204,12 +4212,17 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         from .field_keys import parse_termination_field_key
         from .inference_backend import proposal_candidate_limit
         from .jobs import ResolutionProposalJob
+        from .models import ProposalFailureReason
         from .proposal_jobs import PROMPT_VERSION
         from .proposal_response import RESPONSE_SCHEMA_VERSION
         from .proposal_tasks import proposal_task
-        from .resolution_proposals import request_proposal
+        from .resolution_proposals import fail_proposal, request_proposal
 
         profile, document, workspace, planning_context, reader = self.proposal_context(request)
+        reason = self.unregistered_adapter_reason(profile)
+        if reason is not None:
+            _discard_import_preview(request)
+            return JsonResponse({"ok": False, "error": reason}, status=409)
         field_key = request.POST.get("field_key", "").strip()
         if field_key not in _workspace_field_keys(workspace):
             raise ValueError("This preview asked no question about that termination.")
@@ -4247,9 +4260,13 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
                 candidate_snapshot=snapshot.as_json(),
                 requested_by=request.user,
             )
-        job = ResolutionProposalJob.enqueue(
-            name=ResolutionProposalJob.Meta.name, user=request.user, proposal_id=proposal.pk
-        )
+        try:
+            job = ResolutionProposalJob.enqueue(
+                name=ResolutionProposalJob.Meta.name, user=request.user, proposal_id=proposal.pk
+            )
+        except Exception:
+            fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
+            raise
         return JsonResponse({"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "job_id": job.pk})
 
 
