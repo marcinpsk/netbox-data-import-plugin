@@ -603,6 +603,24 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 403)
         self.assert_unwritten(proposal)
 
+    def test_accept_fails_closed_for_an_empty_related_primary_key_set(self):
+        proposal = self.completed()
+        actor = user_with_object_permission(
+            "empty-primary-key-set-decider",
+            [
+                (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                (Site, ["view"], {}),
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (TerminationResolution, ["add"], {"profile__termination_resolutions__pk__in": []}),
+            ],
+        )
+        self.login_with_preview(actor)
+
+        self.assertIn("permission", self.presentation()["actions"][2]["reason"])
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 403)
+        self.assert_unwritten(proposal)
+
     def test_accept_allows_a_cyclic_primary_key_constraint_with_a_saved_witness(self):
         proposal = self.completed()
         sibling = TerminationResolution.objects.create(

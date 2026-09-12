@@ -16,7 +16,7 @@ from copy import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from django.core.exceptions import FieldError, ValidationError
+from django.core.exceptions import EmptyResultSet, FieldError, ValidationError
 from django.db import DatabaseError, IntegrityError, connection, models, transaction
 from django.db.models.expressions import Col
 from django.db.models.lookups import IsNull
@@ -177,7 +177,7 @@ def _assess_permission_scoped_save(
             not constraint or _prospective_row_matches(user, model, prospective, constraint)
             for constraint in constraints
         )
-    except (DatabaseError, FieldError, TypeError, ValueError) as exc:
+    except (DatabaseError, EmptyResultSet, FieldError, TypeError, ValueError) as exc:
         logger.warning("Prospective %s permission assessment failed closed: %s", model._meta.label, exc)
         allowed = False
     return PermissionScopedSaveAssessment(allowed, permission)
