@@ -318,6 +318,15 @@ class ResolutionProposalSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class ResolutionProposalHistorySerializer(serializers.ModelSerializer):
+    """Serialize one attempt summary for profile-scoped field history."""
+
+    class Meta:
+        model = ResolutionProposal
+        fields = ["id", "created", "status", "outcome", "decision", "failure_reason"]
+        read_only_fields = fields
+
+
 class InferenceBackendSerializer(NetBoxModelSerializer):
     """Serialize one Inference Backend row, without its credential reference.
 

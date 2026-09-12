@@ -171,6 +171,23 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
         self.assertEqual(seen, list(reversed(attempts)))
         self.assertNotIn(other.pk, seen)
 
+    def test_profile_scoped_history_exposes_only_attempt_summaries(self):
+        profile_viewer = user_with_object_permission(
+            "profile-history-summary-viewer", [(ImportProfile, ["view"], {"pk": self.profile.pk})]
+        )
+        self.client.force_login(profile_viewer)
+
+        response = self.client.get(
+            self.history_url,
+            {"profile_id": self.profile.pk, "field_key": self.field_key},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.json()["results"][0]),
+            {"id", "created", "status", "outcome", "decision", "failure_reason"},
+        )
+
     def test_history_endpoint_requires_one_valid_profile_and_field_key(self):
         actor = user_with_object_permission("history-filter-viewer", [(ImportProfile, ["view"], None)])
         self.client.force_login(actor)
