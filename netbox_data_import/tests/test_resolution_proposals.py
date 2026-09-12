@@ -247,22 +247,22 @@ class ProposalDecisionTest(ProposalFixture):
         proposal = self.make_proposal()
         self.complete(proposal)
 
-        self.assertIs(decide_proposal(proposal.pk, decision=ProposalDecision.ACCEPTED, operator=self.operator), True)
+        self.assertIs(decide_proposal(proposal.pk, decision=ProposalDecision.REJECTED, operator=self.operator), True)
 
         decision, decided_at, status = self.decided(proposal)
-        self.assertEqual(decision, ProposalDecision.ACCEPTED)
+        self.assertEqual(decision, ProposalDecision.REJECTED)
         self.assertIsNotNone(decided_at)
         self.assertEqual(status, ProposalStatus.COMPLETED)
 
     def test_a_second_decision_is_refused(self):
         proposal = self.make_proposal()
         self.complete(proposal)
-        decide_proposal(proposal.pk, decision=ProposalDecision.ACCEPTED, operator=self.operator)
+        decide_proposal(proposal.pk, decision=ProposalDecision.REJECTED, operator=self.operator)
 
         again = decide_proposal(proposal.pk, decision=ProposalDecision.REJECTED, operator=self.operator)
 
         self.assertIs(again, False)
-        self.assertEqual(self.decided(proposal)[0], ProposalDecision.ACCEPTED)
+        self.assertEqual(self.decided(proposal)[0], ProposalDecision.REJECTED)
 
     def test_an_undecided_non_completed_proposal_cannot_be_decided(self):
         for status in (ProposalStatus.QUEUED, ProposalStatus.FAILED, ProposalStatus.CANCELLED):
@@ -273,7 +273,7 @@ class ProposalDecisionTest(ProposalFixture):
                 elif status == ProposalStatus.CANCELLED:
                     cancel_proposal(proposal.pk)
 
-                refused = decide_proposal(proposal.pk, decision=ProposalDecision.ACCEPTED, operator=self.operator)
+                refused = decide_proposal(proposal.pk, decision=ProposalDecision.REJECTED, operator=self.operator)
 
                 self.assertIs(refused, False)
                 self.assertEqual(self.decided(proposal)[0], "")
@@ -300,6 +300,15 @@ class ProposalDecisionTest(ProposalFixture):
 
         self.assertEqual(ResolutionProposal.objects.get(pk=proposal.pk).written_resolution, resolution)
 
+    def test_acceptance_without_a_written_resolution_is_refused(self):
+        proposal = self.make_proposal()
+        self.complete(proposal)
+
+        with self.assertRaises(ValueError):
+            decide_proposal(proposal.pk, decision=ProposalDecision.ACCEPTED, operator=self.operator)
+
+        self.assertEqual(self.decided(proposal), ("", None, ProposalStatus.COMPLETED))
+
 
 class ProposalConstraintTest(ProposalFixture):
     """The database refuses a row whose content contradicts its status or its outcome."""
@@ -312,6 +321,17 @@ class ProposalConstraintTest(ProposalFixture):
 
     def test_a_completed_row_needs_an_outcome(self):
         self.assert_refused(status=ProposalStatus.COMPLETED)
+
+    def test_completion_rejects_an_unknown_outcome(self):
+        proposal = self.make_proposal()
+        self.assertTrue(claim_proposal(proposal.pk))
+
+        with self.assertRaises(ValueError):
+            complete_proposal(proposal.pk, outcome="unknown", explanation="Invalid input must not be stored.")
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.RUNNING)
+        self.assertEqual(proposal.outcome, "")
 
     def test_an_outcome_needs_a_completed_row(self):
         self.assert_refused(outcome=ProposalOutcome.NO_MATCH)
@@ -328,6 +348,16 @@ class ProposalConstraintTest(ProposalFixture):
 
     def test_a_failed_row_needs_a_reason(self):
         self.assert_refused(status=ProposalStatus.FAILED)
+
+    def test_failure_rejects_an_unknown_reason(self):
+        proposal = self.make_proposal()
+
+        with self.assertRaises(ValueError):
+            fail_proposal(proposal.pk, reason="unknown")
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.QUEUED)
+        self.assertEqual(proposal.failure_reason, "")
 
     def test_a_reason_needs_a_failed_row(self):
         self.assert_refused(failure_reason=ProposalFailureReason.TIMEOUT)
@@ -383,6 +413,17 @@ class ProposalConstraintTest(ProposalFixture):
 
     def test_a_decision_needs_a_completed_row(self):
         self.assert_refused(decision=ProposalDecision.ACCEPTED, decided_at="2026-09-10T00:00:00Z")
+
+    def test_decision_rejects_an_unknown_value(self):
+        proposal = self.make_proposal()
+        self.complete(proposal)
+
+        with self.assertRaises(ValueError):
+            decide_proposal(proposal.pk, decision="unknown", operator=self.operator)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, "")
+        self.assertIsNone(proposal.decided_at)
 
 
 class ProposalFieldKeyTest(ProposalFixture):

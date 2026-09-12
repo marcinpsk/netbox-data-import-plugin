@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from .models import (
     ProposalDecision,
+    ProposalFailureReason,
     ProposalOutcome,
     ProposalStatus,
     ResolutionProposal,
@@ -80,6 +81,12 @@ def claim_proposal(proposal_id) -> bool:
     return _transition(proposal_id, allowed_from=(ProposalStatus.QUEUED,), status=ProposalStatus.RUNNING)
 
 
+def _validate_choice(value, choices, *, name) -> None:
+    """Reject a value outside one persisted lifecycle vocabulary."""
+    if not any(value == allowed for allowed, _label in choices):
+        raise ValueError(f"Unsupported {name}.")
+
+
 def complete_proposal(
     proposal_id,
     *,
@@ -92,6 +99,7 @@ def complete_proposal(
     response_diagnostic=None,
 ) -> bool:
     """Record the outcome of a running row. False means it was cancelled or already terminal."""
+    _validate_choice(outcome, ProposalOutcome.CHOICES, name="proposal outcome")
     if outcome == ProposalOutcome.CANDIDATE and not selected_candidate_id:
         raise ValueError("A candidate outcome requires selected_candidate_id.")
     if outcome == ProposalOutcome.NO_MATCH:
@@ -112,6 +120,7 @@ def complete_proposal(
 
 def fail_proposal(proposal_id, *, reason, response_diagnostic=None, backend_metadata=None) -> bool:
     """Fail a queued or running row with its typed reason and whatever the call received."""
+    _validate_choice(reason, ProposalFailureReason.CHOICES, name="proposal failure reason")
     return _transition(
         proposal_id,
         allowed_from=ProposalStatus.ACTIVE,
@@ -133,6 +142,9 @@ def decide_proposal(proposal_id, *, decision, operator=None, written_resolution=
     Only a completed row that nobody has decided yet qualifies, so the rowcount also refuses a second
     decision racing the first.
     """
+    _validate_choice(decision, ProposalDecision.CHOICES, name="proposal decision")
+    if decision == ProposalDecision.ACCEPTED and written_resolution is None:
+        raise ValueError("An accepted proposal requires a written resolution.")
     values = {
         "decision": decision,
         "decided_by": operator,

@@ -4192,7 +4192,13 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
         except UnusableCandidateSet as exc:
             return JsonResponse({"ok": False, "error": str(exc), "reason": exc.reason}, status=400)
         except ObjectPermissionDenied as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=403)
+            logger.warning(
+                "%s: proposal action refused outside the caller's object scope: %s", type(self).__name__, exc
+            )
+            return JsonResponse(
+                {"ok": False, "error": "Permission denied: this action is outside your NetBox object permissions."},
+                status=403,
+            )
         except (PlanningTargetUnavailable, ValueError, UnsupportedProposalRole):
             return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
         except ValidationError as exc:
