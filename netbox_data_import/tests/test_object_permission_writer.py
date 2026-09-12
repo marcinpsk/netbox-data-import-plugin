@@ -14,7 +14,8 @@ from django.db.models.signals import post_save, pre_save
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 
-from netbox_data_import.models import DeviceTypeMapping, ImportProfile
+from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from netbox_data_import.models import DeviceTypeMapping, ImportProfile, TerminationResolution, index_digest
 from netbox_data_import.object_permissions import (
     ObjectPermissionDenied,
     assess_permission_scoped_save,
@@ -295,6 +296,30 @@ class SavePermissionScopedObjectTest(TestCase):
             save_permission_scoped_object(user, DeviceTypeMapping, self._lookup(self.other), {})
 
         self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.other).exists())
+
+    def test_a_create_can_use_a_value_derived_during_save(self):
+        """The saved-row authority sees a digest that does not exist on a raw candidate."""
+        from core.models import ObjectType
+
+        field_key = termination_field_key(device="device-a", cards="", port="port-a", kind="interface")
+        user = user_with_object_permission(
+            "writer-derived-value",
+            [(TerminationResolution, ["add"], {"field_key_digest": index_digest(field_key)})],
+        )
+
+        result = save_permission_scoped_object(
+            user,
+            TerminationResolution,
+            {"profile": self.profile, "task_type": SELECT_TERMINATION_TASK, "field_key": field_key},
+            {
+                "selected_object_type": ObjectType.objects.get_for_model(ImportProfile),
+                "selected_object_id": self.profile.pk,
+                "selected_display_name": "Selected object",
+            },
+        )
+
+        self.assertTrue(result.created)
+        self.assertEqual(result.instance.field_key_digest, index_digest(field_key))
 
     def test_an_update_needs_the_change_permission_not_add(self):
         user = user_with_object_permission("writer-add-only", [(DeviceTypeMapping, ["add"], None)])

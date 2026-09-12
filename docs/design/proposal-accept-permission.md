@@ -41,8 +41,8 @@ Evidence:
 
 Add a read-only assessment to `object_permissions`. It receives the actor, model, lookup, and
 resulting values. It returns the required permission and whether the prospective save stays inside
-that permission's object constraints. The writer calls the same assessment under its lock and
-retains its saved-row check as the final authority.
+that permission's object constraints. Proposal acceptance calls the same assessment under its
+profile and proposal locks. The generic writer retains its saved-row check as the final authority.
 
 This keeps generic add, view, and change policy in the existing deep module. The assessment must
 preserve Django lookup and join semantics.
@@ -100,7 +100,8 @@ candidate, while cyclic paths see the database as it would exist after the save.
 
 A create uses a collision-free negative automatic primary key. The assessment supports known
 `isnull` and exact-null predicates for that key. It denies only a constraint arm that depends on
-the unknown generated numeric value. Another valid OR arm can still grant the operation.
+the unknown generated numeric value, including one reached through a cyclic relation. Another
+valid OR arm can still grant the operation.
 
 All candidate and constraint values stay parameterized. Table names, columns, and casts come from
 Django model metadata. Compilation or database errors fail closed. The assessment performs one
@@ -117,8 +118,10 @@ the result was recorded.
 and `permission`. A missing row uses add permission. An existing kept row uses view permission. An
 existing updated row requires change permission against its current and prospective state.
 
-`_scoped_write()` calls the same assessment with its locked row immediately before mutation. It
-keeps the saved-row permission check after mutation.
+Proposal acceptance calls the assessment while it holds the profile and proposal locks. The
+generic `_scoped_write()` keeps its established transactional saved-row checks. It does not use a
+raw prospective instance because model save hooks can derive fields that the generic seam cannot
+predict. This keeps valid constraints on save-derived values effective.
 
 `SelectTerminationTask` constructs and validates the `TerminationResolution` lookup and values in
 one private method. Its assessment and write methods both use that specification. Presentation
@@ -127,6 +130,6 @@ assessment before staleness evaluation and execution.
 
 Tests use real ObjectPermission rows. They cover constrained creates, current and prospective
 update scope, related and cyclic constraints, automatic primary-key predicates, no assessment
-write, card and POST agreement, and the existing create-to-update race.
+write, save-derived fields, card and POST agreement, and the existing create-to-update race.
 
 Ratification verdict: RATIFY
