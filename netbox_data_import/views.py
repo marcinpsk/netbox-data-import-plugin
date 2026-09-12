@@ -3900,7 +3900,10 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         summary["preview_state"] = self._preview_state(request, drift)
         from .proposal_presentation import ProposalPresentation, group_terminations
 
-        reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        try:
+            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
         proposal_display = ProposalPresentation(profile=profile, actor=request.user, reader=reader)
         proposal_fields = proposal_display.fields(selected.terminations if selected else [])
         if selected is not None:
