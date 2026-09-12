@@ -33,6 +33,7 @@ from .serializers import (
     SourceResolutionSerializer,
     ImportExecutionSerializer,
     InferenceBackendSerializer,
+    ResolutionProposalHistorySerializer,
     ResolutionProposalSerializer,
 )
 
@@ -187,7 +188,7 @@ class ResolutionProposalHistoryViewSet(mixins.ListModelMixin, viewsets.GenericVi
     """Read one field's complete paginated history with workspace permissions."""
 
     queryset = ResolutionProposal.objects.none()
-    serializer_class = ResolutionProposalSerializer
+    serializer_class = ResolutionProposalHistorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
