@@ -104,13 +104,16 @@ validated at startup even when inference is otherwise unconfigured:
 
 - accept a positive integer; reject `bool`, `float`, `str` and an explicit `None`
 - apply the default of 64 only when the key is **omitted**
-- reject a value beyond the retrieval implementation's supported numeric range
+- reject a value above 1,024 before retrieval materializes or serializes candidates
 
 `True` is the trap worth naming: it is numerically 1 and would silently admit a one-candidate set.
 The repository already excludes booleans this way in its integer timeout validation
 (`inference_settings.py:205`), and this setting follows it. Zero and negatives admit no set at all;
 `10**100` must never reach a database slice, because `eligible_terminations` materializes the slice
-before computing `total`.
+before computing `total`. The hard ceiling is 1,024. The four supported NetBox termination models
+limit names to 64 characters. A compact candidate array at the ceiling stays below 1 MiB even when
+every name needs worst-case JSON escaping. The default remains 64 because a hard process and request
+size ceiling does not promise that every configured backend accepts the largest prompt.
 
 **Blocker 2 — T7's adapter cannot supply the raw response T8 must retain.** Neither design saw this.
 Verified in source: `InferenceCompletion` carries `content_text`, `is_refusal`, `finish_reason` and
@@ -251,9 +254,32 @@ that mechanism "deferred", at lines 194-197, describes the state before ce49271 
 Ratification is not a claim that T8 passes its acceptance tests. It must still prove failure
 persistence through this interface.
 
+## Candidate ceiling revision, 2026-09-13
+
+The failure class is resource exhaustion through an operator-configured candidate count. The
+`inference_settings` module owns the interface and rejects an unsupported count before the retrieval
+seam materializes a queryset. Complete-set comparison remains unchanged, so the proposal refuses a
+set above the configured count instead of truncating it.
+
+The primary design considered a ceiling of 128 to keep the largest prompt near the default. A blind
+Codex design, produced from the problem and evidence without the primary candidate, proposed 1,024
+to preserve dense-equipment headroom. Both used the session's GPT-5 model family and reasoning
+setting. The merged r1 chose 1,024 because the installed NetBox 4.7 models limit Device, Interface,
+Front Port, and Rear Port names to 64 characters. A measured compact JSON array of 1,024 entries,
+using worst-case escaped names and maximum signed-bigint object ids, is 904,193 bytes. The 128 shape
+would reduce prompt cost, but that is already the default setting's purpose. The maximum is the
+process and request safety ceiling.
+
+An adversarial review recomputed the size, verified the configuration and complete-set failure
+paths, and returned `RATIFY r1` with no open finding. Values from 1 through 1,024 are valid. Larger
+values fail at startup and when read at runtime. Supporting larger sets requires authoritative
+pre-filtering or another selection mechanism, not a larger materialized prompt. Boundary tests keep
+1,025 out of both validation paths. The existing proposal tests prove that an oversized eligible
+set returns `too_many_candidates` without persisting a partial snapshot.
+
 ## First implementable increment
 
-The `ResolutionProposal` model, a hand-written migration, and the transition service.
+The `ResolutionProposal` model, its generated schema migration, and the transition service.
 
 Observable acceptance conditions:
 

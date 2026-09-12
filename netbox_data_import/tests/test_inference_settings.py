@@ -494,6 +494,10 @@ class ProposalCandidateLimitTest(SimpleTestCase):
     def test_the_upper_bound_is_accepted(self):
         self.assertEqual(validate_proposal_candidate_limit(PROPOSAL_CANDIDATE_LIMIT_MAX), PROPOSAL_CANDIDATE_LIMIT_MAX)
 
+    def test_a_value_above_the_supported_candidate_array_bound_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_proposal_candidate_limit(1025)
+
     def test_a_value_past_the_range_is_rejected(self):
         """`10**100` must never reach a database slice, because the retrieval materializes it."""
         for value in (PROPOSAL_CANDIDATE_LIMIT_MAX + 1, 10**100):
@@ -533,5 +537,10 @@ class ProposalCandidateLimitTest(SimpleTestCase):
 
     def test_a_configured_value_is_validated_when_it_is_read(self):
         with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: True}}):
+            with self.assertRaises(InvalidInferenceConfiguration):
+                proposal_candidate_limit()
+
+    def test_an_oversized_candidate_limit_is_rejected_when_it_is_read(self):
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: 1025}}):
             with self.assertRaises(InvalidInferenceConfiguration):
                 proposal_candidate_limit()
