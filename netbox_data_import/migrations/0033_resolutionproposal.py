@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-
 import django.db.models.deletion
 from django.conf import settings
 from django.db import migrations, models
