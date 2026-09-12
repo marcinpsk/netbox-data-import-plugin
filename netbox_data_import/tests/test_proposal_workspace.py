@@ -531,7 +531,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 403)
         self.assert_unwritten(proposal)
 
-    def test_proposal_survives_a_new_preview_of_the_same_source(self):
+    def test_proposal_survives_replanning_after_its_field_leaves_the_preview(self):
         proposal = self.completed()
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]
         self.client.force_login(self.actor)
@@ -539,7 +539,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             trace_workbook_bytes(
                 path_blocks=[
                     direct_path(
-                        from_end=trace_termination("DEV-A", "", "absent-port", "Port"),
+                        from_end=trace_termination("DEV-A", "", "new-port", "Port"),
                         to_end=trace_termination("DEV-B", "", "eth1", "Port"),
                     )
                 ]

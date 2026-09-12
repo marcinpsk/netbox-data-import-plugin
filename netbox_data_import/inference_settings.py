@@ -58,7 +58,8 @@ TIMEOUT_MAX = 2147483647
 
 #: A proposal offers the whole eligible set, so the bound is denser equipment, not the picker's page.
 PROPOSAL_CANDIDATE_LIMIT_DEFAULT = 64
-PROPOSAL_CANDIDATE_LIMIT_MAX = 2147483647
+#: With supported 64-character termination names, even worst-case JSON escaping keeps this array below 1 MiB.
+PROPOSAL_CANDIDATE_LIMIT_MAX = 1024
 
 VAULT_AUTH_METHODS = ("proxy", "token")
 VAULT_FIELDS = ("address", "auth_method", "namespace", "ca_bundle", "connect_timeout", "read_timeout")
