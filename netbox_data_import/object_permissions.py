@@ -161,18 +161,18 @@ def _assess_permission_scoped_save(
     permission = get_permission_for_model(model, action)
     if user is None or user.is_superuser:
         return PermissionScopedSaveAssessment(True, permission)
-    if not user.has_perm(permission):
-        return PermissionScopedSaveAssessment(False, permission)
-    if current is not None and not user.has_perm(permission, current):
-        return PermissionScopedSaveAssessment(False, permission)
-    if on_existing == "keep":
-        return PermissionScopedSaveAssessment(True, permission)
-    prospective = model(**lookup, **values) if current is None else copy(current)
-    if current is not None:
-        for field_name, value in values.items():
-            setattr(prospective, field_name, value)
-    constraints = getattr(user, "_object_perm_cache", {}).get(permission, ())
     try:
+        if not user.has_perm(permission):
+            return PermissionScopedSaveAssessment(False, permission)
+        if current is not None and not user.has_perm(permission, current):
+            return PermissionScopedSaveAssessment(False, permission)
+        if on_existing == "keep":
+            return PermissionScopedSaveAssessment(True, permission)
+        prospective = model(**lookup, **values) if current is None else copy(current)
+        if current is not None:
+            for field_name, value in values.items():
+                setattr(prospective, field_name, value)
+        constraints = getattr(user, "_object_perm_cache", {}).get(permission, ())
         allowed = any(
             not constraint or _prospective_row_matches(user, model, prospective, constraint)
             for constraint in constraints
