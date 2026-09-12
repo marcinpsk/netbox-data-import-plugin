@@ -4263,7 +4263,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
                 resolved_device_id=device.pk,
                 prompt_version=PROMPT_VERSION,
                 response_schema_version=RESPONSE_SCHEMA_VERSION,
-                candidate_snapshot=snapshot.as_json(),
+                candidate_snapshot=snapshot,
                 requested_by=request.user,
             )
         try:

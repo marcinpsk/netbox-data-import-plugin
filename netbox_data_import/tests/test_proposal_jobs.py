@@ -21,6 +21,7 @@ from netbox_data_import.field_keys import SELECT_TERMINATION_TASK
 from netbox_data_import.jobs import ResolutionProposalJob
 from netbox_data_import.models import InferenceBackend, ProposalFailureReason, ProposalOutcome, ProposalStatus
 from netbox_data_import.proposal_jobs import ADAPTER_FAILURE_REASONS, CREDENTIAL_FAILURE_REASONS, run_proposal
+from netbox_data_import.proposal_tasks import CandidateSnapshot, CandidateSnapshotEntry
 from netbox_data_import.resolution_proposals import cancel_proposal, claim_proposal, request_proposal
 from netbox_data_import.tests.test_inference_adapter import RecordingBackend, completion, serving, serving_truncated
 from netbox_data_import.tests.test_inference_connection_test import make_row
@@ -68,17 +69,17 @@ class WorkerFixture:
     """Share row construction and deployment settings between transaction styles."""
 
     def frozen_proposal(self):
-        snapshot = {
-            "total": 1,
-            "candidates": [
-                {
-                    "candidate_id": "candidate-0001",
-                    "object_type": "dcim.interface",
-                    "object_id": self.interface.pk,
-                    "display_name": self.interface.name,
-                }
-            ],
-        }
+        snapshot = CandidateSnapshot(
+            entries=(
+                CandidateSnapshotEntry(
+                    candidate_id="candidate-0001",
+                    object_type="dcim.interface",
+                    object_id=self.interface.pk,
+                    display_name=self.interface.name,
+                ),
+            ),
+            total=1,
+        )
         return request_proposal(
             profile=self.profile,
             task_type=SELECT_TERMINATION_TASK,

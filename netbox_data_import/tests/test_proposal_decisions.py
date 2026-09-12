@@ -75,7 +75,7 @@ class DecisionInventory:
             resolved_device_id=self.device.pk,
             prompt_version=1,
             response_schema_version=1,
-            candidate_snapshot=snapshot.as_json(),
+            candidate_snapshot=snapshot,
             requested_by=self.operator,
         )
         if status == ProposalStatus.COMPLETED:
