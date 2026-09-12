@@ -221,7 +221,7 @@ diagnostic stored.
 | # | Defect | Verification | Resolution |
 | --- | --- | --- | --- |
 | 5.1 | Every error status outside 400/404/405 was retryable | Reproduced 406, 409, 413, 415, 422 and 501 as `TransportFailure(retryable=True)` against a real local HTTP server | The default is inverted. Specification 13.3 enumerates the transient statuses and nothing else, so `TRANSIENT_STATUSES` decides and every other status at or above 400 is non-transient |
-| 5.2 | A decoder failure escaped `complete()` untyped | `response.json()` on `[`x10000 `0` `]`x10000, real `requests.Response`: **3.12.14 and 3.13.5 raise `RecursionError`, 3.14.4 parses it** | Caught with `ValueError`. Two tests, because the suite's own interpreter cannot reproduce the raise |
+| 5.2 | A decoder failure escaped `complete()` untyped | `response.json()` on `[`x10000 `0` `]`x10000, real `requests.Response`: **3.12.14 and 3.13.5 raise `RecursionError`, 3.14.4 parses it** | Caught with `(ValueError, RecursionError)`. Two tests, because the suite's own interpreter cannot reproduce the raise |
 
 5.2 carries a trap worth stating plainly: `requires-python` is `>=3.12.0`, so the defect is real on
 supported deployments, but the NetBox image the suite runs in ships Python 3.14.4, where CPython's

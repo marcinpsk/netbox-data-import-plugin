@@ -334,8 +334,15 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
     def test_cancel_requires_device_access(self):
         proposal = self.request_proposal()
         self.operator(device=False)
-        response = self.call("cancel_proposal", proposal_id=proposal.pk)
+        with self.assertLogs("netbox_data_import.views", level="WARNING") as operator_log:
+            response = self.call("cancel_proposal", proposal_id=proposal.pk)
+
         self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json(),
+            {"ok": False, "error": "Permission denied: this action is outside your NetBox object permissions."},
+        )
+        self.assertIn("dcim.view_device", operator_log.output[0])
         proposal.refresh_from_db()
         self.assertEqual(proposal.status, ProposalStatus.QUEUED)
 
