@@ -14,6 +14,7 @@ from .views import (
     SourceResolutionViewSet,
     ImportExecutionViewSet,
     InferenceBackendViewSet,
+    ResolutionProposalHistoryViewSet,
     ResolutionProposalViewSet,
 )
 
@@ -28,6 +29,7 @@ router.register("source-resolutions", SourceResolutionViewSet)
 router.register("executions", ImportExecutionViewSet)
 router.register("ai-backends", InferenceBackendViewSet)
 router.register("resolution-proposals", ResolutionProposalViewSet)
+router.register("resolution-proposal-history", ResolutionProposalHistoryViewSet, basename="resolutionproposalhistory")
 
 app_name = "netbox_data_import"
 urlpatterns = router.urls

@@ -3914,6 +3914,8 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                         **field,
                         "proposal": proposal_fields[field["field_key"]]["presentation"],
                         "proposal_history": proposal_fields[field["field_key"]]["history_display"],
+                        "proposal_history_has_more": proposal_fields[field["field_key"]]["history_has_more"],
+                        "proposal_history_url": proposal_fields[field["field_key"]]["history_url"],
                     }
                     for field in selected.terminations
                 ],

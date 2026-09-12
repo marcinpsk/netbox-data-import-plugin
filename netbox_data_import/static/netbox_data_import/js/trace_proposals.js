@@ -88,6 +88,10 @@
         + (attempt.failure ? ' · ' + attempt.failure : '');
       history.appendChild(row);
     });
+    var historyLink = node(card, 'history-link');
+    historyLink.hidden = !payload.history_has_more;
+    if (payload.history_url) historyLink.href = payload.history_url;
+    else historyLink.removeAttribute('href');
     node(card, 'history-disclosure').hidden = payload.history_display.length === 0;
   }
 

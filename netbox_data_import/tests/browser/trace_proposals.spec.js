@@ -67,13 +67,14 @@ test('a boost removes the old poll and binds the replacement card only once', as
   expect(await page.evaluate(() => window.proposalReads)).toBe(3);
 });
 
-test('a completed card shows the candidate, kind, explanation, backend, and full history', async ({page}) => {
+test('a completed card shows the candidate, kind, explanation, backend, and recent history', async ({page}) => {
   const initial = completed();
   initial.history_display = [
     {id: 7, created: 'today', status: 'Completed', outcome: 'Candidate'},
     {id: 6, created: 'yesterday', status: 'Completed', outcome: 'No match', decision: 'Rejected'},
     {id: 5, created: 'earlier', status: 'Failed', outcome: 'No outcome', failure: 'Timeout'},
   ];
+  initial.history_has_more = true;
   await mount(page, initial);
   await expect(slot(page, 'badge')).toHaveText('Proposal - not applied');
   await expect(slot(page, 'candidate')).toHaveText('eth0 (Interface)');
@@ -86,6 +87,7 @@ test('a completed card shows the candidate, kind, explanation, backend, and full
     '#7 · today · Completed · Candidate', '#6 · yesterday · Completed · No match · Rejected',
     '#5 · earlier · Failed · No outcome · Timeout',
   ]);
+  await expect(slot(page, 'history-link')).toBeVisible();
 });
 
 test('stale and no-match cards keep Accept disabled with the reason underneath', async ({page}) => {

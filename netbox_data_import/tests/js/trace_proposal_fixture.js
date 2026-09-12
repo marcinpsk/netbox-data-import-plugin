@@ -17,6 +17,8 @@ export function payload(overrides = {}) {
       ...overrides,
     },
     history_display: [{id: 7, created: '2026-09-11T08:00:00+00:00', status: 'Queued', outcome: 'No outcome'}],
+    history_has_more: false,
+    history_url: '/api/plugins/netbox-data-import/resolution-proposal-history/?profile_id=1&field_key=field',
   };
 }
 
@@ -47,7 +49,7 @@ export function fixture(initial = payload()) {
       ${actions(initial.presentation.actions.slice(2))}
     </div>
     <details open data-proposal-history-disclosure><summary>Proposal history</summary>
-      <ul data-proposal-history></ul></details>`;
+      <ul data-proposal-history></ul><a data-proposal-history-link hidden>View all attempts</a></details>`;
   return `
     <base href="http://preview.test/">
     <style>[hidden] { display: none !important; }</style>

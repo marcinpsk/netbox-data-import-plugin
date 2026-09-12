@@ -4,10 +4,11 @@
 
 from django.http import Http404
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
-from rest_framework import viewsets, permissions
+from rest_framework import mixins, permissions, viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import DjangoModelPermissions
 
+from ..field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from ..models import (
     locked_profile_policy,
     locked_resolution_policy,
@@ -180,6 +181,42 @@ class ResolutionProposalViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyMo
     queryset = ResolutionProposal.objects.select_related("profile")
     serializer_class = ResolutionProposalSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
+
+
+class ResolutionProposalHistoryViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """Read one field's complete paginated history with workspace permissions."""
+
+    queryset = ResolutionProposal.objects.none()
+    serializer_class = ResolutionProposalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        """Return one profile field's history when the actor can view that profile."""
+        profile_values = self.request.query_params.getlist("profile_id")
+        field_values = self.request.query_params.getlist("field_key")
+        if len(profile_values) != 1 or not profile_values[0]:
+            raise ValidationError({"profile_id": "Provide one whole-number profile ID."})
+        if len(field_values) != 1 or not field_values[0]:
+            raise ValidationError({"field_key": "Provide one canonical termination field key."})
+        try:
+            profile_id = int(profile_values[0])
+        except (TypeError, ValueError) as exc:
+            raise ValidationError({"profile_id": "Provide one whole-number profile ID."}) from exc
+        try:
+            parse_termination_field_key(field_values[0])
+        except ValueError as exc:
+            raise ValidationError({"field_key": "Provide one canonical termination field key."}) from exc
+        if not ImportProfile.objects.restrict(self.request.user, "view").filter(pk=profile_id).exists():
+            raise Http404
+        return (
+            ResolutionProposal.objects.filter(
+                profile_id=profile_id,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=field_values[0],
+            )
+            .select_related("profile")
+            .order_by("-created", "-pk")
+        )
 
 
 class InferenceBackendViewSet(NetBoxReadOnlyModelViewSet):

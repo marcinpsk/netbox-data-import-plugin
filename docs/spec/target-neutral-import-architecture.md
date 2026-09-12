@@ -1243,7 +1243,8 @@ Every action is always visible. An illegal action renders disabled with its reas
 hidden: an absent control tells the operator nothing about why it is absent. The proposal card itself
 appears only once a proposal exists, so Accept and Reject are card actions and not field actions.
 
-A per-field proposal history list shows every attempt, its status, and its outcome.
+A per-field proposal history list shows the ten most recent attempts, their status, and their outcome.
+The list links to a field-filtered, paginated history endpoint for all older attempts.
 
 A drift warning strip appears when live NetBox differs from the reviewed snapshot, with a re-read
 action. The workspace compares the reviewed plan fingerprint with a freshly computed plan fingerprint
@@ -1262,6 +1263,9 @@ not final.
   instead, which is how the Inference Backend endpoint works.
 - New read-write endpoints: CableClass mapping and Inference Backend.
 - New read-only endpoints: Resolution Proposal and per-Cable provenance.
+- A field-history endpoint requires one Import Profile id and one canonical field key. It uses the
+  workspace's Import Profile view scope, returns newest attempts first with a stable id tie-breaker,
+  and applies the standard REST pagination limit.
 - The Inference Backend serializer exposes the credential reference as write-only, and never exposes
   a secret value (spec default, consistent with the Vault research).
 - Requesting, accepting, and rejecting a Resolution Proposal happen through Review Workspace
@@ -1800,7 +1804,8 @@ permissions at the view boundary.
 - Accepting writes a `TerminationResolution` row, marks the termination `accepted`, and triggers a
   replan.
 - Cancel is offered to any operator with request permission, not only the requester.
-- The per-field history lists every attempt with its status and outcome.
+- The per-field history lists the ten most recent attempts with their status and outcome. A link opens
+  the field-filtered, paginated history endpoint for all older attempts.
 - The change is independently mergeable with all tests passing.
 
 **Blocked by.** T6, T8.
