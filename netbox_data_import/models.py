@@ -1282,12 +1282,15 @@ class ProposalFailureReason:
     TRANSIENT = (RATE_LIMIT, TEMPORARY_BACKEND_FAILURE, TIMEOUT, CREDENTIAL_UNAVAILABLE)
 
 
-class ResolutionProposal(models.Model):
+class ResolutionProposal(DigestIndexedMixin, models.Model):
     """One Resolution Proposal request, attempt, and operator decision (section 7).
 
     A plain audit model on purpose: it carries no profile policy and must stay out of the profile
     YAML policy export that `PolicySectionModel` subclasses enter.
     """
+
+    DIGEST_SOURCE_FIELD = "field_key"
+    DIGEST_FIELD = "field_key_digest"
 
     # NetBox's generic views scope a queryset with `restrict()`, which only this manager provides.
     objects = RestrictedQuerySet.as_manager()
@@ -1394,16 +1397,7 @@ class ResolutionProposal(models.Model):
             _canonical_termination_field_key(self.field_key)
         except ValidationError as exc:
             raise ValidationError({"field_key": exc}) from exc
-        self.field_key_digest = index_digest(self.field_key)
-
-    def save(self, *args, **kwargs):
-        """Derive the index key, so no caller can store one that disagrees with the field key."""
-        self.field_key_digest = index_digest(self.field_key)
-        update_fields = kwargs.get("update_fields")
-        # A partial save of the key alone would leave the constraint on the digest it replaced.
-        if update_fields is not None and "field_key" in update_fields:
-            kwargs["update_fields"] = {*update_fields, "field_key_digest"}
-        super().save(*args, **kwargs)
+        self._derive_digest()
 
     def __str__(self):
         return f"{self.task_type}: {self.status}"
