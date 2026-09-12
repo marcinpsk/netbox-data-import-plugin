@@ -174,24 +174,12 @@ class ImportExecutionViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModel
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
 
-class ResolutionProposalViewSet(viewsets.ReadOnlyModelViewSet):
+class ResolutionProposalViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModelViewSet):
     """Read-only viewset for Resolution Proposal history."""
 
-    queryset = ResolutionProposal.objects.all()
+    queryset = ResolutionProposal.objects.select_related("profile")
     serializer_class = ResolutionProposalSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
-
-    def get_queryset(self):
-        """Restrict proposal history to the viewer and an optional profile_id."""
-        qs = super().get_queryset().restrict(self.request.user, "view").select_related("profile")
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id is not None:
-            try:
-                profile_id = int(profile_id)
-            except ValueError:
-                raise ValidationError({"profile_id": ["Enter a valid integer."]}) from None
-            qs = qs.filter(profile_id=profile_id)
-        return qs
 
 
 class InferenceBackendViewSet(NetBoxReadOnlyModelViewSet):
