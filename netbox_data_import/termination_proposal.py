@@ -19,10 +19,6 @@ __all__ = [
 ]
 
 
-#: The one permission an acceptance needs, read by the workspace card and by the writer.
-DECISION_PERMISSION = "netbox_data_import.add_terminationresolution"
-
-
 class UnsupportedProposalRole(Exception):
     """Proposals are requested for the termination role in this delivery (section 7.1)."""
 
@@ -72,34 +68,44 @@ class SelectTerminationTask:
         self._require_termination_role(field_key)
         return resolved_device_for(field_key, netbox_reader)
 
-    def has_decision_permission(self, actor) -> bool:
-        """Answer the same question the workspace card asks before it offers Accept."""
-        return actor is not None and actor.has_perm(DECISION_PERMISSION)
-
-    def require_decision_permission(self, actor) -> None:
-        """Require the permission to create a manual Row Resolution for either decision."""
-        from .object_permissions import ObjectPermissionDenied
-
-        if not self.has_decision_permission(actor):
-            raise ObjectPermissionDenied(DECISION_PERMISSION)
-
-    def write_resolution(self, *, profile, field_key, entry, actor) -> DecisionReceipt:
-        """Upsert the Row Resolution the accepted candidate names, and return only its id."""
+    def _resolution_write(self, *, profile, field_key, entry):
+        """Return the validated lookup and values shared by assessment and execution."""
         from core.models import ObjectType
 
         from .models import TerminationResolution
-        from .object_permissions import save_permission_scoped_object
 
         app_label, model = entry.object_type.split(".", 1)
         object_type = ObjectType.objects.get(app_label=app_label, model=model)
         lookup = {"profile": profile, "task_type": self.task_type, "field_key": field_key}
+        candidate = TerminationResolution(
+            **lookup,
+            selected_object_type=object_type,
+            selected_object_id=entry.object_id,
+            selected_display_name=entry.display_name,
+        )
+        candidate.full_clean(validate_unique=False, validate_constraints=False)
         values = {
+            "field_key_digest": candidate.field_key_digest,
             "selected_object_type": object_type,
             "selected_object_id": entry.object_id,
             "selected_display_name": entry.display_name,
         }
-        candidate = TerminationResolution(**lookup, **values)
-        candidate.full_clean(validate_unique=False, validate_constraints=False)
+        return lookup, values
+
+    def assess_resolution_write(self, *, profile, field_key, entry, actor):
+        """Return whether the exact resolution write stays inside the actor's current scope."""
+        from .models import TerminationResolution
+        from .object_permissions import assess_permission_scoped_save
+
+        lookup, values = self._resolution_write(profile=profile, field_key=field_key, entry=entry)
+        return assess_permission_scoped_save(actor, TerminationResolution, lookup, values)
+
+    def write_resolution(self, *, profile, field_key, entry, actor) -> DecisionReceipt:
+        """Upsert the Row Resolution the accepted candidate names, and return only its id."""
+        from .models import TerminationResolution
+        from .object_permissions import save_permission_scoped_object
+
+        lookup, values = self._resolution_write(profile=profile, field_key=field_key, entry=entry)
         saved = save_permission_scoped_object(actor, TerminationResolution, lookup, values)
         return DecisionReceipt(written_resolution_id=saved.instance.pk)
 

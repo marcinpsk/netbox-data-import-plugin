@@ -11,7 +11,7 @@ from .inference_backend import NoActiveInferenceBackend, resolve_active_backend
 from .inference_trust import InvalidInferenceConfiguration
 from .models import ImportProfile, ProposalDecision, ProposalOutcome, ProposalStatus, ResolutionProposal
 from .proposal_decisions import proposal_staleness
-from .proposal_tasks import proposal_task
+from .proposal_tasks import CandidateSnapshot, proposal_task
 from .cable_target import AUTOMATICALLY_RESOLVED, MANUALLY_RESOLVED, UNRESOLVED
 
 #: The badge modifier each field state wears, so the template needs no state vocabulary of its own.
@@ -145,11 +145,11 @@ class ProposalPresentation:
         stale_reason = payload.get("staleness_error", "")
         if stale and stale["is_stale"]:
             stale_reason = "The resolved Device or eligible candidates changed. Request a new proposal."
-        candidate, missing = self.selected_candidate(proposal)
+        candidate, missing, selected_entry = self.selected_candidate(proposal)
         if missing:
             # Acceptance refuses this row, so the card must not offer an action the writer declines.
             stale_reason = "The selected candidate is no longer in the request snapshot. Request a new proposal."
-        actions = self.actions(field, proposal, state, pending, completed, stale_reason)
+        actions = self.actions(field, proposal, state, pending, completed, stale_reason, selected_entry)
         badge = proposal.get_status_display() if proposal is not None else "No proposal"
         if completed:
             badge = "Proposal - stale, not applied" if stale_reason else "Proposal - not applied"
@@ -186,20 +186,17 @@ class ProposalPresentation:
     def selected_candidate(proposal):
         """Return the chosen candidate's display, and whether the snapshot no longer holds it."""
         if proposal is None or proposal.outcome != ProposalOutcome.CANDIDATE:
-            return "", False
+            return "", False, None
+        snapshot = CandidateSnapshot.from_json(proposal.candidate_snapshot)
         entry = next(
-            (
-                row
-                for row in proposal.candidate_snapshot["candidates"]
-                if row["candidate_id"] == proposal.selected_candidate_id
-            ),
+            (row for row in snapshot.entries if row.candidate_id == proposal.selected_candidate_id),
             None,
         )
         if entry is None:
-            return "", True
-        return f"{entry['display_name']} ({str(proposal.selected_object_type.name).capitalize()})", False
+            return "", True, None
+        return f"{entry.display_name} ({str(proposal.selected_object_type.name).capitalize()})", False, entry
 
-    def actions(self, field, proposal, state, pending, completed, stale_reason):
+    def actions(self, field, proposal, state, pending, completed, stale_reason, selected_entry):
         """Return every command with its current permission and lifecycle refusal."""
         permission_reason = self.request_permission_reason(field)
         request_reason = permission_reason
@@ -221,8 +218,17 @@ class ProposalPresentation:
         if not accept_reason and proposal.outcome == ProposalOutcome.NO_MATCH:
             accept_reason = "The backend found no match. There is no candidate to accept."
         accept_reason = accept_reason or stale_reason
-        if not self.preview_allowed or not proposal_task(SELECT_TERMINATION_TASK).has_decision_permission(self.actor):
+        if not self.preview_allowed:
             accept_reason = "You do not have permission to save a termination resolution."
+        elif selected_entry is not None:
+            assessment = proposal_task(SELECT_TERMINATION_TASK).assess_resolution_write(
+                profile=self.profile,
+                field_key=proposal.field_key,
+                entry=selected_entry,
+                actor=self.actor,
+            )
+            if not assessment.allowed:
+                accept_reason = "You do not have permission to save a termination resolution."
         reject_reason = decision_reason if self.preview_allowed else "You do not have permission to reject proposals."
         if proposal is not None and proposal.decision:
             accept_reason = reject_reason = "This proposal already has a decision."

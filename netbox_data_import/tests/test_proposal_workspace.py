@@ -14,7 +14,7 @@ from django.urls import reverse
 from django_rq import get_queue
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from netbox_data_import.field_keys import termination_field_key
+from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
 from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
 from netbox_data_import.models import (
     ImportProfile,
@@ -399,6 +399,38 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(response.status_code, 403)
         self.assert_unwritten(proposal)
 
+    def test_acceptance_of_an_existing_resolution_requires_change_scope(self):
+        proposal = self.completed()
+        resolution = TerminationResolution.objects.create(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=self.field_key,
+            selected_object_type=ObjectType.objects.get_for_model(Interface),
+            selected_object_id=self.eth0.pk,
+            selected_display_name="Previous selection",
+        )
+        actor = user_with_object_permission(
+            "add-only-decider",
+            [
+                (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                (Site, ["view"], {}),
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (TerminationResolution, ["add"], {"profile_id": self.profile.pk}),
+            ],
+        )
+        self.login_with_preview(actor)
+
+        self.assertIn("permission", self.presentation()["actions"][2]["reason"])
+        response = self.call("accept_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 403)
+        proposal.refresh_from_db()
+        resolution.refresh_from_db()
+        self.assertEqual(proposal.decision, "")
+        self.assertIsNone(proposal.written_resolution_id)
+        self.assertEqual(resolution.selected_display_name, "Previous selection")
+
     def test_rejection_takes_the_workspace_permission_instead(self):
         """Rejection writes no Row Resolution, so specification 7.6 scopes it by the preview."""
         proposal = self.completed()
@@ -531,6 +563,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             ],
         )
         self.login_with_preview(actor)
+        self.assertIn("permission", self.presentation()["actions"][2]["reason"])
         self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 403)
         self.assert_unwritten(proposal)
 
