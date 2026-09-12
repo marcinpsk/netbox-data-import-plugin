@@ -27,4 +27,5 @@
       <li>#{{ attempt.id }} · {{ attempt.created }} · {{ attempt.status }} · {{ attempt.outcome }}{% if attempt.decision %} · {{ attempt.decision }}{% endif %}{% if attempt.failure %} · {{ attempt.failure }}{% endif %}</li>
     {% endfor %}
   </ul>
+  <a data-proposal-history-link{% if termination.proposal_history_url %} href="{{ termination.proposal_history_url }}"{% endif %} {% if not termination.proposal_history_has_more %}hidden{% endif %}>View all attempts</a>
 </details>

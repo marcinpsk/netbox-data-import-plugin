@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Supply proposal cards and action reasons to the Review Workspace."""
 
+from urllib.parse import urlencode
+
 from django.core.exceptions import ValidationError
+from django.db.models import F, Window
+from django.db.models.functions import RowNumber
 from django.urls import reverse
 
 from .api.serializers import ResolutionProposalSerializer
@@ -25,6 +29,8 @@ STATE_STYLES = {
     "stale": "stale",
     ProposalStatus.FAILED: "failed",
 }
+
+RECENT_PROPOSAL_HISTORY_LIMIT = 10
 
 
 def group_terminations(fields):
@@ -68,26 +74,70 @@ class ProposalPresentation:
             self.backend_reason = "The active Inference Backend configuration is invalid."
 
     def fields(self, fields):
-        """Return each displayed field and its complete history within the authorized profile."""
+        """Return each displayed field and its bounded history within the authorized profile."""
         if self.view_reason:
-            return {field["field_key"]: self.field(field, []) for field in fields}
+            return {field["field_key"]: self.field(field, None, [], False) for field in fields}
         histories: dict[str, list] = {field["field_key"]: [] for field in fields}
         rows = (
             ResolutionProposal.objects.filter(
                 profile=self.profile, task_type=SELECT_TERMINATION_TASK, field_key__in=histories
             )
-            .select_related("profile", "resolved_device_type", "selected_object_type", "written_resolution")
-            .order_by("-created", "-pk")
+            .annotate(
+                history_position=Window(
+                    expression=RowNumber(),
+                    partition_by=F("field_key"),
+                    order_by=(F("created").desc(), F("pk").desc()),
+                )
+            )
+            .filter(history_position__lte=RECENT_PROPOSAL_HISTORY_LIMIT + 1)
+            .only("pk", "field_key", "created", "status", "outcome", "decision", "failure_reason")
+            .order_by("field_key", "history_position")
         )
         for row in rows:
             histories[row.field_key].append(row)
-        return {field["field_key"]: self.field(field, histories[field["field_key"]]) for field in fields}
+        current_ids = [history[0].pk for history in histories.values() if history]
+        current = {
+            proposal.pk: proposal
+            for proposal in ResolutionProposal.objects.filter(pk__in=current_ids).select_related(
+                "profile", "resolved_device_type", "selected_object_type", "written_resolution"
+            )
+        }
+        return {
+            field["field_key"]: self.field(
+                field,
+                current.get(history[0].pk) if history else None,
+                history[:RECENT_PROPOSAL_HISTORY_LIMIT],
+                len(history) > RECENT_PROPOSAL_HISTORY_LIMIT,
+            )
+            for field in fields
+            for history in (histories[field["field_key"]],)
+        }
 
-    def field(self, field, history):
-        """Serialize the current attempt, freshness, actions, and every earlier attempt."""
-        proposal = history[0] if history else None
-        records = ResolutionProposalSerializer(history, many=True).data
-        payload = {"ok": True, "proposal": records[0] if records else None, "history": records, "staleness": None}
+    def field(self, field, proposal, history, history_has_more):
+        """Serialize the current attempt, freshness, actions, and recent summaries."""
+        record = ResolutionProposalSerializer(proposal).data if proposal is not None else None
+        history_url = None
+        if history:
+            query = urlencode({"profile_id": self.profile.pk, "field_key": field["field_key"]})
+            history_url = f"{reverse('plugins-api:netbox_data_import-api:resolutionproposalhistory-list')}?{query}"
+        payload = {
+            "ok": True,
+            "proposal": record,
+            "history_display": [
+                {
+                    "id": row.pk,
+                    "created": row.created.isoformat(),
+                    "status": row.get_status_display(),
+                    "outcome": row.get_outcome_display() or "No outcome",
+                    "decision": row.get_decision_display(),
+                    "failure": row.get_failure_reason_display(),
+                }
+                for row in history
+            ],
+            "history_has_more": history_has_more,
+            "history_url": history_url,
+            "staleness": None,
+        }
         if self.reader is None:
             payload["staleness_error"] = "The saved import target is gone or outside your view scope."
         elif proposal is not None:
@@ -98,17 +148,6 @@ class ProposalPresentation:
                 "candidates_changed": stale.candidates_changed,
             }
         payload["presentation"] = self.card(field, proposal, payload)
-        payload["history_display"] = [
-            {
-                "id": row.pk,
-                "created": row.created.isoformat(),
-                "status": row.get_status_display(),
-                "outcome": row.get_outcome_display() or "No outcome",
-                "decision": row.get_decision_display(),
-                "failure": row.get_failure_reason_display(),
-            }
-            for row in history
-        ]
         return payload
 
     def request_permission_reason(self, field):

@@ -4,6 +4,7 @@
 
 import uuid
 from io import BytesIO
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 from core.choices import JobStatusChoices
@@ -11,6 +12,7 @@ from core.models import Job, ObjectType
 from dcim.models import Device, Interface, Site
 from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from django_rq import get_queue
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -316,8 +318,18 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
     def test_read_without_an_attempt_returns_null(self):
         response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(
-            {key: response.json()[key] for key in ("ok", "proposal", "staleness", "history")},
-            {"ok": True, "proposal": None, "staleness": None, "history": []},
+            {
+                key: response.json()[key]
+                for key in ("ok", "proposal", "staleness", "history_display", "history_has_more", "history_url")
+            },
+            {
+                "ok": True,
+                "proposal": None,
+                "staleness": None,
+                "history_display": [],
+                "history_has_more": False,
+                "history_url": None,
+            },
         )
 
     def test_cancel_queued_and_running_by_another_operator(self):
@@ -763,21 +775,35 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         payload = self.call("proposal", field_key=self.field_key).json()
         self.assertEqual(payload["proposal"]["id"], latest.pk)
         self.assertEqual(
-            [(row["id"], row["status"], row["outcome"]) for row in payload["history"]],
-            [
-                (latest.pk, ProposalStatus.QUEUED, ""),
-                (second.pk, ProposalStatus.CANCELLED, ""),
-                (first.pk, ProposalStatus.COMPLETED, ProposalOutcome.NO_MATCH),
-            ],
-        )
-
-        self.assertEqual(
             [(row["id"], row["status"], row["outcome"]) for row in payload["history_display"]],
             [
                 (latest.pk, "Queued", "No outcome"),
                 (second.pk, "Cancelled", "No outcome"),
                 (first.pk, "Completed", "No match"),
             ],
+        )
+        self.assertFalse(payload["history_has_more"])
+        self.assertNotIn("history", payload)
+
+    def test_workspace_history_is_limited_to_ten_recent_attempts(self):
+        attempts = [self.completed(no_match=True).pk for _ in range(12)]
+        ResolutionProposal.objects.filter(pk__in=attempts).update(created=timezone.now())
+        ResolutionProposal.objects.filter(pk=attempts[-2]).update(
+            candidate_snapshot={"sentinel": "older-snapshot-must-not-be-serialized"}
+        )
+
+        response = self.call("proposal", field_key=self.field_key)
+        payload = response.json()
+
+        expected = list(reversed(attempts[-10:]))
+        self.assertEqual([row["id"] for row in payload["history_display"]], expected)
+        self.assertTrue(payload["history_has_more"])
+        self.assertNotIn("history", payload)
+        self.assertNotIn("older-snapshot-must-not-be-serialized", response.content.decode())
+        history_url = urlsplit(payload["history_url"])
+        self.assertEqual(
+            parse_qs(history_url.query),
+            {"profile_id": [str(self.profile.pk)], "field_key": [self.field_key]},
         )
 
     def test_history_excludes_other_profiles_and_fields(self):
@@ -790,7 +816,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         )
         own = self.completed()
         payload = self.call("proposal", field_key=self.field_key).json()
-        self.assertEqual([row["id"] for row in payload["history"]], [own.pk])
+        self.assertEqual([row["id"] for row in payload["history_display"]], [own.pk])
         self.operator(view_only=True, profile_scope=other_profile.pk)
         response = self.call("proposal", field_key=self.field_key)
         self.assertEqual(response.status_code, 409)
@@ -801,7 +827,10 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         actor = user_with_object_permission("history-viewer", [(ImportProfile, ["view"], {"pk": self.profile.pk})])
         self.login_with_preview(actor)
         payload = self.call("proposal", field_key=self.field_key).json()
-        self.assertEqual([row["id"] for row in payload["history"]], [proposal.pk])
+        self.assertEqual([row["id"] for row in payload["history_display"]], [proposal.pk])
+        history = self.client.get(payload["history_url"])
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual([row["id"] for row in history.json()["results"]], [proposal.pk])
         self.assertIsNone(payload["staleness"])
         self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
 
@@ -1006,7 +1035,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         other_key = termination_field_key(device="DEV-A", cards="", port="older-port", kind="interface")
         ResolutionProposal.objects.filter(pk=proposal.pk).update(field_key=other_key)
         payload = self.call("proposal", field_key=other_key).json()
-        self.assertEqual([row["id"] for row in payload["history"]], [proposal.pk])
+        self.assertEqual([row["id"] for row in payload["history_display"]], [proposal.pk])
         self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
 
     def test_active_history_outside_the_preview_disables_cancel(self):
@@ -1042,7 +1071,8 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         ):
             response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
         payload = response.context["proposal_fields"][self.field_key]
-        self.assertEqual((payload["proposal"], payload["history"]), (None, []))
+        self.assertEqual((payload["proposal"], payload["history_display"]), (None, []))
+        self.assertIsNone(payload["history_url"])
         self.assertEqual(response.context["summary"]["active_proposals"], "Not permitted")
         self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
 

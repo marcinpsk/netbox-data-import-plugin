@@ -68,9 +68,10 @@ it('aborts a detached read and ignores its late answer', async () => {
   expect(node('candidate').textContent).toBe('replacement (Rear port)');
 });
 
-it('renders candidate details as text and every history attempt', () => {
+it('renders candidate details as text and recent history attempts', () => {
   const initial = completed({candidate: '<img src=x onerror=alert(1)> (Front port)'});
   initial.history_display.push({id: 6, created: 'earlier', status: 'Failed', outcome: 'No outcome', failure: 'Timeout'});
+  initial.history_has_more = true;
   mount(initial);
   expect(node('display').hidden).toBe(false);
   expect(node('candidate').textContent).toBe(initial.presentation.candidate);
@@ -83,6 +84,8 @@ it('renders candidate details as text and every history attempt', () => {
     '#6 · earlier · Failed · No outcome · Timeout',
   ]);
   expect(node('history-disclosure').hidden).toBe(false);
+  expect(node('history-link').hidden).toBe(false);
+  expect(node('history-link').href).toContain('resolution-proposal-history');
 });
 
 it('keeps stale and no-match accept buttons visible and disabled with their reason', () => {
