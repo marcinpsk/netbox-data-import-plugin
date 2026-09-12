@@ -6,7 +6,7 @@ from django.urls import reverse
 from rest_framework import serializers, viewsets
 
 from netbox_data_import.api.serializers import ResolutionProposalSerializer
-from netbox_data_import.api.views import ResolutionProposalViewSet
+from netbox_data_import.api.views import ResolutionProposalViewSet, _ProfileScopedQuerySetMixin
 from netbox_data_import.models import ImportProfile, ProposalFailureReason, ProposalStatus, ResolutionProposal
 from netbox_data_import.proposal_jobs import run_proposal
 from netbox_data_import.tests.helpers import user_with_object_permission
@@ -27,7 +27,9 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
         self.client.force_login(self.viewer)
 
     def test_plain_model_uses_plain_drf_bases(self):
-        self.assertEqual(ResolutionProposalViewSet.__bases__, (viewsets.ReadOnlyModelViewSet,))
+        self.assertEqual(
+            ResolutionProposalViewSet.__bases__, (_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModelViewSet)
+        )
         self.assertEqual(ResolutionProposalSerializer.__bases__, (serializers.ModelSerializer,))
 
     def test_list_returns_stored_proposal(self):
@@ -187,7 +189,7 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
         response = self.client.get(self.list_url, {"profile_id": "abc"})
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json(), {"profile_id": ["Enter a valid integer."]})
+        self.assertEqual(response.json(), {"profile_id": "Enter a whole number."})
 
     def test_proposals_are_absent_from_graphql(self):
         response = self.client.post(
