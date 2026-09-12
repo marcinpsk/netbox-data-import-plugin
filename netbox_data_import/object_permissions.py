@@ -16,8 +16,10 @@ from copy import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
+from django.core.exceptions import FieldError, ValidationError
 from django.db import DatabaseError, IntegrityError, connection, models, transaction
+from django.db.models.expressions import Col
+from django.db.models.lookups import IsNull
 from users.constants import CONSTRAINT_TOKEN_USER
 from utilities.permissions import get_permission_for_model, qs_filter_from_constraints
 
@@ -58,47 +60,53 @@ def _synthetic_primary_key(instance):
     return value, True
 
 
-def _constraint_depends_on_generated_primary_key(constraint, instance) -> bool:
-    """Return whether an arm needs an automatic primary key that no save has allocated."""
-    target_model = instance._meta.model
+def _depends_on_generated_root_primary_key(constraint, instance) -> bool:
+    """Return whether the root predicate needs an automatic primary key not yet allocated."""
+    field = instance._meta.pk
+    names = {"pk", field.name, field.attname}
     for key, value in constraint.items():
         parts = key.split("__")
-        current_model = target_model
-        for index, part in enumerate(parts):
-            follows_relation = False
-            if part == "pk":
-                field = current_model._meta.pk
-            else:
-                try:
-                    field = current_model._meta.get_field(part)
-                    follows_relation = field.is_relation
-                except FieldDoesNotExist:
-                    field = next(
-                        (candidate for candidate in current_model._meta.concrete_fields if candidate.attname == part),
-                        None,
-                    )
-                    if field is None:
-                        break
-            if current_model is target_model and field is current_model._meta.pk:
-                suffix = parts[index + 1 :]
-                if suffix == ["isnull"] or ((not suffix or suffix == ["exact"]) and value is None):
-                    break
-                return True
-            if not follows_relation or field.related_model is None:
-                break
-            current_model = field.related_model
+        if parts[0] not in names:
+            continue
+        suffix = parts[1:]
+        if suffix == ["isnull"] or ((not suffix or suffix == ["exact"]) and value is None):
+            continue
+        return True
     return False
+
+
+def _related_generated_primary_key_aliases(query, model) -> set[str]:
+    """Return the exact related aliases whose unknown primary key must not see the probe."""
+    aliases = set()
+    pending = [query.where]
+    while pending:
+        node = pending.pop()
+        pending.extend(getattr(node, "children", ()))
+        if isinstance(node, IsNull):
+            continue
+        expression = getattr(node, "lhs", None)
+        while expression is not None and not isinstance(expression, Col):
+            expression = getattr(expression, "lhs", None)
+        if (
+            isinstance(expression, Col)
+            and expression.alias != query.base_table
+            and expression.target.primary_key
+            and expression.target.model._meta.concrete_model is model._meta.concrete_model
+        ):
+            aliases.add(expression.alias)
+    return aliases
 
 
 def _prospective_row_matches(user, model, instance, constraint) -> bool:
     """Evaluate one NetBox constraint arm against a read-only prospective database world."""
     probe = copy(instance)
     probe.pk, generated_primary_key = _synthetic_primary_key(probe)
-    if generated_primary_key and _constraint_depends_on_generated_primary_key(constraint, probe):
+    if generated_primary_key and _depends_on_generated_root_primary_key(constraint, probe):
         return False
     permission_filter = qs_filter_from_constraints([constraint], {CONSTRAINT_TOKEN_USER: user})
     queryset = model.objects.filter(permission_filter, pk=probe.pk).values_list("pk", flat=True).order_by()
     query = queryset.query.clone()
+    physical_aliases = _related_generated_primary_key_aliases(query, model) if generated_primary_key else set()
     candidate_cte = "ndi_permission_candidate"
     world_cte = "ndi_permission_world"
     if model._meta.db_table in (candidate_cte, world_cte):
@@ -107,7 +115,10 @@ def _prospective_row_matches(user, model, instance, constraint) -> bool:
         if join.table_name != model._meta.db_table:
             continue
         replacement = copy(join)
-        replacement.table_name = candidate_cte if alias == query.base_table else world_cte
+        if alias == query.base_table:
+            replacement.table_name = candidate_cte
+        elif alias not in physical_aliases:
+            replacement.table_name = world_cte
         query.alias_map[alias] = replacement
     sql, params = query.sql_with_params()
     fields = model._meta.concrete_fields
