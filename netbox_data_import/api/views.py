@@ -7,7 +7,6 @@ from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import viewsets, permissions
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import DjangoModelPermissions
-from rest_framework.exceptions import ValidationError
 
 from ..models import (
     locked_profile_policy,
