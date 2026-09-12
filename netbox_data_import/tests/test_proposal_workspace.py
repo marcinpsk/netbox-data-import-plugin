@@ -567,6 +567,24 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 403)
         self.assert_unwritten(proposal)
 
+    def test_accept_does_not_treat_the_synthetic_primary_key_as_real(self):
+        proposal = self.completed()
+        actor = user_with_object_permission(
+            "synthetic-primary-key-decider",
+            [
+                (ImportProfile, ["view", "change"], {"pk": self.profile.pk}),
+                (Site, ["view"], {}),
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (TerminationResolution, ["add"], {"profile__termination_resolutions__pk": -1}),
+            ],
+        )
+        self.login_with_preview(actor)
+
+        self.assertIn("permission", self.presentation()["actions"][2]["reason"])
+        self.assertEqual(self.call("accept_proposal", proposal_id=proposal.pk).status_code, 403)
+        self.assert_unwritten(proposal)
+
     def test_proposal_survives_replanning_after_its_field_leaves_the_preview(self):
         proposal = self.completed()
         before = self.client.session[PREVIEW_REVISION_SESSION_KEY]

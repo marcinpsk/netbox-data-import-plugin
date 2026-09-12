@@ -16,7 +16,7 @@ from copy import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from django.core.exceptions import FieldError, ValidationError
+from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
 from django.db import DatabaseError, IntegrityError, connection, models, transaction
 from users.constants import CONSTRAINT_TOKEN_USER
 from utilities.permissions import get_permission_for_model, qs_filter_from_constraints
@@ -59,19 +59,34 @@ def _synthetic_primary_key(instance):
 
 
 def _constraint_depends_on_generated_primary_key(constraint, instance) -> bool:
-    """Return whether an arm needs the numeric value an auto field has not allocated yet."""
-    field = instance._meta.pk
-    names = {"pk", field.name, field.attname}
+    """Return whether an arm needs an automatic primary key that no save has allocated."""
+    target_model = instance._meta.model
     for key, value in constraint.items():
         parts = key.split("__")
-        if parts[0] not in names:
-            continue
-        suffix = parts[1:]
-        if suffix == ["isnull"]:
-            continue
-        if (not suffix or suffix == ["exact"]) and value is None:
-            continue
-        return True
+        current_model = target_model
+        for index, part in enumerate(parts):
+            follows_relation = False
+            if part == "pk":
+                field = current_model._meta.pk
+            else:
+                try:
+                    field = current_model._meta.get_field(part)
+                    follows_relation = field.is_relation
+                except FieldDoesNotExist:
+                    field = next(
+                        (candidate for candidate in current_model._meta.concrete_fields if candidate.attname == part),
+                        None,
+                    )
+                    if field is None:
+                        break
+            if current_model is target_model and field is current_model._meta.pk:
+                suffix = parts[index + 1 :]
+                if suffix == ["isnull"] or ((not suffix or suffix == ["exact"]) and value is None):
+                    break
+                return True
+            if not follows_relation or field.related_model is None:
+                break
+            current_model = field.related_model
     return False
 
 
@@ -177,12 +192,6 @@ def assess_permission_scoped_save(
     )
 
 
-def _require_scoped_save(assessment: PermissionScopedSaveAssessment) -> None:
-    """Raise the writer's typed refusal for a denied prospective save."""
-    if not assessment.allowed:
-        raise ObjectPermissionDenied(assessment.permission)
-
-
 def enforce_saved_object_permission(obj, user, action):
     """Reject a saved object whose final state is outside the user's scope.
 
@@ -274,18 +283,11 @@ def _scoped_write(
     with transaction.atomic():
         instance = model.objects.select_for_update().filter(**lookup).first()
         if instance is None:
+            permission = get_permission_for_model(model, "add")
+            if user is not None and not user.has_perm(permission):
+                raise ObjectPermissionDenied(permission)
             instance = model(**lookup, **values)
             reject_overlong_fields(instance, model)
-            _require_scoped_save(
-                _assess_permission_scoped_save(
-                    user,
-                    model,
-                    lookup,
-                    values,
-                    on_existing=on_existing,
-                    current=None,
-                )
-            )
             instance, created = save_or_refetch(instance, model, lookup)
             if not created:
                 instance = model.objects.select_for_update().get(pk=instance.pk)
@@ -293,18 +295,15 @@ def _scoped_write(
             created = False
 
         if not created:
-            assessment = _assess_permission_scoped_save(
-                user,
-                model,
-                lookup,
-                values,
-                on_existing=on_existing,
-                current=instance,
-            )
-            _require_scoped_save(assessment)
             if on_existing == "keep":
+                # Reusing someone else's row still exposes it, so it needs the view permission.
+                enforce_saved_object_permission(instance, user, "view")
                 # atomic-exit-safe: existing-row-kept-unwritten
                 return PermissionScopedSaveResult(instance=instance, created=False)
+            if on_existing == "reject":
+                raise ObjectPermissionDenied(get_permission_for_model(model, "add"))
+            # Before, so a row outside the user's scope cannot be taken over.
+            enforce_saved_object_permission(instance, user, "change")
             for field_name, value in values.items():
                 setattr(instance, field_name, value)
             reject_overlong_fields(instance, model)
