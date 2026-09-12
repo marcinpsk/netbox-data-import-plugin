@@ -1367,7 +1367,10 @@ class ResolutionProposal(DigestIndexedMixin, models.Model):
             ),
             models.CheckConstraint(
                 condition=~models.Q(outcome=ProposalOutcome.CANDIDATE)
-                | models.Q(selected_object_type__isnull=False, selected_object_id__isnull=False),
+                | (
+                    models.Q(selected_object_type__isnull=False, selected_object_id__isnull=False)
+                    & ~models.Q(selected_candidate_id="")
+                ),
                 name="ndi_resolutionproposal_candidate_has_selection",
             ),
             models.CheckConstraint(

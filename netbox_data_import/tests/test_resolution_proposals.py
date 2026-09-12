@@ -106,6 +106,7 @@ class ProposalEdgeTableTest(ProposalFixture):
         if status == ProposalStatus.COMPLETED:
             content |= {
                 "outcome": ProposalOutcome.CANDIDATE,
+                "selected_candidate_id": "candidate-0001",
                 "selected_object_type": self.interface_ct,
                 "selected_object_id": self.interface.pk,
             }
@@ -332,7 +333,37 @@ class ProposalConstraintTest(ProposalFixture):
         self.assert_refused(failure_reason=ProposalFailureReason.TIMEOUT)
 
     def test_a_candidate_outcome_needs_a_selection(self):
-        self.assert_refused(status=ProposalStatus.COMPLETED, outcome=ProposalOutcome.CANDIDATE)
+        self.assert_refused(
+            status=ProposalStatus.COMPLETED,
+            outcome=ProposalOutcome.CANDIDATE,
+            selected_candidate_id="candidate-0001",
+        )
+
+    def test_a_candidate_outcome_needs_a_candidate_id(self):
+        self.assert_refused(
+            status=ProposalStatus.COMPLETED,
+            outcome=ProposalOutcome.CANDIDATE,
+            selected_candidate_id="",
+            selected_object_type=self.interface_ct,
+            selected_object_id=self.interface.pk,
+        )
+
+    def test_completing_a_candidate_without_an_id_is_refused(self):
+        proposal = self.make_proposal()
+        self.assertTrue(claim_proposal(proposal.pk))
+
+        with self.assertRaisesMessage(ValueError, "A candidate outcome requires selected_candidate_id."):
+            complete_proposal(
+                proposal.pk,
+                outcome=ProposalOutcome.CANDIDATE,
+                explanation="The candidate matches the source label.",
+                selected_object_type=self.interface_ct,
+                selected_object_id=self.interface.pk,
+            )
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.RUNNING)
+        self.assertEqual(proposal.outcome, "")
 
     def test_a_no_match_outcome_carries_no_selection(self):
         self.assert_refused(

@@ -92,6 +92,8 @@ def complete_proposal(
     response_diagnostic=None,
 ) -> bool:
     """Record the outcome of a running row. False means it was cancelled or already terminal."""
+    if outcome == ProposalOutcome.CANDIDATE and not selected_candidate_id:
+        raise ValueError("A candidate outcome requires selected_candidate_id.")
     if outcome == ProposalOutcome.NO_MATCH:
         selected_candidate_id, selected_object_type, selected_object_id = "", None, None
     return _transition(

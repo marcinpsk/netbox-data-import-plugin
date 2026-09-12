@@ -124,7 +124,11 @@ class Migration(migrations.Migration):
                     models.CheckConstraint(
                         condition=models.Q(
                             models.Q(("outcome", "candidate"), _negated=True),
-                            models.Q(("selected_object_id__isnull", False), ("selected_object_type__isnull", False)),
+                            models.Q(
+                                ("selected_object_id__isnull", False),
+                                ("selected_object_type__isnull", False),
+                                models.Q(("selected_candidate_id", ""), _negated=True),
+                            ),
                             _connector="OR",
                         ),
                         name="ndi_resolutionproposal_candidate_has_selection",
