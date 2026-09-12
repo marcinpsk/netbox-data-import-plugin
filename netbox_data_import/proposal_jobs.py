@@ -172,7 +172,12 @@ def _run_claimed_proposal(proposal_id, metadata):
                     api_key = ""
         except (InferenceBackendError, CredentialFailure) as exc:
             if isinstance(exc, InferenceBackendError):
-                reason = ADAPTER_FAILURE_REASONS[type(exc)]
+                fallback_reason = (
+                    ProposalFailureReason.TEMPORARY_BACKEND_FAILURE
+                    if exc.retryable
+                    else ProposalFailureReason.INVALID_CONFIGURATION
+                )
+                reason = ADAPTER_FAILURE_REASONS.get(type(exc), fallback_reason)
                 diagnostic = asdict(exc.diagnostic)
                 retryable = exc.retryable
             else:
