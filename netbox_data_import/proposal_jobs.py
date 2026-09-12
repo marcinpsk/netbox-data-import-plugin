@@ -70,7 +70,10 @@ def _request(proposal, response_mode):
     if proposal.prompt_version != PROMPT_VERSION:
         raise InvalidBackendConfiguration("The stored prompt version is not supported.")
     snapshot = CandidateSnapshot.from_json(proposal.candidate_snapshot)
-    validate_candidate_ids(snapshot.candidate_ids)
+    try:
+        validate_candidate_ids(snapshot.candidate_ids)
+    except ValueError as exc:
+        raise InvalidBackendConfiguration(str(exc)) from exc
     return InferenceRequest(
         system_instruction=SYSTEM_INSTRUCTION,
         user_payload_json=encode_payload(
