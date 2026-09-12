@@ -101,6 +101,31 @@ class AssessPermissionScopedSaveTest(TestCase):
         self.assertFalse(outside.allowed)
         self.assertFalse(DeviceTypeMapping.objects.exists())
 
+    def test_a_missing_keep_is_assessed_against_its_prospective_add_scope(self):
+        user = user_with_object_permission(
+            "assess-missing-keep",
+            [(DeviceTypeMapping, ["add"], {"profile_id": self.other.pk})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values(),
+            on_existing="keep",
+        )
+        with self.assertRaises(ObjectPermissionDenied):
+            save_permission_scoped_object(
+                user,
+                DeviceTypeMapping,
+                self._lookup(),
+                self._values(),
+                on_existing="keep",
+            )
+
+        self.assertFalse(assessment.allowed)
+        self.assertFalse(DeviceTypeMapping.objects.exists())
+
     def test_an_update_requires_both_current_and_prospective_change_scope(self):
         mapping = DeviceTypeMapping.objects.create(**self._lookup(), **self._values("inside"))
         in_scope = user_with_object_permission(

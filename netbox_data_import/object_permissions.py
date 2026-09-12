@@ -166,7 +166,7 @@ def _assess_permission_scoped_save(
             return PermissionScopedSaveAssessment(False, permission)
         if current is not None and not user.has_perm(permission, current):
             return PermissionScopedSaveAssessment(False, permission)
-        if on_existing == "keep":
+        if on_existing == "keep" and current is not None:
             return PermissionScopedSaveAssessment(True, permission)
         prospective = model(**lookup, **values) if current is None else copy(current)
         if current is not None:
