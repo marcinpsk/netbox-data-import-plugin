@@ -2,7 +2,11 @@
 # Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 """Migration tests for identity constraints."""
 
+import ast
+import tokenize
+
 from contextlib import contextmanager
+from pathlib import Path
 
 from django.apps import apps
 from django.db import connection
@@ -15,6 +19,43 @@ from django.db.migrations.state import ProjectState
 from django.test import SimpleTestCase, TransactionTestCase
 
 APP = "netbox_data_import"
+_DEPENDENCY_COMMENT_EXCEPTIONS = frozenset(
+    {
+        "0001_initial",
+        "0022_migrate_profile_adapter_config",
+        "0031_inferencebackend",
+    }
+)
+
+
+def _migrations_with_dependency_comments():
+    """Return migrations with comments inside the generated dependency declaration."""
+    migrations = Path(__file__).parents[1] / "migrations"
+    found = set()
+    for path in migrations.glob("[0-9]*.py"):
+        source = path.read_text()
+        tree = ast.parse(source)
+        migration_class = next(
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Migration"
+        )
+        dependencies = next(
+            node
+            for node in migration_class.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "dependencies" for target in node.targets)
+        )
+        tokens = tokenize.generate_tokens(iter(source.splitlines(keepends=True)).__next__)
+        if any(
+            token.type == tokenize.COMMENT and dependencies.lineno <= token.start[0] <= dependencies.end_lineno
+            for token in tokens
+        ):
+            found.add(path.stem)
+    return found
+
+
+class GeneratedMigrationDependencyTest(SimpleTestCase):
+    def test_only_approved_compatibility_migrations_have_dependency_comments(self):
+        self.assertEqual(_migrations_with_dependency_comments(), _DEPENDENCY_COMMENT_EXCEPTIONS)
 
 
 class DeviceExistingMatchConstraintMigrationTest(TransactionTestCase):
