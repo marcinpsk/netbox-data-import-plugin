@@ -235,8 +235,8 @@ subclass whose `json()` raises, and removing `RecursionError` from the catch fai
 The unused-constant finding closed as a side effect of 5.1: `NON_TRANSIENT_STATUSES` is deleted, and
 specification 13.3's transient list now has one declaration that both `_read` and the test read.
 
-**New open question for the specification.** 13.3 does not name HTTP 408 Request Timeout. Under the
-inverted default it is now non-transient. That is the operator's call, not this design's.
+**Closed specification question.** HTTP 408 Request Timeout is non-transient under the inverted
+default, as the 2026-09-10 decision above records.
 
 ## Verdict
 

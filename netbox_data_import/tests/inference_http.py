@@ -148,6 +148,14 @@ def issue_server_certificate(directory, hostname):
     return ca_path, certificate_path, key_path
 
 
+def tls_server_context(certificate_path, key_path):
+    """Return a server context with the product's TLS protocol floor."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certificate_path, key_path)
+    return context
+
+
 @contextmanager
 def serving_tls(handler, payload, certificate_path, key_path):
     """Run a TLS stand-in and record the SNI hostname."""
@@ -163,8 +171,7 @@ def serving_tls(handler, payload, certificate_path, key_path):
     Handler.seen = []
     server_names = []
     server = Server(("127.0.0.1", 0), Handler)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(certificate_path, key_path)
+    context = tls_server_context(certificate_path, key_path)
     context.set_servername_callback(lambda _socket, name, _context: server_names.append(name))
     server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -177,4 +184,11 @@ def serving_tls(handler, payload, certificate_path, key_path):
         thread.join(timeout=5)
 
 
-__all__ = ("issue_server_certificate", "local_dns", "rebinding_dns", "serving_rebinding", "serving_tls")
+__all__ = (
+    "issue_server_certificate",
+    "local_dns",
+    "rebinding_dns",
+    "serving_rebinding",
+    "serving_tls",
+    "tls_server_context",
+)

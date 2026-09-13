@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from .cable_target import eligible_terminations, resolved_device_for
 from .field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, parse_termination_field_key
-from .proposal_tasks import CandidateSet, register_proposal_task, snapshot_from
+from .proposal_tasks import CandidateSet, ProposalInventory, UnusableCandidateSet, register_proposal_task, snapshot_from
 
 __all__ = [
     "DecisionReceipt",
@@ -54,14 +54,47 @@ class SelectTerminationTask:
     def current(self, *, profile, field_key, netbox_reader, limit):
         """Return the Candidate Snapshot as the world stands now, for a request or a freshness read."""
         self._require_termination_role(field_key)
+        device = resolved_device_for(field_key, netbox_reader)
+        return self._current_for_device(
+            profile=profile,
+            field_key=field_key,
+            netbox_reader=netbox_reader,
+            limit=limit,
+            device=device,
+        )
+
+    def _current_for_device(self, *, profile, field_key, netbox_reader, limit, device):
+        """Build the snapshot without resolving a Device the caller already read."""
         # The picker and a proposal request share this query, so both see one eligibility rule.
-        eligible = eligible_terminations(field_key, netbox_reader, profile=profile, limit=limit)
+        eligible = eligible_terminations(
+            field_key,
+            netbox_reader,
+            profile=profile,
+            limit=limit,
+            _resolved_device=device,
+        )
         return snapshot_from(
             CandidateSet(objects=eligible.candidates, total=eligible.total),
             label_for=_label_for,
             name_for=_name_for,
             limit=limit,
         )
+
+    def inventory(self, *, profile, field_key, netbox_reader, limit) -> ProposalInventory:
+        """Read the resolved Device and its candidate snapshot once for display and freshness."""
+        self._require_termination_role(field_key)
+        device = resolved_device_for(field_key, netbox_reader)
+        try:
+            candidate_snapshot = self._current_for_device(
+                profile=profile,
+                field_key=field_key,
+                netbox_reader=netbox_reader,
+                limit=limit,
+                device=device,
+            )
+        except UnusableCandidateSet:
+            candidate_snapshot = None
+        return ProposalInventory(resolved_device=device, candidate_snapshot=candidate_snapshot)
 
     def resolved_device(self, *, field_key, netbox_reader):
         """Return the one Device this key resolves to now, or None when it does not resolve to one."""

@@ -17,7 +17,7 @@ from .models import (
     locked_profile_policy,
 )
 from .object_permissions import ObjectPermissionDenied
-from .proposal_tasks import CandidateSnapshot, UnusableCandidateSet, proposal_task
+from .proposal_tasks import CandidateSnapshot, proposal_task
 from .resolution_proposals import decide_proposal
 
 
@@ -34,27 +34,28 @@ class ProposalStaleness:
         return self.resolved_device_changed or self.candidates_changed
 
 
-def proposal_staleness(proposal, *, netbox_reader) -> ProposalStaleness:
+def proposal_staleness(proposal, *, netbox_reader=None, inventory=None) -> ProposalStaleness:
     """Compare current inventory with frozen evidence without changing the proposal."""
-    task = proposal_task(proposal.task_type)
-    device = task.resolved_device(field_key=proposal.field_key, netbox_reader=netbox_reader)
+    if inventory is None:
+        if netbox_reader is None:
+            raise ValueError("Proposal staleness requires current inventory or a scoped NetBox reader.")
+        inventory = proposal_task(proposal.task_type).inventory(
+            profile=proposal.profile,
+            field_key=proposal.field_key,
+            netbox_reader=netbox_reader,
+            limit=proposal_candidate_limit(),
+        )
+    device = inventory.resolved_device
     device_changed = (
         device is None
         or device.pk != proposal.resolved_device_id
         or device._meta.label_lower
         != f"{proposal.resolved_device_type.app_label}.{proposal.resolved_device_type.model}"
     )
-    try:
-        current = task.current(
-            profile=proposal.profile,
-            field_key=proposal.field_key,
-            netbox_reader=netbox_reader,
-            limit=proposal_candidate_limit(),
-        )
-    except UnusableCandidateSet:
-        candidates_changed = True
-    else:
-        candidates_changed = not CandidateSnapshot.from_json(proposal.candidate_snapshot).matches(current)
+    current = inventory.candidate_snapshot
+    candidates_changed = current is None or not CandidateSnapshot.from_json(proposal.candidate_snapshot).matches(
+        current
+    )
     return ProposalStaleness(resolved_device_changed=device_changed, candidates_changed=candidates_changed)
 
 
@@ -113,8 +114,8 @@ def reject_proposal(proposal_id, *, operator) -> bool:
     to create one (specification 7.6).
     """
     profile_id = ResolutionProposal.objects.values_list("profile_id", flat=True).get(pk=proposal_id)
-    if not ImportProfile.objects.restrict(operator, "change").filter(pk=profile_id).exists():
-        raise ObjectPermissionDenied(get_permission_for_model(ImportProfile, "change"))
+    if not ImportProfile.objects.restrict(operator, "view").filter(pk=profile_id).exists():
+        raise ObjectPermissionDenied(get_permission_for_model(ImportProfile, "view"))
     with locked_profile_policy(profile_id):
         proposal = ResolutionProposal.objects.select_for_update().get(pk=proposal_id, profile_id=profile_id)
         decided = decide_proposal(proposal.pk, decision=ProposalDecision.REJECTED, operator=operator)
