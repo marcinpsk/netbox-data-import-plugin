@@ -16,6 +16,7 @@ from django.utils import timezone
 from django_rq import get_queue
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from netbox_data_import import termination_proposal
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
 from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
 from netbox_data_import.models import (
@@ -199,6 +200,31 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertIsNotNone(queued)
         self.assertEqual(queued.kwargs, {"job": job, "proposal_id": proposal.pk})
         self.assertEqual(job.user_id, proposal.requested_by_id)
+
+    def test_request_keeps_the_resolved_device_and_candidates_from_one_inventory_read(self):
+        real_resolver = termination_proposal.resolved_device_for
+        resolution_count = 0
+
+        def resolve_while_the_name_moves(field_key, netbox_reader):
+            nonlocal resolution_count
+            resolved = real_resolver(field_key, netbox_reader)
+            resolution_count += 1
+            if resolution_count == 1:
+                Device.objects.filter(pk=self.device_a.pk).update(name="DEV-A-previous")
+                Device.objects.filter(pk=self.device_b.pk).update(name="DEV-A")
+            return resolved
+
+        with patch.object(
+            termination_proposal,
+            "resolved_device_for",
+            autospec=True,
+            side_effect=resolve_while_the_name_moves,
+        ):
+            proposal = self.request_proposal()
+
+        self.assertEqual(resolution_count, 1)
+        self.assertEqual(proposal.resolved_device_id, self.device_a.pk)
+        self.assertEqual(proposal.candidate_snapshot["candidates"][0]["object_id"], self.eth0.pk)
 
     def test_second_active_request_refuses_and_terminal_attempt_allows_retry(self):
         proposal = self.request_proposal()

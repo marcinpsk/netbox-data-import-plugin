@@ -101,6 +101,7 @@ class ProposalInventory:
 
     resolved_device: object | None
     candidate_snapshot: CandidateSnapshot | None
+    candidate_error: UnusableCandidateSet | None = None
 
 
 def snapshot_from(candidate_set, *, label_for, name_for, limit) -> CandidateSnapshot:
