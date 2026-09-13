@@ -428,6 +428,130 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         self.assertEqual(blocked.disposition, Disposition.BLOCKED)
         self.assertEqual(blocked.diagnostics[0].code, "device.add_permission")
 
+    def test_device_create_permission_is_checked_with_planned_relations(self):
+        """A planned Rack or Device Role does not bypass the Device object constraint."""
+        from dcim.models import Device, DeviceRole, Rack
+
+        rack_actor = user_with_object_permission(
+            "planned-rack-device-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"name": "permitted-device"}),
+            ],
+        )
+        rack_batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PLANNED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": "planned-rack",
+                    "u_height": 42,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="PLANNED-RACK-DEVICE",
+                    device_name="outside-device-scope",
+                    rack_name="planned-rack",
+                ),
+            ),
+        )
+        rack_reader = NetBoxReader.for_actor(rack_actor).for_target(site=self.site)
+
+        rack_unit = DeviceModule().plan(rack_batch, self.profile, CATALOG, rack_reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(rack_unit.diagnostics[0].code, "device.add_permission")
+
+        ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="Planned Role",
+            role_slug="planned-role",
+        )
+        role_actor = user_with_object_permission(
+            "planned-role-device-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"name": "permitted-device"}),
+                (DeviceRole, ["add"], None),
+            ],
+        )
+
+        role_unit = self._plan_device(
+            role_actor,
+            self._device_row(
+                source_id="PLANNED-ROLE-DEVICE",
+                device_class="Planned Role",
+                device_name="outside-device-scope",
+            ),
+        )
+
+        self.assertEqual(role_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(role_unit.diagnostics[0].code, "device.add_permission")
+
+    def test_create_permissions_include_the_source_id_custom_field(self):
+        """Planning checks the same source ID custom field that execution writes."""
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Device, Rack
+        from extras.models import CustomField
+
+        custom_field = CustomField.objects.create(name="edge_source_id", type="text")
+        custom_field.object_types.add(
+            ContentType.objects.get_for_model(Device),
+            ContentType.objects.get_for_model(Rack),
+        )
+        self.profile.adapter_config = {
+            **self.profile.adapter_config,
+            "custom_field_name": custom_field.name,
+        }
+        self.profile.save(update_fields=["adapter_config"])
+
+        rack_actor = user_with_object_permission(
+            "source-field-rack-creator",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"custom_field_data__edge_source_id": "PERMITTED-RACK-ID"}),
+            ],
+        )
+        rack_reader = NetBoxReader.for_actor(rack_actor).for_target(site=self.site)
+        rack_batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PERMITTED-RACK-ID",
+                    "device_class": "Cabinet",
+                    "rack_name": "source-field-rack",
+                    "u_height": 42,
+                    "serial": "",
+                },
+            ),
+        )
+
+        rack_unit = RackModule().plan(rack_batch, self.profile, CATALOG, rack_reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+
+        device_actor = user_with_object_permission(
+            "source-field-device-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"custom_field_data__edge_source_id": "PERMITTED-DEVICE-ID"}),
+            ],
+        )
+
+        device_unit = self._plan_device(
+            device_actor,
+            self._device_row(source_id="PERMITTED-DEVICE-ID", device_name="source-field-device"),
+        )
+
+        self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE, device_unit.diagnostics)
+
     def test_a_device_type_slug_collision_is_not_treated_as_an_existing_target(self):
         """A derived slug owned by a different model blocks implicit reuse."""
         from dcim.models import DeviceType

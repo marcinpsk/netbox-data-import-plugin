@@ -337,6 +337,7 @@ class RackModule:
                 serial,
                 rack_type_id,
                 netbox_reader,
+                profile.adapter_settings.custom_field_name,
                 source_id=_source_text(row.get("source_id")),
             )
             if actor is not None and not _candidate_add_is_allowed(actor, candidate):
@@ -393,6 +394,7 @@ class RackModule:
             serial,
             rack_type_id,
             netbox_reader,
+            profile.adapter_settings.custom_field_name,
             source_id=_source_text(row.get("source_id")),
         )
         if validation is not None:
@@ -525,7 +527,7 @@ class RackModule:
         }
 
     @staticmethod
-    def _validated_candidate(rack, name, height, serial, rack_type_id, reader, source_id):
+    def _validated_candidate(rack, name, height, serial, rack_type_id, reader, custom_field, source_id):
         """Return the prospective Rack and its model validation message, if any."""
         from dcim.models import Rack
 
@@ -539,6 +541,8 @@ class RackModule:
             candidate.location = reader.location
         if reader.tenant is not None:
             candidate.tenant = reader.tenant
+        if rack is None and custom_field and source_id:
+            candidate.custom_field_data[custom_field] = source_id
         try:
             candidate.full_clean()
         except ValidationError as exc:
@@ -1717,12 +1721,8 @@ class DeviceModule:
                 code, taken_display = claim.refused
                 problem(Disposition.INVALID, code, taken_display)
             actor = batch.reader.actor
-            candidate, validation = self._validated_candidate(None, payload)
-            if actor is not None and (
-                not actor.has_perm("dcim.add_device")
-                if candidate is None
-                else not _candidate_add_is_allowed(actor, candidate)
-            ):
+            candidate, validation = self._validated_candidate(None, payload, batch.profile)
+            if actor is not None and not _candidate_add_is_allowed(actor, candidate):
                 problem(Disposition.BLOCKED, "device.add_permission")
             if validation:
                 problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
@@ -1834,7 +1834,7 @@ class DeviceModule:
         actor = batch.reader.actor
         if actor is not None and not batch.reader.devices("change").filter(pk=match.device.pk).exists():
             problem(Disposition.BLOCKED, "device.change_permission")
-        _candidate, validation = self._validated_candidate(match.device, payload)
+        _candidate, validation = self._validated_candidate(match.device, payload, batch.profile)
         if validation:
             problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
         if issues:
@@ -1875,12 +1875,10 @@ class DeviceModule:
         return device.location_id is None and device.rack_id is None and device.position is None and not device.face
 
     @staticmethod
-    def _validated_candidate(device, payload):
+    def _validated_candidate(device, payload, profile):
         """Return the prospective Device and its model validation message, if resolvable."""
         from dcim.models import Device
 
-        if payload["role_id"] is None or payload["rack_name"] is not None:
-            return None, ""
         candidate = copy(device) if device is not None else Device(name=payload["name"])
         candidate.device_type_id = payload["device_type_id"]
         candidate.role_id = payload["role_id"]
@@ -1896,6 +1894,15 @@ class DeviceModule:
         for field in ("serial", "asset_tag"):
             if payload[field]:
                 setattr(candidate, field, payload[field])
+        custom_field = profile.adapter_settings.custom_field_name
+        source_id = payload.get("source_id") or ""
+        if custom_field and source_id:
+            candidate.custom_field_data = {
+                **candidate.custom_field_data,
+                custom_field: source_id,
+            }
+        if payload["role_id"] is None or payload["rack_name"] is not None:
+            return candidate, ""
         try:
             candidate.full_clean()
         except ValidationError as exc:

@@ -943,8 +943,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             FailureReason.STALE_PLAN,
         )
 
-    def test_single_row_sync_reports_a_real_object_permission_failure(self):
-        """A saved Rack outside the actor's object constraint returns a bounded 400."""
+    def test_single_row_sync_blocks_an_object_permission_failure_before_execution(self):
+        """A Rack outside the actor's object constraint is blocked before a write starts."""
         from dcim.models import Rack, Site
 
         actor = user_with_object_permission(
@@ -967,10 +967,7 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertEqual(response.status_code, 400, response.content)
         self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
-        self.assertEqual(
-            ImportExecution.objects.latest("pk").failure_detail["reason"],
-            FailureReason.PERMISSION,
-        )
+        self.assertFalse(ImportExecution.objects.exists())
 
     def test_single_row_sync_marks_the_materialized_preview_stale(self):
         """A selective execution returns immediately and leaves recalculation to the operator."""
