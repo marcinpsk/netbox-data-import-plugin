@@ -9,7 +9,6 @@ from django.db.models import F, Window
 from django.db.models.functions import RowNumber
 from django.urls import reverse
 
-from .api.serializers import ResolutionProposalSerializer
 from .field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, parse_termination_field_key
 from .inference_backend import NoActiveInferenceBackend, resolve_active_backend
 from .inference_trust import InvalidInferenceConfiguration
@@ -115,7 +114,7 @@ class ProposalPresentation:
 
     def field(self, field, proposal, history, history_has_more):
         """Serialize the current attempt, freshness, actions, and recent summaries."""
-        record = ResolutionProposalSerializer(proposal).data if proposal is not None else None
+        record = {"id": proposal.pk} if proposal is not None else None
         history_url = None
         if history:
             query = urlencode({"profile_id": self.profile.pk, "field_key": field["field_key"]})
@@ -184,7 +183,7 @@ class ProposalPresentation:
         stale_reason = payload.get("staleness_error", "")
         if stale and stale["is_stale"]:
             stale_reason = "The resolved Device or eligible candidates changed. Request a new proposal."
-        candidate, missing, selected_entry = self.selected_candidate(proposal)
+        candidate, missing, selected_entry = ("", False, None) if stale_reason else self.selected_candidate(proposal)
         if missing:
             # Acceptance refuses this row, so the card must not offer an action the writer declines.
             stale_reason = "The selected candidate is no longer in the request snapshot. Request a new proposal."

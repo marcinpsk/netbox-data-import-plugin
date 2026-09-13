@@ -310,10 +310,13 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         )
 
     def test_read_uses_actor_inventory_scope(self):
-        self.completed()
+        proposal = self.completed()
         self.operator(view_only=True, device=False)
         response = self.call("proposal", field_key=self.field_key)
-        self.assertTrue(response.json()["staleness"]["resolved_device_changed"])
+        payload = response.json()
+        self.assertTrue(payload["staleness"]["resolved_device_changed"])
+        self.assertEqual(payload["proposal"], {"id": proposal.pk})
+        self.assertEqual(payload["presentation"]["candidate"], "")
 
     def test_read_without_an_attempt_returns_null(self):
         response = self.call("proposal", field_key=self.field_key)
