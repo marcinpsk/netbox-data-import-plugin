@@ -168,8 +168,8 @@ class ProposalPresentation:
             )
         return self._inventory[key]
 
-    def request_permission_reason(self, field, inventory):
-        """Explain preview access, task eligibility, and resolved Device access."""
+    def action_permission_reason(self, field, inventory):
+        """Explain access shared by request and cancellation actions."""
         if not self.preview_allowed:
             return "You do not have permission to request proposals for this Import Profile."
         if parse_termination_field_key(field["field_key"])["role"] != TERMINATION_ROLE:
@@ -178,6 +178,13 @@ class ProposalPresentation:
             return "This preview asked no question about that termination."
         if inventory is None or inventory.resolved_device is None:
             return "The resolved Device is unavailable or outside your view permission."
+        return ""
+
+    def request_permission_reason(self, field, inventory):
+        """Explain access and candidate eligibility for a proposal request."""
+        reason = self.action_permission_reason(field, inventory)
+        if reason:
+            return reason
         if inventory.candidate_error is not None:
             return str(inventory.candidate_error)
         return ""
@@ -251,8 +258,8 @@ class ProposalPresentation:
 
     def actions(self, field, proposal, state, pending, completed, stale_reason, selected_entry, inventory):
         """Return every command with its current permission and lifecycle refusal."""
-        permission_reason = self.request_permission_reason(field, inventory)
-        request_reason = permission_reason
+        permission_reason = self.action_permission_reason(field, inventory)
+        request_reason = self.request_permission_reason(field, inventory)
         if not request_reason and state != UNRESOLVED:
             request_reason = "This termination is already resolved."
         if not request_reason and pending:

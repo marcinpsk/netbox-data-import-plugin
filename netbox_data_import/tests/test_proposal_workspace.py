@@ -938,6 +938,18 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         actions = {row["key"]: row for row in self.presentation()["actions"]}
         self.assertIn("Device", actions["cancel"]["reason"])
 
+    def test_candidate_drift_does_not_disable_pending_cancellation(self):
+        proposal = self.request_proposal()
+        self.eth0.delete()
+
+        actions = {row["key"]: row for row in self.presentation()["actions"]}
+        response = self.call("cancel_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(actions["cancel"]["reason"], "")
+        self.assertEqual(response.status_code, 200, response.content)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, ProposalStatus.CANCELLED)
+
     def test_candidate_actions_follow_decision_permission_and_staleness(self):
         self.completed()
         self.operator()
