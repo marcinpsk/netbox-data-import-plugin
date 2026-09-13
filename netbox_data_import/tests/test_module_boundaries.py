@@ -53,12 +53,19 @@ def _import_engine_calls(path: pathlib.Path) -> set[str]:
 def _private_engine_references(path: pathlib.Path) -> set[str]:
     """Return private coordinator attributes and imports referenced by one test."""
     tree = ast.parse(path.read_text())
+    engine_names = {"ImportEngine"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module not in {"import_engine", "netbox_data_import.import_engine"}:
+            continue
+        engine_names.update(name.asname or name.name for name in node.names if name.name == "ImportEngine")
     references = {
         node.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
-        and node.value.id == "ImportEngine"
+        and node.value.id in engine_names
         and node.attr.startswith("_")
     }
     for node in ast.walk(tree):
@@ -145,6 +152,17 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             path.write_text("ImportEngine.plan()\nImportEngine.execute()\ncallback = ImportEngine._private_helper\n")
 
             self.assertIn("_private_helper", _import_engine_calls(path))
+
+    def test_private_coordinator_alias_references_are_detected(self):
+        """An imported alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine as Engine\n"
+                "callback = Engine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
 
     def test_tests_use_only_the_public_coordinator_interface(self):
         """Tests exercise planning and execution, not coordinator implementation details."""
