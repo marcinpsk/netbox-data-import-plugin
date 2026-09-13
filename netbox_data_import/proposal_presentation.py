@@ -178,6 +178,8 @@ class ProposalPresentation:
             return "This preview asked no question about that termination."
         if inventory is None or inventory.resolved_device is None:
             return "The resolved Device is unavailable or outside your view permission."
+        if inventory.candidate_error is not None:
+            return str(inventory.candidate_error)
         return ""
 
     def card(self, field, proposal, payload, inventory):

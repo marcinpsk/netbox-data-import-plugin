@@ -914,6 +914,15 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         with override_settings(PLUGINS_CONFIG={"netbox_data_import": {}}):
             self.assertIn("No Inference Backend", self.presentation()["actions"][0]["reason"])
 
+    def test_unusable_candidate_set_disables_request_with_the_endpoint_reason(self):
+        self.eth0.delete()
+
+        request_action = self.presentation()["actions"][0]
+        response = self.call("request_proposal", field_key=self.field_key)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(request_action["reason"], response.json()["error"])
+
     def test_active_proposal_disables_request_and_allows_another_operator_to_cancel(self):
         self.request_proposal()
         self.operator()
