@@ -35,7 +35,7 @@ from .contact_resolution import (
 from .device_field_review import DeviceFieldReviewer
 from .device_identity import DeviceTypeIdentityResolver
 from .netbox_reader import PlanningTargetUnavailable
-from .object_permissions import ObjectPermissionDenied, assess_permission_scoped_save
+from .object_permissions import ObjectPermissionDenied, ProspectiveRelation, assess_permission_scoped_save
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
 from .target_runtime import ExecutionContext, PreconditionFailed, TargetModuleRuntime
 from .values import (
@@ -50,15 +50,40 @@ from .values import (
 DEFAULT_RACK_HEIGHT = 42
 
 
-def _candidate_add_is_allowed(actor, candidate) -> bool:
-    """Return whether one unsaved candidate is inside the actor's add scope."""
+def _candidate_save_is_allowed(actor, candidate, prospective_relations=None) -> bool:
+    """Return whether one candidate stays inside the actor's add or change scope."""
     primary_key = candidate._meta.pk.attname
     values = {
         field.attname: field.value_from_object(candidate)
         for field in candidate._meta.concrete_fields
         if not field.primary_key
     }
-    return assess_permission_scoped_save(actor, type(candidate), {primary_key: None}, values).allowed
+    return assess_permission_scoped_save(
+        actor,
+        type(candidate),
+        {primary_key: candidate.pk},
+        values,
+        prospective_relations=prospective_relations,
+    ).allowed
+
+
+def _prospective_ip_relations(candidate, ip_fields) -> dict[str, ProspectiveRelation]:
+    """Return final placeable address rows and connect them during permission assessment."""
+    relations = {}
+    for field, address in ip_assignment.prospective_addresses(candidate, ip_fields).items():
+        setattr(candidate, f"{field}_id", None)
+        relations[field] = ProspectiveRelation(address.instance, address.generated_fields)
+    return relations
+
+
+def _planned_device_relations(payload, dependencies) -> dict[str, Any]:
+    """Return only planned relations that the reviewed Device payload still uses."""
+    relations = {}
+    if payload["rack_id"] is None and payload["rack_name"] and dependencies.planned_rack is not None:
+        relations["rack"] = dependencies.planned_rack
+    if payload["role_id"] is None and dependencies.role.pk is None:
+        relations["role"] = dependencies.role
+    return relations
 
 
 def _text(value) -> str:
@@ -340,7 +365,7 @@ class RackModule:
                 profile.adapter_settings.custom_field_name,
                 source_id=_source_text(row.get("source_id")),
             )
-            if actor is not None and not _candidate_add_is_allowed(actor, candidate):
+            if actor is not None and not _candidate_save_is_allowed(actor, candidate):
                 return _refused(
                     identity,
                     "rack.add_permission",
@@ -596,6 +621,7 @@ class _Dependencies:
     role: Any = None
     rack: Any = None
     rack_identity: str | None = None
+    planned_rack: Any = None
     role_slug: str = ""
     explicit_device_type: bool = False
     changes: tuple[PlannedChange, ...] = ()
@@ -633,11 +659,11 @@ class _Match:
 
 
 @dataclass(frozen=True)
-class _PlannedRole:
-    """The identity of a Device Role this unit will create."""
+class _PlannedRack:
+    """The identity and final unsaved state of a Rack another unit will create."""
 
-    slug: str
-    pk: None = None
+    identity: str
+    candidate: Any
 
 
 _REVIEWED_PAYLOAD_FIELDS: dict[str, tuple[str, Any]] = {
@@ -1113,11 +1139,12 @@ class _DeviceBatch:
                 found.setdefault(value, []).append(row_number)
         return {value: numbers for value, numbers in found.items() if len(numbers) > 1}
 
-    def _planned_racks_by_name(self, source_batch, profile) -> dict[str, str]:
-        """Return valid rack creates in this batch, keyed by comparison name."""
+    def _planned_racks_by_name(self, source_batch, profile) -> dict[str, _PlannedRack]:
+        """Return valid Rack candidates in this batch, keyed by comparison name."""
         rows = RackModule._rack_rows(source_batch, profile)
         ignored = _ignored_source_ids(profile)
         duplicate_names, duplicate_source_ids = rack_duplicate_keys(rows)
+        mappings = {mapping.source_class: mapping for mapping in profile.class_role_mappings.all()}
         planned = {}
         for row in rows:
             if rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) is not None:
@@ -1126,7 +1153,18 @@ class _DeviceBatch:
             # A rack NetBox already holds is an update, so it is there before any device change runs.
             if name_key in self._racks:
                 continue
-            planned[name_key] = rack_unit_identity(row)
+            mapping = mappings[_source_text(row.get("device_class"))]
+            candidate, _validation = RackModule._validated_candidate(
+                None,
+                rack_row_name(row),
+                _coerce_rack_height(row.get("u_height")),
+                _source_text(row.get("serial")),
+                mapping.rack_type_id,
+                self.reader,
+                profile.adapter_settings.custom_field_name,
+                _source_text(row.get("source_id")),
+            )
+            planned[name_key] = _PlannedRack(rack_unit_identity(row), candidate)
         return planned
 
     def clash(self, row) -> tuple[str, str, list[int]] | None:
@@ -1177,10 +1215,13 @@ class _DeviceBatch:
             return _Dependencies(missing=("device.role_unconfigured", {"source_class": row.get("device_class")}))
         role = self._role_objects.get(role_slug)
         if role is None:
-            if actor is not None and not actor.has_perm("dcim.add_devicerole"):
+            from dcim.models import DeviceRole
+
+            role_change = self._role_change(role_slug)
+            role = DeviceRole(**role_change.payload)
+            if actor is not None and not _candidate_save_is_allowed(actor, role):
                 return _Dependencies(missing=("device.role_permission", {"role_slug": role_slug}))
-            changes.append(self._role_change(role_slug))
-            role = _PlannedRole(role_slug)
+            changes.append(role_change)
 
         rack_name = _source_text(row.get("rack_name"))
         rack_key = identity_text(rack_name)
@@ -1193,14 +1234,15 @@ class _DeviceBatch:
 
             # The name scan above cannot lock, and this rack decides the placement claim.
             rack = self.placement_reference(Rack, rack.pk)
-        rack_identity = self._planned_racks.get(rack_key) if rack_name and rack is None else None
-        if rack_name and rack is None and rack_identity is None:
+        planned_rack = self._planned_racks.get(rack_key) if rack_name and rack is None else None
+        if rack_name and rack is None and planned_rack is None:
             return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
         return _Dependencies(
             device_type=device_type,
             role=role,
             rack=rack,
-            rack_identity=rack_identity,
+            rack_identity=planned_rack.identity if planned_rack is not None else None,
+            planned_rack=planned_rack.candidate if planned_rack is not None else None,
             role_slug=role_slug,
             explicit_device_type=explicit,
             changes=tuple(changes),
@@ -1722,7 +1764,13 @@ class DeviceModule:
                 problem(Disposition.INVALID, code, taken_display)
             actor = batch.reader.actor
             candidate, validation = self._validated_candidate(None, payload, batch.profile)
-            if actor is not None and not _candidate_add_is_allowed(actor, candidate):
+            prospective_relations = _planned_device_relations(payload, dependencies)
+            prospective_relations.update(_prospective_ip_relations(candidate, payload["ip_fields"]))
+            if actor is not None and not _candidate_save_is_allowed(
+                actor,
+                candidate,
+                prospective_relations,
+            ):
                 problem(Disposition.BLOCKED, "device.add_permission")
             if validation:
                 problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
@@ -1832,9 +1880,11 @@ class DeviceModule:
                 display=display,
             )
         actor = batch.reader.actor
-        if actor is not None and not batch.reader.devices("change").filter(pk=match.device.pk).exists():
+        candidate, validation = self._validated_candidate(match.device, payload, batch.profile)
+        prospective_relations = _planned_device_relations(payload, dependencies)
+        prospective_relations.update(_prospective_ip_relations(candidate, payload["ip_fields"]))
+        if actor is not None and not _candidate_save_is_allowed(actor, candidate, prospective_relations):
             problem(Disposition.BLOCKED, "device.change_permission")
-        _candidate, validation = self._validated_candidate(match.device, payload, batch.profile)
         if validation:
             problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
         if issues:

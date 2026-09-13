@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from copy import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,6 +62,14 @@ class IPTarget:
             # The stored mask can differ from the one the row states, so it is worth printing.
             return f"already on {self.interface_name} as {self.address}"
         return f"would go to {self.interface_name}"
+
+
+@dataclass(frozen=True)
+class ProspectiveAddress:
+    """The final IPAddress row and fields whose values are generated during execution."""
+
+    instance: Any
+    generated_fields: frozenset[str] = frozenset()
 
 
 def _normalized_ip(token: str) -> str | None:
@@ -196,6 +205,69 @@ def resolve(device, field: str, value) -> IPTarget:
         owner = getattr(existing.assigned_object, "device", None) or existing.assigned_object
         raise IPAssignmentError(f"Address {existing.address} is already assigned to '{owner}'.")
     return IPTarget(address=address, interface=interface, existing=existing, already_held=False)
+
+
+def _prospective_new_device_target(device, field: str, value, interface) -> IPTarget:
+    """Return the target a new Device will get after its interface templates instantiate."""
+    from ipam.models import IPAddress
+
+    address = normalized_address(field, value)
+    existing = IPAddress.objects.filter(address__net_host=_host(address), vrf=interface.vrf).first()
+    if existing is not None and existing.assigned_object is not None:
+        owner = getattr(existing.assigned_object, "device", None) or existing.assigned_object
+        raise IPAssignmentError(f"Address {existing.address} is already assigned to '{owner}'.")
+    return IPTarget(address=address, interface=interface, existing=existing, already_held=False)
+
+
+def prospective_addresses(device, ip_fields) -> dict[str, ProspectiveAddress]:
+    """Return placeable final address rows without saving or mutating caller-owned rows."""
+    from dcim.models import InterfaceTemplate
+    from ipam.models import IPAddress
+
+    future_interface = None
+    if device.pk is None:
+        templates = list(InterfaceTemplate.objects.filter(device_type=device.device_type))
+        templates.sort(key=lambda template: (not template.mgmt_only, template.name))
+        if templates:
+            future_interface = templates[0].instantiate(device=device)
+            future_interface.pk = -1
+            while type(future_interface)._base_manager.filter(pk=future_interface.pk).exists():
+                future_interface.pk -= 1
+        else:
+            return {}
+
+    found = {}
+    shared: dict[tuple[str, int | None], ProspectiveAddress] = {}
+    for field, value in ip_fields.items():
+        try:
+            target = (
+                _prospective_new_device_target(device, field, value, future_interface)
+                if future_interface is not None
+                else resolve(device, field, value)
+            )
+        except IPAssignmentError:
+            continue
+        vrf_key = getattr(target.interface, "vrf_id", None)
+        key = (_host(target.address), vrf_key)
+        prospective = shared.get(key)
+        if prospective is None:
+            address = (
+                copy(target.existing)
+                if target.existing is not None
+                else IPAddress(
+                    address=target.address,
+                    vrf=target.interface.vrf,
+                )
+            )
+            generated_fields: frozenset[str] = frozenset()
+            if not target.already_held:
+                address.assigned_object = target.interface
+                if future_interface is not None:
+                    generated_fields = frozenset({"assigned_object_id"})
+            prospective = ProspectiveAddress(address, generated_fields)
+            shared[key] = prospective
+        found[field] = prospective
+    return found
 
 
 def apply(target: IPTarget, user=None):

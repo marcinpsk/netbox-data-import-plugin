@@ -38,6 +38,7 @@ FORBIDDEN_INTERPRETER_IMPORTS = frozenset(
         "views",
     }
 )
+PERMISSION_CONSTRAINT_INTERNALS = frozenset({"qs_filter_from_constraints", "_object_perm_cache"})
 
 
 def _import_engine_calls(path: pathlib.Path) -> set[str]:
@@ -243,6 +244,28 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         for name in TARGET_MODULES:
             with self.subTest(module=name):
                 self.assertEqual(_imported_roots(PACKAGE / name) & FORBIDDEN_TARGET_MODULE_IMPORTS, set())
+
+    def test_permission_constraint_parsing_has_one_owner(self):
+        """Only the object permission module interprets NetBox constraint state."""
+        offenders = {
+            str(path.relative_to(PACKAGE)): sorted(names)
+            for path in PACKAGE.rglob("*.py")
+            if "tests" not in path.relative_to(PACKAGE).parts
+            and path.name != "object_permissions.py"
+            and (names := _referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS)
+        }
+
+        self.assertEqual(offenders, {})
+
+    def test_permission_constraint_owner_guard_reads_imports_and_attributes(self):
+        """The ownership guard detects both supported access forms."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "permission_reader.py"
+            path.write_text(
+                "from utilities.permissions import qs_filter_from_constraints\nconstraints = actor._object_perm_cache\n"
+            )
+
+            self.assertEqual(_referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS, PERMISSION_CONSTRAINT_INTERNALS)
 
     def test_no_first_party_module_names_the_cable_path_model(self):
         """Section 6.4: the plugin writes Cables and NetBox derives every path from them."""
