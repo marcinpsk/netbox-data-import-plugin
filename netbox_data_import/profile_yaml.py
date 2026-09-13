@@ -163,6 +163,7 @@ def apply_profile_document(data: Any) -> tuple[ImportProfile, dict[str, int]]:
                 continue
             schema = _SCHEMAS_BY_KEY[section.key]
             stats[section.key] = _reconcile_policy_rows(profile, schema, prepared_rows[section.key])
+        # atomic-exit-safe: profile-import-committed
         return profile, stats
 
 
