@@ -61,11 +61,9 @@ def request_to_resolved_address(
     **kwargs: Any,
 ) -> requests.Response:
     """Send one request to a resolved address without changing its HTTP or TLS hostname."""
-    parts = urlsplit(url)
-    prefix = urlunsplit((parts.scheme, parts.netloc, "/", "", ""))
     previous_adapters = OrderedDict(session.adapters)
     adapter = _AddressPinnedAdapter(url, resolved_address)
-    session.mount(prefix, adapter)
+    session.mount(url, adapter)
     try:
         return session.request(method, url, **kwargs)
     finally:
