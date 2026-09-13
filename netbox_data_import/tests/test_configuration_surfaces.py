@@ -689,7 +689,10 @@ class CableProvenanceAPITest(TestCase):
     def test_object_constraint_hides_other_provenance(self):
         viewer = user_with_object_permission(
             "provenance-viewer",
-            [(CableImportSource, ["view"], {"profile_id": self.profile.pk})],
+            [
+                (ImportProfile, ["view"], None),
+                (CableImportSource, ["view"], {"profile_id": self.profile.pk}),
+            ],
         )
         self.client.force_login(viewer)
 
@@ -701,6 +704,19 @@ class CableProvenanceAPITest(TestCase):
             args=[self.other_provenance.pk],
         )
         self.assertEqual(self.client.get(hidden_url).status_code, 404)
+
+    def test_profile_constraint_hides_provenance(self):
+        viewer = user_with_object_permission(
+            "provenance-profile-viewer",
+            [(CableImportSource, ["view"], None)],
+        )
+        self.client.force_login(viewer)
+
+        response = self.client.get(self.list_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"], [])
+        self.assertEqual(self.client.get(self.detail_url).status_code, 404)
 
     def test_every_write_method_is_refused(self):
         before = list(CableImportSource.objects.values())

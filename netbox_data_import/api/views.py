@@ -225,7 +225,8 @@ class CableImportSourceViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyMod
 
     def get_queryset(self):
         """Apply the profile scope and an optional Cable ID filter."""
-        qs = super().get_queryset()
+        profile_scope = ImportProfile.objects.restrict(self.request.user, "view")
+        qs = super().get_queryset().filter(profile__in=profile_scope)
         cable_id = self.request.query_params.get("cable_id")
         if cable_id is not None:
             try:
