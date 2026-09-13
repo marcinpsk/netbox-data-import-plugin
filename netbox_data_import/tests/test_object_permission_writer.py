@@ -10,12 +10,15 @@ permission check would only restate the assumption under test.
 
 from django.core.exceptions import ValidationError
 from django.db import connection
+from django.db.models.signals import post_save, pre_save
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 
-from netbox_data_import.models import DeviceTypeMapping, ImportProfile
+from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from netbox_data_import.models import DeviceTypeMapping, ImportProfile, TerminationResolution, index_digest
 from netbox_data_import.object_permissions import (
     ObjectPermissionDenied,
+    assess_permission_scoped_save,
     delete_permission_scoped_objects,
     enforce_saved_object_permission,
     save_permission_scoped_object,
@@ -58,6 +61,236 @@ class EnforceSavedObjectPermissionTest(TestCase):
         enforce_saved_object_permission(mapping, None, "view")
 
 
+class AssessPermissionScopedSaveTest(TestCase):
+    """The advisory check applies the writer's real object scope without writing."""
+
+    def setUp(self):
+        self.profile = ImportProfile.objects.create(name="Assessment Profile")
+        self.other = ImportProfile.objects.create(name="Assessment Other Profile")
+
+    def _lookup(self, source_make="Acme", *, profile=None):
+        return {
+            "profile": profile or self.profile,
+            "source_make": source_make,
+            "source_model": "Widget",
+        }
+
+    @staticmethod
+    def _values(manufacturer="acme"):
+        return {
+            "netbox_manufacturer_slug": manufacturer,
+            "netbox_device_type_slug": "acme-widget",
+        }
+
+    def test_a_constrained_create_is_assessed_against_its_prospective_state(self):
+        user = user_with_object_permission(
+            "assess-add",
+            [(DeviceTypeMapping, ["add"], {"profile_id": self.profile.pk})],
+        )
+
+        inside = assess_permission_scoped_save(user, DeviceTypeMapping, self._lookup(), self._values())
+        outside = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup(profile=self.other),
+            self._values(),
+        )
+
+        self.assertTrue(inside.allowed)
+        self.assertEqual(inside.permission, "netbox_data_import.add_devicetypemapping")
+        self.assertFalse(outside.allowed)
+        self.assertFalse(DeviceTypeMapping.objects.exists())
+
+    def test_a_missing_keep_is_assessed_against_its_prospective_add_scope(self):
+        user = user_with_object_permission(
+            "assess-missing-keep",
+            [(DeviceTypeMapping, ["add"], {"profile_id": self.other.pk})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values(),
+            on_existing="keep",
+        )
+        with self.assertRaises(ObjectPermissionDenied):
+            save_permission_scoped_object(
+                user,
+                DeviceTypeMapping,
+                self._lookup(),
+                self._values(),
+                on_existing="keep",
+            )
+
+        self.assertFalse(assessment.allowed)
+        self.assertFalse(DeviceTypeMapping.objects.exists())
+
+    def test_an_update_requires_both_current_and_prospective_change_scope(self):
+        mapping = DeviceTypeMapping.objects.create(**self._lookup(), **self._values("inside"))
+        in_scope = user_with_object_permission(
+            "assess-change",
+            [
+                (
+                    DeviceTypeMapping,
+                    ["change"],
+                    {"profile_id": self.profile.pk, "netbox_manufacturer_slug": "inside"},
+                )
+            ],
+        )
+        current_outside = user_with_object_permission(
+            "assess-current-out",
+            [(DeviceTypeMapping, ["change"], {"netbox_manufacturer_slug": "after"})],
+        )
+
+        allowed = assess_permission_scoped_save(
+            in_scope,
+            DeviceTypeMapping,
+            self._lookup(),
+            {"netbox_device_type_slug": "revised-widget"},
+        )
+        resulting_outside = assess_permission_scoped_save(
+            in_scope,
+            DeviceTypeMapping,
+            self._lookup(),
+            {"netbox_manufacturer_slug": "outside"},
+        )
+        current_denied = assess_permission_scoped_save(
+            current_outside,
+            DeviceTypeMapping,
+            self._lookup(),
+            {"netbox_manufacturer_slug": "after"},
+        )
+
+        self.assertTrue(allowed.allowed)
+        self.assertFalse(resulting_outside.allowed)
+        self.assertFalse(current_denied.allowed)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.netbox_manufacturer_slug, "inside")
+        self.assertEqual(mapping.netbox_device_type_slug, "acme-widget")
+
+    def test_a_cyclic_constraint_sees_the_prospective_row(self):
+        user = user_with_object_permission(
+            "assess-cycle",
+            [
+                (
+                    DeviceTypeMapping,
+                    ["add"],
+                    {
+                        "profile__device_type_mappings__source_make": "Cyclic",
+                        "profile__device_type_mappings__netbox_manufacturer_slug": "inside",
+                    },
+                )
+            ],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup("Cyclic"),
+            self._values("inside"),
+        )
+
+        self.assertTrue(assessment.allowed)
+        self.assertFalse(DeviceTypeMapping.objects.exists())
+
+    def test_a_multi_valued_constraint_keeps_related_predicates_correlated(self):
+        matched_make = DeviceTypeMapping.objects.create(**self._lookup("Matched"), **self._values("wrong"))
+        DeviceTypeMapping.objects.create(**self._lookup("Wrong"), **self._values("inside"))
+        user = user_with_object_permission(
+            "assess-correlation",
+            [
+                (
+                    DeviceTypeMapping,
+                    ["add"],
+                    {
+                        "profile__device_type_mappings__source_make": "Matched",
+                        "profile__device_type_mappings__netbox_manufacturer_slug": "inside",
+                    },
+                )
+            ],
+        )
+
+        split_rows = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup("Candidate"),
+            self._values("candidate"),
+        )
+        matched_make.netbox_manufacturer_slug = "inside"
+        matched_make.save(update_fields=["netbox_manufacturer_slug"])
+        matching_row = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup("Candidate"),
+            self._values("candidate"),
+        )
+
+        self.assertFalse(split_rows.allowed)
+        self.assertTrue(matching_row.allowed)
+
+    def test_known_primary_key_nullness_is_supported_without_consuming_the_sequence(self):
+        first = DeviceTypeMapping.objects.create(**self._lookup("First"), **self._values())
+        user = user_with_object_permission(
+            "assess-primary-key",
+            [(DeviceTypeMapping, ["add"], {"pk__isnull": False})],
+        )
+        signals = []
+
+        def record_signal(sender, **kwargs):
+            signals.append(sender)
+
+        pre_save.connect(record_signal, sender=DeviceTypeMapping, weak=False)
+        post_save.connect(record_signal, sender=DeviceTypeMapping, weak=False)
+        self.addCleanup(pre_save.disconnect, record_signal, sender=DeviceTypeMapping)
+        self.addCleanup(post_save.disconnect, record_signal, sender=DeviceTypeMapping)
+
+        assessment = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup("Candidate"),
+            self._values(),
+        )
+
+        self.assertTrue(assessment.allowed)
+        self.assertEqual(signals, [])
+        self.assertFalse(DeviceTypeMapping.objects.filter(source_make="Candidate").exists())
+        pre_save.disconnect(record_signal, sender=DeviceTypeMapping)
+        post_save.disconnect(record_signal, sender=DeviceTypeMapping)
+        following = DeviceTypeMapping.objects.create(**self._lookup("Following"), **self._values())
+        self.assertEqual(following.pk, first.pk + 1)
+
+    def test_an_unknown_generated_primary_key_cannot_grant_create_scope(self):
+        user = user_with_object_permission(
+            "assess-generated-primary-key",
+            [(DeviceTypeMapping, ["add"], {"pk": 1})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values(),
+        )
+
+        self.assertFalse(assessment.allowed)
+
+    def test_an_invalid_constraint_fails_closed(self):
+        user = user_with_object_permission(
+            "assess-invalid",
+            [(DeviceTypeMapping, ["add"], {"missing_field": "value"})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values(),
+        )
+
+        self.assertFalse(assessment.allowed)
+
+
 class SavePermissionScopedObjectTest(TestCase):
     """Create, update, keep and reject, each inside the caller's object scope."""
 
@@ -88,6 +321,30 @@ class SavePermissionScopedObjectTest(TestCase):
             save_permission_scoped_object(user, DeviceTypeMapping, self._lookup(self.other), {})
 
         self.assertFalse(DeviceTypeMapping.objects.filter(profile=self.other).exists())
+
+    def test_a_create_can_use_a_value_derived_during_save(self):
+        """The saved-row authority sees a digest that does not exist on a raw candidate."""
+        from core.models import ObjectType
+
+        field_key = termination_field_key(device="device-a", cards="", port="port-a", kind="interface")
+        user = user_with_object_permission(
+            "writer-derived-value",
+            [(TerminationResolution, ["add"], {"field_key_digest": index_digest(field_key)})],
+        )
+
+        result = save_permission_scoped_object(
+            user,
+            TerminationResolution,
+            {"profile": self.profile, "task_type": SELECT_TERMINATION_TASK, "field_key": field_key},
+            {
+                "selected_object_type": ObjectType.objects.get_for_model(ImportProfile),
+                "selected_object_id": self.profile.pk,
+                "selected_display_name": "Selected object",
+            },
+        )
+
+        self.assertTrue(result.created)
+        self.assertEqual(result.instance.field_key_digest, index_digest(field_key))
 
     def test_an_update_needs_the_change_permission_not_add(self):
         user = user_with_object_permission("writer-add-only", [(DeviceTypeMapping, ["add"], None)])

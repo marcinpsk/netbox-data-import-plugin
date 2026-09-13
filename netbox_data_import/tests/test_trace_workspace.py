@@ -6,6 +6,7 @@ import re
 from io import BytesIO
 
 from dcim.models import Interface
+from django.db import connection
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
@@ -411,6 +412,41 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         )
 
         self.assertFalse(Job.objects.filter(data__job_type="netbox_data_import.import").exists())
+        self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
+        self.assertContains(response, "The saved import target is no longer available.")
+        self.assertFalse(self.client.session["import_preview_pending"])
+
+    def test_the_workspace_ends_the_preview_when_its_target_goes_after_the_live_plan(self):
+        """The proposal display resolves the target again, so loss after planning must still be contained."""
+        from dcim.models import Location
+
+        location = Location.objects.create(name="Room 10", slug="room-10", site=self.site)
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
+        upload.name = "traces.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "location": location.pk, "excel_file": upload},
+            follow=True,
+        )
+        target_reads = 0
+        deleting = False
+
+        def delete_target_before_second_read(execute, sql, params, many, context):
+            nonlocal deleting, target_reads
+            if not deleting and 'FROM "dcim_location"' in sql and params and location.pk in params:
+                target_reads += 1
+                if target_reads == 2:
+                    deleting = True
+                    Location.objects.filter(pk=location.pk).delete()
+                    deleting = False
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(delete_target_before_second_read):
+            response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"), follow=True)
+
+        self.assertEqual(target_reads, 2)
+        self.assertFalse(Location.objects.filter(pk=location.pk).exists())
         self.assertRedirects(response, reverse("plugins:netbox_data_import:import_setup"))
         self.assertContains(response, "The saved import target is no longer available.")
         self.assertFalse(self.client.session["import_preview_pending"])

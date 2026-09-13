@@ -3,12 +3,14 @@
 """Read proposal history through HTTP with real permissions and backend diagnostics."""
 
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import serializers, viewsets
 
 from netbox_data_import.api.serializers import ResolutionProposalSerializer
 from netbox_data_import.api.views import ResolutionProposalViewSet, _ProfileScopedQuerySetMixin
 from netbox_data_import.models import ImportProfile, ProposalFailureReason, ProposalStatus, ResolutionProposal
 from netbox_data_import.proposal_jobs import run_proposal
+from netbox_data_import.resolution_proposals import cancel_proposal
 from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.test_inference_adapter import completion, serving
 from netbox_data_import.tests.test_inference_credentials import SECRET
@@ -23,6 +25,7 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
         self.detail_url = reverse(
             "plugins-api:netbox_data_import-api:resolutionproposal-detail", args=[self.proposal.pk]
         )
+        self.history_url = reverse("plugins-api:netbox_data_import-api:resolutionproposalhistory-list")
         self.viewer = user_with_object_permission("proposal-viewer", [(ResolutionProposal, ["view"], None)])
         self.client.force_login(self.viewer)
 
@@ -138,6 +141,83 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["count"], 1)
                 self.assertEqual([row["id"] for row in response.json()["results"]], [proposal.pk])
+
+    def test_field_filter_exposes_the_complete_paginated_history(self):
+        cancel_proposal(self.proposal.pk)
+        attempts = [self.proposal.pk]
+        for _ in range(11):
+            proposal = self.frozen_proposal()
+            attempts.append(proposal.pk)
+            cancel_proposal(proposal.pk)
+        ResolutionProposal.objects.filter(pk__in=attempts).update(created=timezone.now())
+        other = self.make_proposal(field_key=self.other_field_key)
+        profile_viewer = user_with_object_permission(
+            "profile-history-viewer", [(ImportProfile, ["view"], {"pk": self.profile.pk})]
+        )
+        self.client.force_login(profile_viewer)
+
+        response = self.client.get(
+            self.history_url,
+            {"profile_id": self.profile.pk, "field_key": self.field_key, "limit": 5},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["count"], 12)
+        seen = [row["id"] for row in response.json()["results"]]
+        while response.json()["next"]:
+            response = self.client.get(response.json()["next"])
+            self.assertEqual(response.status_code, 200)
+            seen.extend(row["id"] for row in response.json()["results"])
+        self.assertEqual(seen, list(reversed(attempts)))
+        self.assertNotIn(other.pk, seen)
+
+    def test_profile_scoped_history_exposes_only_attempt_summaries(self):
+        profile_viewer = user_with_object_permission(
+            "profile-history-summary-viewer", [(ImportProfile, ["view"], {"pk": self.profile.pk})]
+        )
+        self.client.force_login(profile_viewer)
+
+        response = self.client.get(
+            self.history_url,
+            {"profile_id": self.profile.pk, "field_key": self.field_key},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.json()["results"][0]),
+            {"id", "created", "status", "outcome", "decision", "failure_reason"},
+        )
+
+    def test_history_endpoint_requires_one_valid_profile_and_field_key(self):
+        actor = user_with_object_permission("history-filter-viewer", [(ImportProfile, ["view"], None)])
+        self.client.force_login(actor)
+        cases = (
+            {},
+            {"profile_id": self.profile.pk},
+            {"field_key": self.field_key},
+            {"profile_id": "not-a-number", "field_key": self.field_key},
+            {"profile_id": self.profile.pk, "field_key": "not-a-field-key"},
+        )
+        for params in cases:
+            with self.subTest(params=params):
+                self.assertEqual(self.client.get(self.history_url, params).status_code, 400)
+
+    def test_history_endpoint_uses_import_profile_view_scope_and_refuses_writes(self):
+        response = self.client.get(
+            self.history_url,
+            {"profile_id": self.profile.pk, "field_key": self.field_key},
+        )
+        self.assertEqual(response.status_code, 404)
+
+        actor = user_with_object_permission(
+            "profile-history-viewer", [(ImportProfile, ["view"], {"pk": self.profile.pk})]
+        )
+        self.client.force_login(actor)
+        response = self.client.post(
+            self.history_url,
+            {"profile_id": self.profile.pk, "field_key": self.field_key},
+        )
+        self.assertEqual(response.status_code, 405)
 
     def test_backend_credential_echo_is_absent_from_responses(self):
         payload = completion(answer(explanation=SECRET), model=SECRET, id=SECRET)

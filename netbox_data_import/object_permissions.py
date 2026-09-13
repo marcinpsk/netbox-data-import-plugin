@@ -11,12 +11,20 @@ can ignore a False and return from an enclosing ``atomic()`` block, which commit
 the denial was meant to prevent.
 """
 
+import logging
+from copy import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
-from utilities.permissions import get_permission_for_model
+from django.core.exceptions import EmptyResultSet, FieldError, ValidationError
+from django.db import DatabaseError, IntegrityError, connection, models, transaction
+from django.db.models.expressions import Col
+from django.db.models.lookups import IsNull
+from users.constants import CONSTRAINT_TOKEN_USER
+from utilities.permissions import get_permission_for_model, qs_filter_from_constraints
+
+
+logger = logging.getLogger(__name__)
 
 
 class ObjectPermissionDenied(Exception):
@@ -29,6 +37,170 @@ class PermissionScopedSaveResult:
 
     instance: Any
     created: bool
+
+
+@dataclass(frozen=True)
+class PermissionScopedSaveAssessment:
+    """Whether one prospective create or update stays inside the actor's object scope."""
+
+    allowed: bool
+    permission: str
+
+
+def _synthetic_primary_key(instance):
+    """Return a collision-free primary key without consuming the model's sequence."""
+    if instance.pk is not None:
+        return instance.pk, False
+    field = instance._meta.pk
+    if not isinstance(field, (models.AutoField, models.BigAutoField, models.SmallAutoField)):
+        raise TypeError(f"Cannot assess an unsaved {instance._meta.label} without a primary key.")
+    value = -1
+    while instance._meta.model._base_manager.filter(pk=value).exists():
+        value -= 1
+    return value, True
+
+
+def _depends_on_generated_root_primary_key(constraint, instance) -> bool:
+    """Return whether the root predicate needs an automatic primary key not yet allocated."""
+    field = instance._meta.pk
+    names = {"pk", field.name, field.attname}
+    for key, value in constraint.items():
+        parts = key.split("__")
+        if parts[0] not in names:
+            continue
+        suffix = parts[1:]
+        if suffix == ["isnull"] or ((not suffix or suffix == ["exact"]) and value is None):
+            continue
+        return True
+    return False
+
+
+def _related_generated_primary_key_aliases(query, model) -> set[str]:
+    """Return the exact related aliases whose unknown primary key must not see the probe."""
+    aliases = set()
+    pending = [query.where]
+    while pending:
+        node = pending.pop()
+        pending.extend(getattr(node, "children", ()))
+        if isinstance(node, IsNull):
+            continue
+        expression = getattr(node, "lhs", None)
+        while expression is not None and not isinstance(expression, Col):
+            expression = getattr(expression, "lhs", None)
+        if (
+            isinstance(expression, Col)
+            and expression.alias != query.base_table
+            and expression.target.primary_key
+            and expression.target.model._meta.concrete_model is model._meta.concrete_model
+        ):
+            aliases.add(expression.alias)
+    return aliases
+
+
+def _prospective_row_matches(user, model, instance, constraint) -> bool:
+    """Evaluate one NetBox constraint arm against a read-only prospective database world."""
+    probe = copy(instance)
+    probe.pk, generated_primary_key = _synthetic_primary_key(probe)
+    if generated_primary_key and _depends_on_generated_root_primary_key(constraint, probe):
+        return False
+    permission_filter = qs_filter_from_constraints([constraint], {CONSTRAINT_TOKEN_USER: user})
+    queryset = model.objects.filter(permission_filter, pk=probe.pk).values_list("pk", flat=True).order_by()
+    query = queryset.query.clone()
+    physical_aliases = _related_generated_primary_key_aliases(query, model) if generated_primary_key else set()
+    candidate_cte = "ndi_permission_candidate"
+    world_cte = "ndi_permission_world"
+    if model._meta.db_table in (candidate_cte, world_cte):
+        raise ValueError("The model table conflicts with an internal permission query name.")
+    for alias, join in tuple(query.alias_map.items()):
+        if join.table_name != model._meta.db_table:
+            continue
+        replacement = copy(join)
+        if alias == query.base_table:
+            replacement.table_name = candidate_cte
+        elif alias not in physical_aliases:
+            replacement.table_name = world_cte
+        query.alias_map[alias] = replacement
+    sql, params = query.sql_with_params()
+    fields = model._meta.concrete_fields
+    field_types = [field.db_type(connection) for field in fields]
+    if any(field_type is None for field_type in field_types):
+        raise ValueError(f"Cannot assess every concrete field of {model._meta.label}.")
+    quote = connection.ops.quote_name
+    columns = ", ".join(quote(field.column) for field in fields)
+    row = ", ".join(f"CAST(%s AS {field_type})" for field_type in field_types)
+    quoted_candidate = quote(candidate_cte)
+    quoted_world = quote(world_cte)
+    quoted_table = quote(model._meta.db_table)
+    quoted_pk = quote(model._meta.pk.column)
+    # Model metadata supplies every identifier and type. Values remain query parameters.
+    statement = (
+        f"WITH {quoted_candidate} ({columns}) AS (VALUES ({row})), "  # noqa: S608
+        f"{quoted_world} ({columns}) AS ("
+        f"SELECT {columns} FROM {quoted_table} WHERE {quoted_pk} <> %s "
+        f"UNION ALL SELECT {columns} FROM {quoted_candidate}) {sql}"
+    )
+    values = [field.value_from_object(probe) for field in fields]
+    with connection.cursor() as cursor:
+        cursor.execute(statement, [*values, probe.pk, *params])
+        return cursor.fetchone() is not None
+
+
+def _assess_permission_scoped_save(
+    user,
+    model,
+    lookup: dict,
+    values: dict,
+    *,
+    on_existing: Literal["update", "keep", "reject"],
+    current,
+) -> PermissionScopedSaveAssessment:
+    """Assess one known current row without locking or writing it."""
+    if current is not None and on_existing == "reject":
+        return PermissionScopedSaveAssessment(False, get_permission_for_model(model, "add"))
+    action = "add" if current is None else "view" if on_existing == "keep" else "change"
+    permission = get_permission_for_model(model, action)
+    if user is None or user.is_superuser:
+        return PermissionScopedSaveAssessment(True, permission)
+    try:
+        if not user.has_perm(permission):
+            return PermissionScopedSaveAssessment(False, permission)
+        if current is not None and not user.has_perm(permission, current):
+            return PermissionScopedSaveAssessment(False, permission)
+        if on_existing == "keep" and current is not None:
+            return PermissionScopedSaveAssessment(True, permission)
+        prospective = model(**lookup, **values) if current is None else copy(current)
+        if current is not None:
+            for field_name, value in values.items():
+                setattr(prospective, field_name, value)
+        constraints = getattr(user, "_object_perm_cache", {}).get(permission, ())
+        allowed = any(
+            not constraint or _prospective_row_matches(user, model, prospective, constraint)
+            for constraint in constraints
+        )
+    except (DatabaseError, EmptyResultSet, FieldError, TypeError, ValueError) as exc:
+        logger.warning("Prospective %s permission assessment failed closed: %s", model._meta.label, exc)
+        allowed = False
+    return PermissionScopedSaveAssessment(allowed, permission)
+
+
+def assess_permission_scoped_save(
+    user,
+    model,
+    lookup: dict,
+    values: dict,
+    *,
+    on_existing: Literal["update", "keep", "reject"] = "update",
+) -> PermissionScopedSaveAssessment:
+    """Assess the save against current object constraints without writing or locking."""
+    current = model.objects.filter(**lookup).first()
+    return _assess_permission_scoped_save(
+        user,
+        model,
+        lookup,
+        values,
+        on_existing=on_existing,
+        current=current,
+    )
 
 
 def enforce_saved_object_permission(obj, user, action):

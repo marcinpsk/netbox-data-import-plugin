@@ -1,0 +1,10 @@
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+<div class="ndi-trace-action">
+  <button type="button" class="btn btn-sm btn-outline-primary" data-proposal-action="{{ action.key }}"
+          aria-describedby="proposalReason{{ field_number }}{{ action.key }}"
+          {% if action.reason %}disabled{% endif %}>{{ action.label }}</button>
+  <div class="ndi-trace-reason" data-proposal-reason="{{ action.key }}"
+       id="proposalReason{{ field_number }}{{ action.key }}"
+       {% if not action.reason %}hidden{% endif %}>{{ action.reason }}</div>
+</div>
