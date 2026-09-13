@@ -17,6 +17,7 @@ from .models import (
     DeviceTypeMapping,
     ImportProfile,
     ManufacturerMapping,
+    locked_profile_policy,
 )
 from .object_permissions import save_or_refetch
 
@@ -139,32 +140,40 @@ def apply_profile_document(data: Any) -> tuple[ImportProfile, dict[str, int]]:
     """Create or update one profile and reconcile each supplied policy section."""
     profile_data, section_rows = _validate_document_shape(data)
     with transaction.atomic():
+        profile_values = _profile_values(profile_data)
         profile = ImportProfile.objects.filter(name=profile_data["name"]).first()
         if profile is None:
             profile = ImportProfile(name=profile_data["name"])
-        for field, value in _profile_values(profile_data).items():
-            setattr(profile, field, value)
-        _validate_instance(profile, "profile")
-        profile, _created = save_or_refetch(profile, ImportProfile, {"name": profile_data["name"]})
+            for field, value in profile_values.items():
+                setattr(profile, field, value)
+            _validate_instance(profile, "profile")
+            profile, _created = save_or_refetch(profile, ImportProfile, {"name": profile_data["name"]})
 
-        _validate_section_applicability(profile, section_rows)
-        prepared_rows = {
-            key: [_prepare_policy_row(_SCHEMAS_BY_KEY[key], row, index) for index, row in enumerate(rows, 1)]
-            for key, rows in section_rows.items()
-        }
-        for key, rows in prepared_rows.items():
-            schema = _SCHEMAS_BY_KEY[key]
-            if schema.release_changed_before_write:
-                _release_changed_rows(profile, schema, rows)
+        with locked_profile_policy(profile.pk):
+            profile = ImportProfile.objects.get(pk=profile.pk)
+            for field, value in profile_values.items():
+                setattr(profile, field, value)
+            _validate_instance(profile, "profile")
+            profile.save()
 
-        stats = {}
-        for section in POLICY_SECTIONS:
-            if section.key not in prepared_rows:
-                continue
-            schema = _SCHEMAS_BY_KEY[section.key]
-            stats[section.key] = _reconcile_policy_rows(profile, schema, prepared_rows[section.key])
-        # atomic-exit-safe: profile-import-committed
-        return profile, stats
+            _validate_section_applicability(profile, section_rows)
+            prepared_rows = {
+                key: [_prepare_policy_row(_SCHEMAS_BY_KEY[key], row, index) for index, row in enumerate(rows, 1)]
+                for key, rows in section_rows.items()
+            }
+            for key, rows in prepared_rows.items():
+                schema = _SCHEMAS_BY_KEY[key]
+                if schema.release_changed_before_write:
+                    _release_changed_rows(profile, schema, rows)
+
+            stats = {}
+            for section in POLICY_SECTIONS:
+                if section.key not in prepared_rows:
+                    continue
+                schema = _SCHEMAS_BY_KEY[section.key]
+                stats[section.key] = _reconcile_policy_rows(profile, schema, prepared_rows[section.key])
+            # atomic-exit-safe: profile-import-committed
+            return profile, stats
 
 
 def _serialize_policy_row(schema: PolicyDocumentSchema, row) -> dict[str, Any]:

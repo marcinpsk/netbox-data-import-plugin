@@ -5,13 +5,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from io import BytesIO
-from threading import Barrier, local
+from threading import Barrier, current_thread, local
 from unittest.mock import patch
 
 import yaml
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError, transaction
-from django.db.models.signals import post_delete, post_save
+from django.db.models.signals import post_delete, post_save, pre_save
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from dcim.models import Cable, Device, Interface
@@ -374,6 +374,73 @@ class CableClassMappingAPIPolicyLockTest(TransactionTestCase):
 
         self.assertEqual(response.status_code, 204, response.content)
         self.assertEqual(seen, ["locked"])
+
+
+class ProfileYamlPolicyLockTest(TransactionTestCase):
+    """Profile YAML must serialize with every other profile policy operation."""
+
+    def test_concurrent_profile_creation_relocks_before_reconciliation(self):
+        from netbox_data_import.profile_yaml import apply_profile_document
+
+        calling_thread = current_thread()
+        competitor_ids = []
+        lock_states = []
+
+        def create_competing_profile(sender, instance, **kwargs):
+            if competitor_ids or current_thread() is not calling_thread:
+                return
+
+            def create_on_another_connection():
+                competitor = ImportProfile.objects.create(
+                    name=instance.name,
+                    description="Competing description",
+                )
+                ColumnMapping.objects.create(
+                    profile=competitor,
+                    source_column="Name",
+                    target_field="device_name",
+                )
+                competitor_ids.append(competitor.pk)
+
+            with run_on_separate_connection(create_on_another_connection):
+                pass
+
+        def observe_profile_lock(sender, instance, **kwargs):
+            if lock_states:
+                return
+
+            def probe_from_another_connection():
+                try:
+                    with transaction.atomic():
+                        ImportProfile.objects.select_for_update(nowait=True).get(pk=instance.profile_id)
+                    lock_states.append("unlocked")
+                except DatabaseError:
+                    lock_states.append("locked")
+
+            with run_on_separate_connection(probe_from_another_connection):
+                pass
+
+        pre_save.connect(create_competing_profile, sender=ImportProfile, weak=False)
+        post_delete.connect(observe_profile_lock, sender=ColumnMapping, weak=False)
+        try:
+            profile, stats = apply_profile_document(
+                {
+                    "profile": {
+                        "name": "Concurrent YAML profile",
+                        "description": "Requested description",
+                    },
+                    "column_mappings": [],
+                }
+            )
+        finally:
+            pre_save.disconnect(create_competing_profile, sender=ImportProfile)
+            post_delete.disconnect(observe_profile_lock, sender=ColumnMapping)
+
+        self.assertEqual(len(competitor_ids), 1)
+        self.assertEqual(lock_states, ["locked"])
+        profile.refresh_from_db()
+        self.assertEqual(profile.description, "Requested description")
+        self.assertEqual(stats["column_mappings"], 0)
 
 
 class PolicyAPICreateSerializationTest(TransactionTestCase):

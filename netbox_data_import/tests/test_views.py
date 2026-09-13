@@ -3958,7 +3958,6 @@ class ApplyProfileDocumentTest(BaseViewTestCase):
         ColumnMapping.objects.create(profile=profile, source_column="Contact", target_field="extra_json:Contact_number")
         ColumnMapping.objects.create(profile=profile, source_column="Host", target_field="device_name")
 
-        # Simulate what apply_profile_document does on import.
         from netbox_data_import.profile_yaml import apply_profile_document
 
         # Delete and re-import to verify clean creation.
