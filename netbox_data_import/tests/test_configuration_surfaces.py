@@ -6,13 +6,19 @@ from io import BytesIO
 
 import yaml
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.db import DatabaseError, transaction
+from django.db.models.signals import post_delete, post_save
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from dcim.models import Cable, Device, Interface
 
 from netbox_data_import.forms import InferenceBackendForm
 from netbox_data_import.models import CableClassMapping, CableImportSource, ImportProfile, InferenceBackend
-from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object_permission
+from netbox_data_import.tests.helpers import (
+    make_dcim_objects,
+    run_on_separate_connection,
+    user_with_object_permission,
+)
 
 
 User = get_user_model()
@@ -102,6 +108,137 @@ class CableClassMappingAPITest(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("profile", response.json())
         self.assertFalse(CableClassMapping.objects.filter(profile=self.flat_profile).exists())
+
+    def scoped_operator(self, actions):
+        """Log in an operator whose writes are limited to one profile."""
+        operator = user_with_object_permission(
+            f"cable-class-{'-'.join(actions)}",
+            [
+                (CableClassMapping, ["view"], {}),
+                (CableClassMapping, actions, {"profile_id": self.trace_profile.pk}),
+                (ImportProfile, ["view"], {}),
+            ],
+        )
+        self.client.force_login(operator)
+
+    def test_constrained_add_cannot_create_under_another_profile(self):
+        self.scoped_operator(["add"])
+
+        response = self.client.post(
+            self.list_url,
+            data={"profile": self.other_trace_profile.pk, "cable_class": "Outside add scope"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 403, response.content)
+        self.assertFalse(
+            CableClassMapping.objects.filter(
+                profile=self.other_trace_profile,
+                cable_class="Outside add scope",
+            ).exists()
+        )
+
+    def test_constrained_change_cannot_update_another_profile(self):
+        mapping = CableClassMapping.objects.create(profile=self.other_trace_profile, cable_class="Outside change scope")
+        self.scoped_operator(["change"])
+        detail_url = reverse("plugins-api:netbox_data_import-api:cableclassmapping-detail", args=[mapping.pk])
+
+        response = self.client.patch(
+            detail_url,
+            data={"cable_class": "Changed outside scope"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 403, response.content)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.cable_class, "Outside change scope")
+
+    def test_constrained_delete_cannot_remove_another_profile(self):
+        mapping = CableClassMapping.objects.create(profile=self.other_trace_profile, cable_class="Outside delete scope")
+        self.scoped_operator(["delete"])
+        detail_url = reverse("plugins-api:netbox_data_import-api:cableclassmapping-detail", args=[mapping.pk])
+
+        response = self.client.delete(detail_url)
+
+        self.assertEqual(response.status_code, 403, response.content)
+        self.assertTrue(CableClassMapping.objects.filter(pk=mapping.pk).exists())
+
+
+class CableClassMappingAPIPolicyLockTest(TransactionTestCase):
+    """Every REST policy mutation must serialize against import execution."""
+
+    def setUp(self):
+        self.profile = ImportProfile.objects.create(
+            name="Cable class API lock profile",
+            source_adapter="trace_workbook",
+            adapter_config={},
+        )
+        self.mapping = CableClassMapping.objects.create(profile=self.profile, cable_class="Before")
+        user = User.objects.create_superuser("cable-class-lock", "cable-class-lock@example.invalid", "testpass")
+        self.client.force_login(user)
+        self.list_url = reverse("plugins-api:netbox_data_import-api:cableclassmapping-list")
+        self.detail_url = reverse(
+            "plugins-api:netbox_data_import-api:cableclassmapping-detail",
+            args=[self.mapping.pk],
+        )
+
+    def lock_state_during_write(self, signal, request):
+        """Return whether another connection can lock the profile during one API write."""
+        seen = []
+
+        def probe_from_another_connection(sender, instance, **kwargs):
+            if seen or instance.profile_id != self.profile.pk:
+                return
+
+            def probe():
+                try:
+                    with transaction.atomic():
+                        ImportProfile.objects.select_for_update(nowait=True).get(pk=self.profile.pk)
+                    seen.append("unlocked")
+                except DatabaseError:
+                    seen.append("locked")
+
+            with run_on_separate_connection(probe):
+                pass
+
+        signal.connect(probe_from_another_connection, sender=CableClassMapping)
+        try:
+            response = request()
+        finally:
+            signal.disconnect(probe_from_another_connection, sender=CableClassMapping)
+        return seen, response
+
+    def test_create_holds_the_profile_policy_lock(self):
+        seen, response = self.lock_state_during_write(
+            post_save,
+            lambda: self.client.post(
+                self.list_url,
+                data={"profile": self.profile.pk, "cable_class": "Created"},
+                content_type="application/json",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(seen, ["locked"])
+
+    def test_update_holds_the_profile_policy_lock(self):
+        seen, response = self.lock_state_during_write(
+            post_save,
+            lambda: self.client.patch(
+                self.detail_url,
+                data={"cable_class": "Updated"},
+                content_type="application/json",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(seen, ["locked"])
+
+    def test_delete_holds_the_profile_policy_lock(self):
+        seen, response = self.lock_state_during_write(post_delete, lambda: self.client.delete(self.detail_url))
+
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertEqual(seen, ["locked"])
 
 
 @override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST}})

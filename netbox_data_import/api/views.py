@@ -5,7 +5,7 @@
 from django.http import Http404
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import mixins, permissions, viewsets
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import DjangoModelPermissions
 
 from ..field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
@@ -24,6 +24,11 @@ from ..models import (
     ImportExecution,
     InferenceBackend,
     ResolutionProposal,
+)
+from ..object_permissions import (
+    ObjectPermissionDenied,
+    delete_permission_scoped_objects,
+    save_permission_scoped_object,
 )
 from .serializers import (
     ImportProfileSerializer,
@@ -88,6 +93,69 @@ class _PluginModelViewSet(_ProfileScopedQuerySetMixin, viewsets.ModelViewSet):
 
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
+    def perform_create(self, serializer):
+        """Create one policy row inside its profile and object-permission scope."""
+        model = serializer.Meta.model
+        values = dict(serializer.validated_data)
+        profile = values.pop("profile")
+        try:
+            result = save_permission_scoped_object(
+                self.request.user,
+                model,
+                {"pk": None, "profile": profile},
+                values,
+                on_existing="reject",
+            )
+        except ImportProfile.DoesNotExist:
+            raise Http404 from None
+        except ObjectPermissionDenied as exc:
+            raise PermissionDenied from exc
+        serializer.instance = result.instance
+
+    def perform_update(self, serializer):
+        """Update one policy row under every affected profile and object scope."""
+        model = serializer.Meta.model
+        row_pk = serializer.instance.pk
+        stored_profile_id = model.objects.filter(pk=row_pk).values_list("profile_id", flat=True).first()
+        if stored_profile_id is None:
+            raise Http404
+        requested_profile = serializer.validated_data.get("profile")
+        requested_profile_id = requested_profile.pk if requested_profile is not None else stored_profile_id
+        try:
+            with locked_profile_policy(stored_profile_id, requested_profile_id):
+                serializer.instance = model.objects.get(pk=row_pk, profile_id=stored_profile_id)
+                serializer.run_validation(serializer.initial_data)
+                result = save_permission_scoped_object(
+                    self.request.user,
+                    model,
+                    {"pk": row_pk, "profile_id": stored_profile_id},
+                    dict(serializer.validated_data),
+                )
+        except (model.DoesNotExist, ImportProfile.DoesNotExist):
+            raise Http404 from None
+        except ObjectPermissionDenied as exc:
+            raise PermissionDenied from exc
+        serializer.instance = result.instance
+
+    def perform_destroy(self, instance):
+        """Delete one policy row under its current profile and object scope."""
+        model = type(instance)
+        profile_id = model.objects.filter(pk=instance.pk).values_list("profile_id", flat=True).first()
+        if profile_id is None:
+            raise Http404
+        try:
+            with locked_profile_policy(profile_id):
+                deleted = delete_permission_scoped_objects(
+                    self.request.user,
+                    model.objects.filter(pk=instance.pk, profile_id=profile_id),
+                )
+                if deleted != 1:
+                    raise Http404
+        except ImportProfile.DoesNotExist:
+            raise Http404 from None
+        except ObjectPermissionDenied as exc:
+            raise PermissionDenied from exc
+
 
 class ColumnMappingViewSet(_PluginModelViewSet):
     """CRUD viewset for ColumnMapping."""
@@ -139,7 +207,7 @@ def _revalidate_against_the_stored_row(serializer):
     read the stored row too, and the profile lock makes this reading of it authoritative. The
     result is discarded: the values are the request's own, which the first pass already holds.
     """
-    serializer.instance = SourceResolution.objects.get(pk=serializer.instance.pk)
+    serializer.instance = type(serializer.instance).objects.get(pk=serializer.instance.pk)
     serializer.run_validation(serializer.initial_data)
 
 
