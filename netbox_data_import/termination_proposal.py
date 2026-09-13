@@ -84,6 +84,7 @@ class SelectTerminationTask:
         """Read the resolved Device and its candidate snapshot once for display and freshness."""
         self._require_termination_role(field_key)
         device = resolved_device_for(field_key, netbox_reader)
+        candidate_error: UnusableCandidateSet | None
         try:
             candidate_snapshot = self._current_for_device(
                 profile=profile,
@@ -92,9 +93,16 @@ class SelectTerminationTask:
                 limit=limit,
                 device=device,
             )
-        except UnusableCandidateSet:
+        except UnusableCandidateSet as exc:
             candidate_snapshot = None
-        return ProposalInventory(resolved_device=device, candidate_snapshot=candidate_snapshot)
+            candidate_error = exc
+        else:
+            candidate_error = None
+        return ProposalInventory(
+            resolved_device=device,
+            candidate_snapshot=candidate_snapshot,
+            candidate_error=candidate_error,
+        )
 
     def resolved_device(self, *, field_key, netbox_reader):
         """Return the one Device this key resolves to now, or None when it does not resolve to one."""
