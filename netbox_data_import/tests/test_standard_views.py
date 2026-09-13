@@ -133,7 +133,7 @@ class InferenceBackendViewTestCase(
     """Exercise the UI detail, list, CRUD and changelog views for AI backends.
 
     The mixins are named one by one because `InferenceBackend` registers no bulk views. The REST
-    endpoint is read-only and covered by `test_inference_secret_containment`.
+    endpoint credential contract is covered by the configuration surface tests.
     """
 
     model = InferenceBackend

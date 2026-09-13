@@ -1515,7 +1515,7 @@ manufacturer_mappings:
         """Adapter configuration replaces the stored mapping instead of merging it."""
         from tenancy.models import ContactRole
 
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         role = ContactRole.objects.create(name="Role to Clear", slug="role-to-clear")
         profile = ImportProfile.objects.create(
@@ -1523,7 +1523,7 @@ manufacturer_mappings:
             adapter_config={"primary_contact_role": role.name, "sheet_name": "Inventory"},
         )
 
-        _apply_profile_yaml_data({"profile": {"name": profile.name, "adapter_config": {"primary_contact_role": None}}})
+        apply_profile_document({"profile": {"name": profile.name, "adapter_config": {"primary_contact_role": None}}})
 
         profile.refresh_from_db()
         self.assertIsNone(profile.resolved_primary_contact_role)
@@ -1531,10 +1531,10 @@ manufacturer_mappings:
 
     def test_yaml_import_rejects_an_unknown_primary_contact_role(self):
         """A dangling Contact Role natural key fails at the adapter form boundary."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         with self.assertRaisesMessage(ValueError, "primary_contact_role"):
-            _apply_profile_yaml_data(
+            apply_profile_document(
                 {
                     "profile": {
                         "name": "Unknown Contact Role",
@@ -1545,11 +1545,11 @@ manufacturer_mappings:
 
     def test_yaml_import_rejects_an_unknown_profile_key(self):
         """A key the profile block does not define is an error, never ignored."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         # `sheet_name` is no longer a stray key: it is one of the pre-1.6 scalars #108 translates.
         with self.assertRaisesMessage(ValueError, "stray_key"):
-            _apply_profile_yaml_data({"profile": {"name": "Stray Key", "stray_key": "Data"}})
+            apply_profile_document({"profile": {"name": "Stray Key", "stray_key": "Data"}})
 
     def test_post_creates_column_mappings(self):
         """POST with YAML creates column mappings."""
@@ -1563,9 +1563,9 @@ manufacturer_mappings:
 
     def test_yaml_import_preserves_multiple_candidate_source_columns(self):
         """One candidate target can receive values from many configured columns."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
-        profile, _ = _apply_profile_yaml_data(
+        profile, _ = apply_profile_document(
             {
                 "profile": {"name": "Candidate Mapping Profile"},
                 "column_mappings": [
@@ -3789,53 +3789,53 @@ column_transform_rules:
         self.assertFalse(ImportProfile.objects.filter(name="BulkImportedProfile").exists())
 
 
-class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
-    """Unit tests for the _apply_profile_yaml_data helper."""
+class ApplyProfileDocumentTest(BaseViewTestCase):
+    """Unit tests for the apply_profile_document helper."""
 
     def test_missing_profile_key_raises(self):
         """Raises ValueError when top-level 'profile' key is absent."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         with self.assertRaises(ValueError, msg="profile key missing"):
-            _apply_profile_yaml_data({"column_mappings": []})
+            apply_profile_document({"column_mappings": []})
 
     def test_non_dict_input_raises(self):
         """Raises ValueError when input is not a dict."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         with self.assertRaises(ValueError):
-            _apply_profile_yaml_data("just a string")  # type: ignore[arg-type]
+            apply_profile_document("just a string")  # type: ignore[arg-type]
 
     def test_profile_scalar_raises(self):
         """Raises TypeError when profile value is a scalar, not a mapping."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         with self.assertRaises(TypeError):
-            _apply_profile_yaml_data({"profile": "not-a-dict"})
+            apply_profile_document({"profile": "not-a-dict"})
 
     def test_profile_list_raises(self):
         """Raises TypeError when profile value is a list, not a mapping."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         with self.assertRaises(TypeError):
-            _apply_profile_yaml_data({"profile": ["item1", "item2"]})
+            apply_profile_document({"profile": ["item1", "item2"]})
 
     def test_missing_name_raises(self):
         """Raises ValueError when profile dict has no 'name' field."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         with self.assertRaises(ValueError):
-            _apply_profile_yaml_data({"profile": {"description": "no name"}})
+            apply_profile_document({"profile": {"description": "no name"}})
 
     def test_creates_profile_and_returns_stats(self):
         """Creates an ImportProfile and returns non-empty stats dict."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         data = {
             "profile": {"name": "UnitTestProfile", "adapter_config": {"sheet_name": "Sheet1"}},
             "column_mappings": [{"source_column": "Name", "target_field": "device_name"}],
         }
-        profile, stats = _apply_profile_yaml_data(data)
+        profile, stats = apply_profile_document(data)
         self.assertEqual(profile.name, "UnitTestProfile")
         self.assertEqual(profile.adapter_settings.sheet_name, "Sheet1")
         self.assertEqual(stats.get("column_mappings"), 1)
@@ -3843,7 +3843,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
 
     def test_atomic_rollback_on_bad_column_mapping(self):
         """A missing required key mid-import raises ValueError and rolls back the transaction."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         bad_data = {
             "profile": {"name": "AtomicRollbackProfile"},
@@ -3851,13 +3851,13 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
             "column_mappings": [{"source_column": "Name"}],
         }
         with self.assertRaises(ValueError) as cm:
-            _apply_profile_yaml_data(bad_data)
+            apply_profile_document(bad_data)
         self.assertIn("target_field", str(cm.exception))
         self.assertFalse(ImportProfile.objects.filter(name="AtomicRollbackProfile").exists())
 
     def test_column_mappings_not_a_list_raises(self):
         """Raises ValueError when a section is a dict instead of a list."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         bad_data = {
             "profile": {"name": "SectionTypeProfile"},
@@ -3865,36 +3865,36 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
             "column_mappings": {"target_field": "device_name", "source_column": "Name"},
         }
         with self.assertRaises(ValueError, msg="section type check"):
-            _apply_profile_yaml_data(bad_data)
+            apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="SectionTypeProfile").exists())
 
     def test_column_mappings_item_not_a_dict_raises(self):
         """Raises TypeError when a section item is a scalar instead of a mapping."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         bad_data = {
             "profile": {"name": "SectionItemProfile"},
             "column_mappings": ["just-a-string"],
         }
         with self.assertRaises(TypeError):
-            _apply_profile_yaml_data(bad_data)
+            apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="SectionItemProfile").exists())
 
     def test_null_section_raises_value_error(self):
         """Raises ValueError (not silently deleting) when a section value is explicitly null."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         bad_data = {
             "profile": {"name": "NullSectionProfile"},
             "column_mappings": None,
         }
         with self.assertRaises(ValueError, msg="explicit null section must raise ValueError"):
-            _apply_profile_yaml_data(bad_data)
+            apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="NullSectionProfile").exists())
 
     def test_absent_section_preserves_existing_mappings(self):
         """If a section key is absent from YAML, existing mappings are preserved."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         # Set up a profile with a column mapping.
         profile = ImportProfile.objects.create(name="PreserveProfile")
@@ -3902,7 +3902,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
 
         # Import same profile without the column_mappings key at all.
         data = {"profile": {"name": "PreserveProfile", "adapter_config": {"sheet_name": "Data"}}}
-        _apply_profile_yaml_data(data)
+        apply_profile_document(data)
 
         # The existing column mapping must still exist.
         self.assertTrue(
@@ -3912,31 +3912,31 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
 
     def test_invalid_preview_view_mode_raises(self):
         """full_clean catches an invalid preview_view_mode and rolls back the transaction."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         bad_data = {
             "profile": {"name": "BadViewModeProfile", "adapter_config": {"preview_view_mode": "invalid"}},
         }
         with self.assertRaises(ValueError, msg="invalid choice field must raise ValueError"):
-            _apply_profile_yaml_data(bad_data)
+            apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name="BadViewModeProfile").exists())
 
     def test_invalid_column_mapping_target_field_raises_and_rolls_back(self):
         """Invalid target_field choice triggers full_clean and rolls back the profile too."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         bad_data = {
             "profile": {"name": "BadTargetFieldProfile"},
             "column_mappings": [{"source_column": "Col", "target_field": "not_a_real_field"}],
         }
         with self.assertRaises(ValueError, msg="invalid target_field choice must raise ValueError"):
-            _apply_profile_yaml_data(bad_data)
+            apply_profile_document(bad_data)
         # Full rollback: profile itself must not exist.
         self.assertFalse(ImportProfile.objects.filter(name="BadTargetFieldProfile").exists())
 
     def test_extra_json_column_mapping_imports_successfully(self):
         """extra_json:<key> target_field values are accepted during profile import."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         data = {
             "profile": {"name": "ExtraJsonProfile"},
@@ -3945,7 +3945,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
                 {"source_column": "Name", "target_field": "device_name"},
             ],
         }
-        profile, stats = _apply_profile_yaml_data(data)
+        profile, stats = apply_profile_document(data)
         self.assertEqual(stats.get("column_mappings"), 2)
         self.assertTrue(
             ColumnMapping.objects.filter(profile=profile, target_field="extra_json:Contact_number").exists(),
@@ -3958,8 +3958,8 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         ColumnMapping.objects.create(profile=profile, source_column="Contact", target_field="extra_json:Contact_number")
         ColumnMapping.objects.create(profile=profile, source_column="Host", target_field="device_name")
 
-        # Simulate what _apply_profile_yaml_data does on import.
-        from netbox_data_import.views import _apply_profile_yaml_data
+        # Simulate what apply_profile_document does on import.
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         # Delete and re-import to verify clean creation.
         profile.delete()
@@ -3970,7 +3970,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
                 {"source_column": "Host", "target_field": "device_name"},
             ],
         }
-        profile, stats = _apply_profile_yaml_data(data)
+        profile, stats = apply_profile_document(data)
         self.assertEqual(stats.get("column_mappings"), 2)
         cms = {cm.target_field: cm.source_column for cm in profile.column_mappings.all()}
         self.assertEqual(cms.get("extra_json:Contact_number"), "Contact")
@@ -3978,7 +3978,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
 
     def test_partial_reimport_preserves_unmentioned_profile_fields(self):
         """Reimporting YAML that omits optional profile fields does not reset them."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         # Create a profile with non-default field values.
         profile = ImportProfile.objects.create(
@@ -3993,7 +3993,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
         )
 
         # Re-import with only 'name' — no other profile fields.
-        _apply_profile_yaml_data({"profile": {"name": "PartialReimportProfile"}})
+        apply_profile_document({"profile": {"name": "PartialReimportProfile"}})
 
         profile.refresh_from_db()
         self.assertEqual(profile.adapter_settings.sheet_name, "CustomSheet", "sheet_name must not be reset")
@@ -4004,7 +4004,7 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
 
     def test_column_mapping_missing_required_key_raises_descriptive_error(self):
         """Missing required key in column_mappings raises ValueError with section and key name."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         ImportProfile.objects.create(name="KeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
@@ -4012,13 +4012,13 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
             "column_mappings": [{"source_column": "Name"}],  # missing target_field
         }
         with self.assertRaises(ValueError) as cm:
-            _apply_profile_yaml_data(data)
+            apply_profile_document(data)
         self.assertIn("column_mappings[1]", str(cm.exception))
         self.assertIn("target_field", str(cm.exception))
 
     def test_device_type_mapping_missing_required_key_raises_descriptive_error(self):
         """Missing required key in device_type_mappings raises ValueError, not bare KeyError."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         ImportProfile.objects.create(name="DTMKeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
@@ -4032,12 +4032,12 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
             ],
         }
         with self.assertRaises(ValueError) as cm:
-            _apply_profile_yaml_data(data)
+            apply_profile_document(data)
         self.assertIn("device_type_mappings[1]", str(cm.exception))
 
     def test_manufacturer_mapping_missing_required_key_raises_descriptive_error(self):
         """Missing required key in manufacturer_mappings raises ValueError with context."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         ImportProfile.objects.create(name="MMKeyErrProfile", adapter_config={"sheet_name": "Data"})
         data = {
@@ -4045,19 +4045,19 @@ class ApplyProfileYamlDataUnitTest(BaseViewTestCase):
             "manufacturer_mappings": [{"source_make": "Cisco"}],  # missing netbox_manufacturer_slug
         }
         with self.assertRaises(ValueError) as cm:
-            _apply_profile_yaml_data(data)
+            apply_profile_document(data)
         self.assertIn("manufacturer_mappings[1]", str(cm.exception))
         self.assertIn("netbox_manufacturer_slug", str(cm.exception))
 
     def test_overlength_profile_name_raises_value_error_not_500(self):
         """Overlength field is caught by full_clean before any DB write, raising ValueError."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         bad_data = {
             "profile": {"name": "X" * 200},  # exceeds max_length=100 for ImportProfile.name
         }
         with self.assertRaises(ValueError, msg="overlength name must raise ValueError, not DataError"):
-            _apply_profile_yaml_data(bad_data)
+            apply_profile_document(bad_data)
         self.assertFalse(ImportProfile.objects.filter(name__startswith="X" * 50).exists())
 
 
@@ -4169,7 +4169,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
 
     def test_yaml_import_with_rack_type(self):
         """YAML import resolves rack_type slug to FK."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         data = {
             "profile": {"name": "RackTypeImport"},
@@ -4181,13 +4181,13 @@ class RackTypeFeatureTest(BaseViewTestCase):
                 },
             ],
         }
-        profile, _stats = _apply_profile_yaml_data(data)
+        profile, _stats = apply_profile_document(data)
         crm = ClassRoleMapping.objects.get(profile=profile, source_class="Cab")
         self.assertEqual(crm.rack_type_id, self.rack_type.pk)
 
     def test_yaml_import_with_invalid_rack_type_raises(self):
         """YAML import with non-existent rack_type slug raises ValueError."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         data = {
             "profile": {"name": "RackTypeBadImport"},
@@ -4200,7 +4200,7 @@ class RackTypeFeatureTest(BaseViewTestCase):
             ],
         }
         with self.assertRaises(ValueError):
-            _apply_profile_yaml_data(data)
+            apply_profile_document(data)
 
 
 class RemoveExtraIpViewTests(TestCase):

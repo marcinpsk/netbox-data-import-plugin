@@ -46,7 +46,7 @@ column_transform_rules:
 
 
 class LegacyProfileYamlImportTest(TestCase):
-    """`_profile_defaults_from_yaml` translates the pre-cutover scalar keys."""
+    """The profile document module translates the pre-cutover scalar keys."""
 
     def setUp(self):
         """Authenticate and create the Contact Role the legacy file references by slug."""

@@ -3,7 +3,7 @@
 """DRF viewsets for the data-import plugin API."""
 
 from django.http import Http404
-from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
+from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import mixins, permissions, viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import DjangoModelPermissions
@@ -13,6 +13,8 @@ from ..models import (
     locked_profile_policy,
     locked_resolution_policy,
     ImportProfile,
+    CableClassMapping,
+    CableImportSource,
     ColumnMapping,
     ClassRoleMapping,
     DeviceTypeMapping,
@@ -25,6 +27,8 @@ from ..models import (
 )
 from .serializers import (
     ImportProfileSerializer,
+    CableClassMappingSerializer,
+    CableImportSourceSerializer,
     ColumnMappingSerializer,
     ClassRoleMappingSerializer,
     DeviceTypeMappingSerializer,
@@ -90,6 +94,13 @@ class ColumnMappingViewSet(_PluginModelViewSet):
 
     queryset = ColumnMapping.objects.select_related("profile")
     serializer_class = ColumnMappingSerializer
+
+
+class CableClassMappingViewSet(_PluginModelViewSet):
+    """CRUD viewset for CableClassMapping."""
+
+    queryset = CableClassMapping.objects.select_related("profile")
+    serializer_class = CableClassMappingSerializer
 
 
 class ClassRoleMappingViewSet(_PluginModelViewSet):
@@ -176,6 +187,26 @@ class ImportExecutionViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModel
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
 
+class CableImportSourceViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only viewset for per-Cable import provenance."""
+
+    queryset = CableImportSource.objects.select_related("cable", "profile")
+    serializer_class = CableImportSourceSerializer
+    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
+
+    def get_queryset(self):
+        """Apply the profile scope and an optional Cable ID filter."""
+        qs = super().get_queryset()
+        cable_id = self.request.query_params.get("cable_id")
+        if cable_id is not None:
+            try:
+                cable_id = int(cable_id)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError({"cable_id": "Enter a whole number."}) from exc
+            qs = qs.filter(cable_id=cable_id)
+        return qs
+
+
 class ResolutionProposalViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModelViewSet):
     """Read-only viewset for Resolution Proposal history."""
 
@@ -220,12 +251,8 @@ class ResolutionProposalHistoryViewSet(mixins.ListModelMixin, viewsets.GenericVi
         )
 
 
-class InferenceBackendViewSet(NetBoxReadOnlyModelViewSet):
-    """Read-only viewset for Inference Backend rows.
-
-    Read-only on purpose: a backend row carries the destination NetBox itself calls, and the UI form
-    is the one place that validates the `api_root` trust boundary against the allowlist.
-    """
+class InferenceBackendViewSet(NetBoxModelViewSet):
+    """CRUD viewset whose configuration fields derive from the Inference Backend form."""
 
     queryset = InferenceBackend.objects.prefetch_related("tags")
     serializer_class = InferenceBackendSerializer
