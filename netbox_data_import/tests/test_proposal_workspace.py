@@ -10,9 +10,10 @@ from unittest.mock import patch
 from core.choices import JobStatusChoices
 from core.models import Job, ObjectType
 from dcim.models import Device, Interface, Site
-from django.test import TestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
+from django.views import View
 from django_rq import get_queue
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -36,6 +37,23 @@ from netbox_data_import.resolution_proposals import cancel_proposal, claim_propo
 from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
+
+
+class ProposalErrorEnvelopeTest(SimpleTestCase):
+    def test_invalid_proposal_id_does_not_disclose_exception_text(self):
+        """A validation exception must not expose its text through the JSON boundary."""
+        import json
+
+        from netbox_data_import.views import InvalidProposalId, _TraceProposalMixin
+
+        class InvalidProposalView(_TraceProposalMixin, View):
+            def get(self, _request):
+                raise InvalidProposalId("Sensitive implementation detail.")
+
+        response = InvalidProposalView.as_view()(RequestFactory().get("/proposal"))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(json.loads(response.content), {"ok": False, "error": "Enter a valid proposal_id integer."})
 
 
 class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCase):
@@ -249,15 +267,29 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
 
     def test_enqueue_failure_fails_attempt_and_allows_retry(self):
         with patch.object(ResolutionProposalJob, "enqueue", autospec=True, side_effect=RedisConnectionError):
-            with self.assertRaises(RedisConnectionError):
-                self.call("request_proposal", field_key=self.field_key)
+            response = self.call("request_proposal", field_key=self.field_key)
 
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {"ok": False, "error": "The proposal queue is unavailable. Try again later."},
+        )
         proposal = ResolutionProposal.objects.get(profile=self.profile, field_key=self.field_key)
         self.assertEqual(proposal.status, ProposalStatus.FAILED)
         self.assertEqual(proposal.failure_reason, ProposalFailureReason.QUEUE_UNAVAILABLE)
         retry = self.request_proposal()
         self.assertNotEqual(retry.pk, proposal.pk)
         self.assertEqual(retry.status, ProposalStatus.QUEUED)
+
+    def test_unexpected_enqueue_failure_propagates_after_releasing_attempt(self):
+        with patch.object(ResolutionProposalJob, "enqueue", autospec=True, side_effect=TypeError("Programming error.")):
+            with self.assertRaises(TypeError):
+                self.call("request_proposal", field_key=self.field_key)
+
+        proposal = ResolutionProposal.objects.get(profile=self.profile, field_key=self.field_key)
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(proposal.failure_reason, ProposalFailureReason.QUEUE_UNAVAILABLE)
+        self.assertNotEqual(self.request_proposal().pk, proposal.pk)
 
     def test_proposal_actions_report_missing_or_non_numeric_ids(self):
         for action in ("cancel_proposal", "accept_proposal", "reject_proposal"):

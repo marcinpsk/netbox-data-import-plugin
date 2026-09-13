@@ -1,13 +1,10 @@
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> -->
-
 # T8 Resolution Proposal: design record
 
 Revision r6 (RATIFIED at round 5, after adversarial rounds 1-5). The adapter diagnostic mechanism was
 split to #94 and is now an implemented prerequisite, not a deferral. Implementation review corrected
 the diagnostic on 2026-09-13: it retains receipt and status but withholds non-empty authenticated
-response text. Scope: issue #95, the 13 acceptance criteria of ticket T8. Design only; no T8 production
-code exists yet.
+response text. Scope: issue #95, the 13 acceptance criteria of ticket T8. T8 is now implemented in
+production code and covered by its acceptance tests.
 
 ## Problem, as a class
 
