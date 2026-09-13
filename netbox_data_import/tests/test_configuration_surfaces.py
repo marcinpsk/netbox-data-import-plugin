@@ -3,10 +3,8 @@
 """Configuration surfaces introduced for trace and inference workflows."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from io import BytesIO
-from threading import Barrier, current_thread, local
-from unittest.mock import patch
+from threading import current_thread
 
 import yaml
 from django.contrib.auth import get_user_model
@@ -17,7 +15,6 @@ from django.urls import reverse
 from dcim.models import Cable, Device, Interface
 
 from netbox_data_import.forms import InferenceBackendForm
-from netbox_data_import.api.serializers import PolicySectionSerializer
 from netbox_data_import.models import (
     CableClassMapping,
     CableImportSource,
@@ -25,13 +22,13 @@ from netbox_data_import.models import (
     ColumnTransformRule,
     ImportProfile,
     InferenceBackend,
-    locked_profile_policy,
     SourceResolution,
 )
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
     run_on_separate_connection,
     user_with_object_permission,
+    wait_until_a_lock_is_blocked,
 )
 
 
@@ -456,34 +453,6 @@ class PolicyAPICreateSerializationTest(TransactionTestCase):
 
     def test_conflicting_creates_revalidate_after_the_profile_lock(self):
         """Only one request can assign a target when both first validate an empty policy."""
-        validation_barrier = Barrier(2)
-        cleaned_values_barrier = Barrier(2)
-        lock_state = local()
-        original_validate = PolicySectionSerializer.validate
-        original_model_cleaned_values = PolicySectionSerializer.model_cleaned_values
-
-        def synchronize_initial_validation(serializer, attrs):
-            result = original_validate(serializer, attrs)
-            if not getattr(serializer, "_initial_validation_synchronized", False):
-                serializer._initial_validation_synchronized = True
-                validation_barrier.wait(timeout=10)
-            return result
-
-        def synchronize_unlocked_cleaned_values(serializer):
-            result = original_model_cleaned_values(serializer)
-            if not getattr(lock_state, "held", False):
-                cleaned_values_barrier.wait(timeout=10)
-            return result
-
-        @contextmanager
-        def record_profile_lock(*profile_ids):
-            with locked_profile_policy(*profile_ids):
-                lock_state.held = True
-                try:
-                    yield
-                finally:
-                    lock_state.held = False
-
         requests = (
             (
                 reverse("plugins-api:netbox_data_import-api:columnmapping-list"),
@@ -511,13 +480,12 @@ class PolicyAPICreateSerializationTest(TransactionTestCase):
             response = client.post(url, data=data, content_type="application/json")
             return response.status_code, response.json()
 
-        with (
-            patch.object(PolicySectionSerializer, "validate", synchronize_initial_validation),
-            patch.object(PolicySectionSerializer, "model_cleaned_values", synchronize_unlocked_cleaned_values),
-            patch("netbox_data_import.api.views.locked_profile_policy", record_profile_lock),
-            ThreadPoolExecutor(max_workers=2) as executor,
-        ):
-            responses = list(executor.map(create_policy, requests))
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            with transaction.atomic():
+                ImportProfile.objects.select_for_update().get(pk=self.profile.pk)
+                pending = [executor.submit(create_policy, request) for request in requests]
+                wait_until_a_lock_is_blocked(self, minimum=2)
+            responses = [future.result(timeout=10) for future in pending]
 
         self.assertEqual(sorted(status for status, _body in responses), [201, 400], responses)
         created = ColumnMapping.objects.filter(profile=self.profile).count()
