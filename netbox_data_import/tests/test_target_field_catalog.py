@@ -740,10 +740,10 @@ class ProfileAndPolicyBoundaryTest(TestCase):
 
     def test_yaml_import_rejects_an_adapter_change(self):
         """The bulk YAML path must keep the adapter immutable."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         with self.assertRaisesMessage(ValueError, "source adapter"):
-            _apply_profile_yaml_data({"profile": {"name": self.flat.name, "source_adapter": "trace_workbook"}})
+            apply_profile_document({"profile": {"name": self.flat.name, "source_adapter": "trace_workbook"}})
 
     def test_bulk_csv_import_rejects_an_adapter_change_end_to_end(self):
         """Drive the real bulk-import view: an id row cannot repoint an existing profile."""
@@ -914,10 +914,10 @@ class AdapterRuntimeSupportTest(TestCase):
 
     def test_yaml_import_rejects_creating_a_profile_without_a_target_module(self):
         """The hierarchical YAML path validates through the same model rule."""
-        from netbox_data_import.views import _apply_profile_yaml_data
+        from netbox_data_import.profile_yaml import apply_profile_document
 
         with self.assertRaises(ValueError):
-            _apply_profile_yaml_data({"profile": {"name": "YAML Trace", "source_adapter": "trace_workbook"}})
+            apply_profile_document({"profile": {"name": "YAML Trace", "source_adapter": "trace_workbook"}})
         self.assertFalse(ImportProfile.objects.filter(name="YAML Trace").exists())
 
     def test_an_unsaved_profile_with_a_preset_pk_is_still_a_creation(self):

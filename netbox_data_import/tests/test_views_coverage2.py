@@ -19,7 +19,7 @@ from netbox_data_import.models import (
     SourceResolution,
 )
 from netbox_data_import.tests.helpers import set_import_source, workbook_bytes
-from netbox_data_import.views import _save_or_refetch, _validate_model_instance
+from netbox_data_import.views import _validate_model_instance
 
 User = get_user_model()
 
@@ -55,18 +55,6 @@ class ValidateModelInstanceNonDictTest(TestCase):
             _validate_model_instance(instance, "test_label")
         self.assertIn("plain error message", str(cm.exception))
         self.assertIn("test_label", str(cm.exception))
-
-
-class SaveOrRefetchIntegrityErrorTest(TestCase):
-    """Tests for _save_or_refetch — lines 243-244: IntegrityError causes refetch."""
-
-    def test_integrity_error_returns_pre_existing_instance(self):
-        """On IntegrityError, _save_or_refetch returns the pre-existing object — lines 243-244."""
-        profile = _make_profile("SORFCov2")
-        existing = ClassRoleMapping.objects.create(profile=profile, source_class="IntegErrClass", creates_rack=False)
-        duplicate = ClassRoleMapping(profile=profile, source_class="IntegErrClass", creates_rack=False)
-        result = _save_or_refetch(duplicate, ClassRoleMapping, profile=profile, source_class="IntegErrClass")
-        self.assertEqual(result.pk, existing.pk)
 
 
 class ApplyProfileYamlRackTypeNullTest(TestCase):

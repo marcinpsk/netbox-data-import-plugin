@@ -1780,6 +1780,8 @@ class CableImportSource(DigestIndexedMixin):
     DIGEST_SOURCE_FIELD = "trace_identity"
     DIGEST_FIELD = "trace_key"
 
+    objects = RestrictedQuerySet.as_manager()
+
     cable = models.ForeignKey(
         to="dcim.Cable",
         on_delete=models.CASCADE,
