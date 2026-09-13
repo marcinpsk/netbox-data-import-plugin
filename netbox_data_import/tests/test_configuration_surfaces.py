@@ -26,6 +26,7 @@ from netbox_data_import.models import (
     ImportProfile,
     InferenceBackend,
     locked_profile_policy,
+    SourceResolution,
 )
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
@@ -205,6 +206,97 @@ class CableClassMappingAPITest(TestCase):
 
         self.assertEqual(response.status_code, 403, response.content)
         self.assertTrue(CableClassMapping.objects.filter(pk=mapping.pk).exists())
+
+
+class SourceResolutionAPIPermissionTest(TestCase):
+    """Apply object-permission scope to every Source Resolution write."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.allowed_profile = ImportProfile.objects.create(
+            name="Allowed resolution API profile",
+            source_adapter="flat_workbook",
+            adapter_config={},
+        )
+        cls.other_profile = ImportProfile.objects.create(
+            name="Other resolution API profile",
+            source_adapter="flat_workbook",
+            adapter_config={},
+        )
+
+    def setUp(self):
+        self.list_url = reverse("plugins-api:netbox_data_import-api:sourceresolution-list")
+
+    def scoped_operator(self, actions):
+        """Log in an operator whose writes are limited to one profile."""
+        operator = user_with_object_permission(
+            f"source-resolution-{'-'.join(actions)}",
+            [
+                (SourceResolution, ["view"], {}),
+                (SourceResolution, actions, {"profile_id": self.allowed_profile.pk}),
+                (ImportProfile, ["view"], {}),
+            ],
+        )
+        self.client.force_login(operator)
+
+    def resolution_data(self, profile):
+        """Return one valid Source Resolution request for the profile."""
+        return {
+            "profile": profile.pk,
+            "source_id": "SR-PERMISSION",
+            "source_column": "Name",
+            "original_value": "Before",
+            "resolved_fields": {"device_name": "After"},
+        }
+
+    def test_constrained_add_cannot_create_under_another_profile(self):
+        self.scoped_operator(["add"])
+
+        response = self.client.post(
+            self.list_url,
+            data=self.resolution_data(self.other_profile),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 403, response.content)
+        self.assertFalse(SourceResolution.objects.filter(profile=self.other_profile).exists())
+
+    def test_constrained_change_cannot_update_another_profile(self):
+        resolution = SourceResolution.objects.create(
+            profile=self.other_profile,
+            source_id="SR-PERMISSION",
+            source_column="Name",
+            original_value="Before",
+            resolved_fields={"device_name": "After"},
+        )
+        self.scoped_operator(["change"])
+        detail_url = reverse("plugins-api:netbox_data_import-api:sourceresolution-detail", args=[resolution.pk])
+
+        response = self.client.patch(
+            detail_url,
+            data={"original_value": "Changed outside scope"},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 403, response.content)
+        resolution.refresh_from_db()
+        self.assertEqual(resolution.original_value, "Before")
+
+    def test_constrained_delete_cannot_remove_another_profile(self):
+        resolution = SourceResolution.objects.create(
+            profile=self.other_profile,
+            source_id="SR-PERMISSION",
+            source_column="Name",
+            original_value="Before",
+            resolved_fields={"device_name": "After"},
+        )
+        self.scoped_operator(["delete"])
+        detail_url = reverse("plugins-api:netbox_data_import-api:sourceresolution-detail", args=[resolution.pk])
+
+        response = self.client.delete(detail_url)
+
+        self.assertEqual(response.status_code, 403, response.content)
+        self.assertTrue(SourceResolution.objects.filter(pk=resolution.pk).exists())
 
 
 class CableClassMappingAPIPolicyLockTest(TransactionTestCase):
