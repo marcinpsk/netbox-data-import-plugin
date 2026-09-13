@@ -96,16 +96,19 @@ class _PluginModelViewSet(_ProfileScopedQuerySetMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Create one policy row inside its profile and object-permission scope."""
         model = serializer.Meta.model
-        values = serializer.model_cleaned_values()
-        profile = values.pop("profile")
+        profile_id = serializer.validated_data["profile"].pk
         try:
-            result = save_permission_scoped_object(
-                self.request.user,
-                model,
-                {"pk": None, "profile": profile},
-                values,
-                on_existing="reject",
-            )
+            with locked_profile_policy(profile_id):
+                serializer.run_validation(serializer.initial_data)
+                values = serializer.model_cleaned_values()
+                profile = values.pop("profile")
+                result = save_permission_scoped_object(
+                    self.request.user,
+                    model,
+                    {"pk": None, "profile": profile},
+                    values,
+                    on_existing="reject",
+                )
         except ImportProfile.DoesNotExist:
             raise Http404 from None
         except ObjectPermissionDenied as exc:
