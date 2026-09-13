@@ -390,6 +390,19 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             },
         )
 
+    def test_malformed_candidate_object_type_is_logged_and_refused(self):
+        proposal = self.completed()
+        candidate_snapshot = proposal.candidate_snapshot
+        candidate_snapshot["candidates"][0]["object_type"] = "invalid"
+        ResolutionProposal.objects.filter(pk=proposal.pk).update(candidate_snapshot=candidate_snapshot)
+
+        with self.assertLogs("netbox_data_import.views", level="WARNING") as operator_log:
+            response = self.call("accept_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"ok": False, "error": "That termination cannot be resolved here."})
+        self.assertIn("TraceAcceptProposalView: termination refused", operator_log.output[0])
+
     def test_cancel_queued_and_running_by_another_operator(self):
         for running in (False, True):
             with self.subTest(running=running):

@@ -26,7 +26,10 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
             "plugins-api:netbox_data_import-api:resolutionproposal-detail", args=[self.proposal.pk]
         )
         self.history_url = reverse("plugins-api:netbox_data_import-api:resolutionproposalhistory-list")
-        self.viewer = user_with_object_permission("proposal-viewer", [(ResolutionProposal, ["view"], None)])
+        self.viewer = user_with_object_permission(
+            "proposal-viewer",
+            [(ImportProfile, ["view"], None), (ResolutionProposal, ["view"], None)],
+        )
         self.client.force_login(self.viewer)
 
     def test_plain_model_uses_plain_drf_bases(self):
@@ -121,6 +124,19 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
                 response = self.client.get(url)
                 self.assertEqual(response.status_code, 403)
 
+    def test_proposal_permission_without_profile_permission_hides_the_proposal(self):
+        viewer = user_with_object_permission(
+            "proposal-only-viewer",
+            [(ResolutionProposal, ["view"], None)],
+        )
+        self.client.force_login(viewer)
+
+        response = self.client.get(self.list_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"], [])
+        self.assertEqual(self.client.get(self.detail_url).status_code, 404)
+
     def test_anonymous_user_is_refused(self):
         self.client.logout()
         for url in (self.list_url, self.detail_url):
@@ -203,6 +219,12 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
                 self.assertEqual(self.client.get(self.history_url, params).status_code, 400)
 
     def test_history_endpoint_uses_import_profile_view_scope_and_refuses_writes(self):
+        self.client.force_login(
+            user_with_object_permission(
+                "profile-history-denied",
+                [(ResolutionProposal, ["view"], None)],
+            )
+        )
         response = self.client.get(
             self.history_url,
             {"profile_id": self.profile.pk, "field_key": self.field_key},
@@ -246,7 +268,11 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
         self.profile = ImportProfile.objects.create(name="Permitted Proposal Profile", source_adapter="trace_workbook")
         permitted = self.frozen_proposal()
         viewer = user_with_object_permission(
-            "constrained-proposal-viewer", [(ResolutionProposal, ["view"], {"profile_id": self.profile.pk})]
+            "constrained-proposal-viewer",
+            [
+                (ImportProfile, ["view"], {"pk": self.profile.pk}),
+                (ResolutionProposal, ["view"], {"profile_id": self.profile.pk}),
+            ],
         )
         self.client.force_login(viewer)
 

@@ -183,6 +183,11 @@ class ResolutionProposalViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyMo
     serializer_class = ResolutionProposalSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
+    def get_queryset(self):
+        """Return proposals only for profiles that the actor can view."""
+        profile_scope = ImportProfile.objects.restrict(self.request.user, "view")
+        return super().get_queryset().filter(profile__in=profile_scope)
+
 
 class ResolutionProposalHistoryViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     """Read one field's complete paginated history with workspace permissions."""
