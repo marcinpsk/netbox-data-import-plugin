@@ -7,11 +7,13 @@ actually builds is the one under test: its path, its headers, and its body.
 """
 
 import json
+import pathlib
 import socket
 import threading
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import requests
@@ -26,6 +28,13 @@ from netbox_data_import.inference_credentials import (
     InvalidCredentialReference,
     InvalidSecretMaterial,
     VaultKvV2CredentialBackend,
+)
+from netbox_data_import.tests.inference_http import (
+    issue_server_certificate,
+    local_dns,
+    rebinding_dns,
+    serving_rebinding as _serving_rebinding,
+    serving_tls as _serving_tls,
 )
 
 SECRET = "sk-do-not-leak-this-value"
@@ -94,23 +103,8 @@ def serving(status=200, payload=None, handler=RecordingVault):
 @contextmanager
 def serving_rebinding():
     """Run approved and private Vault stand-ins that share one port."""
-
-    class Approved(RecordingVault):
-        pass
-
-    class Private(RecordingVault):
-        pass
-
-    Approved.seen = []
-    Private.seen = []
-    approved_server = ThreadingHTTPServer(("127.0.0.1", 0), Approved)
-    port = approved_server.server_address[1]
-    private_server = ThreadingHTTPServer(("127.0.0.2", port), Private)
-    servers = (approved_server, private_server)
-    threads = tuple(threading.Thread(target=server.serve_forever, daemon=True) for server in servers)
-    for thread in threads:
-        thread.start()
-    try:
+    payload = {"data": {"data": {"api_key": SECRET}}}
+    with _serving_rebinding(RecordingVault, payload) as (port, approved_seen, private_seen):
         yield (
             {
                 "address": f"http://localhost:{port}",
@@ -118,28 +112,26 @@ def serving_rebinding():
                 "connect_timeout": 2,
                 "read_timeout": 2,
             },
-            Approved.seen,
-            Private.seen,
+            approved_seen,
+            private_seen,
         )
-    finally:
-        for server in servers:
-            server.shutdown()
-            server.server_close()
-        for thread in threads:
-            thread.join(timeout=5)
 
 
-def rebinding_dns(original):
-    """Return the approved address to a trust lookup and a private one to a normal lookup."""
-
-    def getaddrinfo(host, port, *args, **kwargs):
-        proto = kwargs.get("proto", args[2] if len(args) > 2 else 0)
-        if host == "localhost":
-            address = "127.0.0.1" if proto == socket.IPPROTO_TCP else "127.0.0.2"
-            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))]
-        return original(host, port, *args, **kwargs)
-
-    return getaddrinfo
+@contextmanager
+def serving_tls(certificate_path: pathlib.Path, key_path: pathlib.Path):
+    """Run a TLS Vault stand-in and return its deployment settings."""
+    payload = {"data": {"data": {"api_key": SECRET}}}
+    with _serving_tls(RecordingVault, payload, certificate_path, key_path) as (port, seen, server_names):
+        yield (
+            {
+                "address": f"https://localhost:{port}",
+                "auth_method": "proxy",
+                "connect_timeout": 2,
+                "read_timeout": 2,
+            },
+            seen,
+            server_names,
+        )
 
 
 class CloseRecordingSession(requests.Session):
@@ -281,6 +273,35 @@ class VaultReadTest(SimpleTestCase):
         self.assertEqual(len(approved_seen), 1)
         self.assertEqual(approved_seen[0]["headers"]["host"], settings["address"].removeprefix("http://"))
         self.assertEqual(private_seen, [])
+
+    def test_tls_accepts_a_certificate_for_the_vault_hostname(self):
+        original = socket.getaddrinfo
+        with TemporaryDirectory() as temporary:
+            ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+            with serving_tls(certificate_path, key_path) as (settings, seen, server_names):
+                settings["ca_bundle"] = str(ca_path)
+                with patch("socket.getaddrinfo", side_effect=local_dns(original)):
+                    self.assertEqual(self.resolve(settings), SECRET)
+
+        self.assertEqual(server_names, ["localhost"])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["headers"]["host"], settings["address"].removeprefix("https://"))
+
+    def test_tls_refuses_a_certificate_for_another_hostname(self):
+        original = socket.getaddrinfo
+        with TemporaryDirectory() as temporary:
+            ca_path, certificate_path, key_path = issue_server_certificate(
+                pathlib.Path(temporary), "wrong.example.invalid"
+            )
+            with serving_tls(certificate_path, key_path) as (settings, seen, server_names):
+                settings["ca_bundle"] = str(ca_path)
+                with patch("socket.getaddrinfo", side_effect=local_dns(original)):
+                    with self.assertRaises(CredentialUnavailable) as caught:
+                        self.resolve(settings)
+
+        self.assertEqual(caught.exception.category, "credential_unavailable")
+        self.assertEqual(server_names, ["localhost"])
+        self.assertEqual(seen, [])
 
     def test_the_request_names_the_kv_v2_data_path(self):
         with serving() as (settings, seen):
