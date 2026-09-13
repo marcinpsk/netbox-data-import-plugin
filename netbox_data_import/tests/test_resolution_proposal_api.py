@@ -283,7 +283,11 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
     def test_constrained_viewer_cannot_read_another_profile_proposal(self):
         other = ImportProfile.objects.create(name="Permitted Proposal Profile", source_adapter="trace_workbook")
         viewer = user_with_object_permission(
-            "constrained-proposal-viewer", [(ResolutionProposal, ["view"], {"profile_id": other.pk})]
+            "constrained-proposal-viewer",
+            [
+                (ImportProfile, ["view"], {"pk": self.profile.pk}),
+                (ResolutionProposal, ["view"], {"profile_id": other.pk}),
+            ],
         )
         self.client.force_login(viewer)
 
