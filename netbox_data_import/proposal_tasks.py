@@ -20,6 +20,7 @@ __all__ = [
     "CandidateSet",
     "CandidateSnapshot",
     "CandidateSnapshotEntry",
+    "ProposalInventory",
     "UnknownProposalTask",
     "UnusableCandidateSet",
     "proposal_task",
@@ -92,6 +93,14 @@ class CandidateSet:
 
     objects: tuple
     total: int
+
+
+@dataclass(frozen=True)
+class ProposalInventory:
+    """The resolved Device and eligible candidates one freshness read observed together."""
+
+    resolved_device: object | None
+    candidate_snapshot: CandidateSnapshot | None
 
 
 def snapshot_from(candidate_set, *, label_for, name_for, limit) -> CandidateSnapshot:

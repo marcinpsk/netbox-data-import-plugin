@@ -550,9 +550,37 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         ResolutionProposal.objects.filter(pk=proposal.pk).update(profile=other)
         for action in ("cancel_proposal", "accept_proposal", "reject_proposal"):
             with self.subTest(action=action):
-                self.assertEqual(self.call(action, proposal_id=proposal.pk).status_code, 404)
+                response = self.call(action, proposal_id=proposal.pk)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json(), {"ok": False, "error": "That proposal is no longer available."})
         self.assertIsNone(self.call("proposal", field_key=self.field_key).json()["proposal"])
         self.assert_unwritten(proposal)
+
+    def test_proposal_deletion_races_use_the_json_404_envelope(self):
+        """Each row that can disappear mid-request maps to the controller's JSON contract."""
+        import json
+
+        from django.http import Http404
+        from django.test import RequestFactory
+        from django.views import View
+
+        from netbox_data_import.views import _TraceProposalMixin
+
+        cases = (
+            (Http404(), "That proposal is no longer available."),
+            (ImportProfile.DoesNotExist(), "The import profile is no longer available."),
+            (ResolutionProposal.DoesNotExist(), "That proposal is no longer available."),
+        )
+        for failure, message in cases:
+            with self.subTest(failure=type(failure).__name__):
+
+                class DisappearingProposalView(_TraceProposalMixin, View):
+                    def get(self, _request, _failure=failure):
+                        raise _failure
+
+                response = DisappearingProposalView.as_view()(RequestFactory().get("/proposal"))
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(json.loads(response.content), {"ok": False, "error": message})
 
     def test_invalid_field_and_unoffered_field_are_refused(self):
         for key in ("invalid", termination_field_key(device="DEV-A", cards="", port="invented", kind="interface")):
@@ -835,7 +863,9 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(history.status_code, 200)
         self.assertEqual([row["id"] for row in history.json()["results"]], [proposal.pk])
         self.assertIsNone(payload["staleness"])
-        self.assertTrue(all(action["reason"] for action in payload["presentation"]["actions"]))
+        actions = {action["key"]: action for action in payload["presentation"]["actions"]}
+        self.assertTrue(all(actions[key]["reason"] for key in ("request", "cancel", "accept")))
+        self.assertEqual(actions["reject"]["reason"], "")
 
     def test_workspace_supplies_affordances_without_editing_the_plan(self):
         from netbox_data_import.tests.test_inference_backend import ALLOWLIST, FALLBACK
@@ -1016,12 +1046,65 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         backend_reads = [query for query in queries if 'FROM "netbox_data_import_inferencebackend"' in query["sql"]]
         self.assertEqual(len(backend_reads), 1)
 
-    def test_profile_view_permission_disables_request_and_reject(self):
-        self.completed()
+    def test_profile_view_permission_disables_request_and_allows_reject(self):
+        proposal = self.completed()
         self.operator(view_only=True)
         actions = {row["key"]: row for row in self.presentation()["actions"]}
         self.assertIn("permission", actions["request"]["reason"])
-        self.assertIn("permission", actions["reject"]["reason"])
+        self.assertEqual(actions["reject"]["reason"], "")
+
+        response = self.call("reject_proposal", proposal_id=proposal.pk)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, "rejected")
+
+    def test_fields_reuse_inventory_for_the_same_device_kind_and_role(self):
+        """Two proposal fields with one eligibility key must not repeat its inventory reads."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_data_import.cable_target import UNRESOLVED
+        from netbox_data_import.netbox_reader import NetBoxReader
+        from netbox_data_import.proposal_presentation import ProposalPresentation
+
+        first = self.completed()
+        first.refresh_from_db()
+        second_key = termination_field_key(device="DEV-A", cards="", port="another-port", kind="interface")
+        ResolutionProposal.objects.create(
+            profile=self.profile,
+            task_type=first.task_type,
+            field_key=second_key,
+            status=first.status,
+            source_evidence={"port": "another-port"},
+            resolved_device_type=first.resolved_device_type,
+            resolved_device_id=first.resolved_device_id,
+            prompt_version=first.prompt_version,
+            response_schema_version=first.response_schema_version,
+            candidate_snapshot=first.candidate_snapshot,
+            requested_by=first.requested_by,
+            outcome=first.outcome,
+            selected_candidate_id=first.selected_candidate_id,
+            selected_object_type=first.selected_object_type,
+            selected_object_id=first.selected_object_id,
+            explanation=first.explanation,
+        )
+        fields = (
+            {"field_key": self.field_key, "state": UNRESOLVED},
+            {"field_key": second_key, "state": UNRESOLVED},
+        )
+        reader = NetBoxReader.for_actor(self.actor).for_target(site=self.site)
+        presentation = ProposalPresentation(profile=self.profile, actor=self.actor, reader=reader)
+
+        with CaptureQueriesContext(connection) as queries:
+            payloads = presentation.fields(fields)
+
+        self.assertFalse(payloads[self.field_key]["staleness"]["is_stale"])
+        self.assertFalse(payloads[second_key]["staleness"]["is_stale"])
+        device_reads = [query for query in queries if 'FROM "dcim_device"' in query["sql"]]
+        candidate_reads = [query for query in queries if 'FROM "dcim_interface"' in query["sql"]]
+        self.assertEqual(len(device_reads), 1)
+        self.assertEqual(len(candidate_reads), 2)
 
     def test_mapped_peer_has_a_manual_reason(self):
         from netbox_data_import.field_keys import MAPPED_PEER_ROLE

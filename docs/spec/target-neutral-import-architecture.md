@@ -953,7 +953,7 @@ A plugin-level model holds named Inference Backend rows with at most one enabled
 
 | Field | Requirement | Meaning |
 | --- | --- | --- |
-| Backend key | Required | The unique name of the Inference Backend, and the only identifier a job payload carries |
+| Backend key | Required | The unique name of the Inference Backend. Only an Inference Backend connection-test job carries this key; a proposal job carries its Resolution Proposal id. |
 | Display name | Required | Operator-facing label |
 | Adapter type | Required | `openai_compatible` in this delivery (spec default key) |
 | `api_root` | Required | Exact API root without a trailing slash. The client appends `/chat/completions` or `/models`. It never adds `/v1`. |

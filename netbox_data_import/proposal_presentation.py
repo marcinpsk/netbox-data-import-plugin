@@ -10,7 +10,7 @@ from django.db.models.functions import RowNumber
 from django.urls import reverse
 
 from .field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, parse_termination_field_key
-from .inference_backend import NoActiveInferenceBackend, resolve_active_backend
+from .inference_backend import NoActiveInferenceBackend, proposal_candidate_limit, resolve_active_backend
 from .inference_trust import InvalidInferenceConfiguration
 from .models import ImportProfile, ProposalDecision, ProposalOutcome, ProposalStatus, ResolutionProposal
 from .proposal_decisions import proposal_staleness
@@ -60,9 +60,12 @@ class ProposalPresentation:
         self.profile = profile
         self.actor = actor
         self.reader = reader
+        self._inventory = {}
+        self._write_assessments = {}
         self.preview_allowed = ImportProfile.objects.restrict(actor, "change").filter(pk=profile.pk).exists()
+        self.profile_view_allowed = ImportProfile.objects.restrict(actor, "view").filter(pk=profile.pk).exists()
         self.view_reason = ""
-        if not ImportProfile.objects.restrict(actor, "view").filter(pk=profile.pk).exists():
+        if not self.profile_view_allowed:
             self.view_reason = "You do not have permission to view proposals for this Import Profile."
         self.backend_reason = ""
         try:
@@ -137,19 +140,35 @@ class ProposalPresentation:
             "history_url": history_url,
             "staleness": None,
         }
+        inventory = self.field_inventory(field) if proposal is not None or self.preview_allowed else None
         if self.reader is None:
             payload["staleness_error"] = "The saved import target is gone or outside your view scope."
         elif proposal is not None:
-            stale = proposal_staleness(proposal, netbox_reader=self.reader)
+            stale = proposal_staleness(proposal, inventory=inventory)
             payload["staleness"] = {
                 "is_stale": stale.is_stale,
                 "resolved_device_changed": stale.resolved_device_changed,
                 "candidates_changed": stale.candidates_changed,
             }
-        payload["presentation"] = self.card(field, proposal, payload)
+        payload["presentation"] = self.card(field, proposal, payload, inventory)
         return payload
 
-    def request_permission_reason(self, field):
+    def field_inventory(self, field):
+        """Return one cached inventory read for fields that share device, kind, and role."""
+        parsed = parse_termination_field_key(field["field_key"])
+        if self.reader is None or parsed["role"] != TERMINATION_ROLE:
+            return None
+        key = (parsed["device"], parsed["kind"], parsed["role"])
+        if key not in self._inventory:
+            self._inventory[key] = proposal_task(SELECT_TERMINATION_TASK).inventory(
+                profile=self.profile,
+                field_key=field["field_key"],
+                netbox_reader=self.reader,
+                limit=proposal_candidate_limit(),
+            )
+        return self._inventory[key]
+
+    def request_permission_reason(self, field, inventory):
         """Explain preview access, task eligibility, and resolved Device access."""
         if not self.preview_allowed:
             return "You do not have permission to request proposals for this Import Profile."
@@ -157,17 +176,11 @@ class ProposalPresentation:
             return "Ask AI supports termination fields only. Choose the mapped peer manually."
         if not field.get("offered", True):
             return "This preview asked no question about that termination."
-        if (
-            self.reader is None
-            or proposal_task(SELECT_TERMINATION_TASK).resolved_device(
-                field_key=field["field_key"], netbox_reader=self.reader
-            )
-            is None
-        ):
+        if inventory is None or inventory.resolved_device is None:
             return "The resolved Device is unavailable or outside your view permission."
         return ""
 
-    def card(self, field, proposal, payload):
+    def card(self, field, proposal, payload, inventory):
         """Derive all proposal vocabulary and legal actions in one place."""
         pending = proposal is not None and proposal.status in ProposalStatus.ACTIVE
         completed = proposal is not None and proposal.status == ProposalStatus.COMPLETED
@@ -187,7 +200,7 @@ class ProposalPresentation:
         if missing:
             # Acceptance refuses this row, so the card must not offer an action the writer declines.
             stale_reason = "The selected candidate is no longer in the request snapshot. Request a new proposal."
-        actions = self.actions(field, proposal, state, pending, completed, stale_reason, selected_entry)
+        actions = self.actions(field, proposal, state, pending, completed, stale_reason, selected_entry, inventory)
         badge = proposal.get_status_display() if proposal is not None else "No proposal"
         if completed:
             badge = "Proposal - stale, not applied" if stale_reason else "Proposal - not applied"
@@ -234,9 +247,9 @@ class ProposalPresentation:
             return "", True, None
         return f"{entry.display_name} ({str(proposal.selected_object_type.name).capitalize()})", False, entry
 
-    def actions(self, field, proposal, state, pending, completed, stale_reason, selected_entry):
+    def actions(self, field, proposal, state, pending, completed, stale_reason, selected_entry, inventory):
         """Return every command with its current permission and lifecycle refusal."""
-        permission_reason = self.request_permission_reason(field)
+        permission_reason = self.request_permission_reason(field, inventory)
         request_reason = permission_reason
         if not request_reason and state != UNRESOLVED:
             request_reason = "This termination is already resolved."
@@ -259,15 +272,27 @@ class ProposalPresentation:
         if not self.preview_allowed:
             accept_reason = "You do not have permission to save a termination resolution."
         elif selected_entry is not None:
-            assessment = proposal_task(SELECT_TERMINATION_TASK).assess_resolution_write(
-                profile=self.profile,
-                field_key=proposal.field_key,
-                entry=selected_entry,
-                actor=self.actor,
+            assessment_key = (
+                proposal.field_key,
+                selected_entry.object_type,
+                selected_entry.object_id,
+                selected_entry.display_name,
             )
+            if assessment_key not in self._write_assessments:
+                self._write_assessments[assessment_key] = proposal_task(
+                    SELECT_TERMINATION_TASK
+                ).assess_resolution_write(
+                    profile=self.profile,
+                    field_key=proposal.field_key,
+                    entry=selected_entry,
+                    actor=self.actor,
+                )
+            assessment = self._write_assessments[assessment_key]
             if not assessment.allowed:
                 accept_reason = "You do not have permission to save a termination resolution."
-        reject_reason = decision_reason if self.preview_allowed else "You do not have permission to reject proposals."
+        reject_reason = (
+            decision_reason if self.profile_view_allowed else "You do not have permission to reject proposals."
+        )
         if proposal is not None and proposal.decision:
             accept_reason = reject_reason = "This proposal already has a decision."
         actions = [

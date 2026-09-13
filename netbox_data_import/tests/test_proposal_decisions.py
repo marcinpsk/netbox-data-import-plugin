@@ -267,7 +267,7 @@ class ProposalAcceptanceTest(DecisionInventory, TestCase):
             [
                 (Device, ["view"], {}),
                 (Interface, ["view"], {}),
-                (ImportProfile, ["change"], {"pk": self.profile.pk}),
+                (ImportProfile, ["view"], {"pk": self.profile.pk}),
                 (TerminationResolution, ["add"], {"profile_id": self.profile.pk + 1}),
             ],
         )
@@ -278,18 +278,17 @@ class ProposalAcceptanceTest(DecisionInventory, TestCase):
         self.assertEqual(proposal.decision, ProposalDecision.REJECTED)
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
-    def test_profile_view_permission_alone_cannot_reject(self):
+    def test_profile_view_permission_alone_can_reject(self):
         proposal = self.proposal()
         actor = user_with_object_permission(
             "profile-viewer",
             [(ImportProfile, ["view"], {"pk": self.profile.pk})],
         )
 
-        with self.assertRaises(ObjectPermissionDenied):
-            reject_proposal(proposal.pk, operator=actor)
+        self.assertTrue(reject_proposal(proposal.pk, operator=actor))
 
         proposal.refresh_from_db()
-        self.assertEqual(proposal.decision, "")
+        self.assertEqual(proposal.decision, ProposalDecision.REJECTED)
 
     def test_rejection_is_refused_outside_the_operators_profile_scope(self):
         proposal = self.proposal()

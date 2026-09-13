@@ -6,6 +6,7 @@ import ast
 import json
 import pathlib
 import socket
+import ssl
 import threading
 
 import requests
@@ -909,3 +910,14 @@ class InterruptedAndMalformedTransportTest(SimpleTestCase):
                 adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
 
         self.assertFalse(caught.exception.retryable)
+
+
+def test_tls_server_context_requires_tls_1_2():
+    """The real TLS stand-in must not accept protocol versions the product rejects."""
+    from netbox_data_import.tests.inference_http import tls_server_context
+
+    with TemporaryDirectory() as directory:
+        _ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(directory), "localhost")
+        context = tls_server_context(certificate_path, key_path)
+
+    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2

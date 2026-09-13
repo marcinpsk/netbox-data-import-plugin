@@ -335,6 +335,9 @@ def resolved_device_for(field_key: str, netbox_reader):
     return devices[0] if len(devices) == 1 else None
 
 
+_RESOLVED_DEVICE_UNSET = object()
+
+
 def eligible_terminations(
     field_key: str,
     netbox_reader,
@@ -342,6 +345,7 @@ def eligible_terminations(
     profile,
     search: str = "",
     limit: int = ELIGIBLE_TERMINATION_LIMIT,
+    _resolved_device=_RESOLVED_DEVICE_UNSET,
 ) -> EligibleTerminations:
     """Return one page of candidates for a canonical termination field key.
 
@@ -353,7 +357,11 @@ def eligible_terminations(
     parsed = parse_termination_field_key(field_key)
     kind = parsed["kind"]
     accessor = _READER_ACCESSOR_BY_KIND[kind]
-    device = resolved_device_for(field_key, netbox_reader)
+    device = (
+        resolved_device_for(field_key, netbox_reader)
+        if _resolved_device is _RESOLVED_DEVICE_UNSET
+        else _resolved_device
+    )
     if device is None:
         return EligibleTerminations(candidates=(), total=0)
     candidates = getattr(netbox_reader, accessor)().filter(device_id=device.pk)

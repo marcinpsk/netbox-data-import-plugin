@@ -4191,6 +4191,7 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
 
     def dispatch(self, request, *args, **kwargs):
         """Translate domain refusals into the workspace JSON envelope."""
+        from .models import ResolutionProposal
         from .proposal_tasks import UnusableCandidateSet
         from .resolution_proposals import ActiveProposalExists
         from .termination_proposal import UnsupportedProposalRole
@@ -4199,6 +4200,12 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
             return super().dispatch(request, *args, **kwargs)
         except InvalidProposalId as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        except Http404:
+            return JsonResponse({"ok": False, "error": "That proposal is no longer available."}, status=404)
+        except ImportProfile.DoesNotExist:
+            return JsonResponse({"ok": False, "error": "The import profile is no longer available."}, status=404)
+        except ResolutionProposal.DoesNotExist:
+            return JsonResponse({"ok": False, "error": "That proposal is no longer available."}, status=404)
         except (PreviewActionInvalid, ActiveProposalExists) as exc:
             return JsonResponse({"ok": False, "error": str(exc)}, status=409)
         except UnusableCandidateSet as exc:
@@ -4386,6 +4393,8 @@ class TraceAcceptProposalView(_TraceProposalActionView):
 class TraceRejectProposalView(_TraceProposalActionView):
     """Record the explicit rejection without binding it to the requesting operator."""
 
+    permission_required = "netbox_data_import.view_importprofile"
+    preview_profile_action = "view"
     requires_reader = False
 
     def apply(self, proposal, request, reader):
