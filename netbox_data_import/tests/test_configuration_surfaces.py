@@ -18,6 +18,7 @@ from netbox_data_import.forms import InferenceBackendForm
 from netbox_data_import.models import (
     CableClassMapping,
     CableImportSource,
+    ClassRoleMapping,
     ColumnMapping,
     ColumnTransformRule,
     ImportProfile,
@@ -921,6 +922,92 @@ class ProfileYamlSurfaceTest(TestCase):
                 self.assertContains(response, "does not apply to source adapter")
                 self.assertFalse(ImportProfile.objects.filter(name=name).exists())
 
+    def test_import_persists_values_normalized_by_policy_validation(self):
+        """The YAML writer persists the validated model values, not the raw input values."""
+        document = {
+            "profile": {
+                "name": "Normalized trace profile",
+                "source_adapter": "trace_workbook",
+                "adapter_config": {},
+            },
+            "cable_class_mappings": [
+                {
+                    "cable_class": "Unresolved patch",
+                    "cable_type_resolved": False,
+                    "cable_type": "",
+                    "cable_profile_resolved": False,
+                    "cable_profile": "",
+                }
+            ],
+        }
+        upload = BytesIO(yaml.safe_dump(document).encode())
+        upload.name = "normalized-profile.yaml"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"),
+            {"yaml_file": upload},
+        )
+
+        self.assertEqual(response.status_code, 302, response.content)
+        mapping = CableClassMapping.objects.get(profile__name="Normalized trace profile")
+        self.assertIsNone(mapping.cable_type)
+        self.assertIsNone(mapping.cable_profile)
+
+    def test_import_rejects_duplicate_policy_identities_before_writing(self):
+        """A duplicate natural identity is a document error, not a database constraint error."""
+        profile = ImportProfile.objects.create(name="Duplicate policy profile", adapter_config={})
+        rule = ColumnTransformRule.objects.create(
+            profile=profile,
+            source_column="Device label",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+        document = {
+            "profile": {"name": profile.name, "adapter_config": {}},
+            "column_transform_rules": [
+                {
+                    "source_column": rule.source_column,
+                    "pattern": r"^(.{1,})$",
+                    "group_1_target": rule.group_1_target,
+                    "group_2_target": "",
+                },
+                {
+                    "source_column": rule.source_column,
+                    "pattern": r"^(.{2,})$",
+                    "group_1_target": rule.group_1_target,
+                    "group_2_target": "",
+                },
+            ],
+        }
+        upload = BytesIO(yaml.safe_dump(document).encode())
+        upload.name = "duplicate-policy.yaml"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"),
+            {"yaml_file": upload},
+        )
+
+        rule.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Duplicate column_transform_rules identity: Device label")
+        self.assertEqual(rule.pattern, r"^(.+)$")
+        self.assertEqual(ColumnTransformRule.objects.filter(profile=profile).count(), 1)
+
+    def test_import_rejects_pre_cutover_profile_fields(self):
+        """Profile YAML has one current shape and no legacy adapter compatibility path."""
+        document = {"profile": {"name": "Pre-cutover profile", "sheet_name": "Inventory"}}
+        upload = BytesIO(yaml.safe_dump(document).encode())
+        upload.name = "pre-cutover-profile.yaml"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"),
+            {"yaml_file": upload},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Unknown profile key(s): sheet_name")
+        self.assertFalse(ImportProfile.objects.filter(name="Pre-cutover profile").exists())
+
     @classmethod
     def _keys_ending_in_id(cls, value):
         """Return instance-local key paths found in one parsed YAML value."""
@@ -931,3 +1018,165 @@ class ProfileYamlSurfaceTest(TestCase):
         if isinstance(value, list):
             return [item for item in value if cls._keys_ending_in_id(item)]
         return []
+
+
+class ProfileYamlPermissionTest(TestCase):
+    """Full-profile YAML uses the same object permissions as standard profile views."""
+
+    def setUp(self):
+        self.allowed = ImportProfile.objects.create(name="Allowed YAML profile", adapter_config={})
+        self.other = ImportProfile.objects.create(
+            name="Other YAML profile",
+            description="Original description",
+            adapter_config={},
+        )
+
+    def _post_document(self, user, document):
+        self.client.force_login(user)
+        upload = BytesIO(yaml.safe_dump(document).encode())
+        upload.name = "profile.yaml"
+        return self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"),
+            {"yaml_file": upload},
+        )
+
+    def test_export_is_scoped_to_profiles_the_actor_may_view(self):
+        actor = user_with_object_permission(
+            "profile-yaml-viewer",
+            [(ImportProfile, ["view"], {"pk": self.allowed.pk})],
+        )
+        self.client.force_login(actor)
+
+        allowed = self.client.get(
+            reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.allowed.pk})
+        )
+        other = self.client.get(reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.other.pk}))
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(other.status_code, 404)
+
+    def test_export_requires_view_access_to_included_policy_rows(self):
+        ClassRoleMapping.objects.create(profile=self.allowed, source_class="Server", role_slug="server")
+        actor = user_with_object_permission(
+            "profile-yaml-policy-viewer",
+            [(ImportProfile, ["view"], {"pk": self.allowed.pk})],
+        )
+        self.client.force_login(actor)
+
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.allowed.pk})
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_import_cannot_update_a_profile_outside_the_actor_scope(self):
+        actor = user_with_object_permission(
+            "profile-yaml-editor",
+            [(ImportProfile, ["change"], {"pk": self.allowed.pk})],
+        )
+
+        response = self._post_document(
+            actor,
+            {
+                "profile": {
+                    "name": self.other.name,
+                    "description": "Unauthorized change",
+                    "adapter_config": {},
+                }
+            },
+        )
+
+        self.other.refresh_from_db()
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.other.description, "Original description")
+
+    def test_bulk_import_cannot_use_add_access_to_update_an_existing_profile(self):
+        actor = user_with_object_permission(
+            "profile-yaml-bulk-creator",
+            [(ImportProfile, ["add"], {})],
+        )
+        self.client.force_login(actor)
+        document = {
+            "profile": {
+                "name": self.other.name,
+                "description": "Unauthorized bulk change",
+                "adapter_config": {},
+            }
+        }
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:importprofile_bulk_import"),
+            {"data": yaml.safe_dump(document)},
+        )
+
+        self.other.refresh_from_db()
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.other.description, "Original description")
+
+    def test_import_requires_the_policy_rows_own_change_permission(self):
+        mapping = ClassRoleMapping.objects.create(
+            profile=self.allowed,
+            source_class="Server",
+            role_slug="old-role",
+        )
+        actor = user_with_object_permission(
+            "profile-yaml-policy-editor",
+            [(ImportProfile, ["change"], {"pk": self.allowed.pk})],
+        )
+
+        response = self._post_document(
+            actor,
+            {
+                "profile": {"name": self.allowed.name, "adapter_config": {}},
+                "class_role_mappings": [
+                    {
+                        "source_class": "Server",
+                        "creates_rack": False,
+                        "rack_type": None,
+                        "role_slug": "new-role",
+                        "ignore": False,
+                    }
+                ],
+            },
+        )
+
+        mapping.refresh_from_db()
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(mapping.role_slug, "old-role")
+
+    def test_import_updates_a_released_policy_row_with_standard_change_permission(self):
+        """An internal release and reinsert remains one logical change permission operation."""
+        rule = ColumnTransformRule.objects.create(
+            profile=self.allowed,
+            source_column="Device label",
+            pattern=r"^(.+)$",
+            group_1_target="device_name",
+        )
+        original_pk = rule.pk
+        actor = user_with_object_permission(
+            "profile-yaml-transform-editor",
+            [
+                (ImportProfile, ["change"], {"pk": self.allowed.pk}),
+                (ColumnTransformRule, ["change"], {"pk": rule.pk}),
+            ],
+        )
+
+        response = self._post_document(
+            actor,
+            {
+                "profile": {"name": self.allowed.name, "adapter_config": {}},
+                "column_transform_rules": [
+                    {
+                        "source_column": rule.source_column,
+                        "pattern": r"^(.{1,})$",
+                        "group_1_target": rule.group_1_target,
+                        "group_2_target": "",
+                    }
+                ],
+            },
+        )
+
+        rule.refresh_from_db()
+        self.assertEqual(response.status_code, 302, response.content)
+        self.assertEqual(rule.pk, original_pk)
+        self.assertEqual(rule.pattern, r"^(.{1,})$")

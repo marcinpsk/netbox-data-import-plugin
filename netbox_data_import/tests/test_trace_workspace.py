@@ -1594,8 +1594,9 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
     def test_a_replanned_trace_is_executed_again_rather_than_reported_done(self):
         """One trace identity spans two workbooks, so the execution key cannot be the selection alone."""
         from core.models import Job
+        from dcim.models import Cable
 
-        from netbox_data_import.models import ExecutionOutcome, ImportExecution
+        from netbox_data_import.models import CableImportSource, ExecutionOutcome, ImportExecution
 
         self.client.force_login(self.actor)
         keys = []
@@ -1647,7 +1648,21 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
 
         # The patched path replaces the direct Cable with its three physical segments.
         self.assertFalse(cables_on(self.eth0, self.eth1).exists())
-        self.assertTrue(cables_on(self.panel_1_rear).exists())
+        self.assertTrue(cables_on(self.eth0, self.panel_1_fronts[0]).exists())
+        self.assertTrue(cables_on(self.panel_1_rear, self.panel_2_rear).exists())
+        self.assertTrue(cables_on(self.panel_2_fronts[0], self.eth1).exists())
+        self.assertEqual(Cable.objects.count(), 3)
+        self.assertEqual(CableImportSource.objects.count(), 3)
+        self.assertEqual(
+            set(CableImportSource.objects.values_list("cable_id", flat=True)),
+            set(Cable.objects.values_list("pk", flat=True)),
+        )
+        self.assertEqual(
+            sorted(CableImportSource.objects.values_list("segment_index", flat=True)),
+            [0, 1, 2],
+        )
+        self.assertEqual({cable.status for cable in Cable.objects.all()}, {"connected"})
+        self.assertEqual({cable.type for cable in Cable.objects.all()}, {"cat6"})
 
 
 class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):

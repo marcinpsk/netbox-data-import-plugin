@@ -15,14 +15,15 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 
-from core.models import Job
+from core.models import Job, ObjectChange
 from django.apps import apps
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from netbox_data_import.inference_connection_test import run_connection_test
 from netbox_data_import.jobs import InferenceBackendConnectionTestJob
-from netbox_data_import.models import ImportProfile, InferenceBackend
+from netbox_data_import.inference_backend import resolve_active_backend
+from netbox_data_import.models import ExecutionOutcome, ImportExecution, ImportProfile, InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
 
 SECRET = "sk-never-persisted-anywhere"
@@ -63,13 +64,39 @@ def vault():
         thread.join(timeout=5)
 
 
-def settings_for(vault_settings):
+def settings_for(vault_settings, *, inference_backend=None):
     """Return a PLUGINS_CONFIG entry pointing the plugin at one Vault stand-in."""
-    return {
+    settings = {
         "netbox_data_import": {
             "inference_backend_origin_allowlist": ["https://backend.example.invalid:443"],
             "vault": vault_settings,
         }
+    }
+    if inference_backend is not None:
+        settings["netbox_data_import"]["inference_backend"] = inference_backend
+    return settings
+
+
+def occurrences(value, expected) -> int:
+    """Count exact nested occurrences of one configuration value."""
+    if value == expected:
+        return 1
+    if isinstance(value, dict):
+        return sum(occurrences(item, expected) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(occurrences(item, expected) for item in value)
+    return 0
+
+
+def persisted_state() -> dict:
+    """Return every plugin row and NetBox job payload as plain values."""
+    return {
+        "plugin_rows": {
+            model._meta.label: list(model.objects.values())
+            for model in apps.get_app_config("netbox_data_import").get_models()
+        },
+        "jobs": list(Job.objects.values()),
+        "object_changes": list(ObjectChange.objects.values("prechange_data", "postchange_data")),
     }
 
 
@@ -203,14 +230,88 @@ class SecretContainmentTest(TestCase):
         self.assertNotIn("credential_reference", body)
         self.assertNotIn("inference/backend", body)
 
-    def test_the_reference_lives_in_exactly_one_authoritative_place(self):
-        """Section 8.6: the enabled row, or the file fallback when no row is enabled."""
-        self.resolve_once()
+    def test_one_real_job_leaves_no_secret_and_one_authoritative_database_reference(self):
+        """One sweep covers persisted rows, an audit, a job payload, the session, and logs."""
+        profile = ImportProfile.objects.create(name="Redaction audit", adapter_config={})
+        ImportExecution.objects.create(
+            profile=profile,
+            outcome=ExecutionOutcome.FAILED,
+            failure_detail={"reason": "planning"},
+        )
+        user = user_with_object_permission("redaction-job", [(InferenceBackend, ["change"], {})])
+        self.client.force_login(user)
+        url = reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk])
+        stream = StringIO()
+        handler = logging.StreamHandler(stream)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        previous = root.level
+        root.setLevel(logging.DEBUG)
+        try:
+            with vault() as vault_settings:
+                configuration = settings_for(vault_settings)
+                with override_settings(PLUGINS_CONFIG=configuration):
+                    edit_response = self.client.post(
+                        reverse(
+                            "plugins:netbox_data_import:inferencebackend_edit",
+                            kwargs={"pk": self.row.pk},
+                        ),
+                        {
+                            "backend_key": self.row.backend_key,
+                            "display_name": "Updated primary",
+                            "adapter_type": self.row.adapter_type,
+                            "api_root": self.row.api_root,
+                            "model": self.row.model,
+                            "authentication": self.row.authentication,
+                            "response_mode": self.row.response_mode,
+                            "credential_reference": json.dumps(REFERENCE),
+                            "connect_timeout": self.row.connect_timeout,
+                            "read_timeout": self.row.read_timeout,
+                            "enabled": "on",
+                        },
+                    )
+                    self.assertEqual(edit_response.status_code, 302, edit_response.content)
+                    self.client.post(url)
+                    InferenceBackendConnectionTestJob.handle(Job.objects.get(), pk=self.row.pk, backend_key="primary")
+                    state = {
+                        **persisted_state(),
+                        "session": dict(self.client.session),
+                        "logs": stream.getvalue(),
+                        "inference_backend_setting": configuration["netbox_data_import"].get("inference_backend"),
+                    }
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(previous)
 
-        holders = [
-            model
-            for model in apps.get_app_config("netbox_data_import").get_models()
-            if any("credential_reference" in field.name for field in model._meta.get_fields() if hasattr(field, "name"))
-        ]
+        serialized = json.dumps(state, default=str)
+        self.assertNotIn(SECRET, serialized)
+        self.assertIn("netbox_data_import.ImportExecution", state["plugin_rows"])
+        self.assertTrue(state["object_changes"])
+        self.assertEqual(occurrences(state, REFERENCE), 1)
 
-        self.assertEqual(holders, [InferenceBackend])
+    def test_the_file_fallback_is_the_only_reference_when_no_row_is_enabled(self):
+        """The fallback reference stays in settings and is not copied to persistent state."""
+        fallback = {
+            "display_name": "File fallback",
+            "adapter_type": "openai_compatible",
+            "api_root": "https://backend.example.invalid:443",
+            "model": "m",
+            "authentication": "bearer",
+            "response_mode": "prompt_json",
+            "credential_reference": REFERENCE,
+            "connect_timeout": 2,
+            "read_timeout": 2,
+        }
+        self.row.delete()
+        with vault() as vault_settings:
+            configuration = settings_for(vault_settings, inference_backend=fallback)
+            with override_settings(PLUGINS_CONFIG=configuration):
+                active = resolve_active_backend()
+                state = {
+                    **persisted_state(),
+                    "inference_backend_setting": configuration["netbox_data_import"]["inference_backend"],
+                }
+
+        self.assertEqual(active.source, "file-fallback")
+        self.assertNotIn(SECRET, json.dumps(state, default=str))
+        self.assertEqual(occurrences(state, REFERENCE), 1)

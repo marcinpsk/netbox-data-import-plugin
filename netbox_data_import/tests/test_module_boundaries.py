@@ -50,6 +50,26 @@ def _import_engine_calls(path: pathlib.Path) -> set[str]:
     }
 
 
+def _private_engine_references(path: pathlib.Path) -> set[str]:
+    """Return private coordinator attributes and imports referenced by one test."""
+    tree = ast.parse(path.read_text())
+    references = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "ImportEngine"
+        and node.attr.startswith("_")
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module not in {"import_engine", "netbox_data_import.import_engine"}:
+            continue
+        references.update(name.name for name in node.names if name.name.startswith("_"))
+    return references
+
+
 def _import_root(name: str) -> str:
     """Return the module a dotted name belongs to, with the plugin's own package stripped."""
     parts = name.removeprefix(f"{PACKAGE_NAME}.").partition(".")
@@ -125,6 +145,16 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             path.write_text("ImportEngine.plan()\nImportEngine.execute()\ncallback = ImportEngine._private_helper\n")
 
             self.assertIn("_private_helper", _import_engine_calls(path))
+
+    def test_tests_use_only_the_public_coordinator_interface(self):
+        """Tests exercise planning and execution, not coordinator implementation details."""
+        offenders = {
+            path.name: sorted(references)
+            for path in (PACKAGE / "tests").glob("test_*.py")
+            if (references := _private_engine_references(path))
+        }
+
+        self.assertEqual(offenders, {})
 
     def test_views_and_jobs_do_not_import_target_modules(self):
         self.assertEqual([name for name in CALLERS if _imports_target_modules(PACKAGE / name)], [])

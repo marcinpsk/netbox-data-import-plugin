@@ -320,7 +320,12 @@ class RackModule:
         if rack is None:
             actor = netbox_reader.actor
             if actor is not None and not actor.has_perm("dcim.add_rack"):
-                return _refused(identity, "rack.add_permission", unit_display)
+                return _refused(
+                    identity,
+                    "rack.add_permission",
+                    unit_display,
+                    disposition=Disposition.BLOCKED,
+                )
             validation = self._validated_candidate(
                 None,
                 name,
@@ -382,7 +387,12 @@ class RackModule:
         if validation is not None:
             return _refused(identity, "rack.validation_failed", {**existing_display, "message": validation})
         if netbox_reader.actor is not None and not netbox_reader.racks("change").filter(pk=rack.pk).exists():
-            return _refused(identity, "rack.change_permission", existing_display)
+            return _refused(
+                identity,
+                "rack.change_permission",
+                existing_display,
+                disposition=Disposition.BLOCKED,
+            )
         return SynchronizationUnit(
             identity=identity,
             disposition=Disposition.ACTIONABLE,
@@ -535,11 +545,11 @@ def _occupied_units(position, height):
     return [start + step * index for index in range(count)]
 
 
-def _refused(identity, code, display) -> SynchronizationUnit:
-    """Return an invalid unit carrying the error that refused it."""
+def _refused(identity, code, display, *, disposition=Disposition.INVALID) -> SynchronizationUnit:
+    """Return a non-actionable unit carrying the error that refused it."""
     return SynchronizationUnit(
         identity=identity,
-        disposition=Disposition.INVALID,
+        disposition=disposition,
         diagnostics=(Diagnostic(code=code, severity=Severity.ERROR, identities=(identity,), display=display),),
         display=display,
     )
@@ -1643,7 +1653,7 @@ class DeviceModule:
         try:
             contact = batch.contact_review(row, match.device)
         except ObjectPermissionDenied as exc:
-            problem(Disposition.INVALID, "device.contact_permission", {"message": str(exc)})
+            problem(Disposition.BLOCKED, "device.contact_permission", {"message": str(exc)})
         except DanglingProfileReference as exc:
             problem(Disposition.BLOCKED, "profile.dangling_reference", {"message": "; ".join(exc.messages)})
         except ContactResolutionRequired as exc:
@@ -1697,7 +1707,7 @@ class DeviceModule:
                 problem(Disposition.INVALID, code, taken_display)
             actor = batch.reader.actor
             if actor is not None and not actor.has_perm("dcim.add_device"):
-                problem(Disposition.INVALID, "device.add_permission")
+                problem(Disposition.BLOCKED, "device.add_permission")
             if validation := self._validation_error(None, payload):
                 problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
             if issues:
@@ -1807,7 +1817,7 @@ class DeviceModule:
             )
         actor = batch.reader.actor
         if actor is not None and not batch.reader.devices("change").filter(pk=match.device.pk).exists():
-            problem(Disposition.INVALID, "device.change_permission")
+            problem(Disposition.BLOCKED, "device.change_permission")
         if validation := self._validation_error(match.device, payload):
             problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
         if issues:

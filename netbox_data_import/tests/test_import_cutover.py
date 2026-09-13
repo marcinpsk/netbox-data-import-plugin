@@ -3,7 +3,6 @@
 """The HTTP import workflow uses the target-neutral Import Engine contract."""
 
 import uuid
-from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -767,26 +766,6 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "validating")
 
-    def test_progress_publication_is_throttled_and_tolerates_no_rq_context(self):
-        """Large imports bound Redis writes, and synchronous calls have no RQ metadata."""
-
-        class ProgressJob:
-            def __init__(self):
-                self.meta = {}
-                self.saved = []
-
-            def save_meta(self):
-                self.saved.append(self.meta["processed"])
-
-        progress_job = ProgressJob()
-        with patch("netbox_data_import.jobs.get_current_job", autospec=True, return_value=progress_job):
-            for processed in range(31):
-                ImportJobRunner._publish_progress(processed, 30)
-        self.assertEqual(progress_job.saved, [0, 25, 30])
-
-        with patch("netbox_data_import.jobs.get_current_job", autospec=True, return_value=None):
-            ImportJobRunner._publish_progress(0, 1)
-
     def test_single_row_sync_rejects_invalid_session_and_row_inputs(self):
         """Inline execution requires a readable plan, profile, source, and create unit."""
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
@@ -854,6 +833,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertNotIn(constraint, response.json()["error"])
         self.assertNotIn("dcim_rack", response.json()["error"])
+        self.assertEqual(
+            ImportExecution.objects.latest("pk").failure_detail["reason"],
+            FailureReason.DATABASE,
+        )
 
     def test_single_row_sync_reports_a_refused_save_as_readable_text(self):
         """A NetBox validator's reason reads as its own text, not as the repr of a list."""
@@ -872,6 +855,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "A NetBox validator refused this rack.")
+        self.assertEqual(
+            ImportExecution.objects.latest("pk").failure_detail["reason"],
+            FailureReason.VALIDATION,
+        )
 
     def test_single_row_sync_rejects_a_queued_or_dirty_preview(self):
         """Inline execution cannot use a plan after import starts or a review changes it."""

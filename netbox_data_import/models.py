@@ -1186,6 +1186,10 @@ class InferenceBackend(JobsMixin, NetBoxModel):
         """Return the detail URL for this Inference Backend."""
         return reverse("plugins:netbox_data_import:inferencebackend", args=[self.pk])
 
+    def serialize_object(self, exclude=None):
+        """Keep the Vault reference out of NetBox change-log snapshots."""
+        return super().serialize_object(exclude=[*(exclude or ()), "credential_reference"])
+
     def clean(self):
         """Reject a second enabled row, an unapproved api_root, and a reference that is not typed."""
         super().clean()

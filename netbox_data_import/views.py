@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -634,7 +634,9 @@ class ImportProfileBulkImportView(generic.BulkImportView):
         # Hierarchical format: delegate to shared helper.
         if isinstance(data, dict) and "profile" in data:
             try:
-                profile, stats = apply_profile_document(data)
+                profile, stats = apply_profile_document(data, request.user)
+            except ObjectPermissionDenied as exc:
+                raise PermissionDenied from exc
             except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
                 messages.error(request, str(exc))
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
@@ -3252,16 +3254,19 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
 class ExportProfileYamlView(PermissionRequiredMixin, View):
     """Download all profile configuration as a single YAML file."""
 
-    permission_required = "netbox_data_import.change_importprofile"
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request, pk):
         """Serialize the profile and all its mappings to YAML and return as a file download."""
         import yaml
         from django.http import HttpResponse
 
-        profile = get_object_or_404(ImportProfile, pk=pk)
+        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "view"), pk=pk)
 
-        data = serialize_profile(profile)
+        try:
+            data = serialize_profile(profile, request.user)
+        except ObjectPermissionDenied as exc:
+            raise PermissionDenied from exc
 
         yaml_str = yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
         safe_name = profile.name.lower().replace(" ", "_").replace("/", "-")
@@ -3280,6 +3285,16 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
     """
 
     permission_required = "netbox_data_import.change_importprofile"
+
+    def has_permission(self):
+        """Allow the page when the actor can create or update at least one profile."""
+        return any(
+            self.request.user.has_perm(permission)
+            for permission in (
+                "netbox_data_import.add_importprofile",
+                "netbox_data_import.change_importprofile",
+            )
+        )
 
     def get(self, request):
         """Render the profile YAML import form."""
@@ -3301,7 +3316,9 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
         try:
-            profile, stats = apply_profile_document(data)
+            profile, stats = apply_profile_document(data, request.user)
+        except ObjectPermissionDenied as exc:
+            raise PermissionDenied from exc
         except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
             messages.error(request, str(exc))
             return render(request, "netbox_data_import/import_profile_yaml.html")

@@ -315,7 +315,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
 
         unit = RackModule().plan(batch, self.profile, CATALOG, scoped)[0]
 
-        self.assertEqual(unit.disposition, Disposition.INVALID)
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
         self.assertEqual(unit.diagnostics[0].code, "rack.change_permission")
 
     def test_missing_device_type_and_role_dependencies_are_explicit_diagnostics(self):
@@ -347,6 +347,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             [(Rack, ["view"], None), (Device, ["view"], None)],
         )
         create = self._plan_device(viewer, self._device_row())
+        self.assertEqual(create.disposition, Disposition.BLOCKED)
         self.assertEqual(create.diagnostics[0].code, "device.add_permission")
 
         stored = Device.objects.create(
@@ -364,6 +365,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             device_name=stored.name,
         )
         update = self._plan_device(viewer, self._device_row(serial="NEW"))
+        self.assertEqual(update.disposition, Disposition.BLOCKED)
         self.assertEqual(update.diagnostics[0].code, "device.change_permission")
 
     def test_a_device_type_slug_collision_is_not_treated_as_an_existing_target(self):

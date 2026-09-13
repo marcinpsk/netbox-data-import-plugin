@@ -171,7 +171,7 @@ class RackModulePlanTest(RackModulePlanTestBase):
 
         units = RackModule().plan(self._batch(self._row(2, "RACK-1", "cab-01")), self.profile, CATALOG, scoped)
 
-        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].disposition, Disposition.BLOCKED)
         self.assertEqual(units[0].diagnostics[0].code, "rack.add_permission")
 
 
