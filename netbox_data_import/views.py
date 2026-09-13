@@ -4270,12 +4270,12 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             inventory = task.inventory(
                 profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_candidate_limit()
             )
+            device = inventory.resolved_device
+            if device is None:
+                raise PreviewActionInvalid("The resolved Device is unavailable or outside your view permission.")
             if inventory.candidate_error is not None:
                 raise inventory.candidate_error
             snapshot = inventory.candidate_snapshot
-            device = inventory.resolved_device
-            if device is None:
-                raise PreviewActionInvalid("The resolved Device is no longer available.")
             if snapshot is None:
                 raise PreviewActionInvalid("The eligible candidates are no longer available.")
             proposal = request_proposal(

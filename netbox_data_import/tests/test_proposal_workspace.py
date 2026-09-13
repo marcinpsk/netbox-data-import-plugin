@@ -16,7 +16,6 @@ from django.utils import timezone
 from django_rq import get_queue
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from netbox_data_import import termination_proposal
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
 from netbox_data_import.jobs import ImportJobRunner, ResolutionProposalJob
 from netbox_data_import.models import (
@@ -202,27 +201,25 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(job.user_id, proposal.requested_by_id)
 
     def test_request_keeps_the_resolved_device_and_candidates_from_one_inventory_read(self):
-        real_resolver = termination_proposal.resolved_device_for
-        resolution_count = 0
+        from django.db import connection
 
-        def resolve_while_the_name_moves(field_key, netbox_reader):
-            nonlocal resolution_count
-            resolved = real_resolver(field_key, netbox_reader)
-            resolution_count += 1
-            if resolution_count == 1:
-                Device.objects.filter(pk=self.device_a.pk).update(name="DEV-A-previous")
-                Device.objects.filter(pk=self.device_b.pk).update(name="DEV-A")
-            return resolved
+        resolution_reads = []
 
-        with patch.object(
-            termination_proposal,
-            "resolved_device_for",
-            autospec=True,
-            side_effect=resolve_while_the_name_moves,
-        ):
+        def rename_after_resolved_device_read(execute, sql, params, many, context):
+            """Rename both Devices after the one-name query has read the original row."""
+            result = execute(sql, params, many, context)
+            device_table = connection.ops.quote_name(Device._meta.db_table)
+            if f"FROM {device_table}" in sql and "UPPER" in sql and " OR " not in sql:
+                resolution_reads.append(True)
+                if len(resolution_reads) == 1:
+                    Device.objects.filter(pk=self.device_a.pk).update(name="DEV-A-previous")
+                    Device.objects.filter(pk=self.device_b.pk).update(name="DEV-A")
+            return result
+
+        with connection.execute_wrapper(rename_after_resolved_device_read):
             proposal = self.request_proposal()
 
-        self.assertEqual(resolution_count, 1)
+        self.assertEqual(resolution_reads, [True])
         self.assertEqual(proposal.resolved_device_id, self.device_a.pk)
         self.assertEqual(proposal.candidate_snapshot["candidates"][0]["object_id"], self.eth0.pk)
 
@@ -393,7 +390,11 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
     def test_request_requires_device_access(self):
         self.operator(device=False)
         response = self.call("request_proposal", field_key=self.field_key)
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json(),
+            {"ok": False, "error": "The resolved Device is unavailable or outside your view permission."},
+        )
         self.assertFalse(ResolutionProposal.objects.exists())
 
     def test_accept_by_another_operator_writes_resolution_and_requires_recalculation(self):
