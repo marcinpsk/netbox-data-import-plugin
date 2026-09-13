@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Configuration surfaces introduced for trace and inference workflows."""
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from io import BytesIO
+from threading import Barrier, local
+from unittest.mock import patch
 
 import yaml
 from django.contrib.auth import get_user_model
@@ -13,7 +17,16 @@ from django.urls import reverse
 from dcim.models import Cable, Device, Interface
 
 from netbox_data_import.forms import InferenceBackendForm
-from netbox_data_import.models import CableClassMapping, CableImportSource, ImportProfile, InferenceBackend
+from netbox_data_import.api.serializers import PolicySectionSerializer
+from netbox_data_import.models import (
+    CableClassMapping,
+    CableImportSource,
+    ColumnMapping,
+    ColumnTransformRule,
+    ImportProfile,
+    InferenceBackend,
+    locked_profile_policy,
+)
 from netbox_data_import.tests.helpers import (
     make_dcim_objects,
     run_on_separate_connection,
@@ -269,6 +282,88 @@ class CableClassMappingAPIPolicyLockTest(TransactionTestCase):
 
         self.assertEqual(response.status_code, 204, response.content)
         self.assertEqual(seen, ["locked"])
+
+
+class PolicyAPICreateSerializationTest(TransactionTestCase):
+    """Concurrent REST creates must recheck cross-row policy invariants."""
+
+    def setUp(self):
+        self.profile = ImportProfile.objects.create(name="Concurrent policy API profile", adapter_config={})
+        self.user = User.objects.create_superuser(
+            "concurrent-policy-api",
+            "concurrent-policy-api@example.invalid",
+            "testpass",
+        )
+
+    def test_conflicting_creates_revalidate_after_the_profile_lock(self):
+        """Only one request can assign a target when both first validate an empty policy."""
+        validation_barrier = Barrier(2)
+        cleaned_values_barrier = Barrier(2)
+        lock_state = local()
+        original_validate = PolicySectionSerializer.validate
+        original_model_cleaned_values = PolicySectionSerializer.model_cleaned_values
+
+        def synchronize_initial_validation(serializer, attrs):
+            result = original_validate(serializer, attrs)
+            if not getattr(serializer, "_initial_validation_synchronized", False):
+                serializer._initial_validation_synchronized = True
+                validation_barrier.wait(timeout=10)
+            return result
+
+        def synchronize_unlocked_cleaned_values(serializer):
+            result = original_model_cleaned_values(serializer)
+            if not getattr(lock_state, "held", False):
+                cleaned_values_barrier.wait(timeout=10)
+            return result
+
+        @contextmanager
+        def record_profile_lock(*profile_ids):
+            with locked_profile_policy(*profile_ids):
+                lock_state.held = True
+                try:
+                    yield
+                finally:
+                    lock_state.held = False
+
+        requests = (
+            (
+                reverse("plugins-api:netbox_data_import-api:columnmapping-list"),
+                {
+                    "profile": self.profile.pk,
+                    "source_column": "Direct name",
+                    "target_field": "device_name",
+                },
+            ),
+            (
+                reverse("plugins-api:netbox_data_import-api:columntransformrule-list"),
+                {
+                    "profile": self.profile.pk,
+                    "source_column": "Parsed name",
+                    "pattern": "(.+)",
+                    "group_1_target": "device_name",
+                },
+            ),
+        )
+
+        def create_policy(request):
+            url, data = request
+            client = self.client_class()
+            client.force_login(User.objects.get(pk=self.user.pk))
+            response = client.post(url, data=data, content_type="application/json")
+            return response.status_code, response.json()
+
+        with (
+            patch.object(PolicySectionSerializer, "validate", synchronize_initial_validation),
+            patch.object(PolicySectionSerializer, "model_cleaned_values", synchronize_unlocked_cleaned_values),
+            patch("netbox_data_import.api.views.locked_profile_policy", record_profile_lock),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            responses = list(executor.map(create_policy, requests))
+
+        self.assertEqual(sorted(status for status, _body in responses), [201, 400], responses)
+        created = ColumnMapping.objects.filter(profile=self.profile).count()
+        created += ColumnTransformRule.objects.filter(profile=self.profile).count()
+        self.assertEqual(created, 1)
 
 
 @override_settings(PLUGINS_CONFIG={"netbox_data_import": {"inference_backend_origin_allowlist": INFERENCE_ALLOWLIST}})
