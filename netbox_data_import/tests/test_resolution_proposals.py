@@ -285,6 +285,38 @@ class ProposalDecisionTest(ProposalFixture):
         self.assertIsNotNone(decided_at)
         self.assertEqual(status, ProposalStatus.COMPLETED)
 
+    def test_a_rejected_decision_requires_an_operator(self):
+        proposal = self.make_proposal()
+        self.complete(proposal)
+
+        with self.assertRaisesMessage(ValueError, "A decision requires an operator."):
+            decide_proposal(proposal.pk, decision=ProposalDecision.REJECTED, operator=None)
+
+        self.assertEqual(self.decided(proposal), ("", None, ProposalStatus.COMPLETED))
+
+    def test_an_accepted_decision_requires_an_operator(self):
+        proposal = self.make_proposal()
+        self.complete(proposal)
+        resolution = TerminationResolution.objects.create(
+            profile=self.profile,
+            task_type=SELECT_TERMINATION_TASK,
+            field_key=self.field_key,
+            selected_object_type=self.interface_ct,
+            selected_object_id=self.interface.pk,
+            selected_display_name=str(self.interface),
+        )
+
+        with self.assertRaisesMessage(ValueError, "A decision requires an operator."):
+            decide_proposal(
+                proposal.pk,
+                decision=ProposalDecision.ACCEPTED,
+                operator=None,
+                written_resolution=resolution,
+            )
+
+        self.assertEqual(self.decided(proposal), ("", None, ProposalStatus.COMPLETED))
+        self.assertIsNone(ResolutionProposal.objects.get(pk=proposal.pk).written_resolution_id)
+
     def test_a_second_decision_is_refused(self):
         proposal = self.make_proposal()
         self.complete(proposal)
