@@ -19,6 +19,8 @@ from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from netbox.views import generic
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from utilities.permissions import get_permission_for_model
 from utilities.views import ConditionalLoginRequiredMixin
 
@@ -4168,7 +4170,10 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
 
 
 class InvalidProposalId(ValueError):
-    """A proposal action received no integer id, with wording this plugin owns."""
+    """A proposal action received no integer id."""
+
+
+INVALID_PROPOSAL_ID_ERROR = "Enter a valid proposal_id integer."
 
 
 class _TraceProposalMixin(_TraceWorkspaceMixin):
@@ -4198,8 +4203,8 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
 
         try:
             return super().dispatch(request, *args, **kwargs)
-        except InvalidProposalId as exc:
-            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        except InvalidProposalId:
+            return JsonResponse({"ok": False, "error": INVALID_PROPOSAL_ID_ERROR}, status=400)
         except Http404:
             return JsonResponse({"ok": False, "error": "That proposal is no longer available."}, status=404)
         except ImportProfile.DoesNotExist:
@@ -4294,6 +4299,13 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             job = ResolutionProposalJob.enqueue(
                 name=ResolutionProposalJob.Meta.name, user=request.user, proposal_id=proposal.pk
             )
+        except (RedisConnectionError, RedisTimeoutError):
+            fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
+            logger.exception("Failed to enqueue resolution proposal_id=%s", proposal.pk)
+            return JsonResponse(
+                {"ok": False, "error": "The proposal queue is unavailable. Try again later."},
+                status=503,
+            )
         except Exception:
             fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
             raise
@@ -4344,7 +4356,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         try:
             proposal_id = int(request.POST.get("proposal_id", ""))
         except ValueError:
-            raise InvalidProposalId("Enter a valid proposal_id integer.") from None
+            raise InvalidProposalId(INVALID_PROPOSAL_ID_ERROR) from None
         proposal = get_object_or_404(
             ResolutionProposal,
             pk=proposal_id,

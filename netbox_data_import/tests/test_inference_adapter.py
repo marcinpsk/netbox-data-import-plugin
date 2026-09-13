@@ -11,7 +11,6 @@ import threading
 import time
 
 import requests
-from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -94,6 +93,25 @@ class RecordingBackend(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         """Keep the test output quiet."""
+
+
+class DisconnectingFirstBackend(RecordingBackend):
+    """Read the request on the first loopback address, then close without a response."""
+
+    def do_POST(self):
+        if self.server.server_address[0] != "127.0.0.1":
+            return super().do_POST()
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length).decode() if length else ""
+        type(self).seen.append(
+            {
+                "path": self.path,
+                "headers": {name.lower(): value for name, value in self.headers.items()},
+                "body": body,
+            }
+        )
+        self.close_connection = True
+        self.connection.shutdown(socket.SHUT_RDWR)
 
 
 @contextmanager
@@ -183,11 +201,50 @@ def serving_stalled_body():
 
 
 @contextmanager
-def serving_rebinding():
+def serving_rebinding(handler=RecordingBackend):
     """Run approved and private stand-ins that DNS can select on the same port."""
-    with _serving_rebinding(RecordingBackend, completion()) as (port, approved_seen, private_seen):
+    with _serving_rebinding(handler, completion()) as (port, approved_seen, private_seen):
         root = f"http://localhost:{port}"
         yield root, approved_seen, private_seen, [root]
+
+
+@contextmanager
+def serving_after_unavailable_address():
+    """Keep the first loopback address closed and serve the same port on the second."""
+
+    class Handler(RecordingBackend):
+        pass
+
+    Handler.payload = completion()
+    Handler.seen = []
+    unavailable = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    unavailable.bind(("127.0.0.1", 0))
+    port = unavailable.getsockname()[1]
+    server = ThreadingHTTPServer(("127.0.0.2", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        root = f"http://localhost:{port}"
+        yield root, Handler.seen, [root]
+    finally:
+        server.shutdown()
+        server.server_close()
+        unavailable.close()
+        thread.join(timeout=5)
+
+
+def multi_address_dns(original):
+    """Resolve localhost to both ordered loopback addresses and leave other hosts unchanged."""
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host == "localhost":
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.2", port)),
+            ]
+        return original(host, port, *args, **kwargs)
+
+    return getaddrinfo
 
 
 @contextmanager
@@ -491,63 +548,26 @@ class RequestTimeTrustTest(SimpleTestCase):
 
     def test_a_connection_failure_tries_the_next_approved_address(self):
         """One unavailable DNS answer must not hide a healthy answer for the same origin."""
-        response = requests.Response()
-        response.status_code = 200
-        response._content = json.dumps(completion()).encode()
-        attempted = []
-
-        def answer_on_the_second_address(_session, _method, _url, resolved_address, **_kwargs):
-            attempted.append(resolved_address)
-            if len(attempted) == 1:
-                connection = NewConnectionError(None, "first address is unavailable")
-                raise requests.ConnectionError(MaxRetryError(None, _url, connection))
-            return response
-
-        root = "http://127.0.0.1:1"
-        addresses = ("127.0.0.1", "127.0.0.2")
-        with (
-            patch(
-                "netbox_data_import.inference_adapter.resolve_addresses",
-                autospec=True,
-                return_value=addresses,
-            ),
-            patch(
-                "netbox_data_import.inference_adapter.request_to_resolved_address",
-                autospec=True,
-                side_effect=answer_on_the_second_address,
-            ),
-        ):
-            result = adapter_for(root, [root]).complete(REQUEST, api_key=API_KEY)
+        original = socket.getaddrinfo
+        with serving_after_unavailable_address() as (root, seen, allowlist):
+            with patch("socket.getaddrinfo", side_effect=multi_address_dns(original)):
+                result = adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
 
         self.assertEqual(result.backend_response_id, "cmpl-123")
-        self.assertEqual(attempted, list(addresses))
+        self.assertEqual(len(seen), 1)
 
     def test_a_post_response_connection_failure_is_not_replayed(self):
         """A protocol failure can follow request acceptance, so the job must own its retry."""
-        attempted = []
+        original = socket.getaddrinfo
+        with serving_rebinding(DisconnectingFirstBackend) as (root, approved_seen, private_seen, allowlist):
+            with (
+                patch("socket.getaddrinfo", side_effect=multi_address_dns(original)),
+                self.assertRaises(TransportFailure),
+            ):
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
 
-        def fail_after_the_request(_session, _method, _url, resolved_address, **_kwargs):
-            attempted.append(resolved_address)
-            raise requests.ConnectionError(ProtocolError("the server closed after reading the request"))
-
-        root = "http://127.0.0.1:1"
-        addresses = ("127.0.0.1", "127.0.0.2")
-        with (
-            patch(
-                "netbox_data_import.inference_adapter.resolve_addresses",
-                autospec=True,
-                return_value=addresses,
-            ),
-            patch(
-                "netbox_data_import.inference_adapter.request_to_resolved_address",
-                autospec=True,
-                side_effect=fail_after_the_request,
-            ),
-            self.assertRaises(TransportFailure),
-        ):
-            adapter_for(root, [root]).complete(REQUEST, api_key=API_KEY)
-
-        self.assertEqual(attempted, [addresses[0]])
+        self.assertEqual(len(approved_seen), 1)
+        self.assertEqual(private_seen, [])
 
     def test_a_path_specific_session_adapter_cannot_bypass_address_pinning(self):
         original = socket.getaddrinfo
