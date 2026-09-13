@@ -322,6 +322,21 @@ class AssessPermissionScopedSaveTest(TestCase):
 
         self.assertFalse(assessment.allowed)
 
+    def test_an_invalid_typed_constraint_fails_closed(self):
+        user = user_with_object_permission(
+            "assess-invalid-value",
+            [(DeviceTypeMapping, ["add"], {"profile__created": "not-a-date"})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values(),
+        )
+
+        self.assertFalse(assessment.allowed)
+
 
 class SavePermissionScopedObjectTest(TestCase):
     """Create, update, keep and reject, each inside the caller's object scope."""

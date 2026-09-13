@@ -177,7 +177,7 @@ def _assess_permission_scoped_save(
             not constraint or _prospective_row_matches(user, model, prospective, constraint)
             for constraint in constraints
         )
-    except (DatabaseError, EmptyResultSet, FieldError, TypeError, ValueError) as exc:
+    except (DatabaseError, EmptyResultSet, FieldError, TypeError, ValidationError, ValueError) as exc:
         logger.warning("Prospective %s permission assessment failed closed: %s", model._meta.label, exc)
         allowed = False
     return PermissionScopedSaveAssessment(allowed, permission)
