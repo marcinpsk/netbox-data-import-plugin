@@ -17,6 +17,7 @@ from collections.abc import Sequence
 
 import requests
 
+from .inference_transport import request_to_resolved_address
 from .inference_trust import (
     InvalidInferenceConfiguration,
     assert_resolved_address_allowed,
@@ -248,24 +249,29 @@ class OpenAICompatibleAdapter:
             body["response_format"] = {"type": "json_object"}
         return body
 
-    def _check_destination(self) -> None:
-        """Reject a destination the deployment has not approved, rechecked at request time."""
+    def _resolved_destination(self) -> str:
+        """Return one approved address, rechecking the destination at request time."""
         try:
             validate_api_root(self.api_root, self.allowlist, self.authentication)
-            assert_resolved_address_allowed(self.api_root, self.allowlist, resolve_addresses(self.api_root))
+            addresses = resolve_addresses(self.api_root)
+            assert_resolved_address_allowed(self.api_root, self.allowlist, addresses)
         except InvalidInferenceConfiguration as exc:
             raise InvalidBackendConfiguration(str(exc)) from None
+        return addresses[0]
 
     def complete(self, request: InferenceRequest, api_key: str) -> InferenceCompletion:
         """Return one completion, or raise the typed error the backend condition maps to."""
         self._check_response_mode(request)
-        self._check_destination()
+        resolved_address = self._resolved_destination()
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.authentication == "bearer":
             headers["Authorization"] = f"Bearer {api_key}"
         try:
-            response = self._session.post(
+            response = request_to_resolved_address(
+                self._session,
+                "POST",
                 f"{self.api_root}{CHAT_COMPLETIONS_PATH}",
+                resolved_address,
                 json=self._body(request),
                 headers=headers,
                 timeout=(self.connect_timeout, self.read_timeout),

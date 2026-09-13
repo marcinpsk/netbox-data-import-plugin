@@ -1008,7 +1008,9 @@ row and for an `inference_backend` setting value:
 - Require `https` when `authentication` is `bearer`. Allow `http` only for an origin the allowlist
   marks as an approved local endpoint.
 - Resolve the host and reject a private, link-local, loopback, or cloud metadata destination unless
-  the allowlist approves that exact origin. Recheck after resolution.
+  the allowlist approves that exact origin. Recheck after resolution, then connect to one of the
+  checked addresses without resolving the hostname again. Keep the original HTTP Host header and
+  TLS hostname verification.
 - Disable redirects in the HTTP client, or revalidate every redirect target against the same rules
   before following it.
 

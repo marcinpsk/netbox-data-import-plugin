@@ -54,6 +54,7 @@ dev = [
     # openpyxl and PyYAML ship no py.typed. strawberry-django and django-rq do, so they need none.
     "types-PyYAML",
     "types-openpyxl",
+    "cryptography>=42",
 ]
 docs = [
     "mkdocs>=1,<2",
