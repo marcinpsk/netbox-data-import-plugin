@@ -7,10 +7,14 @@ actually builds is the one under test: its path, its headers, and its body.
 """
 
 import json
+import pathlib
+import socket
 import threading
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import requests
 
@@ -24,6 +28,13 @@ from netbox_data_import.inference_credentials import (
     InvalidCredentialReference,
     InvalidSecretMaterial,
     VaultKvV2CredentialBackend,
+)
+from netbox_data_import.tests.inference_http import (
+    issue_server_certificate,
+    local_dns,
+    rebinding_dns,
+    serving_rebinding as _serving_rebinding,
+    serving_tls as _serving_tls,
 )
 
 SECRET = "sk-do-not-leak-this-value"
@@ -87,6 +98,52 @@ def serving(status=200, payload=None, handler=RecordingVault):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@contextmanager
+def serving_rebinding():
+    """Run approved and private Vault stand-ins that share one port."""
+    payload = {"data": {"data": {"api_key": SECRET}}}
+    with _serving_rebinding(RecordingVault, payload) as (port, approved_seen, private_seen):
+        yield (
+            {
+                "address": f"http://localhost:{port}",
+                "auth_method": "proxy",
+                "connect_timeout": 2,
+                "read_timeout": 2,
+            },
+            approved_seen,
+            private_seen,
+        )
+
+
+@contextmanager
+def serving_tls(certificate_path: pathlib.Path, key_path: pathlib.Path):
+    """Run a TLS Vault stand-in and return its deployment settings."""
+    payload = {"data": {"data": {"api_key": SECRET}}}
+    with _serving_tls(RecordingVault, payload, certificate_path, key_path) as (port, seen, server_names):
+        yield (
+            {
+                "address": f"https://localhost:{port}",
+                "auth_method": "proxy",
+                "connect_timeout": 2,
+                "read_timeout": 2,
+            },
+            seen,
+            server_names,
+        )
+
+
+class CloseRecordingSession(requests.Session):
+    """A real Requests session that records when its pools are closed."""
+
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+        super().close()
 
 
 @contextmanager
@@ -169,43 +226,82 @@ class VaultReadTest(SimpleTestCase):
         backend = VaultKvV2CredentialBackend(settings)
         return backend.resolve(CredentialReference.from_mapping(reference or REFERENCE))
 
-    def test_close_clears_only_an_owned_session_pool(self):
-        for injected in (False, True):
-            with self.subTest(injected=injected), serving() as (settings, _seen):
-                with requests.Session() as session:
-                    backend = VaultKvV2CredentialBackend(settings, session=session if injected else None)
-                    self.addCleanup(backend._session.close)
-                    backend.resolve(CredentialReference.from_mapping(REFERENCE))
-                    pools = backend._session.get_adapter(settings["address"]).poolmanager.pools
-                    self.assertEqual(len(pools), 1)
+    def test_close_closes_only_an_owned_session(self):
+        with serving() as (settings, _seen):
+            owned = CloseRecordingSession()
+            with patch("netbox_data_import.inference_credentials.requests.Session", autospec=True, return_value=owned):
+                owned_backend = VaultKvV2CredentialBackend(settings)
+            injected = CloseRecordingSession()
+            injected_backend = VaultKvV2CredentialBackend(settings, session=injected)
 
-                    backend.close()
+            owned_backend.close()
+            injected_backend.close()
 
-                    self.assertEqual(len(pools), 1 if injected else 0)
+        self.assertTrue(owned.closed)
+        self.assertFalse(injected.closed)
+        injected.close()
 
-    def test_context_exit_clears_only_owned_pools_on_success_and_failure(self):
-        for injected in (False, True):
-            for status in (200, 403):
-                with self.subTest(injected=injected, status=status), serving(status=status) as (settings, _seen):
-                    with requests.Session() as session:
-                        backend = VaultKvV2CredentialBackend(settings, session=session if injected else None)
-                        self.addCleanup(backend._session.close)
-                        pools = backend._session.get_adapter(settings["address"]).poolmanager.pools
-                        try:
-                            with backend as store:
-                                self.assertIs(store, backend)
-                                store.resolve(CredentialReference.from_mapping(REFERENCE))
-                                self.assertEqual(len(pools), 1)
-                        except CredentialDenied:
-                            self.assertEqual(status, 403)
+    def test_context_exit_closes_an_owned_session_after_success_and_failure(self):
+        for status in (200, 403):
+            with self.subTest(status=status), serving(status=status) as (settings, _seen):
+                owned = CloseRecordingSession()
+                with patch(
+                    "netbox_data_import.inference_credentials.requests.Session", autospec=True, return_value=owned
+                ):
+                    backend = VaultKvV2CredentialBackend(settings)
+                try:
+                    with backend as store:
+                        self.assertIs(store, backend)
+                        store.resolve(CredentialReference.from_mapping(REFERENCE))
+                except CredentialDenied:
+                    self.assertEqual(status, 403)
 
-                        self.assertEqual(len(pools), 1 if injected else 0)
+                self.assertTrue(owned.closed)
 
     def test_the_configured_field_is_returned(self):
         with serving() as (settings, seen):
             self.assertEqual(self.resolve(settings), SECRET)
 
         self.assertEqual(len(seen), 1)
+
+    def test_the_connection_uses_the_address_resolved_for_the_vault_origin(self):
+        original = socket.getaddrinfo
+        with serving_rebinding() as (settings, approved_seen, private_seen):
+            with patch("socket.getaddrinfo", side_effect=rebinding_dns(original)):
+                self.assertEqual(self.resolve(settings), SECRET)
+
+        self.assertEqual(len(approved_seen), 1)
+        self.assertEqual(approved_seen[0]["headers"]["host"], settings["address"].removeprefix("http://"))
+        self.assertEqual(private_seen, [])
+
+    def test_tls_accepts_a_certificate_for_the_vault_hostname(self):
+        original = socket.getaddrinfo
+        with TemporaryDirectory() as temporary:
+            ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+            with serving_tls(certificate_path, key_path) as (settings, seen, server_names):
+                settings["ca_bundle"] = str(ca_path)
+                with patch("socket.getaddrinfo", side_effect=local_dns(original)):
+                    self.assertEqual(self.resolve(settings), SECRET)
+
+        self.assertEqual(server_names, ["localhost"])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["headers"]["host"], settings["address"].removeprefix("https://"))
+
+    def test_tls_refuses_a_certificate_for_another_hostname(self):
+        original = socket.getaddrinfo
+        with TemporaryDirectory() as temporary:
+            ca_path, certificate_path, key_path = issue_server_certificate(
+                pathlib.Path(temporary), "wrong.example.invalid"
+            )
+            with serving_tls(certificate_path, key_path) as (settings, seen, server_names):
+                settings["ca_bundle"] = str(ca_path)
+                with patch("socket.getaddrinfo", side_effect=local_dns(original)):
+                    with self.assertRaises(CredentialUnavailable) as caught:
+                        self.resolve(settings)
+
+        self.assertEqual(caught.exception.category, "credential_unavailable")
+        self.assertEqual(server_names, ["localhost"])
+        self.assertEqual(seen, [])
 
     def test_the_request_names_the_kv_v2_data_path(self):
         with serving() as (settings, seen):

@@ -323,3 +323,17 @@ class InferenceBackendListViewTest(TestCase):
                     reverse(f"plugins:netbox_data_import:inferencebackend_{action}", kwargs={"pk": backend.pk}),
                     status_code=200,
                 )
+
+    def test_a_delete_through_the_view_answers(self):
+        """NetBox freezes a delete event payload eagerly, which needs this model's REST serializer."""
+        backend = make_row()
+        user = user_with_object_permission("remover", [(InferenceBackend, ["view", "delete"], {})])
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:inferencebackend_delete", kwargs={"pk": backend.pk}),
+            {"confirm": True},
+        )
+
+        self.assertIn(response.status_code, (200, 302))
+        self.assertFalse(InferenceBackend.objects.filter(pk=backend.pk).exists())

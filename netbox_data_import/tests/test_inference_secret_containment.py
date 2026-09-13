@@ -189,6 +189,20 @@ class SecretContainmentTest(TestCase):
         self.assertNotIn(SECRET, body)
         self.assertNotIn("credential_reference", body)
 
+    def test_the_rest_endpoint_holds_no_backend_credential(self):
+        """The AI backends endpoint exists so a delete event can serialize; it names no Vault location."""
+        user = user_with_object_permission("api-tester", [(InferenceBackend, ["view"], {})])
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("plugins-api:netbox_data_import-api:inferencebackend-list"))
+
+        body = response.content.decode()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.row.backend_key, body)
+        self.assertNotIn(SECRET, body)
+        self.assertNotIn("credential_reference", body)
+        self.assertNotIn("inference/backend", body)
+
     def test_the_reference_lives_in_exactly_one_authoritative_place(self):
         """Section 8.6: the enabled row, or the file fallback when no row is enabled."""
         self.resolve_once()

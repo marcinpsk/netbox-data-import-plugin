@@ -171,4 +171,24 @@ class InferenceBackendConnectionTestJob(JobRunner):
         return result.category
 
 
-__all__ = ("ImportJobRunner", "InferenceBackendConnectionTestJob", "SourceDocumentRetentionJob")
+class ResolutionProposalJob(JobRunner):
+    """Run inference for one proposal id through the worker service."""
+
+    job_type = "netbox_data_import.resolution_proposal"
+
+    class Meta:
+        name = "Resolution Proposal"
+
+    def run(self, proposal_id):
+        """Resolve backend configuration on the worker after claiming the proposal."""
+        from .proposal_jobs import run_proposal
+
+        return run_proposal(proposal_id)
+
+
+__all__ = (
+    "ImportJobRunner",
+    "InferenceBackendConnectionTestJob",
+    "ResolutionProposalJob",
+    "SourceDocumentRetentionJob",
+)

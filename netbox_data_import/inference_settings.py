@@ -20,6 +20,7 @@ from .inference_trust import (
 ORIGIN_ALLOWLIST_SETTING = "inference_backend_origin_allowlist"
 FILE_FALLBACK_SETTING = "inference_backend"
 VAULT_SETTING = "vault"
+PROPOSAL_CANDIDATE_LIMIT_SETTING = "inference_proposal_candidate_limit"
 
 # The fallback is one whole backend, so its key cannot be chosen per deployment.
 FILE_FALLBACK_KEY = "file-fallback"
@@ -54,6 +55,11 @@ MODEL_MAX_LENGTH = 200
 # PositiveIntegerField stores up to this. One second is the smallest timeout that can make a call.
 TIMEOUT_MIN = 1
 TIMEOUT_MAX = 2147483647
+
+#: A proposal offers the whole eligible set, so the bound is denser equipment, not the picker's page.
+PROPOSAL_CANDIDATE_LIMIT_DEFAULT = 64
+#: With supported 64-character termination names, even worst-case JSON escaping keeps this array below 1 MiB.
+PROPOSAL_CANDIDATE_LIMIT_MAX = 1024
 
 VAULT_AUTH_METHODS = ("proxy", "token")
 VAULT_FIELDS = ("address", "auth_method", "namespace", "ca_bundle", "connect_timeout", "read_timeout")
@@ -247,6 +253,22 @@ def validate_file_fallback(value: Any, allowlist: Sequence[str]) -> Mapping[str,
     return mapping
 
 
+def validate_proposal_candidate_limit(value: Any) -> int:
+    """Reject a candidate bound the retrieval cannot honour (section 7.3, operator decision).
+
+    `True` is numerically 1 and would silently admit a one-candidate set, so bool is excluded before
+    the range check. A value past the range never reaches a database slice.
+    """
+    label = f"'{PROPOSAL_CANDIDATE_LIMIT_SETTING}'"
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InvalidInferenceConfiguration(f"{label} must be a whole number, got {value!r}.")
+    if not 0 < value <= PROPOSAL_CANDIDATE_LIMIT_MAX:
+        raise InvalidInferenceConfiguration(
+            f"{label} must be between 1 and {PROPOSAL_CANDIDATE_LIMIT_MAX}, got {value!r}."
+        )
+    return value
+
+
 def validate_plugin_settings(user_config: Mapping[str, Any]) -> None:
     """Reject a malformed Inference Backend configuration before the application serves a request."""
     allowlist = validate_origin_allowlist(user_config.get(ORIGIN_ALLOWLIST_SETTING, ()))
@@ -254,6 +276,9 @@ def validate_plugin_settings(user_config: Mapping[str, Any]) -> None:
         validate_vault_settings(user_config[VAULT_SETTING])
     if FILE_FALLBACK_SETTING in user_config:
         validate_file_fallback(user_config[FILE_FALLBACK_SETTING], allowlist)
+    # Validated even when inference is otherwise unconfigured, and defaulted only when omitted.
+    if PROPOSAL_CANDIDATE_LIMIT_SETTING in user_config:
+        validate_proposal_candidate_limit(user_config[PROPOSAL_CANDIDATE_LIMIT_SETTING])
 
 
 __all__ = (
@@ -263,6 +288,9 @@ __all__ = (
     "FILE_FALLBACK_KEY",
     "FILE_FALLBACK_SETTING",
     "ORIGIN_ALLOWLIST_SETTING",
+    "PROPOSAL_CANDIDATE_LIMIT_DEFAULT",
+    "PROPOSAL_CANDIDATE_LIMIT_MAX",
+    "PROPOSAL_CANDIDATE_LIMIT_SETTING",
     "VAULT_AUTH_METHODS",
     "VAULT_SETTING",
     "InvalidInferenceConfiguration",
@@ -270,5 +298,6 @@ __all__ = (
     "validate_file_fallback",
     "validate_origin_allowlist",
     "validate_plugin_settings",
+    "validate_proposal_candidate_limit",
     "validate_vault_settings",
 )

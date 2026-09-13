@@ -3,10 +3,12 @@
 """DRF viewsets for the data-import plugin API."""
 
 from django.http import Http404
-from netbox.api.viewsets import NetBoxModelViewSet
-from rest_framework import viewsets, permissions
+from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
+from rest_framework import mixins, permissions, viewsets
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import DjangoModelPermissions
 
+from ..field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from ..models import (
     locked_profile_policy,
     locked_resolution_policy,
@@ -18,6 +20,8 @@ from ..models import (
     ColumnTransformRule,
     SourceResolution,
     ImportExecution,
+    InferenceBackend,
+    ResolutionProposal,
 )
 from .serializers import (
     ImportProfileSerializer,
@@ -28,6 +32,9 @@ from .serializers import (
     ColumnTransformRuleSerializer,
     SourceResolutionSerializer,
     ImportExecutionSerializer,
+    InferenceBackendSerializer,
+    ResolutionProposalHistorySerializer,
+    ResolutionProposalSerializer,
 )
 
 
@@ -56,7 +63,23 @@ class ImportProfileViewSet(NetBoxModelViewSet):
     serializer_class = ImportProfileSerializer
 
 
-class _PluginModelViewSet(viewsets.ModelViewSet):
+class _ProfileScopedQuerySetMixin(viewsets.GenericViewSet):
+    """Restrict profile-owned rows and validate their optional profile filter."""
+
+    def get_queryset(self):
+        """Return viewable rows, filtered by a valid profile ID when supplied."""
+        qs = super().get_queryset().restrict(self.request.user, "view")
+        profile_id = self.request.query_params.get("profile_id")
+        if profile_id is not None:
+            try:
+                profile_id = int(profile_id)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError({"profile_id": "Enter a whole number."}) from exc
+            qs = qs.filter(profile_id=profile_id)
+        return qs
+
+
+class _PluginModelViewSet(_ProfileScopedQuerySetMixin, viewsets.ModelViewSet):
     """Base class for plain-model viewsets in this plugin."""
 
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
@@ -68,28 +91,12 @@ class ColumnMappingViewSet(_PluginModelViewSet):
     queryset = ColumnMapping.objects.select_related("profile")
     serializer_class = ColumnMappingSerializer
 
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
-
 
 class ClassRoleMappingViewSet(_PluginModelViewSet):
     """CRUD viewset for ClassRoleMapping."""
 
     queryset = ClassRoleMapping.objects.select_related("profile", "rack_type")
     serializer_class = ClassRoleMappingSerializer
-
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
 
 
 class DeviceTypeMappingViewSet(_PluginModelViewSet):
@@ -98,14 +105,6 @@ class DeviceTypeMappingViewSet(_PluginModelViewSet):
     queryset = DeviceTypeMapping.objects.select_related("profile")
     serializer_class = DeviceTypeMappingSerializer
 
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
-
 
 class IgnoredDeviceViewSet(_PluginModelViewSet):
     """CRUD viewset for IgnoredDevice."""
@@ -113,28 +112,12 @@ class IgnoredDeviceViewSet(_PluginModelViewSet):
     queryset = IgnoredDevice.objects.select_related("profile")
     serializer_class = IgnoredDeviceSerializer
 
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
-
 
 class ColumnTransformRuleViewSet(_PluginModelViewSet):
     """CRUD viewset for ColumnTransformRule."""
 
     queryset = ColumnTransformRule.objects.select_related("profile")
     serializer_class = ColumnTransformRuleSerializer
-
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
 
 
 def _revalidate_against_the_stored_row(serializer):
@@ -184,26 +167,65 @@ class SourceResolutionViewSet(_PluginModelViewSet):
         except (SourceResolution.DoesNotExist, ImportProfile.DoesNotExist):
             raise Http404 from None
 
-    def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
 
-
-class ImportExecutionViewSet(viewsets.ReadOnlyModelViewSet):
+class ImportExecutionViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModelViewSet):
     """Read-only viewset for the Import Execution audit history."""
 
     queryset = ImportExecution.objects.select_related("profile")
     serializer_class = ImportExecutionSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
+
+class ResolutionProposalViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only viewset for Resolution Proposal history."""
+
+    queryset = ResolutionProposal.objects.select_related("profile")
+    serializer_class = ResolutionProposalSerializer
+    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
+
+
+class ResolutionProposalHistoryViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """Read one field's complete paginated history with workspace permissions."""
+
+    queryset = ResolutionProposal.objects.none()
+    serializer_class = ResolutionProposalHistorySerializer
+    permission_classes = [permissions.IsAuthenticated]
+
     def get_queryset(self):
-        """Filter by profile_id query param if provided."""
-        qs = super().get_queryset()
-        profile_id = self.request.query_params.get("profile_id")
-        if profile_id:
-            qs = qs.filter(profile_id=profile_id)
-        return qs
+        """Return one profile field's history when the actor can view that profile."""
+        profile_values = self.request.query_params.getlist("profile_id")
+        field_values = self.request.query_params.getlist("field_key")
+        if len(profile_values) != 1 or not profile_values[0]:
+            raise ValidationError({"profile_id": "Provide one whole-number profile ID."})
+        if len(field_values) != 1 or not field_values[0]:
+            raise ValidationError({"field_key": "Provide one canonical termination field key."})
+        try:
+            profile_id = int(profile_values[0])
+        except (TypeError, ValueError) as exc:
+            raise ValidationError({"profile_id": "Provide one whole-number profile ID."}) from exc
+        try:
+            parse_termination_field_key(field_values[0])
+        except ValueError as exc:
+            raise ValidationError({"field_key": "Provide one canonical termination field key."}) from exc
+        if not ImportProfile.objects.restrict(self.request.user, "view").filter(pk=profile_id).exists():
+            raise Http404
+        return (
+            ResolutionProposal.objects.filter(
+                profile_id=profile_id,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=field_values[0],
+            )
+            .select_related("profile")
+            .order_by("-created", "-pk")
+        )
+
+
+class InferenceBackendViewSet(NetBoxReadOnlyModelViewSet):
+    """Read-only viewset for Inference Backend rows.
+
+    Read-only on purpose: a backend row carries the destination NetBox itself calls, and the UI form
+    is the one place that validates the `api_root` trust boundary against the allowlist.
+    """
+
+    queryset = InferenceBackend.objects.prefetch_related("tags")
+    serializer_class = InferenceBackendSerializer

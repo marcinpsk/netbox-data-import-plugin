@@ -5,14 +5,27 @@
 import ast
 import json
 import pathlib
+import socket
+import ssl
 import threading
+import time
 
+import requests
+
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
 from netbox_data_import.inference_adapter import (
+    BODY_ABSENT,
+    BODY_EMPTY,
+    BODY_INTERRUPTED,
+    BODY_PRESENT,
+    DIAGNOSTIC_TEXT_LIMIT,
     AuthenticationFailure,
     BackendTimeout,
     InferenceRequest,
@@ -21,6 +34,15 @@ from netbox_data_import.inference_adapter import (
     OpenAICompatibleAdapter,
     RateLimited,
     TransportFailure,
+    TRANSIENT_STATUSES,
+)
+from netbox_data_import.inference_transport import request_to_resolved_address
+from netbox_data_import.tests.inference_http import (
+    issue_server_certificate,
+    local_dns,
+    rebinding_dns,
+    serving_rebinding as _serving_rebinding,
+    serving_tls as _serving_tls,
 )
 
 API_KEY = "sk-adapter-secret"
@@ -58,8 +80,6 @@ class RecordingBackend(BaseHTTPRequestHandler):
             }
         )
         if self.delay:
-            import time
-
             time.sleep(self.delay)
         raw = self.payload if isinstance(self.payload, str) else json.dumps(self.payload)
         encoded = raw.encode()
@@ -73,6 +93,25 @@ class RecordingBackend(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         """Keep the test output quiet."""
+
+
+class DisconnectingFirstBackend(RecordingBackend):
+    """Read the request on the first loopback address, then close without a response."""
+
+    def do_POST(self):
+        if self.server.server_address[0] != "127.0.0.1":
+            return super().do_POST()
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length).decode() if length else ""
+        type(self).seen.append(
+            {
+                "path": self.path,
+                "headers": {name.lower(): value for name, value in self.headers.items()},
+                "body": body,
+            }
+        )
+        self.close_connection = True
+        self.connection.shutdown(socket.SHUT_RDWR)
 
 
 @contextmanager
@@ -97,6 +136,123 @@ def serving(status=200, payload=None, headers_out=None, delay=0.0):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@contextmanager
+def serving_truncated():
+    """Serve a Content-Length larger than the body sent, so the read is cut short."""
+
+    class Truncating(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            # Promise more than is written, then close: the client sees an incomplete read.
+            self.send_header("Content-Length", "4096")
+            self.end_headers()
+            self.wfile.write(b'{"diagnostic body prefix"')
+            self.close_connection = True
+
+        def log_message(self, *args):
+            """Keep the test output quiet."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Truncating)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        yield f"http://127.0.0.1:{port}", [f"http://127.0.0.1:{port}"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@contextmanager
+def serving_stalled_body():
+    """Send headers and a body prefix, then stall beyond the client's read timeout."""
+
+    class Stalling(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "4096")
+            self.end_headers()
+            self.wfile.write(b'{"diagnostic body prefix"')
+            self.wfile.flush()
+            time.sleep(2)
+
+        def log_message(self, *args):
+            """Keep the test output quiet."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Stalling)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        yield f"http://127.0.0.1:{port}", [f"http://127.0.0.1:{port}"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@contextmanager
+def serving_rebinding(handler=RecordingBackend):
+    """Run approved and private stand-ins that DNS can select on the same port."""
+    with _serving_rebinding(handler, completion()) as (port, approved_seen, private_seen):
+        root = f"http://localhost:{port}"
+        yield root, approved_seen, private_seen, [root]
+
+
+@contextmanager
+def serving_after_unavailable_address():
+    """Keep the first loopback address closed and serve the same port on the second."""
+
+    class Handler(RecordingBackend):
+        pass
+
+    Handler.payload = completion()
+    Handler.seen = []
+    unavailable = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    unavailable.bind(("127.0.0.1", 0))
+    port = unavailable.getsockname()[1]
+    server = ThreadingHTTPServer(("127.0.0.2", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        root = f"http://localhost:{port}"
+        yield root, Handler.seen, [root]
+    finally:
+        server.shutdown()
+        server.server_close()
+        unavailable.close()
+        thread.join(timeout=5)
+
+
+def multi_address_dns(original):
+    """Resolve localhost to both ordered loopback addresses and leave other hosts unchanged."""
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host == "localhost":
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.2", port)),
+            ]
+        return original(host, port, *args, **kwargs)
+
+    return getaddrinfo
+
+
+@contextmanager
+def serving_tls(certificate_path: pathlib.Path, key_path: pathlib.Path):
+    """Run a TLS Chat Completions stand-in and record the received SNI name."""
+    with _serving_tls(RecordingBackend, completion(), certificate_path, key_path) as (port, seen, server_names):
+        root = f"https://localhost:{port}"
+        yield root, seen, server_names
 
 
 def adapter_for(api_root, allowlist, **overrides):
@@ -380,6 +536,86 @@ class RequestTimeTrustTest(SimpleTestCase):
         self.assertIn("is not on the inference_backend_origin_allowlist", str(caught.exception))
         self.assertEqual(seen, [])
 
+    def test_the_connection_uses_the_address_approved_by_the_trust_check(self):
+        original = socket.getaddrinfo
+        with serving_rebinding() as (root, approved_seen, private_seen, allowlist):
+            with patch("socket.getaddrinfo", side_effect=rebinding_dns(original)):
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(len(approved_seen), 1)
+        self.assertEqual(approved_seen[0]["headers"]["host"], root.removeprefix("http://"))
+        self.assertEqual(private_seen, [])
+
+    def test_a_connection_failure_tries_the_next_approved_address(self):
+        """One unavailable DNS answer must not hide a healthy answer for the same origin."""
+        original = socket.getaddrinfo
+        with serving_after_unavailable_address() as (root, seen, allowlist):
+            with patch("socket.getaddrinfo", side_effect=multi_address_dns(original)):
+                result = adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(result.backend_response_id, "cmpl-123")
+        self.assertEqual(len(seen), 1)
+
+    def test_a_post_response_connection_failure_is_not_replayed(self):
+        """A protocol failure can follow request acceptance, so the job must own its retry."""
+        original = socket.getaddrinfo
+        with serving_rebinding(DisconnectingFirstBackend) as (root, approved_seen, private_seen, allowlist):
+            with (
+                patch("socket.getaddrinfo", side_effect=multi_address_dns(original)),
+                self.assertRaises(TransportFailure),
+            ):
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(len(approved_seen), 1)
+        self.assertEqual(private_seen, [])
+
+    def test_a_path_specific_session_adapter_cannot_bypass_address_pinning(self):
+        original = socket.getaddrinfo
+        with serving_rebinding() as (root, approved_seen, private_seen, allowlist):
+            with requests.Session() as session:
+                session.mount(f"{root}/chat/completions", requests.adapters.HTTPAdapter())
+                adapter = adapter_for(root, allowlist, session=session)
+                with patch("socket.getaddrinfo", side_effect=rebinding_dns(original)):
+                    adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(len(approved_seen), 1)
+        self.assertEqual(private_seen, [])
+
+    def test_tls_accepts_a_certificate_for_the_api_root_hostname(self):
+        original = socket.getaddrinfo
+        with TemporaryDirectory() as temporary:
+            ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+            with serving_tls(certificate_path, key_path) as (root, seen, server_names):
+                with requests.Session() as session:
+                    session.trust_env = False
+                    session.verify = str(ca_path)
+                    adapter = adapter_for(root, [root], session=session)
+                    with patch("socket.getaddrinfo", side_effect=local_dns(original)):
+                        adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(server_names, ["localhost"])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["headers"]["host"], root.removeprefix("https://"))
+
+    def test_tls_uses_the_api_root_hostname_and_refuses_a_wrong_certificate(self):
+        original = socket.getaddrinfo
+        with TemporaryDirectory() as temporary:
+            ca_path, certificate_path, key_path = issue_server_certificate(
+                pathlib.Path(temporary), "wrong.example.invalid"
+            )
+            with serving_tls(certificate_path, key_path) as (root, seen, server_names):
+                with requests.Session() as session:
+                    session.trust_env = False
+                    session.verify = str(ca_path)
+                    adapter = adapter_for(root, [root], session=session)
+                    with patch("socket.getaddrinfo", side_effect=local_dns(original)):
+                        with self.assertRaises(TransportFailure) as caught:
+                            adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertIn("SSLError", str(caught.exception))
+        self.assertEqual(server_names, ["localhost"])
+        self.assertEqual(seen, [])
+
 
 class ResponseModeAgreementTest(SimpleTestCase):
     """The request states the mode it wants, so a backend configured for another one refuses."""
@@ -430,3 +666,483 @@ class NonStringContentTest(SimpleTestCase):
 
         with self.assertRaises(MalformedEnvelope):
             self.complete(envelope)
+
+
+class RetryClassificationTest(SimpleTestCase):
+    """Specification 13.3 separates a request the operator must repair from a backend that is busy."""
+
+    def failure(self, status):
+        with serving(status=status, payload={"error": {"message": "no"}}) as (root, _seen, allowlist):
+            with self.assertRaises(Exception) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+        return caught.exception
+
+    def test_a_request_error_is_not_retryable(self):
+        """400, 404 and 405 name a request the operator must repair, so a retry repeats the mistake."""
+        for status in (400, 404, 405):
+            with self.subTest(status=status):
+                failure = self.failure(status)
+
+                self.assertIsInstance(failure, InvalidBackendConfiguration)
+                self.assertFalse(failure.retryable)
+
+    def test_a_temporary_backend_failure_is_retryable(self):
+        self.assertEqual(set(TRANSIENT_STATUSES), {500, 502, 503, 504})
+        for status in TRANSIENT_STATUSES:
+            with self.subTest(status=status):
+                failure = self.failure(status)
+
+                self.assertIsInstance(failure, TransportFailure)
+                self.assertTrue(failure.retryable)
+
+    def test_any_other_error_status_is_not_retryable(self):
+        """13.3 names four transient statuses; everything else at 400 and above is the request."""
+        for status in (406, 408, 409, 413, 415, 422, 501):
+            with self.subTest(status=status):
+                failure = self.failure(status)
+
+                self.assertIsInstance(failure, InvalidBackendConfiguration)
+                self.assertFalse(failure.retryable)
+
+    def test_a_credential_refusal_is_not_retryable(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                self.assertFalse(self.failure(status).retryable)
+
+    def test_a_rate_limit_is_retryable(self):
+        self.assertTrue(self.failure(429).retryable)
+
+    def test_a_timeout_is_retryable(self):
+        with serving(delay=3) as (root, _seen, allowlist):
+            adapter = adapter_for(root, allowlist, read_timeout=1)
+
+            with self.assertRaises(BackendTimeout) as caught:
+                adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.retryable)
+
+    def test_an_unreachable_backend_is_retryable(self):
+        adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])
+
+        with self.assertRaises(TransportFailure) as caught:
+            adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.retryable)
+
+    def test_an_unreadable_envelope_is_not_retryable(self):
+        """A backend that answers unreadably answers the same way next time."""
+        with serving(payload="not json at all") as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.retryable)
+
+
+class ResponseDiagnosticTest(SimpleTestCase):
+    """A diagnostic records response state without retaining authenticated response text."""
+
+    def test_a_large_authenticated_error_body_is_withheld(self):
+        payload = "x" * (DIAGNOSTIC_TEXT_LIMIT + 1)
+        with serving(status=500, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+        self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_an_authenticated_body_within_the_prior_budget_is_withheld(self):
+        for size in (DIAGNOSTIC_TEXT_LIMIT - 1, DIAGNOSTIC_TEXT_LIMIT):
+            with self.subTest(size=size):
+                payload = "x" * size
+                with serving(status=500, payload=payload) as (root, _seen, allowlist):
+                    with self.assertRaises(TransportFailure) as caught:
+                        adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+                self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+                self.assertIsNone(caught.exception.diagnostic.text)
+                self.assertTrue(caught.exception.diagnostic.withheld)
+                self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_a_key_past_the_budget_is_still_redacted(self):
+        for secret in (API_KEY, API_KEY.replace("-", "\\u002d")):
+            with self.subTest(secret=secret):
+                payload = '{"error": "' + "x" * DIAGNOSTIC_TEXT_LIMIT + secret + '"}'
+                with serving(status=500, payload=payload) as (root, _seen, allowlist):
+                    with self.assertRaises(TransportFailure) as caught:
+                        adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+                self.assertEqual(caught.exception.diagnostic.text, "[redacted: the backend echoed the credential]")
+                self.assertTrue(caught.exception.diagnostic.redacted)
+                self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_an_undecodable_escape_past_the_budget_is_withheld(self):
+        payload = "x" * DIAGNOSTIC_TEXT_LIMIT + "\\x2d"
+        with serving(status=500, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertFalse(caught.exception.diagnostic.redacted)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+        self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_a_large_completion_keeps_its_content_and_withholds_its_diagnostic_text(self):
+        content = "x" * (DIAGNOSTIC_TEXT_LIMIT + 1)
+        payload = json.dumps(completion(content=content))
+        with serving(payload=payload) as (root, _seen, allowlist):
+            answer = adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(answer.content_text, content)
+        self.assertEqual(answer.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(answer.diagnostic.text)
+        self.assertTrue(answer.diagnostic.withheld)
+        self.assertFalse(answer.diagnostic.truncated)
+
+    def test_a_credential_refusal_records_a_withheld_body(self):
+        with serving(status=401, payload={"error": {"message": "token expired"}}) as (root, _seen, allowlist):
+            with self.assertRaises(AuthenticationFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+        self.assertEqual(caught.exception.diagnostic.status_code, 401)
+
+    def test_a_temporary_failure_records_a_withheld_body(self):
+        with serving(status=503, payload={"error": {"message": "draining"}}) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+
+    def test_a_wrong_finish_reason_records_a_withheld_body(self):
+        """The proposal reads this to explain why no answer was produced."""
+        with serving(payload=completion(content="half an ans", finish_reason="length")) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+
+    def test_an_unreadable_body_is_withheld(self):
+        with serving(payload="not json at all") as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+
+    def test_a_refusal_is_classified_before_its_body_is_withheld(self):
+        envelope = completion(content=None, message={"refusal": "I will not answer that."})
+        with serving(payload=envelope) as (root, _seen, allowlist):
+            answer = adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(answer.is_refusal)
+        self.assertEqual(answer.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(answer.diagnostic.text)
+        self.assertTrue(answer.diagnostic.withheld)
+
+    def test_a_completion_records_a_withheld_body(self):
+        with serving() as (root, _seen, allowlist):
+            answer = adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(answer.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(answer.diagnostic.text)
+        self.assertTrue(answer.diagnostic.withheld)
+
+    def test_an_empty_body_is_not_an_absent_body(self):
+        """A worker must tell "the backend said nothing" from "nothing arrived"."""
+        with serving(status=500, payload="") as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_EMPTY)
+        self.assertEqual(caught.exception.diagnostic.text, "")
+        self.assertFalse(caught.exception.diagnostic.withheld)
+        self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_a_call_that_never_answered_reports_an_absent_body(self):
+        adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])
+
+        with self.assertRaises(TransportFailure) as caught:
+            adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_ABSENT)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertFalse(caught.exception.diagnostic.withheld)
+
+    def test_an_escaped_key_is_redacted_too(self):
+        """A JSON escape hides the key from a literal search but not from whoever decodes the body."""
+        escaped = API_KEY.replace("-", "\\u002d")
+
+        with serving(status=500, payload=f'{{"error": "key {escaped} rejected"}}') as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.diagnostic.redacted)
+        self.assertNotIn(API_KEY, caught.exception.diagnostic.text)
+        # The escaped form has to be gone too, or the key is one `json.loads` away.
+        self.assertNotIn("u002d", caught.exception.diagnostic.text)
+
+    def test_a_key_split_across_json_members_is_not_retained(self):
+        first, second, third = "sk-", "adapter-", "secret"
+        for payload in (
+            {"prefix": first + second, "suffix": third},
+            {"suffix": third, "prefix": first + second},
+            {"first": first, "second": second, "third": third},
+            {"first": f"credential {first + second}", "second": f"{third} rejected"},
+        ):
+            with (
+                self.subTest(keys=tuple(payload)),
+                serving(status=500, payload=payload) as (
+                    root,
+                    _seen,
+                    allowlist,
+                ),
+            ):
+                with self.assertRaises(TransportFailure) as caught:
+                    adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+            self.assertTrue(caught.exception.diagnostic.withheld)
+            self.assertFalse(caught.exception.diagnostic.redacted)
+            self.assertIsNone(caught.exception.diagnostic.text)
+
+    def test_unrelated_json_strings_do_not_form_a_credential_echo(self):
+        for api_key in ("secret", "ace"):
+            with self.subTest(api_key=api_key), serving() as (root, _seen, allowlist):
+                result = adapter_for(root, allowlist).complete(REQUEST, api_key=api_key)
+
+            self.assertFalse(result.diagnostic.redacted)
+            self.assertTrue(result.diagnostic.withheld)
+            self.assertIsNone(result.diagnostic.text)
+
+    def test_a_key_holding_json_syntax_is_redacted_too(self):
+        """A quote or a backslash is re-escaped by the encoder, so a literal search misses it."""
+        # A key holding a newline never reaches a backend, so it cannot be echoed back.
+        for secret in ('sk-"quote', "sk-back\\slash", "sk-tab\there"):
+            with self.subTest(secret=secret):
+                with serving(status=500, payload={"error": {"message": f"rejected {secret}"}}) as (
+                    root,
+                    _seen,
+                    allowlist,
+                ):
+                    with self.assertRaises(TransportFailure) as caught:
+                        adapter_for(root, allowlist).complete(REQUEST, api_key=secret)
+
+                self.assertTrue(caught.exception.diagnostic.redacted)
+                self.assertNotIn(secret, caught.exception.diagnostic.text)
+
+    def test_an_escaped_key_in_a_body_that_is_not_json_is_withheld(self):
+        """A malformed envelope cannot prove what its escape means, so its text is withheld."""
+        escaped = API_KEY.replace("-", "\\u002d")
+
+        with serving(status=500, payload=f'{{"error": "key {escaped} rejected"') as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.diagnostic.redacted)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+        self.assertIsNone(caught.exception.diagnostic.text)
+
+    def test_a_body_that_cannot_be_decoded_is_not_retained(self):
+        """Escapes can be layered, so authenticated undecodable text is withheld."""
+        for encoded in (API_KEY.replace("-", "\\\\u002d"), API_KEY.replace("-", "\\x2d")):
+            with self.subTest(encoded=encoded):
+                with serving(status=500, payload=f'{{"error": "key {encoded} rejected"') as (
+                    root,
+                    _seen,
+                    allowlist,
+                ):
+                    with self.assertRaises(TransportFailure) as caught:
+                        adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+                self.assertFalse(caught.exception.diagnostic.redacted)
+                self.assertTrue(caught.exception.diagnostic.withheld)
+                self.assertIsNone(caught.exception.diagnostic.text)
+                self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_an_undecodable_inner_escape_is_not_retained(self):
+        payload = json.dumps({"error": API_KEY.replace("s", "\\u0073", 1)})
+
+        with serving(status=500, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.diagnostic.redacted)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+        self.assertIsNone(caught.exception.diagnostic.text)
+
+    def test_an_escaped_key_takes_precedence_over_an_undecodable_inner_escape(self):
+        payload = json.dumps({"error": API_KEY, "detail": "\\x73"}).replace(API_KEY, API_KEY.replace("s", "\\u0073", 1))
+
+        with serving(status=500, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.diagnostic.redacted)
+        self.assertEqual(caught.exception.diagnostic.text, "[redacted: the backend echoed the credential]")
+
+    def test_a_plain_authenticated_body_that_is_not_json_is_withheld(self):
+        with serving(status=500, payload="upstream connect error, no healthy backend") as (
+            root,
+            _seen,
+            allowlist,
+        ):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.diagnostic.redacted)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+        self.assertIsNone(caught.exception.diagnostic.text)
+
+    def test_no_diagnostic_carries_the_api_key(self):
+        """The body is a new persistence surface, so the containment rule reaches it too."""
+        for status in (401, 500):
+            with self.subTest(status=status):
+                with serving(status=status, payload={"error": {"message": f"key {API_KEY} rejected"}}) as (
+                    root,
+                    _seen,
+                    allowlist,
+                ):
+                    with self.assertRaises(Exception) as caught:
+                        adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+                self.assertNotIn(API_KEY, caught.exception.diagnostic.text or "")
+                self.assertTrue(caught.exception.diagnostic.redacted)
+
+
+class InterruptedAndMalformedTransportTest(SimpleTestCase):
+    """Two paths that lost the answer before it reached any classification."""
+
+    def test_a_body_cut_short_is_reported_as_interrupted(self):
+        """Requests raises with response=None, so the bytes cannot be recovered; say so."""
+        with serving_truncated() as (root, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_INTERRUPTED)
+        self.assertFalse(caught.exception.diagnostic.truncated)
+        self.assertTrue(caught.exception.retryable)
+
+    def test_a_body_read_timeout_is_typed_and_reported_as_interrupted(self):
+        with serving_stalled_body() as (root, allowlist):
+            with self.assertRaises(BackendTimeout) as caught:
+                adapter_for(root, allowlist, read_timeout=1).complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_INTERRUPTED)
+        self.assertEqual(caught.exception.diagnostic.status_code, 200)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertTrue(caught.exception.retryable)
+
+    def test_a_deeply_nested_body_stays_typed(self):
+        """On 3.12 and 3.13 the decoder recurses and raises; 3.14 parses it and the envelope fails."""
+        payload = "[" * 10000 + "0" + "]" * 10000
+
+        with serving(payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+
+    def test_each_json_decoder_exception_is_typed(self):
+        """The interpreter under test parses the body above, so both decoder failures are explicit."""
+
+        class DecoderFailure(requests.Response):
+            error_type = ValueError
+
+            def json(self, **kwargs):
+                raise self.error_type("decoder failure")
+
+        for error_type in (ValueError, RecursionError):
+            with self.subTest(error_type=error_type.__name__):
+                response = DecoderFailure()
+                response.error_type = error_type
+                response.status_code = 200
+                response._content = b'{"deep": true}'
+
+                with self.assertRaises(MalformedEnvelope) as caught:
+                    adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])._read(response, API_KEY)
+
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+                self.assertIsNone(caught.exception.diagnostic.text)
+                self.assertTrue(caught.exception.diagnostic.withheld)
+
+    def test_a_malformed_redirect_target_is_typed(self):
+        """`requests` raises a bare ValueError while preparing it, which no caller can classify."""
+        with serving(status=302, headers_out={"Location": "https://[invalid/"}) as (root, _seen, allowlist):
+            with self.assertRaises(InvalidBackendConfiguration) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
+        self.assertEqual(caught.exception.diagnostic.status_code, 302)
+        self.assertIsNone(caught.exception.diagnostic.text)
+        self.assertTrue(caught.exception.diagnostic.withheld)
+
+
+class AddressPinnedSessionTest(SimpleTestCase):
+    """A shared injected session must not expose one temporary adapter to another call."""
+
+    def test_requests_through_one_session_are_serialized(self):
+        session = requests.Session()
+        first_entered = threading.Event()
+        second_entered = threading.Event()
+        state_lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def request(_method, url, **_kwargs):
+            nonlocal active, maximum_active
+            with state_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                position = active
+            if position == 1:
+                first_entered.set()
+                second_entered.wait(timeout=1)
+            else:
+                second_entered.set()
+            response = requests.Response()
+            response.status_code = 200
+            response.url = url
+            with state_lock:
+                active -= 1
+            return response
+
+        session.request = request
+        calls = (
+            ("http://one.example.invalid", "198.18.0.1"),
+            ("http://two.example.invalid", "198.18.0.2"),
+        )
+
+        def send(call):
+            url, address = call
+            return request_to_resolved_address(session, "GET", url, address)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(send, calls))
+
+        self.assertTrue(first_entered.is_set())
+        self.assertEqual([response.status_code for response in responses], [200, 200])
+        self.assertEqual(maximum_active, 1)
+
+
+def test_tls_server_context_requires_tls_1_2():
+    """The real TLS stand-in must not accept protocol versions the product rejects."""
+    from netbox_data_import.tests.inference_http import tls_server_context
+
+    with TemporaryDirectory() as directory:
+        _ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(directory), "localhost")
+        context = tls_server_context(certificate_path, key_path)
+
+    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2

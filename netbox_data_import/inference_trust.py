@@ -7,10 +7,9 @@ boundary and again at request time. Resolution is a separate step: the allowlist
 and `assert_resolved_address_allowed` decides whether the address that name answered with is one
 NetBox may reach.
 
-Specification 8.3 asks for a recheck after resolution, which is what this module performs. It does
-not pin the socket to the address it checked, so a name that answers differently between the check
-and the connect is a residual window. Closing it needs an address-pinned transport with its own TLS
-hostname handling, which is tracked in issue #147.
+Specification 8.3 asks for a recheck after resolution. The inference and Vault request paths hand
+that result to the address-pinned transport, which connects without resolving the hostname again.
+The transport keeps the original HTTP Host header and TLS hostname verification.
 
 A bearer credential may travel in cleartext over HTTP to an approved local endpoint.
 `is_local_endpoint` covers loopback, private and link-local addresses, so this includes a private

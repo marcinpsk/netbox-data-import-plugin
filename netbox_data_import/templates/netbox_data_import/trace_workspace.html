@@ -8,9 +8,21 @@
 {% block content %}
 {# htmx boost swaps the body and discards the response head, so this renders here. #}
 <style>
+  .ndi-proposal-badge { background: var(--tblr-bg-surface-secondary); color: var(--tblr-body-color); }
+  .ndi-trace-state-unknown { background: var(--tblr-bg-surface-secondary); color: var(--tblr-body-color); }
   .ndi-trace-state-unresolved { background-color: var(--tblr-danger) !important; color: #fff !important; }
-  .ndi-trace-state-auto { background-color: var(--tblr-info) !important; color: #fff !important; }
   .ndi-trace-state-manual { background-color: var(--tblr-primary) !important; color: #fff !important; }
+  .ndi-trace-state-auto { background-color: var(--tblr-info) !important; color: #fff !important; }
+  .ndi-trace-state-proposed { background-color: var(--tblr-purple) !important; color: #fff !important; }
+  .ndi-trace-state-accepted { background-color: var(--tblr-success) !important; color: #fff !important; }
+  .ndi-trace-state-stale { background-color: var(--tblr-warning) !important; color: #000 !important; }
+  .ndi-trace-state-failed { background-color: var(--tblr-danger) !important; color: #fff !important; }
+  [data-bs-theme="dark"] .ndi-trace-state-auto { color: #08283a !important; }
+  .ndi-proposal-card { overflow-wrap: anywhere; border: 1px solid var(--tblr-border-color); border-radius: var(--tblr-border-radius); padding: .75rem; }
+  .ndi-proposal-card p { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .ndi-trace-actions { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .ndi-trace-action { flex: 0 1 auto; max-width: 22rem; min-width: 0; }
+  [data-proposal-action]:disabled { color: var(--tblr-secondary-color); border-color: var(--tblr-border-color); opacity: 1; }
   .ndi-trace-status-create { background-color: var(--tblr-success) !important; color: #fff !important; }
   .ndi-trace-status-reuse { background-color: var(--tblr-secondary) !important; color: #fff !important; }
   .ndi-trace-status-conflict { background-color: var(--tblr-danger) !important; color: #fff !important; }
@@ -20,7 +32,6 @@
   .ndi-trace-disposition-no-op { background-color: var(--tblr-secondary) !important; color: #fff !important; }
   [data-bs-theme="dark"] .ndi-trace-disposition-no-op,
   [data-bs-theme="dark"] .ndi-trace-status-reuse { background-color: #4b5563 !important; color: #e5e7eb !important; }
-  [data-bs-theme="dark"] .ndi-trace-state-auto { color: #08283a !important; }
   .ndi-trace-panel { height: 100%; }
   .ndi-trace-panel .card-header { font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; }
   .ndi-trace-claim { color: var(--tblr-secondary); font-size: .8rem; }
@@ -67,6 +78,10 @@
     <div>
       <div class="text-secondary small">Terminations open</div>
       <div class="h2 mb-0">{{ summary.unresolved_terminations }}</div>
+    </div>
+    <div>
+      <div class="text-secondary small">Active proposals</div>
+      <div class="h2 mb-0">{{ summary.active_proposals }}</div>
     </div>
     <div>
       <div class="text-secondary small">Saved decisions</div>
@@ -164,35 +179,6 @@
               {% else %}
                 <div class="text-secondary">Planning stopped before it read the current topology.</div>
               {% endif %}
-              <hr>
-              <div class="text-secondary small mb-1">Terminations</div>
-              <ul class="list-unstyled mb-0">
-                {% for termination in trace.terminations %}
-                  <li class="mb-1">
-                    {{ termination.label }}
-                    {% if termination.state == "unresolved" %}
-                      <span class="badge ndi-trace-state-unresolved">unresolved</span>
-                    {% elif termination.state == "manually resolved" %}
-                      <span class="badge ndi-trace-state-manual">manually resolved</span>
-                    {% else %}
-                      <span class="badge ndi-trace-state-auto">automatically resolved</span>
-                    {% endif %}
-                    {% if termination.selected %}
-                      <span class="text-secondary">{{ termination.selected }}</span>
-                    {% endif %}
-                    <button type="button" class="btn btn-sm btn-outline-secondary ms-1"
-                            data-trace-picker="{{ termination.field_key }}"
-                            data-trace-kind="{{ termination.kind }}"
-                            data-trace-label="{{ termination.label }}"
-                            {% if not termination.selectable %}disabled{% endif %}>Choose termination</button>
-                    {% if not termination.selectable %}
-                      <div class="ndi-trace-reason">{{ termination.reason }}</div>
-                    {% endif %}
-                  </li>
-                {% empty %}
-                  <li class="text-secondary">This trace resolved no termination.</li>
-                {% endfor %}
-              </ul>
             </div>
           </div>
         </div>
@@ -233,6 +219,72 @@
         </div>
 
       </div>
+
+      <section class="mt-3" data-trace-terminations>
+        <h3>Terminations</h3>
+        <ul class="list-unstyled mb-0">
+          {% for termination in attention_terminations %}
+            <li class="mb-3" data-proposal-field="{{ termination.field_key }}"
+                data-proposal-url="{% url 'plugins:netbox_data_import:trace_proposal' %}"
+                data-preview-revision="{{ preview_revision }}">
+              {{ termination.label }}
+              <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}"
+                    data-proposal-state data-proposal-state-prefix="ndi-trace-state-">{{ termination.proposal.field_state }}</span>
+              {% if termination.selected %}
+                <span class="text-secondary">{{ termination.selected }}</span>
+              {% endif %}
+              {% with field_number=forloop.counter %}
+                <div data-proposal-content>
+                  {% if termination.proposal.has_proposal %}
+                    {% include 'netbox_data_import/_proposal_card.html' %}
+                  {% endif %}
+                </div>
+                <template data-proposal-template>
+                  {% include 'netbox_data_import/_proposal_card.html' %}
+                </template>
+                <div class="ndi-trace-actions mt-2" data-proposal-field-actions>
+                  <div class="ndi-trace-action">
+                    <button type="button" class="btn btn-sm btn-outline-secondary"
+                            data-trace-picker="{{ termination.field_key }}"
+                            data-trace-kind="{{ termination.kind }}"
+                            data-trace-label="{{ termination.label }}"
+                            {% if not termination.selectable %}disabled{% endif %}>Choose termination</button>
+                    {% if not termination.selectable %}
+                      <div class="ndi-trace-reason">{{ termination.reason }}</div>
+                    {% endif %}
+                  </div>
+                  {% for action in termination.proposal.actions|slice:":2" %}
+                    {% include 'netbox_data_import/_proposal_action.html' %}
+                  {% endfor %}
+                </div>
+              {% endwith %}
+              <div class="alert alert-danger mt-2 mb-0" role="alert" data-proposal-error hidden></div>
+            </li>
+          {% empty %}
+            <li class="text-secondary">Every termination on this trace resolves to a NetBox port.</li>
+          {% endfor %}
+        </ul>
+        {% if settled_terminations %}
+          <details data-trace-settled>
+            <summary>{{ settled_terminations|length }} termination(s) resolved automatically by exact name match</summary>
+            <div class="table-responsive">
+              <table class="table table-sm mb-0">
+                <thead><tr><th>Termination</th><th>Kind</th><th>Selected port</th><th>State</th></tr></thead>
+                <tbody>
+                  {% for termination in settled_terminations %}
+                    <tr>
+                      <td>{{ termination.label }}</td>
+                      <td>{{ termination.kind }}</td>
+                      <td>{{ termination.selected }}</td>
+                      <td><span class="badge ndi-trace-state-{{ termination.proposal.state_style }}">{{ termination.proposal.field_state }}</span></td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        {% endif %}
+      </section>
 
       {% if trace.findings %}
         <ul class="list-unstyled mt-3 mb-0">
@@ -283,5 +335,7 @@
   </div>
 </div>
 
+{{ proposal_fields|json_script:"traceProposalFields" }}
+<script src="{% static 'netbox_data_import/js/trace_proposals.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
 {% endblock %}

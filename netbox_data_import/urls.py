@@ -181,6 +181,11 @@ urlpatterns = [
         views.TraceResolveTerminationView.as_view(),
         name="trace_resolve_termination",
     ),
+    path("trace-workspace/proposals/", views.TraceProposalView.as_view(), name="trace_proposal"),
+    path("trace-workspace/proposals/request/", views.TraceRequestProposalView.as_view(), name="trace_request_proposal"),
+    path("trace-workspace/proposals/cancel/", views.TraceCancelProposalView.as_view(), name="trace_cancel_proposal"),
+    path("trace-workspace/proposals/accept/", views.TraceAcceptProposalView.as_view(), name="trace_accept_proposal"),
+    path("trace-workspace/proposals/reject/", views.TraceRejectProposalView.as_view(), name="trace_reject_proposal"),
     # Per-row sync
     path("sync-single-row/", views.SyncSingleRowView.as_view(), name="sync_single_row"),
     path("unlink-device/", views.UnlinkDeviceView.as_view(), name="unlink_device"),
