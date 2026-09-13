@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
 import requests
+from urllib3.exceptions import MaxRetryError, NewConnectionError
 
 
 _SESSION_LOCKS: WeakKeyDictionary[requests.Session, RLock] = WeakKeyDictionary()
@@ -25,6 +26,14 @@ class ResponseProcessingFailure(requests.RequestException):
     def __init__(self, cause: Exception, response: requests.Response):
         super().__init__(str(cause), response=response)
         self.cause = cause
+
+
+def is_preconnect_failure(exc: requests.RequestException) -> bool:
+    """Return whether another address can be tried without replaying a sent request."""
+    if isinstance(exc, requests.ConnectTimeout):
+        return True
+    reason = exc.args[0] if exc.args else None
+    return isinstance(reason, MaxRetryError) and isinstance(reason.reason, NewConnectionError)
 
 
 def _session_lock(session: requests.Session) -> RLock:
@@ -118,4 +127,4 @@ def request_to_resolved_address(
             session.adapters.update(previous_adapters)
 
 
-__all__ = ("ResponseProcessingFailure", "request_to_resolved_address")
+__all__ = ("ResponseProcessingFailure", "is_preconnect_failure", "request_to_resolved_address")

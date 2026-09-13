@@ -40,7 +40,9 @@ from netbox_data_import.inference_transport import request_to_resolved_address
 from netbox_data_import.tests.inference_http import (
     issue_server_certificate,
     local_dns,
+    multi_address_dns,
     rebinding_dns,
+    serving_after_unavailable_address as _serving_after_unavailable_address,
     serving_rebinding as _serving_rebinding,
     serving_tls as _serving_tls,
 )
@@ -211,40 +213,9 @@ def serving_rebinding(handler=RecordingBackend):
 @contextmanager
 def serving_after_unavailable_address():
     """Keep the first loopback address closed and serve the same port on the second."""
-
-    class Handler(RecordingBackend):
-        pass
-
-    Handler.payload = completion()
-    Handler.seen = []
-    unavailable = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    unavailable.bind(("127.0.0.1", 0))
-    port = unavailable.getsockname()[1]
-    server = ThreadingHTTPServer(("127.0.0.2", port), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    with _serving_after_unavailable_address(RecordingBackend, completion()) as (port, seen):
         root = f"http://localhost:{port}"
-        yield root, Handler.seen, [root]
-    finally:
-        server.shutdown()
-        server.server_close()
-        unavailable.close()
-        thread.join(timeout=5)
-
-
-def multi_address_dns(original):
-    """Resolve localhost to both ordered loopback addresses and leave other hosts unchanged."""
-
-    def getaddrinfo(host, port, *args, **kwargs):
-        if host == "localhost":
-            return [
-                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
-                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.2", port)),
-            ]
-        return original(host, port, *args, **kwargs)
-
-    return getaddrinfo
+        yield root, seen, [root]
 
 
 @contextmanager

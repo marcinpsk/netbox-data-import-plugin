@@ -114,6 +114,22 @@ class DigestIndexedModelTest(TestCase):
                     (source, hashlib.sha256(source.encode()).hexdigest(), "Updated"),
                 )
 
+    def test_partial_digest_save_without_its_source_is_rejected(self):
+        for row, source_field, digest_field, moved, _other in self._rows():
+            with self.subTest(model=type(row).__name__):
+                row.save()
+                setattr(row, source_field, moved)
+
+                with self.assertRaisesRegex(ValueError, f"{digest_field} cannot be saved without {source_field}"):
+                    row.save(update_fields={digest_field})
+
+                row.refresh_from_db()
+                self.assertNotEqual(getattr(row, source_field), moved)
+                self.assertEqual(
+                    getattr(row, digest_field),
+                    hashlib.sha256(getattr(row, source_field).encode()).hexdigest(),
+                )
+
     def test_empty_update_fields_does_not_write(self):
         for row, source_field, digest_field, moved, _other in self._rows():
             with self.subTest(model=type(row).__name__):

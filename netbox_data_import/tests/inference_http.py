@@ -47,6 +47,46 @@ def serving_rebinding(handler, payload):
             thread.join(timeout=5)
 
 
+@contextmanager
+def serving_after_unavailable_address(handler, payload):
+    """Keep the first loopback address closed and serve the same port on the second."""
+
+    class Handler(handler):
+        pass
+
+    Handler.payload = payload
+    Handler.seen = []
+    unavailable = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    unavailable.bind(("127.0.0.1", 0))
+    port = unavailable.getsockname()[1]
+    try:
+        server = ThreadingHTTPServer(("127.0.0.2", port), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield port, Handler.seen
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+    finally:
+        unavailable.close()
+
+
+def multi_address_dns(original):
+    """Resolve localhost to both ordered loopback addresses and leave other hosts unchanged."""
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        if host == "localhost":
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.2", port)),
+            ]
+        return original(host, port, *args, **kwargs)
+
+    return getaddrinfo
+
+
 def rebinding_dns(original):
     """Return the approved address to a trust lookup and a private one to a normal lookup."""
 
@@ -187,7 +227,9 @@ def serving_tls(handler, payload, certificate_path, key_path):
 __all__ = (
     "issue_server_certificate",
     "local_dns",
+    "multi_address_dns",
     "rebinding_dns",
+    "serving_after_unavailable_address",
     "serving_rebinding",
     "serving_tls",
     "tls_server_context",

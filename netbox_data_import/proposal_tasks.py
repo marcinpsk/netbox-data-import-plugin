@@ -21,8 +21,10 @@ __all__ = [
     "CandidateSnapshot",
     "CandidateSnapshotEntry",
     "ProposalInventory",
+    "ProposalStaleness",
     "UnknownProposalTask",
     "UnusableCandidateSet",
+    "proposal_inventory_staleness",
     "proposal_task",
     "register_proposal_task",
     "snapshot_from",
@@ -88,6 +90,19 @@ class CandidateSnapshot:
 
 
 @dataclass(frozen=True)
+class ProposalStaleness:
+    """The two independent reasons a proposal's frozen evidence no longer applies."""
+
+    resolved_device_changed: bool
+    candidates_changed: bool
+
+    @property
+    def is_stale(self) -> bool:
+        """Return whether either freshness trigger fired."""
+        return self.resolved_device_changed or self.candidates_changed
+
+
+@dataclass(frozen=True)
 class CandidateSet:
     """What a task type retrieves: the objects themselves and the uncapped matching total."""
 
@@ -102,6 +117,22 @@ class ProposalInventory:
     resolved_device: object | None
     candidate_snapshot: CandidateSnapshot | None
     candidate_error: UnusableCandidateSet | None = None
+
+
+def proposal_inventory_staleness(proposal, inventory) -> ProposalStaleness:
+    """Compare one current inventory read with a proposal's frozen evidence."""
+    device = inventory.resolved_device
+    device_changed = (
+        device is None
+        or device.pk != proposal.resolved_device_id
+        or device._meta.label_lower
+        != f"{proposal.resolved_device_type.app_label}.{proposal.resolved_device_type.model}"
+    )
+    current = inventory.candidate_snapshot
+    candidates_changed = current is None or not CandidateSnapshot.from_json(proposal.candidate_snapshot).matches(
+        current
+    )
+    return ProposalStaleness(resolved_device_changed=device_changed, candidates_changed=candidates_changed)
 
 
 def snapshot_from(candidate_set, *, label_for, name_for, limit) -> CandidateSnapshot:

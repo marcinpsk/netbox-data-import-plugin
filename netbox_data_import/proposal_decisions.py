@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Revalidate proposal evidence and serialize explicit operator decisions."""
 
-from dataclasses import dataclass
-
 from django.db import transaction
 from utilities.permissions import get_permission_for_model
 
@@ -17,24 +15,11 @@ from .models import (
     locked_profile_policy,
 )
 from .object_permissions import ObjectPermissionDenied
-from .proposal_tasks import CandidateSnapshot, proposal_task
+from .proposal_tasks import CandidateSnapshot, proposal_inventory_staleness, proposal_task
 from .resolution_proposals import decide_proposal
 
 
-@dataclass(frozen=True)
-class ProposalStaleness:
-    """The two independent reasons a proposal's frozen evidence no longer applies."""
-
-    resolved_device_changed: bool
-    candidates_changed: bool
-
-    @property
-    def is_stale(self) -> bool:
-        """Return whether either freshness trigger fired."""
-        return self.resolved_device_changed or self.candidates_changed
-
-
-def proposal_staleness(proposal, *, netbox_reader=None, inventory=None) -> ProposalStaleness:
+def proposal_staleness(proposal, *, netbox_reader=None, inventory=None):
     """Compare current inventory with frozen evidence without changing the proposal."""
     if inventory is None:
         if netbox_reader is None:
@@ -45,18 +30,7 @@ def proposal_staleness(proposal, *, netbox_reader=None, inventory=None) -> Propo
             netbox_reader=netbox_reader,
             limit=proposal_candidate_limit(),
         )
-    device = inventory.resolved_device
-    device_changed = (
-        device is None
-        or device.pk != proposal.resolved_device_id
-        or device._meta.label_lower
-        != f"{proposal.resolved_device_type.app_label}.{proposal.resolved_device_type.model}"
-    )
-    current = inventory.candidate_snapshot
-    candidates_changed = current is None or not CandidateSnapshot.from_json(proposal.candidate_snapshot).matches(
-        current
-    )
-    return ProposalStaleness(resolved_device_changed=device_changed, candidates_changed=candidates_changed)
+    return proposal_inventory_staleness(proposal, inventory)
 
 
 def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
@@ -82,20 +56,16 @@ def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
         if entry is None:
             # atomic-exit-safe: proposal-refused-before-write
             return False
-        assessment = task.assess_resolution_write(
-            profile=proposal.profile,
-            field_key=proposal.field_key,
+        receipt = task.write_resolution_if_fresh(
+            proposal=proposal,
             entry=entry,
             actor=operator,
+            netbox_reader=netbox_reader,
+            limit=proposal_candidate_limit(),
         )
-        if not assessment.allowed:
-            raise ObjectPermissionDenied(assessment.permission)
-        if proposal_staleness(proposal, netbox_reader=netbox_reader).is_stale:
+        if receipt is None:
             # atomic-exit-safe: proposal-refused-before-write
             return False
-        receipt = task.write_resolution(
-            profile=proposal.profile, field_key=proposal.field_key, entry=entry, actor=operator
-        )
         decided = decide_proposal(
             proposal.pk,
             decision=ProposalDecision.ACCEPTED,

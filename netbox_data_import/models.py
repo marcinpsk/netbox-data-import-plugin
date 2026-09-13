@@ -719,10 +719,14 @@ class DigestIndexedMixin(models.Model):
 
     def save(self, *args, **kwargs):
         """Derive the digest and include it when a partial save writes its source."""
-        self._derive_digest()
         update_fields = kwargs.get("update_fields")
-        if update_fields is not None and self.DIGEST_SOURCE_FIELD in update_fields:
+        if update_fields is None:
+            self._derive_digest()
+        elif self.DIGEST_SOURCE_FIELD in update_fields:
+            self._derive_digest()
             kwargs["update_fields"] = {*update_fields, self.DIGEST_FIELD}
+        elif self.DIGEST_FIELD in update_fields:
+            raise ValueError(f"{self.DIGEST_FIELD} cannot be saved without {self.DIGEST_SOURCE_FIELD}.")
         return super().save(*args, **kwargs)
 
 

@@ -654,6 +654,7 @@ def cancelling_backend(proposal_id, payload, status):
 
 class ProposalCancellationTest(WorkerFixture, TransactionTestCase):
     def setUp(self):
+        # TransactionTestCase truncates between tests, so the shared fixture is rebuilt per method.
         ProposalFixture.setUpTestData.__func__(type(self))
 
     def check_late_response(self, payload, status):

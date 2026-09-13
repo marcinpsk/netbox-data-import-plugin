@@ -26,7 +26,7 @@ from .inference_settings import (
     validate_credential_reference,
     validate_vault_settings,
 )
-from .inference_transport import request_to_resolved_address
+from .inference_transport import is_preconnect_failure, request_to_resolved_address
 from .inference_trust import InvalidInferenceConfiguration, resolve_addresses
 
 # The deployment owns the token; the plugin never stores one.
@@ -207,24 +207,38 @@ class VaultKvV2CredentialBackend:
             self._settings.get("read_timeout", DEFAULT_READ_TIMEOUT),
         )
         try:
-            # The deployment-owned origin is the approval. Pin the request to this one DNS answer.
-            resolved_address = resolve_addresses(address, setting="vault.address")[0]
-            with _quiet_transport_logging():
-                return request_to_resolved_address(
-                    self._session,
-                    "GET",
-                    url,
-                    resolved_address,
-                    headers=self._headers(),
-                    timeout=timeout,
-                    verify=self._settings.get("ca_bundle", True),
-                    allow_redirects=False,
-                )
-        except (InvalidInferenceConfiguration, requests.RequestException) as exc:
-            # This text reaches Job.data, so neither the address nor the URL is reported.
+            resolved_addresses = resolve_addresses(address, setting="vault.address")
+        except InvalidInferenceConfiguration as exc:
             raise CredentialUnavailable(
                 f"The credential store could not be reached ({type(exc).__name__}). Check the configured vault address."
             ) from None
+        connection_failure = None
+        for resolved_address in resolved_addresses:
+            try:
+                with _quiet_transport_logging():
+                    return request_to_resolved_address(
+                        self._session,
+                        "GET",
+                        url,
+                        resolved_address,
+                        headers=self._headers(),
+                        timeout=timeout,
+                        verify=self._settings.get("ca_bundle", True),
+                        allow_redirects=False,
+                    )
+            except requests.RequestException as exc:
+                if is_preconnect_failure(exc):
+                    connection_failure = exc
+                    continue
+                # This text reaches Job.data, so neither the address nor the URL is reported.
+                raise CredentialUnavailable(
+                    f"The credential store could not be reached ({type(exc).__name__}). "
+                    f"Check the configured vault address."
+                ) from None
+        failure_name = type(connection_failure).__name__ if connection_failure is not None else "NoAddress"
+        raise CredentialUnavailable(
+            f"The credential store could not be reached ({failure_name}). Check the configured vault address."
+        ) from None
 
     def resolve(self, reference: CredentialReference) -> str:
         """Return the secret the reference names, classifying every failure without quoting Vault."""

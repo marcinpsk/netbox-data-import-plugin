@@ -303,7 +303,7 @@ def _source_record(trace, segment_index: int) -> dict:
     }
 
 
-def _visible_devices(netbox_reader, names) -> dict[str, list]:
+def _visible_devices(netbox_reader, names, *, _lock_rows=False) -> dict[str, list]:
     """Return the visible Devices at the import target, grouped by comparison name."""
     from django.db.models import Q
 
@@ -313,6 +313,8 @@ def _visible_devices(netbox_reader, names) -> dict[str, list]:
     devices = netbox_reader.devices()
     if netbox_reader.site is not None:
         devices = devices.filter(site=netbox_reader.site)
+    if _lock_rows:
+        devices = devices.order_by("pk").select_for_update(of=("self",))
     lookup = Q()
     for name in sorted(wanted):
         lookup |= Q(name__iexact=name)
@@ -324,14 +326,14 @@ def _visible_devices(netbox_reader, names) -> dict[str, list]:
     return grouped
 
 
-def resolved_device_for(field_key: str, netbox_reader):
+def resolved_device_for(field_key: str, netbox_reader, *, _lock_rows=False):
     """Return the one visible Device a termination field key names, or None when it names no single one.
 
     A proposal freezes this reference and revalidates it, so the retrieval and the freshness check
     have to agree on what "the resolved Device" means.
     """
     device_name = parse_termination_field_key(field_key)["device"]
-    devices = _visible_devices(netbox_reader, [device_name]).get(identity_text(device_name), [])
+    devices = _visible_devices(netbox_reader, [device_name], _lock_rows=_lock_rows).get(identity_text(device_name), [])
     return devices[0] if len(devices) == 1 else None
 
 
@@ -346,6 +348,7 @@ def eligible_terminations(
     search: str = "",
     limit: int = ELIGIBLE_TERMINATION_LIMIT,
     _resolved_device=_RESOLVED_DEVICE_UNSET,
+    _lock_rows: bool = False,
 ) -> EligibleTerminations:
     """Return one page of candidates for a canonical termination field key.
 
@@ -358,7 +361,7 @@ def eligible_terminations(
     kind = parsed["kind"]
     accessor = _READER_ACCESSOR_BY_KIND[kind]
     device = (
-        resolved_device_for(field_key, netbox_reader)
+        resolved_device_for(field_key, netbox_reader, _lock_rows=_lock_rows)
         if _resolved_device is _RESOLVED_DEVICE_UNSET
         else _resolved_device
     )
@@ -417,6 +420,8 @@ def eligible_terminations(
         )
     if search:
         candidates = candidates.filter(name__icontains=search)
+    if _lock_rows:
+        tuple(candidates.order_by("pk").select_for_update(of=("self",)).values_list("pk", flat=True))
     candidates = candidates.order_by("name", "pk")
     return EligibleTerminations(candidates=tuple(candidates[:limit]), total=candidates.count())
 

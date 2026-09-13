@@ -3,6 +3,7 @@
 """Read-time freshness and explicit operator decisions against real inventory."""
 
 from threading import Event
+from time import monotonic, sleep
 
 from core.models import ObjectType
 from dcim.models import Device, Interface
@@ -373,6 +374,76 @@ class ProposalAcceptanceTest(DecisionInventory, TestCase):
 
 
 class ProposalDecisionConcurrencyTest(DecisionInventory, TransactionTestCase):
+    def assert_candidate_mutation_waits_for_acceptance(self, mutate):
+        """Prove that target changes cannot commit between the freshness read and resolution write."""
+        proposal = self.proposal()
+        before_write = Event()
+        continue_write = Event()
+        mutation_started = Event()
+        mutation_committed = Event()
+        accept_backend_pid = []
+        mutation_backend_pid = []
+        results = []
+
+        def pause_before_write(execute, sql, params, many, context):
+            if (
+                not before_write.is_set()
+                and sql.lstrip().startswith("INSERT INTO")
+                and '"netbox_data_import_terminationresolution"' in sql
+            ):
+                before_write.set()
+                if not continue_write.wait(timeout=10):
+                    self.fail("Acceptance did not resume after the concurrent mutation check.")
+            return execute(sql, params, many, context)
+
+        def accept_before_mutation():
+            connection.ensure_connection()
+            accept_backend_pid.append(connection.connection.info.backend_pid)
+            with connection.execute_wrapper(pause_before_write):
+                results.append(self.accept(proposal))
+
+        def mutate_candidate():
+            connection.ensure_connection()
+            mutation_backend_pid.append(connection.connection.info.backend_pid)
+            mutation_started.set()
+            mutate()
+            mutation_committed.set()
+
+        with run_on_separate_connection(accept_before_mutation):
+            self.assertTrue(before_write.wait(timeout=10))
+            with run_on_separate_connection(mutate_candidate):
+                self.assertTrue(mutation_started.wait(timeout=10))
+                blocked = False
+                deadline = monotonic() + 10
+                while monotonic() < deadline and not mutation_committed.is_set():
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT %s = ANY(pg_blocking_pids(%s))",
+                            [accept_backend_pid[0], mutation_backend_pid[0]],
+                        )
+                        blocked = cursor.fetchone()[0]
+                    if blocked:
+                        break
+                    sleep(0.05)
+                try:
+                    self.assertTrue(blocked, "The candidate mutation committed before the resolution write.")
+                finally:
+                    continue_write.set()
+
+        self.assertEqual(results, [True])
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.decision, ProposalDecision.ACCEPTED)
+
+    def test_a_candidate_rename_waits_for_the_resolution_write(self):
+        self.assert_candidate_mutation_waits_for_acceptance(
+            lambda: Interface.objects.filter(pk=self.ports[0].pk).update(name="Changed during acceptance")
+        )
+
+    def test_a_candidate_addition_waits_for_the_resolution_write(self):
+        self.assert_candidate_mutation_waits_for_acceptance(
+            lambda: Interface.objects.create(device_id=self.device.pk, name="Ethernet 1/3")
+        )
+
     def test_concurrent_acceptances_have_one_winner_and_the_loser_never_writes(self):
         proposal = self.proposal()
         holder_ready = Event()

@@ -10,7 +10,14 @@ from dataclasses import dataclass
 
 from .cable_target import eligible_terminations, resolved_device_for
 from .field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, parse_termination_field_key
-from .proposal_tasks import CandidateSet, ProposalInventory, UnusableCandidateSet, register_proposal_task, snapshot_from
+from .proposal_tasks import (
+    CandidateSet,
+    ProposalInventory,
+    UnusableCandidateSet,
+    proposal_inventory_staleness,
+    register_proposal_task,
+    snapshot_from,
+)
 
 __all__ = [
     "DecisionReceipt",
@@ -63,7 +70,7 @@ class SelectTerminationTask:
             device=device,
         )
 
-    def _current_for_device(self, *, profile, field_key, netbox_reader, limit, device):
+    def _current_for_device(self, *, profile, field_key, netbox_reader, limit, device, lock_rows=False):
         """Build the snapshot without resolving a Device the caller already read."""
         # The picker and a proposal request share this query, so both see one eligibility rule.
         eligible = eligible_terminations(
@@ -72,6 +79,7 @@ class SelectTerminationTask:
             profile=profile,
             limit=limit,
             _resolved_device=device,
+            _lock_rows=lock_rows,
         )
         return snapshot_from(
             CandidateSet(objects=eligible.candidates, total=eligible.total),
@@ -82,8 +90,18 @@ class SelectTerminationTask:
 
     def inventory(self, *, profile, field_key, netbox_reader, limit) -> ProposalInventory:
         """Read the resolved Device and its candidate snapshot once for display and freshness."""
+        return self._inventory(
+            profile=profile,
+            field_key=field_key,
+            netbox_reader=netbox_reader,
+            limit=limit,
+            lock_rows=False,
+        )
+
+    def _inventory(self, *, profile, field_key, netbox_reader, limit, lock_rows) -> ProposalInventory:
+        """Read one inventory, locking its target rows when a resolution write follows."""
         self._require_termination_role(field_key)
-        device = resolved_device_for(field_key, netbox_reader)
+        device = resolved_device_for(field_key, netbox_reader, _lock_rows=lock_rows)
         candidate_error: UnusableCandidateSet | None
         try:
             candidate_snapshot = self._current_for_device(
@@ -92,6 +110,7 @@ class SelectTerminationTask:
                 netbox_reader=netbox_reader,
                 limit=limit,
                 device=device,
+                lock_rows=lock_rows,
             )
         except UnusableCandidateSet as exc:
             candidate_snapshot = None
@@ -126,7 +145,6 @@ class SelectTerminationTask:
         )
         candidate.full_clean(validate_unique=False, validate_constraints=False)
         values = {
-            "field_key_digest": candidate.field_key_digest,
             "selected_object_type": object_type,
             "selected_object_id": entry.object_id,
             "selected_display_name": entry.display_name,
@@ -149,6 +167,34 @@ class SelectTerminationTask:
         lookup, values = self._resolution_write(profile=profile, field_key=field_key, entry=entry)
         saved = save_permission_scoped_object(actor, TerminationResolution, lookup, values)
         return DecisionReceipt(written_resolution_id=saved.instance.pk)
+
+    def write_resolution_if_fresh(self, *, proposal, entry, actor, netbox_reader, limit):
+        """Lock and recheck the target inventory, then write one still-fresh resolution."""
+        assessment = self.assess_resolution_write(
+            profile=proposal.profile,
+            field_key=proposal.field_key,
+            entry=entry,
+            actor=actor,
+        )
+        if not assessment.allowed:
+            from .object_permissions import ObjectPermissionDenied
+
+            raise ObjectPermissionDenied(assessment.permission)
+        inventory = self._inventory(
+            profile=proposal.profile,
+            field_key=proposal.field_key,
+            netbox_reader=netbox_reader,
+            limit=limit,
+            lock_rows=True,
+        )
+        if proposal_inventory_staleness(proposal, inventory).is_stale:
+            return None
+        return self.write_resolution(
+            profile=proposal.profile,
+            field_key=proposal.field_key,
+            entry=entry,
+            actor=actor,
+        )
 
 
 register_proposal_task(SELECT_TERMINATION_TASK, SelectTerminationTask())

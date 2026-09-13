@@ -17,9 +17,9 @@ from collections.abc import Sequence
 from contextlib import suppress
 
 import requests
-from urllib3.exceptions import MaxRetryError, NewConnectionError, ReadTimeoutError
+from urllib3.exceptions import ReadTimeoutError
 
-from .inference_transport import ResponseProcessingFailure, request_to_resolved_address
+from .inference_transport import ResponseProcessingFailure, is_preconnect_failure, request_to_resolved_address
 from .inference_trust import (
     InvalidInferenceConfiguration,
     assert_resolved_address_allowed,
@@ -193,14 +193,6 @@ def _retry_after(response) -> int | None:
         return None
 
 
-def _is_preconnect_failure(exc: requests.RequestException) -> bool:
-    """Return whether another address can be tried without replaying a sent request."""
-    if isinstance(exc, requests.ConnectTimeout):
-        return True
-    reason = exc.args[0] if exc.args else None
-    return isinstance(reason, MaxRetryError) and isinstance(reason.reason, NewConnectionError)
-
-
 def _is_response_read_timeout(exc: Exception) -> bool:
     """Return whether Requests timed out after it had received response headers."""
     return isinstance(exc, requests.ConnectionError) and bool(exc.args) and isinstance(exc.args[0], ReadTimeoutError)
@@ -308,7 +300,7 @@ class OpenAICompatibleAdapter:
                 connection_failure = exc
                 continue
             except requests.ConnectionError as exc:
-                if _is_preconnect_failure(exc):
+                if is_preconnect_failure(exc):
                     connection_failure = exc
                     continue
                 raise TransportFailure(

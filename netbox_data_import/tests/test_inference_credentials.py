@@ -32,7 +32,9 @@ from netbox_data_import.inference_credentials import (
 from netbox_data_import.tests.inference_http import (
     issue_server_certificate,
     local_dns,
+    multi_address_dns,
     rebinding_dns,
+    serving_after_unavailable_address as _serving_after_unavailable_address,
     serving_rebinding as _serving_rebinding,
     serving_tls as _serving_tls,
 )
@@ -114,6 +116,22 @@ def serving_rebinding():
             },
             approved_seen,
             private_seen,
+        )
+
+
+@contextmanager
+def serving_after_unavailable_address():
+    """Keep the first loopback address closed and serve the same port on the second."""
+    payload = {"data": {"data": {"api_key": SECRET}}}
+    with _serving_after_unavailable_address(RecordingVault, payload) as (port, seen):
+        yield (
+            {
+                "address": f"http://localhost:{port}",
+                "auth_method": "proxy",
+                "connect_timeout": 2,
+                "read_timeout": 2,
+            },
+            seen,
         )
 
 
@@ -255,6 +273,8 @@ class VaultReadTest(SimpleTestCase):
                         store.resolve(CredentialReference.from_mapping(REFERENCE))
                 except CredentialDenied:
                     self.assertEqual(status, 403)
+                else:
+                    self.assertEqual(status, 200)
 
                 self.assertTrue(owned.closed)
 
@@ -273,6 +293,14 @@ class VaultReadTest(SimpleTestCase):
         self.assertEqual(len(approved_seen), 1)
         self.assertEqual(approved_seen[0]["headers"]["host"], settings["address"].removeprefix("http://"))
         self.assertEqual(private_seen, [])
+
+    def test_a_connection_failure_tries_the_next_resolved_vault_address(self):
+        original = socket.getaddrinfo
+        with serving_after_unavailable_address() as (settings, seen):
+            with patch("socket.getaddrinfo", side_effect=multi_address_dns(original)):
+                self.assertEqual(self.resolve(settings), SECRET)
+
+        self.assertEqual(len(seen), 1)
 
     def test_tls_accepts_a_certificate_for_the_vault_hostname(self):
         original = socket.getaddrinfo
