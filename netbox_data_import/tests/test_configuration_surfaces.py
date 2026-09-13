@@ -89,6 +89,36 @@ class CableClassMappingAPITest(TestCase):
         self.assertEqual(self.client.delete(detail_url).status_code, 204)
         self.assertFalse(CableClassMapping.objects.filter(pk=mapping.pk).exists())
 
+    def test_create_persists_the_model_normalization_of_a_blank_choice(self):
+        response = self.client.post(
+            self.list_url,
+            data={
+                "profile": self.trace_profile.pk,
+                "cable_class": "No selected type",
+                "cable_type_resolved": True,
+                "cable_type": "",
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = CableClassMapping.objects.get(profile=self.trace_profile, cable_class="No selected type")
+        self.assertIsNone(mapping.cable_type)
+
+    def test_update_persists_the_model_normalization_of_a_blank_choice(self):
+        mapping = CableClassMapping.objects.create(profile=self.trace_profile, cable_class="No selected profile")
+        detail_url = reverse("plugins-api:netbox_data_import-api:cableclassmapping-detail", args=[mapping.pk])
+
+        response = self.client.patch(
+            detail_url,
+            data={"cable_profile_resolved": True, "cable_profile": ""},
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        mapping.refresh_from_db()
+        self.assertIsNone(mapping.cable_profile)
+
     def test_profile_filter_returns_only_matching_mappings(self):
         expected = CableClassMapping.objects.create(profile=self.trace_profile, cable_class="Expected")
         CableClassMapping.objects.create(profile=self.other_trace_profile, cable_class="Hidden")

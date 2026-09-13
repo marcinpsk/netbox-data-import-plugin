@@ -66,6 +66,17 @@ class PolicySectionSerializer(PolicySectionApplicabilityMixin, ValidatedModelSer
     def validate_policy_row(self, attrs):
         """Check the fields this model resolves through the catalog. Subclasses override."""
 
+    def model_cleaned_values(self):
+        """Return request values after applying the model's canonical normalization."""
+        values = dict(self.validated_data)
+        if self.instance is None:
+            instance = self.Meta.model(**values)
+            instance.full_clean(validate_unique=False)
+        else:
+            # ValidatedModelSerializer.validate() applies request values and full_clean() to this instance.
+            instance = self.instance
+        return {name: getattr(instance, name) for name in values}
+
 
 def _validate_target_keys(instance, attrs, names, *, allow_candidates=True, required=False):
     """Reject a target key the profile's Source Adapter cannot supply."""
