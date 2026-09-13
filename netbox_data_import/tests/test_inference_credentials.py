@@ -7,10 +7,12 @@ actually builds is the one under test: its path, its headers, and its body.
 """
 
 import json
+import socket
 import threading
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 import requests
 
@@ -87,6 +89,69 @@ def serving(status=200, payload=None, handler=RecordingVault):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@contextmanager
+def serving_rebinding():
+    """Run approved and private Vault stand-ins that share one port."""
+
+    class Approved(RecordingVault):
+        pass
+
+    class Private(RecordingVault):
+        pass
+
+    Approved.seen = []
+    Private.seen = []
+    approved_server = ThreadingHTTPServer(("127.0.0.1", 0), Approved)
+    port = approved_server.server_address[1]
+    private_server = ThreadingHTTPServer(("127.0.0.2", port), Private)
+    servers = (approved_server, private_server)
+    threads = tuple(threading.Thread(target=server.serve_forever, daemon=True) for server in servers)
+    for thread in threads:
+        thread.start()
+    try:
+        yield (
+            {
+                "address": f"http://localhost:{port}",
+                "auth_method": "proxy",
+                "connect_timeout": 2,
+                "read_timeout": 2,
+            },
+            Approved.seen,
+            Private.seen,
+        )
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=5)
+
+
+def rebinding_dns(original):
+    """Return the approved address to a trust lookup and a private one to a normal lookup."""
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        proto = kwargs.get("proto", args[2] if len(args) > 2 else 0)
+        if host == "localhost":
+            address = "127.0.0.1" if proto == socket.IPPROTO_TCP else "127.0.0.2"
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port))]
+        return original(host, port, *args, **kwargs)
+
+    return getaddrinfo
+
+
+class CloseRecordingSession(requests.Session):
+    """A real Requests session that records when its pools are closed."""
+
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+        super().close()
 
 
 @contextmanager
@@ -169,43 +234,53 @@ class VaultReadTest(SimpleTestCase):
         backend = VaultKvV2CredentialBackend(settings)
         return backend.resolve(CredentialReference.from_mapping(reference or REFERENCE))
 
-    def test_close_clears_only_an_owned_session_pool(self):
-        for injected in (False, True):
-            with self.subTest(injected=injected), serving() as (settings, _seen):
-                with requests.Session() as session:
-                    backend = VaultKvV2CredentialBackend(settings, session=session if injected else None)
-                    self.addCleanup(backend._session.close)
-                    backend.resolve(CredentialReference.from_mapping(REFERENCE))
-                    pools = backend._session.get_adapter(settings["address"]).poolmanager.pools
-                    self.assertEqual(len(pools), 1)
+    def test_close_closes_only_an_owned_session(self):
+        with serving() as (settings, _seen):
+            owned = CloseRecordingSession()
+            with patch("netbox_data_import.inference_credentials.requests.Session", autospec=True, return_value=owned):
+                owned_backend = VaultKvV2CredentialBackend(settings)
+            injected = CloseRecordingSession()
+            injected_backend = VaultKvV2CredentialBackend(settings, session=injected)
 
-                    backend.close()
+            owned_backend.close()
+            injected_backend.close()
 
-                    self.assertEqual(len(pools), 1 if injected else 0)
+        self.assertTrue(owned.closed)
+        self.assertFalse(injected.closed)
+        injected.close()
 
-    def test_context_exit_clears_only_owned_pools_on_success_and_failure(self):
-        for injected in (False, True):
-            for status in (200, 403):
-                with self.subTest(injected=injected, status=status), serving(status=status) as (settings, _seen):
-                    with requests.Session() as session:
-                        backend = VaultKvV2CredentialBackend(settings, session=session if injected else None)
-                        self.addCleanup(backend._session.close)
-                        pools = backend._session.get_adapter(settings["address"]).poolmanager.pools
-                        try:
-                            with backend as store:
-                                self.assertIs(store, backend)
-                                store.resolve(CredentialReference.from_mapping(REFERENCE))
-                                self.assertEqual(len(pools), 1)
-                        except CredentialDenied:
-                            self.assertEqual(status, 403)
+    def test_context_exit_closes_an_owned_session_after_success_and_failure(self):
+        for status in (200, 403):
+            with self.subTest(status=status), serving(status=status) as (settings, _seen):
+                owned = CloseRecordingSession()
+                with patch(
+                    "netbox_data_import.inference_credentials.requests.Session", autospec=True, return_value=owned
+                ):
+                    backend = VaultKvV2CredentialBackend(settings)
+                try:
+                    with backend as store:
+                        self.assertIs(store, backend)
+                        store.resolve(CredentialReference.from_mapping(REFERENCE))
+                except CredentialDenied:
+                    self.assertEqual(status, 403)
 
-                        self.assertEqual(len(pools), 1 if injected else 0)
+                self.assertTrue(owned.closed)
 
     def test_the_configured_field_is_returned(self):
         with serving() as (settings, seen):
             self.assertEqual(self.resolve(settings), SECRET)
 
         self.assertEqual(len(seen), 1)
+
+    def test_the_connection_uses_the_address_resolved_for_the_vault_origin(self):
+        original = socket.getaddrinfo
+        with serving_rebinding() as (settings, approved_seen, private_seen):
+            with patch("socket.getaddrinfo", side_effect=rebinding_dns(original)):
+                self.assertEqual(self.resolve(settings), SECRET)
+
+        self.assertEqual(len(approved_seen), 1)
+        self.assertEqual(approved_seen[0]["headers"]["host"], settings["address"].removeprefix("http://"))
+        self.assertEqual(private_seen, [])
 
     def test_the_request_names_the_kv_v2_data_path(self):
         with serving() as (settings, seen):

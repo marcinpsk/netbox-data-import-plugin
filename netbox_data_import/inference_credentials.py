@@ -26,7 +26,8 @@ from .inference_settings import (
     validate_credential_reference,
     validate_vault_settings,
 )
-from .inference_trust import InvalidInferenceConfiguration
+from .inference_transport import request_to_resolved_address
+from .inference_trust import InvalidInferenceConfiguration, resolve_addresses
 
 # The deployment owns the token; the plugin never stores one.
 VAULT_TOKEN_ENVIRONMENT_VARIABLE = "VAULT_TOKEN"  # noqa: S105 - This names an environment variable, not a token.
@@ -206,15 +207,20 @@ class VaultKvV2CredentialBackend:
             self._settings.get("read_timeout", DEFAULT_READ_TIMEOUT),
         )
         try:
+            # The deployment-owned origin is the approval. Pin the request to this one DNS answer.
+            resolved_address = resolve_addresses(address, setting="vault.address")[0]
             with _quiet_transport_logging():
-                return self._session.get(
+                return request_to_resolved_address(
+                    self._session,
+                    "GET",
                     url,
+                    resolved_address,
                     headers=self._headers(),
                     timeout=timeout,
                     verify=self._settings.get("ca_bundle", True),
                     allow_redirects=False,
                 )
-        except requests.RequestException as exc:
+        except (InvalidInferenceConfiguration, requests.RequestException) as exc:
             # This text reaches Job.data, so neither the address nor the URL is reported.
             raise CredentialUnavailable(
                 f"The credential store could not be reached ({type(exc).__name__}). Check the configured vault address."
