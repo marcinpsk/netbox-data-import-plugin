@@ -158,15 +158,17 @@
         credentials: 'same-origin', signal: state.controller.signal,
       }).then(readResponse);
       if (!card.isConnected) return;
+      await refresh(card);
+      if (!card.isConnected) return;
       state.busy = false;
       render(card, state.payload);
-      await refresh(card);
       if (card.isConnected && payload.preview_state) replan(card);
     } catch (failure) {
       if (!card.isConnected || failure.name === 'AbortError') return;
+      await refresh(card);
+      if (!card.isConnected) return;
       state.busy = false;
       render(card, state.payload);
-      await refresh(card);
       if (card.isConnected) error(card, failure.message);
     }
   }
