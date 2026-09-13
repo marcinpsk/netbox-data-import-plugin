@@ -86,9 +86,9 @@ from .device_field_review import DeviceFieldReviewer
 from .object_permissions import (
     ObjectPermissionDenied,
     delete_permission_scoped_objects,
-    save_or_refetch,
     save_permission_scoped_object,
 )
+from .profile_yaml import apply_profile_document, serialize_profile
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -566,11 +566,6 @@ class ImportProfileChangeLogView(generic.ObjectChangeLogView):
     queryset = ImportProfile.objects.all()
 
 
-# Scalar profile fields handled by _apply_profile_yaml_data.
-# 'tags' (M2M) is intentionally excluded — use the edit UI or the flat import path.
-_PROFILE_FIELDS = ("description", "source_adapter")
-
-
 def _validate_model_instance(instance, label):
     """Call full_clean() and surface ValidationErrors as ValueError so the atomic block rolls back."""
     from django.core.exceptions import ValidationError as DjangoValidationError
@@ -585,300 +580,9 @@ def _validate_model_instance(instance, label):
         raise PreviewActionInvalid(f"Validation error in {label}: {msg}") from exc
 
 
-def _legacy_adapter_config(profile_data):
-    """Return the top-level `profile` keys releases up to 1.5.2 exported, as adapter configuration."""
-    from .adapter_forms import FlatWorkbookConfigForm
-
-    # The legacy keys are exactly the flat-workbook adapter's own settings.
-    legacy_keys = set(FlatWorkbookConfigForm.base_fields) & set(profile_data)
-    if not legacy_keys:
-        return None
-    conflicting = sorted({"adapter_config", "source_adapter"} & set(profile_data))
-    if conflicting:
-        raise ValueError(
-            f"Profile key(s) {', '.join(sorted(legacy_keys))} belong to a release before the adapter "
-            f"cutover and cannot be combined with {', '.join(conflicting)}."
-        )
-    config = {key: profile_data[key] for key in legacy_keys}
-    # The legacy file names the Contact Role by slug; adapter_config stores its name.
-    slug = config.get("primary_contact_role")
-    if slug:
-        from tenancy.models import ContactRole
-
-        role = ContactRole.objects.filter(slug=slug).first()
-        if role is None:
-            raise ValueError(f"No Contact Role matches the primary_contact_role slug '{slug}'.")
-        config["primary_contact_role"] = role.name
-    return config
-
-
-def _profile_defaults_from_yaml(profile_data):
-    """Resolve the scalar profile values and the adapter configuration from YAML."""
-    legacy_config = _legacy_adapter_config(profile_data)
-    accepted = {"name", "adapter_config", *_PROFILE_FIELDS}
-    if legacy_config is not None:
-        accepted |= set(legacy_config)
-    unknown = sorted(set(profile_data) - accepted)
-    if unknown:
-        raise ValueError(f"Unknown profile key(s): {', '.join(unknown)}")
-    profile_defaults = {field: profile_data[field] for field in _PROFILE_FIELDS if field in profile_data}
-    if legacy_config is not None:
-        from .adapters import FlatWorkbookAdapter
-
-        # Pinned, not DEFAULT_ADAPTER_KEY: a legacy file is a flat workbook whatever the default becomes.
-        profile_defaults["source_adapter"] = FlatWorkbookAdapter.key
-        profile_defaults["adapter_config"] = legacy_config
-    elif "adapter_config" in profile_data:
-        profile_defaults["adapter_config"] = profile_data["adapter_config"]
-    return profile_defaults
-
-
 def _get_or_init(model_class, **lookup):
-    """Return the existing persisted instance matching *lookup*, or a new unsaved one.
-
-    This enables validate-before-save semantics: callers can set fields on the
-    returned instance, call ``_validate_model_instance``, and only then call
-    ``instance.save()``.  DB-level errors (e.g. overlength strings) are thus
-    caught by Django's field validators before any write reaches the database.
-    """
+    """Return an existing object for a natural lookup, or one unsaved object."""
     return model_class.objects.filter(**lookup).first() or model_class(**lookup)
-
-
-def _set_if_present(instance, data, fields):
-    """Set attributes on *instance* only when the corresponding key exists in *data*."""
-    for name in fields:
-        if name in data:
-            setattr(instance, name, data[name])
-
-
-def _save_or_refetch(instance, model_class, **lookup):
-    """Persist *instance*, or return the row that won the concurrent insert."""
-    resolved, _saved = save_or_refetch(instance, model_class, lookup)
-    return resolved
-
-
-def _iter_yaml_section(data, section_name, required_keys=()):
-    """Yield mapping items for a named section in a parsed YAML dict.
-
-    - Absent key → yields nothing (caller skips reconciliation).
-    - Explicit null or non-list value → raises ValueError.
-    - Explicit empty list → yields nothing (caller reconcile-deletes all).
-    - Item missing a required key → raises ValueError with index and key name(s),
-      preventing a bare KeyError from bubbling up with no context.
-    """
-    if section_name not in data:
-        return
-    section = data[section_name]
-    if section is None or not isinstance(section, list):
-        raise ValueError(
-            f"'{section_name}' must be a list of mappings; "
-            f"use [] to explicitly remove all entries, got {type(section).__name__}."
-        )
-    for idx, item in enumerate(section, start=1):
-        if not isinstance(item, dict):
-            raise TypeError(f"'{section_name}[{idx}]' must be a mapping, got {type(item).__name__}.")
-        missing = [k for k in required_keys if k not in item]
-        if missing:
-            raise ValueError(f"'{section_name}[{idx}]' missing required key(s): {', '.join(missing)}")
-        yield item
-
-
-def _delete_stale_device_type_mappings(profile, keep_keys):
-    """Delete DeviceTypeMapping rows whose (source_make, source_model) is not in *keep_keys*.
-
-    Uses a single DB-level exclusion via Q objects, consistent with how other sections
-    handle reconcile-deletes, and avoids loading all existing rows into Python.
-    """
-    from django.db.models import Q
-
-    qs = DeviceTypeMapping.objects.filter(profile=profile)
-    if keep_keys:
-        keep_q = Q()
-        for make, model in keep_keys:
-            keep_q |= Q(source_make=make, source_model=model)
-        qs = qs.exclude(keep_q)
-    qs.delete()
-
-
-def _import_class_role_mappings(data, profile, stats):
-    """Import class_role_mappings from YAML data into the given profile."""
-    crm_source_classes = []
-    for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
-        instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
-        _set_if_present(instance, m, ("creates_rack", "role_slug", "ignore"))
-        if m.get("rack_type"):
-            from dcim.models import RackType
-
-            try:
-                instance.rack_type = RackType.objects.get(slug=m["rack_type"])
-            except RackType.DoesNotExist as exc:
-                raise ValueError(
-                    f"class_role_mappings[{m['source_class']}]: RackType with slug '{m['rack_type']}' not found"
-                ) from exc
-        elif "rack_type" in m:
-            instance.rack_type = None
-        _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
-        _save_or_refetch(instance, ClassRoleMapping, profile=profile, source_class=m["source_class"])
-        crm_source_classes.append(m["source_class"])
-        stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
-    if "class_role_mappings" in data:
-        ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
-
-
-def _import_cable_class_mappings(data, profile, stats):
-    """Import cable_class_mappings from YAML data into the given profile."""
-    ccm_cable_classes = []
-    for m in _iter_yaml_section(data, "cable_class_mappings", ("cable_class",)):
-        instance = _get_or_init(CableClassMapping, profile=profile, cable_class=m["cable_class"])
-        _set_if_present(instance, m, ("cable_type_resolved", "cable_type", "cable_profile_resolved", "cable_profile"))
-        _validate_model_instance(instance, f"cable_class_mappings[{m['cable_class']}]")
-        _save_or_refetch(instance, CableClassMapping, profile=profile, cable_class=m["cable_class"])
-        ccm_cable_classes.append(m["cable_class"])
-        stats["cable_class_mappings"] = stats.get("cable_class_mappings", 0) + 1
-    if "cable_class_mappings" in data:
-        CableClassMapping.objects.filter(profile=profile).exclude(cable_class__in=ccm_cable_classes).delete()
-
-
-def _release_replaced_column_policy_rows(profile, mapping_rows, transform_rows):
-    """Remove rows that leave or change target ownership before validating their replacements."""
-    if mapping_rows is not None:
-        retained_mappings = {(row["source_column"], row["target_field"]) for row in mapping_rows}
-        stale_mapping_ids = [
-            mapping.pk
-            for mapping in profile.column_mappings.only("pk", "source_column", "target_field")
-            if (mapping.source_column, mapping.target_field) not in retained_mappings
-        ]
-        ColumnMapping.objects.filter(pk__in=stale_mapping_ids).delete()
-
-    if transform_rows is None:
-        return
-    desired_by_source = {row["source_column"]: row for row in transform_rows}
-    stale_transform_ids = []
-    for rule in profile.column_transform_rules.only(
-        "pk", "source_column", "pattern", "group_1_target", "group_2_target"
-    ):
-        desired = desired_by_source.get(rule.source_column)
-        if desired is None or any(
-            getattr(rule, field) != desired.get(field, getattr(rule, field))
-            for field in ("pattern", "group_1_target", "group_2_target")
-        ):
-            stale_transform_ids.append(rule.pk)
-    profile.column_transform_rules.filter(pk__in=stale_transform_ids).delete()
-
-
-def _apply_profile_yaml_data(data):
-    """Create or update an ImportProfile and all its nested mappings from parsed YAML data.
-
-    ``data`` must be a dict with a top-level ``profile`` key (the format
-    produced by :class:`ExportProfileYamlView`).
-
-    Returns ``(profile, stats)`` where *stats* is a ``{section: count}`` dict.
-    Raises ``TypeError`` or ``ValueError`` with a descriptive message on invalid input.
-    """
-    from django.db import transaction
-
-    from .models import ColumnTransformRule
-
-    if not isinstance(data, dict) or "profile" not in data:
-        raise ValueError("YAML must contain a top-level 'profile' key.")
-
-    pdata = data["profile"]
-    if not isinstance(pdata, dict):
-        raise TypeError("The 'profile' value must be a mapping (dict), not a scalar or list.")
-    if not pdata.get("name"):
-        raise ValueError("Profile YAML must include a 'name' field.")
-
-    mapping_rows = (
-        list(_iter_yaml_section(data, "column_mappings", ("target_field", "source_column")))
-        if "column_mappings" in data
-        else None
-    )
-    transform_rows = (
-        list(_iter_yaml_section(data, "column_transform_rules", ("source_column", "pattern")))
-        if "column_transform_rules" in data
-        else None
-    )
-
-    with transaction.atomic():
-        # Only include fields that are explicitly present in the YAML so that a
-        # partial reimport (e.g. just trimming child sections) does not silently
-        # reset unrelated profile settings back to hard-coded defaults.
-        profile_defaults = _profile_defaults_from_yaml(pdata)
-        profile = _get_or_init(ImportProfile, name=pdata["name"])
-        for field, value in profile_defaults.items():
-            setattr(profile, field, value)
-        _validate_model_instance(profile, "profile")
-        profile = _save_or_refetch(profile, ImportProfile, name=pdata["name"])
-
-        stats = {}
-        _release_replaced_column_policy_rows(profile, mapping_rows, transform_rows)
-
-        cm_ids = []
-        for cm in mapping_rows or ():
-            mapping_key = {
-                "profile": profile,
-                "source_column": cm["source_column"],
-                "target_field": cm["target_field"],
-            }
-            instance = _get_or_init(ColumnMapping, **mapping_key)
-            _validate_model_instance(instance, f"column_mappings[{cm['source_column']}->{cm['target_field']}]")
-            instance = _save_or_refetch(instance, ColumnMapping, **mapping_key)
-            cm_ids.append(instance.pk)
-            stats["column_mappings"] = stats.get("column_mappings", 0) + 1
-        if "column_mappings" in data:
-            ColumnMapping.objects.filter(profile=profile).exclude(pk__in=cm_ids).delete()
-
-        _import_class_role_mappings(data, profile, stats)
-        _import_cable_class_mappings(data, profile, stats)
-
-        dtm_keys = []
-        for m in _iter_yaml_section(
-            data,
-            "device_type_mappings",
-            ("source_make", "source_model", "netbox_manufacturer_slug", "netbox_device_type_slug"),
-        ):
-            instance = _get_or_init(
-                DeviceTypeMapping, profile=profile, source_make=m["source_make"], source_model=m["source_model"]
-            )
-            instance.netbox_manufacturer_slug = m["netbox_manufacturer_slug"]
-            instance.netbox_device_type_slug = m["netbox_device_type_slug"]
-            _validate_model_instance(instance, f"device_type_mappings[{m['source_make']}/{m['source_model']}]")
-            _save_or_refetch(
-                instance,
-                DeviceTypeMapping,
-                profile=profile,
-                source_make=m["source_make"],
-                source_model=m["source_model"],
-            )
-            dtm_keys.append((m["source_make"], m["source_model"]))
-            stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
-        if "device_type_mappings" in data:
-            _delete_stale_device_type_mappings(profile, dtm_keys)
-
-        mm_source_makes = []
-        for m in _iter_yaml_section(data, "manufacturer_mappings", ("source_make", "netbox_manufacturer_slug")):
-            instance = _get_or_init(ManufacturerMapping, profile=profile, source_make=m["source_make"])
-            instance.netbox_manufacturer_slug = m["netbox_manufacturer_slug"]
-            _validate_model_instance(instance, f"manufacturer_mappings[{m['source_make']}]")
-            _save_or_refetch(instance, ManufacturerMapping, profile=profile, source_make=m["source_make"])
-            mm_source_makes.append(m["source_make"])
-            stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
-        if "manufacturer_mappings" in data:
-            ManufacturerMapping.objects.filter(profile=profile).exclude(source_make__in=mm_source_makes).delete()
-
-        ctr_source_columns = []
-        for r in transform_rows or ():
-            instance = _get_or_init(ColumnTransformRule, profile=profile, source_column=r["source_column"])
-            instance.pattern = r["pattern"]
-            _set_if_present(instance, r, ("group_1_target", "group_2_target"))
-            _validate_model_instance(instance, f"column_transform_rules[{r['source_column']}]")
-            _save_or_refetch(instance, ColumnTransformRule, profile=profile, source_column=r["source_column"])
-            ctr_source_columns.append(r["source_column"])
-            stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
-        if "column_transform_rules" in data:
-            ColumnTransformRule.objects.filter(profile=profile).exclude(source_column__in=ctr_source_columns).delete()
-
-    return profile, stats
 
 
 class ImportProfileBulkImportView(generic.BulkImportView):
@@ -930,7 +634,7 @@ class ImportProfileBulkImportView(generic.BulkImportView):
         # Hierarchical format: delegate to shared helper.
         if isinstance(data, dict) and "profile" in data:
             try:
-                profile, stats = _apply_profile_yaml_data(data)
+                profile, stats = apply_profile_document(data)
             except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
                 messages.error(request, str(exc))
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
@@ -3557,70 +3261,7 @@ class ExportProfileYamlView(PermissionRequiredMixin, View):
 
         profile = get_object_or_404(ImportProfile, pk=pk)
 
-        data = {
-            "profile": {
-                "name": profile.name,
-                "description": profile.description,
-                "source_adapter": profile.source_adapter,
-                "adapter_config": profile.adapter_config,
-            },
-            "column_mappings": [
-                {"source_column": cm.source_column, "target_field": cm.target_field}
-                for cm in profile.column_mappings.all()
-            ],
-            "class_role_mappings": [
-                {
-                    **{
-                        k: v
-                        for k, v in {
-                            "source_class": m.source_class,
-                            "creates_rack": m.creates_rack,
-                            "role_slug": m.role_slug,
-                            "ignore": m.ignore,
-                        }.items()
-                        if v != ""
-                    },
-                    "rack_type": m.rack_type.slug if m.rack_type_id else None,
-                }
-                for m in profile.class_role_mappings.select_related("rack_type").all()
-            ],
-            "device_type_mappings": [
-                {
-                    "source_make": m.source_make,
-                    "source_model": m.source_model,
-                    "netbox_manufacturer_slug": m.netbox_manufacturer_slug,
-                    "netbox_device_type_slug": m.netbox_device_type_slug,
-                }
-                for m in profile.device_type_mappings.all()
-            ],
-            "manufacturer_mappings": [
-                {
-                    "source_make": m.source_make,
-                    "netbox_manufacturer_slug": m.netbox_manufacturer_slug,
-                }
-                for m in profile.manufacturer_mappings.all()
-            ],
-            "column_transform_rules": [
-                {
-                    "source_column": r.source_column,
-                    "pattern": r.pattern,
-                    "group_1_target": r.group_1_target,
-                    "group_2_target": r.group_2_target,
-                }
-                for r in profile.column_transform_rules.all()
-            ],
-            # All four fields travel: "decided as none" and "not decided" are different answers.
-            "cable_class_mappings": [
-                {
-                    "cable_class": m.cable_class,
-                    "cable_type_resolved": m.cable_type_resolved,
-                    "cable_type": m.cable_type,
-                    "cable_profile_resolved": m.cable_profile_resolved,
-                    "cable_profile": m.cable_profile,
-                }
-                for m in profile.cable_class_mappings.all()
-            ],
-        }
+        data = serialize_profile(profile)
 
         yaml_str = yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
         safe_name = profile.name.lower().replace(" ", "_").replace("/", "-")
@@ -3660,7 +3301,7 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
         try:
-            profile, stats = _apply_profile_yaml_data(data)
+            profile, stats = apply_profile_document(data)
         except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
             messages.error(request, str(exc))
             return render(request, "netbox_data_import/import_profile_yaml.html")

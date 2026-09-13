@@ -6,7 +6,7 @@
 import strawberry
 import strawberry_django
 
-from .types import ImportProfileType
+from .types import CableClassMappingType, ImportProfileType
 
 
 @strawberry.type(name="Query")
@@ -17,6 +17,14 @@ class ImportProfilesQuery:
     import_profile_list: list[ImportProfileType] = strawberry_django.field()
 
 
-schema = [ImportProfilesQuery]
+@strawberry.type(name="Query")
+class CableClassMappingsQuery:
+    """Expose CableClass mapping detail and list queries."""
 
-__all__ = ("ImportProfilesQuery", "schema")
+    cable_class_mapping: CableClassMappingType = strawberry_django.field()
+    cable_class_mapping_list: list[CableClassMappingType] = strawberry_django.field()
+
+
+schema = [ImportProfilesQuery, CableClassMappingsQuery]
+
+__all__ = ("CableClassMappingsQuery", "ImportProfilesQuery", "schema")

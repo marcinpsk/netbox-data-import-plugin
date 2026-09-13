@@ -190,7 +190,7 @@ class SecretContainmentTest(TestCase):
         self.assertNotIn("credential_reference", body)
 
     def test_the_rest_endpoint_holds_no_backend_credential(self):
-        """The AI backends endpoint exists so a delete event can serialize; it names no Vault location."""
+        """The AI backends endpoint names no Vault location in a read response."""
         user = user_with_object_permission("api-tester", [(InferenceBackend, ["view"], {})])
         self.client.force_login(user)
 
