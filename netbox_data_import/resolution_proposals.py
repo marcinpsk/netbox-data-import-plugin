@@ -139,13 +139,15 @@ def cancel_proposal(proposal_id) -> bool:
     return _transition(proposal_id, allowed_from=ProposalStatus.ACTIVE, status=ProposalStatus.CANCELLED)
 
 
-def decide_proposal(proposal_id, *, decision, operator=None, written_resolution=None) -> bool:
+def decide_proposal(proposal_id, *, decision, operator, written_resolution=None) -> bool:
     """Set the one-shot decision fields, which never change the status.
 
     Only a completed row that nobody has decided yet qualifies, so the rowcount also refuses a second
     decision racing the first.
     """
     _validate_choice(decision, ProposalDecision.CHOICES, name="proposal decision")
+    if operator is None:
+        raise ValueError("A decision requires an operator.")
     if decision == ProposalDecision.ACCEPTED and written_resolution is None:
         raise ValueError("An accepted proposal requires a written resolution.")
     values = {
