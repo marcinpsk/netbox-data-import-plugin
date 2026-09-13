@@ -20,6 +20,7 @@ from netbox_data_import.models import (
     ProposalOutcome,
     ProposalStatus,
     TerminationResolution,
+    index_digest,
     locked_profile_policy,
 )
 from netbox_data_import.netbox_reader import NetBoxReader
@@ -320,6 +321,22 @@ class ProposalAcceptanceTest(DecisionInventory, TestCase):
         )
         self.assertTrue(self.accept(proposal, actor))
         self.assertEqual(TerminationResolution.objects.get(profile=self.profile).selected_object_id, self.ports[0].pk)
+
+    def test_digest_scoped_add_permission_can_write_the_derived_digest(self):
+        proposal = self.proposal()
+        actor = user_with_object_permission(
+            "digest-scoped-decider",
+            [
+                (Device, ["view"], {}),
+                (Interface, ["view"], {}),
+                (TerminationResolution, ["add"], {"field_key_digest": index_digest(self.field_key)}),
+            ],
+        )
+
+        self.assertTrue(self.accept(proposal, actor))
+
+        resolution = TerminationResolution.objects.get(profile=self.profile)
+        self.assertEqual(resolution.field_key_digest, index_digest(self.field_key))
 
     def test_acceptance_cannot_use_another_operators_reader(self):
         proposal = self.proposal()

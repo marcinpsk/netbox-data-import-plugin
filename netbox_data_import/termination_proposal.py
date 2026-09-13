@@ -136,14 +136,21 @@ class SelectTerminationTask:
 
         app_label, model = entry.object_type.split(".", 1)
         object_type = ObjectType.objects.get(app_label=app_label, model=model)
-        lookup = {"profile": profile, "task_type": self.task_type, "field_key": field_key}
         candidate = TerminationResolution(
-            **lookup,
+            profile=profile,
+            task_type=self.task_type,
+            field_key=field_key,
             selected_object_type=object_type,
             selected_object_id=entry.object_id,
             selected_display_name=entry.display_name,
         )
         candidate.full_clean(validate_unique=False, validate_constraints=False)
+        lookup = {
+            "profile": profile,
+            "task_type": self.task_type,
+            "field_key": field_key,
+            "field_key_digest": candidate.field_key_digest,
+        }
         values = {
             "selected_object_type": object_type,
             "selected_object_id": entry.object_id,
