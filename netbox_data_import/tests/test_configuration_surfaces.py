@@ -370,13 +370,26 @@ class CableClassMappingGraphQLTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("errors", response.json(), response.json())
         schema = response.json()["data"]["__schema"]
-        self.assertIn("CableClassMappingType", {item["name"] for item in schema["types"]})
-        normalized_names = {
-            item["name"].replace("_", "").lower() for item in [*schema["types"], *schema["queryType"]["fields"]]
-        }
-        for forbidden in ("ImportPlan", "ImportExecution", "ResolutionProposal", "InferenceBackend"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden.lower(), normalized_names)
+        type_names = {item["name"] for item in schema["types"]}
+        query_names = {item["name"] for item in schema["queryType"]["fields"]}
+        self.assertIn("CableClassMappingType", type_names)
+        for model_name in ("ImportPlan", "ImportExecution", "ResolutionProposal", "InferenceBackend"):
+            with self.subTest(model_name=model_name):
+                self.assertNotIn(model_name, type_names)
+                self.assertNotIn(f"{model_name}Type", type_names)
+
+        for field_name in (
+            "import_plan",
+            "import_plan_list",
+            "import_execution",
+            "import_execution_list",
+            "resolution_proposal",
+            "resolution_proposal_list",
+            "inference_backend",
+            "inference_backend_list",
+        ):
+            with self.subTest(field_name=field_name):
+                self.assertNotIn(field_name, query_names)
 
     def test_object_constraint_limits_the_mapping_query(self):
         other_profile = ImportProfile.objects.create(
