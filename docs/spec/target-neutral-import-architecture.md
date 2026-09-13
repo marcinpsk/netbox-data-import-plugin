@@ -941,7 +941,7 @@ InferenceBackend.complete(InferenceRequest) -> InferenceCompletion
 
 InferenceRequest:  system_instruction, user_payload_json, requested_response_mode
 InferenceCompletion: content_text (optional), is_refusal, finish_reason,
-                     backend_request_id, backend_response_id, backend_model
+                     backend_request_id, backend_response_id, backend_model, diagnostic
 
   is_refusal is derived by the adapter: finish_reason `stop` with empty content,
   or with a refusal payload instead of content. Any other finish_reason, or a
