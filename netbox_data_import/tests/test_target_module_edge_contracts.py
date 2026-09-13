@@ -318,6 +318,46 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
         self.assertEqual(unit.diagnostics[0].code, "rack.change_permission")
 
+    def test_rack_create_permission_is_checked_against_the_candidate(self):
+        """A constrained add grant must cover the Rack the plan would create."""
+        from dcim.models import Rack
+
+        actor = user_with_object_permission(
+            "rack-edge-creator",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "permitted-rack"}),
+            ],
+        )
+        scoped = NetBoxReader.for_actor(actor).for_target(site=self.site)
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PERMITTED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": "permitted-rack",
+                    "u_height": 42,
+                    "serial": "",
+                },
+                {
+                    "_row_number": 3,
+                    "source_id": "SCOPED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": "outside-rack-scope",
+                    "u_height": 42,
+                    "serial": "",
+                },
+            ),
+        )
+
+        permitted, blocked = RackModule().plan(batch, self.profile, CATALOG, scoped)
+
+        self.assertEqual(permitted.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(blocked.disposition, Disposition.BLOCKED)
+        self.assertEqual(blocked.diagnostics[0].code, "rack.add_permission")
+
     def test_missing_device_type_and_role_dependencies_are_explicit_diagnostics(self):
         """Missing Device Type and Device Role dependencies block the unit that needs them."""
         from dcim.models import Device, Rack
@@ -367,6 +407,26 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         update = self._plan_device(viewer, self._device_row(serial="NEW"))
         self.assertEqual(update.disposition, Disposition.BLOCKED)
         self.assertEqual(update.diagnostics[0].code, "device.change_permission")
+
+    def test_device_create_permission_is_checked_against_the_candidate(self):
+        """A constrained add grant must cover the Device the plan would create."""
+        from dcim.models import Device, Rack
+
+        actor = user_with_object_permission(
+            "device-edge-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"name": "permitted-device"}),
+            ],
+        )
+
+        permitted = self._plan_device(actor, self._device_row(device_name="permitted-device"))
+        blocked = self._plan_device(actor, self._device_row(device_name="outside-device-scope"))
+
+        self.assertEqual(permitted.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(blocked.disposition, Disposition.BLOCKED)
+        self.assertEqual(blocked.diagnostics[0].code, "device.add_permission")
 
     def test_a_device_type_slug_collision_is_not_treated_as_an_existing_target(self):
         """A derived slug owned by a different model blocks implicit reuse."""

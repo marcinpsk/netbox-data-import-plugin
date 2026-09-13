@@ -1957,7 +1957,11 @@ class DeviceModuleProvenanceTest(DeviceModulePlanTestBase):
         )
         actor = user_with_object_permission(
             "device-module-review-blind",
-            [(Device, ("view", "add"), {"name": "nothing-matches-this"}), (Rack, ("view",), {})],
+            [
+                (Device, ("view",), {"name": "nothing-matches-this"}),
+                (Device, ("add",), {"name": "srv-02"}),
+                (Rack, ("view",), {}),
+            ],
         )
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 

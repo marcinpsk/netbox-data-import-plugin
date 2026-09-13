@@ -35,7 +35,7 @@ from .contact_resolution import (
 from .device_field_review import DeviceFieldReviewer
 from .device_identity import DeviceTypeIdentityResolver
 from .netbox_reader import PlanningTargetUnavailable
-from .object_permissions import ObjectPermissionDenied
+from .object_permissions import ObjectPermissionDenied, assess_permission_scoped_save
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
 from .target_runtime import ExecutionContext, PreconditionFailed, TargetModuleRuntime
 from .values import (
@@ -48,6 +48,17 @@ from .values import (
 )
 
 DEFAULT_RACK_HEIGHT = 42
+
+
+def _candidate_add_is_allowed(actor, candidate) -> bool:
+    """Return whether one unsaved candidate is inside the actor's add scope."""
+    primary_key = candidate._meta.pk.attname
+    values = {
+        field.attname: field.value_from_object(candidate)
+        for field in candidate._meta.concrete_fields
+        if not field.primary_key
+    }
+    return assess_permission_scoped_save(actor, type(candidate), {primary_key: None}, values).allowed
 
 
 def _text(value) -> str:
@@ -319,14 +330,7 @@ class RackModule:
         rack = matches[0] if matches else None
         if rack is None:
             actor = netbox_reader.actor
-            if actor is not None and not actor.has_perm("dcim.add_rack"):
-                return _refused(
-                    identity,
-                    "rack.add_permission",
-                    unit_display,
-                    disposition=Disposition.BLOCKED,
-                )
-            validation = self._validated_candidate(
+            candidate, validation = self._validated_candidate(
                 None,
                 name,
                 height,
@@ -335,6 +339,13 @@ class RackModule:
                 netbox_reader,
                 source_id=_source_text(row.get("source_id")),
             )
+            if actor is not None and not _candidate_add_is_allowed(actor, candidate):
+                return _refused(
+                    identity,
+                    "rack.add_permission",
+                    unit_display,
+                    disposition=Disposition.BLOCKED,
+                )
             if validation is not None:
                 return _refused(identity, "rack.validation_failed", {**unit_display, "message": validation})
             return SynchronizationUnit(
@@ -375,7 +386,7 @@ class RackModule:
             else:
                 existing_display["detail"] = f"Rack '{name}' already exists (update_existing=False)"
             return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP, display=existing_display)
-        validation = self._validated_candidate(
+        _candidate, validation = self._validated_candidate(
             rack,
             name,
             height,
@@ -515,7 +526,7 @@ class RackModule:
 
     @staticmethod
     def _validated_candidate(rack, name, height, serial, rack_type_id, reader, source_id):
-        """Return a model validation message, or None when the planned rack is valid."""
+        """Return the prospective Rack and its model validation message, if any."""
         from dcim.models import Rack
 
         candidate = copy(rack) if rack is not None else Rack(site=reader.site, location=reader.location)
@@ -531,8 +542,8 @@ class RackModule:
         try:
             candidate.full_clean()
         except ValidationError as exc:
-            return "; ".join(exc.messages)
-        return None
+            return candidate, "; ".join(exc.messages)
+        return candidate, None
 
 
 def _occupied_units(position, height):
@@ -1706,9 +1717,14 @@ class DeviceModule:
                 code, taken_display = claim.refused
                 problem(Disposition.INVALID, code, taken_display)
             actor = batch.reader.actor
-            if actor is not None and not actor.has_perm("dcim.add_device"):
+            candidate, validation = self._validated_candidate(None, payload)
+            if actor is not None and (
+                not actor.has_perm("dcim.add_device")
+                if candidate is None
+                else not _candidate_add_is_allowed(actor, candidate)
+            ):
                 problem(Disposition.BLOCKED, "device.add_permission")
-            if validation := self._validation_error(None, payload):
+            if validation:
                 problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
             if issues:
                 return _with_issues(identity, issues)
@@ -1818,7 +1834,8 @@ class DeviceModule:
         actor = batch.reader.actor
         if actor is not None and not batch.reader.devices("change").filter(pk=match.device.pk).exists():
             problem(Disposition.BLOCKED, "device.change_permission")
-        if validation := self._validation_error(match.device, payload):
+        _candidate, validation = self._validated_candidate(match.device, payload)
+        if validation:
             problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
         if issues:
             return _with_issues(identity, issues)
@@ -1858,12 +1875,12 @@ class DeviceModule:
         return device.location_id is None and device.rack_id is None and device.position is None and not device.face
 
     @staticmethod
-    def _validation_error(device, payload) -> str:
-        """Return a model validation message for a fully resolvable Device change."""
+    def _validated_candidate(device, payload):
+        """Return the prospective Device and its model validation message, if resolvable."""
         from dcim.models import Device
 
         if payload["role_id"] is None or payload["rack_name"] is not None:
-            return ""
+            return None, ""
         candidate = copy(device) if device is not None else Device(name=payload["name"])
         candidate.device_type_id = payload["device_type_id"]
         candidate.role_id = payload["role_id"]
@@ -1883,9 +1900,11 @@ class DeviceModule:
             candidate.full_clean()
         except ValidationError as exc:
             if hasattr(exc, "message_dict"):
-                return "; ".join(f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items())
-            return "; ".join(exc.messages)
-        return ""
+                return candidate, "; ".join(
+                    f"{field}: {', '.join(errors)}" for field, errors in exc.message_dict.items()
+                )
+            return candidate, "; ".join(exc.messages)
+        return candidate, ""
 
     @staticmethod
     def _review_display(display, review) -> dict:
