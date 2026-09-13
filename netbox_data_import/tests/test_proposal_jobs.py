@@ -134,9 +134,10 @@ class WorkerFixture:
             proposal.response_diagnostic,
             {
                 "receipt": "present" if text else "empty",
-                "text": text,
+                "text": None if text else "",
                 "status_code": status,
                 "redacted": False,
+                "withheld": bool(text),
                 "truncated": False,
             },
         )
@@ -292,8 +293,8 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
                 self.assert_failure(proposal, reason, seen, 3, status, "temporary")
                 proposal.delete()
 
-    def test_an_oversized_failure_body_is_stored_bounded_and_marked(self):
-        """The adapter's bound has to reach the column, which is where the body actually persists."""
+    def test_an_oversized_authenticated_failure_body_is_withheld(self):
+        """An authenticated body must not reach the proposal persistence surface."""
         from netbox_data_import.inference_adapter import DIAGNOSTIC_TEXT_LIMIT
 
         payload = "x" * (DIAGNOSTIC_TEXT_LIMIT + 500)
@@ -303,8 +304,9 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
                 run_proposal(proposal.pk)
         proposal.refresh_from_db()
         self.assertEqual(proposal.status, ProposalStatus.FAILED)
-        self.assertEqual(len(proposal.response_diagnostic["text"]), DIAGNOSTIC_TEXT_LIMIT)
-        self.assertTrue(proposal.response_diagnostic["truncated"])
+        self.assertIsNone(proposal.response_diagnostic["text"])
+        self.assertTrue(proposal.response_diagnostic["withheld"])
+        self.assertFalse(proposal.response_diagnostic["truncated"])
 
     def test_non_transient_statuses_send_exactly_one_request(self):
         for status in (400, 404, 405, 408, 422, 501, 401, 403):
@@ -377,7 +379,8 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
         self.assertIsNone(proposal.selected_object_id)
         self.assertIsNone(proposal.selected_object_type)
         self.assertEqual(proposal.backend_metadata["backend_source"], "file-fallback")
-        self.assertEqual(proposal.response_diagnostic["text"], json.dumps(payload))
+        self.assertIsNone(proposal.response_diagnostic["text"])
+        self.assertTrue(proposal.response_diagnostic["withheld"])
 
     def test_candidate_links_the_frozen_object_and_sends_frozen_evidence(self):
         proposal = self.frozen_proposal()
@@ -412,11 +415,13 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
         self.assertEqual(proposal.selected_object_type, self.interface_ct)
         self.assertEqual(proposal.selected_object_id, self.interface.pk)
         self.assertEqual(proposal.explanation, "Matching label.")
-        self.assertEqual(proposal.response_diagnostic["text"], json.dumps(payload))
-        self.assertEqual(proposal.backend_metadata["backend_request_id"], "request-example")
-        self.assertEqual(proposal.backend_metadata["backend_response_id"], "cmpl-123")
-        self.assertEqual(proposal.backend_metadata["backend_model"], "served-model")
+        self.assertIsNone(proposal.response_diagnostic["text"])
+        self.assertTrue(proposal.response_diagnostic["withheld"])
+        self.assertNotIn("backend_request_id", proposal.backend_metadata)
+        self.assertNotIn("backend_response_id", proposal.backend_metadata)
+        self.assertEqual(proposal.backend_metadata["backend_model"], "m")
         self.assertEqual(proposal.backend_metadata["finish_reason"], "stop")
+        self.assertTrue(proposal.backend_metadata["response_metadata_withheld"])
         self.assertEqual(proposal.decision, "")
         self.assertIsNone(proposal.written_resolution)
 
@@ -433,6 +438,28 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
         self.assertNotIn(
             SECRET, json.dumps([proposal.response_diagnostic, proposal.backend_metadata, proposal.explanation])
         )
+
+    def test_split_credential_response_metadata_is_withheld_before_persistence(self):
+        fragments = ("sk-", "do-not-leak-", "this-value")
+        proposal = self.frozen_proposal()
+        payload = completion(
+            answer(),
+            request_id=fragments[0],
+            id=fragments[1],
+            model=fragments[2],
+        )
+        with serving(payload=payload) as (root, seen, allowed), self.configured(root, allowed):
+            run_proposal(proposal.pk)
+
+        proposal.refresh_from_db()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(proposal.status, ProposalStatus.COMPLETED)
+        stored = json.dumps(proposal.backend_metadata)
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, stored)
+        self.assertEqual(proposal.backend_metadata["backend_model"], "m")
+        self.assertTrue(proposal.backend_metadata["response_metadata_withheld"])
 
     def test_escaped_credential_echo_is_not_stored_in_metadata(self):
         secret = "sk-é-example"
@@ -520,8 +547,10 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
                 None,
             ],
         )
-        self.assertEqual(proposal.backend_metadata["attempts"][0]["diagnostic"]["text"], "temporary")
-        self.assertEqual(proposal.response_diagnostic["text"], json.dumps(responses[-1][1]))
+        self.assertIsNone(proposal.backend_metadata["attempts"][0]["diagnostic"]["text"])
+        self.assertTrue(proposal.backend_metadata["attempts"][0]["diagnostic"]["withheld"])
+        self.assertIsNone(proposal.response_diagnostic["text"])
+        self.assertTrue(proposal.response_diagnostic["withheld"])
 
     def test_rate_limit_honors_retry_after(self):
         proposal = self.frozen_proposal()
@@ -551,8 +580,9 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
             {
                 "receipt": "interrupted",
                 "text": None,
-                "status_code": None,
+                "status_code": 200,
                 "redacted": False,
+                "withheld": False,
                 "truncated": False,
             },
         )

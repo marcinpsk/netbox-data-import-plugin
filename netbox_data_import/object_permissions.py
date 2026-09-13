@@ -139,7 +139,7 @@ def _prospective_row_matches(user, model, instance, constraint) -> bool:
         f"SELECT {columns} FROM {quoted_table} WHERE {quoted_pk} <> %s "
         f"UNION ALL SELECT {columns} FROM {quoted_candidate}) {sql}"
     )
-    values = [field.value_from_object(probe) for field in fields]
+    values = [field.get_db_prep_save(field.value_from_object(probe), connection) for field in fields]
     with connection.cursor() as cursor:
         cursor.execute(statement, [*values, probe.pk, *params])
         return cursor.fetchone() is not None

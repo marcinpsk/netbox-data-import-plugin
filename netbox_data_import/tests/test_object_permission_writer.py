@@ -15,7 +15,13 @@ from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
-from netbox_data_import.models import DeviceTypeMapping, ImportProfile, TerminationResolution, index_digest
+from netbox_data_import.models import (
+    DeviceTypeMapping,
+    ImportProfile,
+    InferenceBackend,
+    TerminationResolution,
+    index_digest,
+)
 from netbox_data_import.object_permissions import (
     ObjectPermissionDenied,
     assess_permission_scoped_save,
@@ -100,6 +106,32 @@ class AssessPermissionScopedSaveTest(TestCase):
         self.assertEqual(inside.permission, "netbox_data_import.add_devicetypemapping")
         self.assertFalse(outside.allowed)
         self.assertFalse(DeviceTypeMapping.objects.exists())
+
+    def test_a_json_value_is_prepared_for_the_prospective_database_row(self):
+        user = user_with_object_permission(
+            "assess-json",
+            [(InferenceBackend, ["add"], {"backend_key": "prospective"})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            InferenceBackend,
+            {"backend_key": "prospective"},
+            {
+                "display_name": "Prospective backend",
+                "api_root": "https://backend.example.invalid:443",
+                "model": "inference-model",
+                "credential_reference": {
+                    "backend": "vault_kv_v2",
+                    "mount": "secret",
+                    "path": "inference/backend",
+                    "field": "api_key",
+                },
+            },
+        )
+
+        self.assertTrue(assessment.allowed)
+        self.assertFalse(InferenceBackend.objects.exists())
 
     def test_a_missing_keep_is_assessed_against_its_prospective_add_scope(self):
         user = user_with_object_permission(

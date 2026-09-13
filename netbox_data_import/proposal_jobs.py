@@ -160,13 +160,11 @@ def _run_claimed_proposal(proposal_id, metadata):
                 try:
                     completion = adapter.complete(request, api_key)
                     response_metadata = {
-                        "backend_request_id": completion.backend_request_id,
-                        "backend_response_id": completion.backend_response_id,
-                        "backend_model": completion.backend_model,
                         "finish_reason": completion.finish_reason,
+                        "response_metadata_withheld": True,
                     }
                     if completion.diagnostic.redacted:
-                        response_metadata = {"redacted": True}
+                        response_metadata["redacted"] = True
                     metadata.update(response_metadata)
                 finally:
                     api_key = ""
