@@ -31,63 +31,62 @@ from netbox_data_import.tests.helpers import make_dcim_objects
 User = get_user_model()
 
 
-class FakeCandidate:
-    """One retrieved object, carrying only what a snapshot entry reads from it."""
-
-    def __init__(self, pk, name):
-        self.pk = pk
-        self.name = name
-
-    def __str__(self):
-        return self.name
-
-
-def fake_set(count, total=None):
-    """Return a retrieved set of *count* objects claiming an uncapped *total*."""
-    objects = tuple(FakeCandidate(pk=index + 1, name=f"Ethernet 1/{index + 1}") for index in range(count))
-    return CandidateSet(objects=objects, total=count if total is None else total)
-
-
-def build(candidate_set, limit=64):
-    """Snapshot *candidate_set* with a fixed object-type label."""
-    return snapshot_from(candidate_set, label_for=lambda _c: "dcim.interface", name_for=str, limit=limit)
-
-
-class CandidateSnapshotTest(SimpleTestCase):
+class CandidateSnapshotTest(TestCase):
     """A snapshot freezes the whole eligible set, or it refuses to exist."""
 
+    @classmethod
+    def setUpTestData(cls):
+        site, _manufacturer, device_type, role = make_dcim_objects("Candidate Snapshot")
+        device = Device.objects.create(name="SNAPSHOT-SWITCH", site=site, device_type=device_type, role=role)
+        cls.candidates = tuple(
+            Interface.objects.create(device=device, name=f"Ethernet 1/{index}") for index in range(1, 66)
+        )
+
+    def snapshot(self, count, *, total=None, limit=64):
+        """Snapshot persisted candidates with the specified uncapped total."""
+        candidates = CandidateSet(
+            objects=self.candidates[:count],
+            total=count if total is None else total,
+        )
+        return snapshot_from(
+            candidates,
+            label_for=lambda candidate: candidate._meta.label_lower,
+            name_for=str,
+            limit=limit,
+        )
+
     def test_entries_carry_positional_opaque_identifiers(self):
-        snapshot = build(fake_set(3))
+        snapshot = self.snapshot(3)
 
         self.assertEqual(snapshot.candidate_ids, ("candidate-0001", "candidate-0002", "candidate-0003"))
-        self.assertEqual(snapshot.entries[1].object_id, 2)
+        self.assertEqual(snapshot.entries[1].object_id, self.candidates[1].pk)
         self.assertEqual(snapshot.entries[1].object_type, "dcim.interface")
         self.assertEqual(snapshot.entries[1].display_name, "Ethernet 1/2")
 
     def test_an_empty_set_cannot_back_a_proposal(self):
         with self.assertRaises(UnusableCandidateSet) as caught:
-            build(fake_set(0))
+            self.snapshot(0)
 
         self.assertEqual(caught.exception.reason, NO_CANDIDATES)
 
     def test_a_set_past_the_bound_is_refused(self):
         with self.assertRaises(UnusableCandidateSet) as caught:
-            build(fake_set(65), limit=64)
+            self.snapshot(65, limit=64)
 
         self.assertEqual(caught.exception.reason, TOO_MANY_CANDIDATES)
 
     def test_the_bound_itself_is_accepted(self):
-        self.assertEqual(build(fake_set(64), limit=64).total, 64)
+        self.assertEqual(self.snapshot(64, limit=64).total, 64)
 
     def test_a_truncated_retrieval_never_establishes_freshness(self):
         """A page of 20 out of 48 would freeze a set that was never the eligible set."""
         with self.assertRaises(UnusableCandidateSet) as caught:
-            build(fake_set(20, total=48))
+            self.snapshot(20, total=48)
 
         self.assertEqual(caught.exception.reason, TOO_MANY_CANDIDATES)
 
     def test_a_snapshot_survives_a_round_trip_through_the_row(self):
-        snapshot = build(fake_set(3))
+        snapshot = self.snapshot(3)
 
         restored = CandidateSnapshot.from_json(snapshot.as_json())
 
@@ -95,7 +94,7 @@ class CandidateSnapshotTest(SimpleTestCase):
 
     def test_a_renamed_candidate_no_longer_matches(self):
         """The model chose on the labels it was shown, so a changed label changed the evidence."""
-        snapshot = build(fake_set(2))
+        snapshot = self.snapshot(2)
         renamed = CandidateSnapshot(
             entries=(
                 snapshot.entries[0],
@@ -112,7 +111,7 @@ class CandidateSnapshotTest(SimpleTestCase):
         self.assertFalse(snapshot.matches(renamed))
 
     def test_a_changed_membership_no_longer_matches(self):
-        self.assertFalse(build(fake_set(2)).matches(build(fake_set(3))))
+        self.assertFalse(self.snapshot(2).matches(self.snapshot(3)))
 
 
 class ProposalTaskRegistryTest(SimpleTestCase):
