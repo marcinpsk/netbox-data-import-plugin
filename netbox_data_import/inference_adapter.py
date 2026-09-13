@@ -14,10 +14,12 @@ import json
 
 from dataclasses import dataclass
 from collections.abc import Sequence
+from contextlib import suppress
 
 import requests
+from urllib3.exceptions import MaxRetryError, NewConnectionError, ReadTimeoutError
 
-from .inference_transport import request_to_resolved_address
+from .inference_transport import ResponseProcessingFailure, request_to_resolved_address
 from .inference_trust import (
     InvalidInferenceConfiguration,
     assert_resolved_address_allowed,
@@ -41,26 +43,25 @@ BODY_PRESENT = "present"
 TRANSIENT_STATUSES = (500, 502, 503, 504)
 
 _REDACTED = "[redacted: the backend echoed the credential]"
-_UNDECODABLE = "[redacted: the response could not be decoded, so its content could not be established]"
-
 _BODY_CLEAN = "clean"
 _BODY_ECHOES = "echoes"
-_BODY_UNDECIDABLE = "undecidable"
 
 
 @dataclass(frozen=True)
 class ResponseDiagnostic:
     """What one call received, for an operator to read when it failed.
 
-    `text` is the decoded body after credential checks, bounded by DIAGNOSTIC_TEXT_LIMIT.
-    It is None unless the receipt is `empty` or `present`. `redacted` records that the body was
-    replaced for credential safety. `truncated` records that the retained text is incomplete.
+    `text` is retained only for an empty or unauthenticated response, bounded by
+    DIAGNOSTIC_TEXT_LIMIT, or as a fixed redaction marker. `redacted` records that the body was
+    replaced for credential safety. `withheld` records that an authenticated response body was not
+    retained. `truncated` records that retained unauthenticated text is incomplete.
     """
 
     receipt: str
     text: str | None = None
     status_code: int | None = None
     redacted: bool = False
+    withheld: bool = False
     truncated: bool = False
 
 
@@ -68,25 +69,21 @@ ABSENT_DIAGNOSTIC = ResponseDiagnostic(receipt=BODY_ABSENT)
 
 
 def _inspect(text: str, api_key: str) -> str:
-    """Return whether the body echoes the key, cannot be decoded, or is clean."""
+    """Return whether the body contains a complete literal or decoded key."""
     pending: list[object] = [text]
-    undecidable = False
     while pending:
         value = pending.pop()
         if isinstance(value, str):
             if api_key in value:
                 return _BODY_ECHOES
-            try:
+            with suppress(ValueError, RecursionError):
                 # Members are flattened into the list so a key echoed as a member name is seen too.
                 pending.append(
                     json.loads(value, object_pairs_hook=lambda pairs: [item for pair in pairs for item in pair])
                 )
-            except (ValueError, RecursionError):
-                if "\\" in value:
-                    undecidable = True
         elif isinstance(value, list):
             pending.extend(value)
-    return _BODY_UNDECIDABLE if undecidable else _BODY_CLEAN
+    return _BODY_CLEAN
 
 
 def _diagnostic(response, api_key: str) -> ResponseDiagnostic:
@@ -98,11 +95,9 @@ def _diagnostic(response, api_key: str) -> ResponseDiagnostic:
     verdict = _inspect(text, api_key) if api_key else _BODY_CLEAN
     if verdict == _BODY_ECHOES:
         return ResponseDiagnostic(receipt=BODY_PRESENT, text=_REDACTED, status_code=response.status_code, redacted=True)
-    if verdict == _BODY_UNDECIDABLE:
-        return ResponseDiagnostic(
-            receipt=BODY_PRESENT, text=_UNDECODABLE, status_code=response.status_code, redacted=True
-        )
     receipt = BODY_PRESENT if text else BODY_EMPTY
+    if api_key and text:
+        return ResponseDiagnostic(receipt=receipt, status_code=response.status_code, withheld=True)
     return ResponseDiagnostic(
         receipt=receipt,
         text=text[:DIAGNOSTIC_TEXT_LIMIT],
@@ -185,7 +180,7 @@ class InferenceCompletion:
     backend_request_id: str | None
     backend_response_id: str | None
     backend_model: str | None
-    # A refusal's text lives only here: `is_refusal` is computed from it and the message is dropped.
+    # The adapter computes `is_refusal` while parsing. It does not retain the raw refusal body.
     diagnostic: ResponseDiagnostic = ABSENT_DIAGNOSTIC
 
 
@@ -196,6 +191,19 @@ def _retry_after(response) -> int | None:
         return int(raw) if raw is not None else None
     except ValueError:
         return None
+
+
+def _is_preconnect_failure(exc: requests.RequestException) -> bool:
+    """Return whether another address can be tried without replaying a sent request."""
+    if isinstance(exc, requests.ConnectTimeout):
+        return True
+    reason = exc.args[0] if exc.args else None
+    return isinstance(reason, MaxRetryError) and isinstance(reason.reason, NewConnectionError)
+
+
+def _is_response_read_timeout(exc: Exception) -> bool:
+    """Return whether Requests timed out after it had received response headers."""
+    return isinstance(exc, requests.ConnectionError) and bool(exc.args) and isinstance(exc.args[0], ReadTimeoutError)
 
 
 class OpenAICompatibleAdapter:
@@ -249,50 +257,86 @@ class OpenAICompatibleAdapter:
             body["response_format"] = {"type": "json_object"}
         return body
 
-    def _resolved_destination(self) -> str:
-        """Return one approved address, rechecking the destination at request time."""
+    def _resolved_destinations(self) -> tuple[str, ...]:
+        """Return all approved addresses, rechecking the destination at request time."""
         try:
             validate_api_root(self.api_root, self.allowlist, self.authentication)
             addresses = resolve_addresses(self.api_root)
             assert_resolved_address_allowed(self.api_root, self.allowlist, addresses)
         except InvalidInferenceConfiguration as exc:
             raise InvalidBackendConfiguration(str(exc)) from None
-        return addresses[0]
+        return addresses
 
     def complete(self, request: InferenceRequest, api_key: str) -> InferenceCompletion:
         """Return one completion, or raise the typed error the backend condition maps to."""
         self._check_response_mode(request)
-        resolved_address = self._resolved_destination()
+        resolved_addresses = self._resolved_destinations()
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.authentication == "bearer":
             headers["Authorization"] = f"Bearer {api_key}"
-        try:
-            response = request_to_resolved_address(
-                self._session,
-                "POST",
-                f"{self.api_root}{CHAT_COMPLETIONS_PATH}",
-                resolved_address,
-                json=self._body(request),
-                headers=headers,
-                timeout=(self.connect_timeout, self.read_timeout),
-                # A redirect is a different destination, so it is refused rather than followed.
-                allow_redirects=False,
-            )
-        except requests.Timeout:
+        connection_failure: requests.RequestException | None = None
+        for resolved_address in resolved_addresses:
+            try:
+                response = request_to_resolved_address(
+                    self._session,
+                    "POST",
+                    f"{self.api_root}{CHAT_COMPLETIONS_PATH}",
+                    resolved_address,
+                    json=self._body(request),
+                    headers=headers,
+                    timeout=(self.connect_timeout, self.read_timeout),
+                    # A redirect is a different destination, so it is refused rather than followed.
+                    allow_redirects=False,
+                )
+            except ResponseProcessingFailure as exc:
+                if isinstance(exc.cause, ValueError):
+                    raise InvalidBackendConfiguration(
+                        f"The backend answered with a location this delivery cannot use ({type(exc.cause).__name__}).",
+                        diagnostic=_diagnostic(exc.response, api_key),
+                    ) from None
+                diagnostic = ResponseDiagnostic(receipt=BODY_INTERRUPTED, status_code=exc.response.status_code)
+                if isinstance(exc.cause, requests.Timeout) or _is_response_read_timeout(exc.cause):
+                    raise BackendTimeout(
+                        "The backend did not finish its answer inside the configured limits.",
+                        diagnostic=diagnostic,
+                    ) from None
+                raise TransportFailure(
+                    f"The backend answer was interrupted ({type(exc.cause).__name__}).",
+                    diagnostic=diagnostic,
+                ) from None
+            except requests.ConnectTimeout as exc:
+                connection_failure = exc
+                continue
+            except requests.ConnectionError as exc:
+                if _is_preconnect_failure(exc):
+                    connection_failure = exc
+                    continue
+                raise TransportFailure(
+                    f"The backend could not be reached ({type(exc).__name__}).",
+                    diagnostic=ABSENT_DIAGNOSTIC,
+                ) from None
+            except requests.Timeout:
+                raise BackendTimeout("The backend did not answer inside the configured limits.") from None
+            except requests.RequestException as exc:
+                # A cut-short body raises with no response attached, so its bytes cannot be recovered.
+                receipt = BODY_INTERRUPTED if isinstance(exc, requests.exceptions.ChunkedEncodingError) else BODY_ABSENT
+                raise TransportFailure(
+                    f"The backend could not be reached ({type(exc).__name__}).",
+                    diagnostic=ResponseDiagnostic(receipt=receipt),
+                ) from None
+            except ValueError as exc:
+                # `requests` raises this bare while preparing an unparsable redirect target.
+                raise InvalidBackendConfiguration(
+                    f"The backend answered with a location this delivery cannot use ({type(exc).__name__})."
+                ) from None
+            return self._read(response, api_key)
+
+        if isinstance(connection_failure, requests.ConnectTimeout):
             raise BackendTimeout("The backend did not answer inside the configured limits.") from None
-        except requests.RequestException as exc:
-            # A cut-short body raises with no response attached, so its bytes cannot be recovered.
-            receipt = BODY_INTERRUPTED if isinstance(exc, requests.exceptions.ChunkedEncodingError) else BODY_ABSENT
-            raise TransportFailure(
-                f"The backend could not be reached ({type(exc).__name__}).",
-                diagnostic=ResponseDiagnostic(receipt=receipt),
-            ) from None
-        except ValueError as exc:
-            # `requests` raises this bare while preparing an unparsable redirect target.
-            raise InvalidBackendConfiguration(
-                f"The backend answered with a location this delivery cannot use ({type(exc).__name__})."
-            ) from None
-        return self._read(response, api_key)
+        raise TransportFailure(
+            f"The backend could not be reached ({type(connection_failure).__name__}).",
+            diagnostic=ABSENT_DIAGNOSTIC,
+        ) from None
 
     def _read(self, response, api_key: str = "") -> InferenceCompletion:
         """Classify the answer, then parse the one envelope a completed call returns."""

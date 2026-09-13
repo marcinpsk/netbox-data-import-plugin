@@ -3,8 +3,11 @@
 
 # T8 Resolution Proposal: design record
 
-Revision r6 (RATIFIED at round 5, after adversarial rounds 1-5). The adapter diagnostic mechanism was split to #94 and is now an implemented prerequisite, not a deferral. Scope: issue #95, the 13 acceptance criteria of ticket T8. Design only; no T8
-production code exists yet.
+Revision r6 (RATIFIED at round 5, after adversarial rounds 1-5). The adapter diagnostic mechanism was
+split to #94 and is now an implemented prerequisite, not a deferral. Implementation review corrected
+the diagnostic on 2026-09-13: it retains receipt and status but withholds non-empty authenticated
+response text. Scope: issue #95, the 13 acceptance criteria of ticket T8. Design only; no T8 production
+code exists yet.
 
 ## Problem, as a class
 
@@ -115,31 +118,40 @@ limit names to 64 characters. A compact candidate array at the ceiling stays bel
 every name needs worst-case JSON escaping. The default remains 64 because a hard process and request
 size ceiling does not promise that every configured backend accepts the largest prompt.
 
-**Blocker 2 — T7's adapter cannot supply the raw response T8 must retain.** Neither design saw this.
+**Blocker 2: T7's adapter cannot supply the response diagnostic T8 requires.** Neither design saw this.
 Verified in source: `InferenceCompletion` carries `content_text`, `is_refusal`, `finish_reason` and
 the backend ids only, so a structured refusal's text is discarded; and
 `inference_adapter.py:220` raises `MalformedEnvelope(...)` with a message string for a non-`stop`
 finish reason, before any content is read, so the body is lost. Criterion 7 ("sets the row to failed
-with its typed reason **and the raw response text**") is not implementable through the current seam.
+with its typed reason and response diagnostic) is not implementable through the current seam.
 
-*r3:* the adapter's **diagnostic** interface carries the complete HTTP body, decoded to text and
-**captured before any validation**, alongside its existing typed classifications. Transport ownership
-is unchanged and no `requests.Response`, session, headers, prepared request or credential-bearing
-object crosses the seam: strings and existing scalars suffice.
+*r3, corrected after implementation review:* the adapter's **diagnostic** interface captures receipt
+state and HTTP status before validation, alongside its existing typed classifications. Transport
+ownership is unchanged and no `requests.Response`, session, headers, prepared request or
+credential-bearing object crosses the seam: strings and existing scalars suffice.
+
+The earlier design required the complete decoded HTTP body. That cannot satisfy the secret-containment
+invariant: a backend can reflect a bearer token in arbitrary fragments, and no bounded inspection can
+prove that retained text is safe. The corrected interface replaces a proven credential echo with a
+fixed redaction marker and marks every other non-empty authenticated body as withheld. The adapter
+still parses the body in memory. The application service stores only the validated content, configured
+backend metadata, and fixed-domain response values. It withholds arbitrary response-supplied metadata
+because separate fields can hold credential fragments. Raw response text does not cross the
+persistence seam.
 
 Round 2 found r2's version still short. `_read` raises `InvalidBackendConfiguration` (redirect),
 `AuthenticationFailure` (401/403), `RateLimited` (429) and `TransportFailure` (>=400) **before**
-`response.json()` is ever called, verified at `inference_adapter.py:190-205`, so a 401 carrying
-diagnostic text loses it. Spec 7.3 requires retaining failure response text when one was received.
+`response.json()` is ever called, verified at `inference_adapter.py:190-205`, so each path must still
+capture receipt state and status before classification.
 
-*r3 therefore extends diagnostic carriage to* **every typed adapter failure for which a body was
-received**, distinguishing "no body received" from "an empty body", and preserving every existing
+*r3 therefore extends diagnostic carriage to* **every typed adapter failure**, distinguishing "no
+body received" from an interrupted, empty, or present body, and preserving every existing
 classification and retry behaviour.
 
-Sanitization is correspondingly wider: the worker redacts response-derived **metadata** (the adapter
-copies backend ids and model straight from the envelope) and **exception text** (a non-`stop`
-finish reason is interpolated unchecked into the `MalformedEnvelope` message) as well as the retained
-body. Redacting only the body would leave the other two representations exposed.
+Sanitization is correspondingly wider: the worker withholds response-derived **metadata** (the adapter
+copies backend ids and model straight from the envelope) and sanitizes **exception text** (a non-`stop`
+finish reason was previously interpolated unchecked into the `MalformedEnvelope` message). It never
+persists non-empty authenticated response text.
 
 **Operator decision, taken 2026-09-10: this lands by reopening #94 (T7), not inside T8.** Criterion 7
 of T8 was unbuildable against what T7 shipped, so it is a T7 defect. #94 is reopened and carries the
@@ -150,9 +162,10 @@ not covered by "every typed adapter failure" at all.
 
 **T8 asserts the revised interface rather than tolerating either shape.** Shared contract tests, run
 through the real adapter and through failure persistence, require: one diagnostic representation
-across successes and every typed failure; absent, empty and partial receipt distinguishable; existing
-categories and `RateLimited.retry_after` intact; refusal text and pre-validation bodies available; and
-only declared values crossing the seam, with **no `getattr(..., None)`** fallback to the old shape.
+across successes and every typed failure; absent, empty, interrupted, and present receipt
+distinguishable; existing categories and `RateLimited.retry_after` intact; authenticated response text
+withheld; and only declared values crossing the seam, with **no `getattr(..., None)`** fallback to the
+old shape.
 Field-existence tests alone would not stop drift.
 
 ### Correction in r5: "preserve every existing classification" was wrong
@@ -191,9 +204,9 @@ selection, candidate policy and freshness, the acceptance transaction and lock o
 validator, and worker ownership, cancellation and recovery. All were closed across rounds 1-3.
 
 **The core does not stand fully alone, and this record says so rather than claiming otherwise.**
-T8 criterion 7 requires the raw response text, which only the #94 interface can supply. T8 is already
-declared blocked by T7 in the specification, so the dependency is stated, not introduced here. The
-core design is ratifiable; the *delivery* of T8 waits on #94.
+T8 criterion 7 requires the response diagnostic, which only the #94 interface can supply. T8 is
+already declared blocked by T7 in the specification, so the dependency is stated, not introduced
+here. The core design is ratifiable; the *delivery* of T8 waits on #94.
 
 ## Open work
 

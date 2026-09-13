@@ -5,10 +5,36 @@
 import ipaddress
 
 from collections import OrderedDict
+from threading import Lock, RLock
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from weakref import WeakKeyDictionary
 
 import requests
+
+
+_SESSION_LOCKS: WeakKeyDictionary[requests.Session, RLock] = WeakKeyDictionary()
+_SESSION_LOCKS_GUARD = Lock()
+
+
+class ResponseProcessingFailure(requests.RequestException):
+    """A response arrived, but Requests failed while processing it."""
+
+    response: requests.Response
+
+    def __init__(self, cause: Exception, response: requests.Response):
+        super().__init__(str(cause), response=response)
+        self.cause = cause
+
+
+def _session_lock(session: requests.Session) -> RLock:
+    """Return the exclusive transport lock owned by one session."""
+    with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(session)
+        if lock is None:
+            lock = RLock()
+            _SESSION_LOCKS[session] = lock
+        return lock
 
 
 class _AddressPinnedAdapter(requests.adapters.HTTPAdapter):
@@ -61,15 +87,35 @@ def request_to_resolved_address(
     **kwargs: Any,
 ) -> requests.Response:
     """Send one request to a resolved address without changing its HTTP or TLS hostname."""
-    previous_adapters = OrderedDict(session.adapters)
-    adapter = _AddressPinnedAdapter(url, resolved_address)
-    session.mount(url, adapter)
-    try:
-        return session.request(method, url, **kwargs)
-    finally:
-        adapter.close()
-        session.adapters.clear()
-        session.adapters.update(previous_adapters)
+    with _session_lock(session):
+        previous_adapters = OrderedDict(session.adapters)
+        adapter = _AddressPinnedAdapter(url, resolved_address)
+        captured_response = None
+
+        def capture_response(response, *_args, **_kwargs):
+            nonlocal captured_response
+            captured_response = response
+            return response
+
+        hooks = dict(kwargs.pop("hooks", {}) or {})
+        response_hooks = hooks.get("response", ())
+        if response_hooks is None:
+            response_hooks = ()
+        elif callable(response_hooks):
+            response_hooks = (response_hooks,)
+        hooks["response"] = (capture_response, *response_hooks)
+        session.mount(url, adapter)
+        try:
+            try:
+                return session.request(method, url, hooks=hooks, **kwargs)
+            except (ValueError, requests.RequestException) as exc:
+                if captured_response is not None:
+                    raise ResponseProcessingFailure(exc, captured_response) from exc
+                raise
+        finally:
+            adapter.close()
+            session.adapters.clear()
+            session.adapters.update(previous_adapters)
 
 
-__all__ = ("request_to_resolved_address",)
+__all__ = ("ResponseProcessingFailure", "request_to_resolved_address")

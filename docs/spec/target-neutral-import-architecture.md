@@ -769,15 +769,22 @@ The row is created when the request is made, so it is also the attempt record. I
 Inference Backend call and survives every outcome.
 
 Completion adds the outcome (`candidate` or `no_match`), the selected candidate reference, the
-required explanation, backend metadata (model, request and response ids, finish reason, per-attempt
-records, and which configuration source supplied the Inference Backend), and the raw response text for
-diagnostics. Failure adds the typed failure reason and the raw response text when one was received.
+required explanation, backend metadata (the configured model, validated finish reason, per-attempt
+records, and which configuration source supplied the Inference Backend), and a response diagnostic.
+Failure adds the typed failure reason and the same diagnostic shape.
+
+The response diagnostic records whether the body was absent, interrupted, empty, or present, and it
+records the HTTP status when one was received. The delivery uses bearer authentication, so it never
+retains non-empty response text. A proven credential echo is replaced with a fixed redaction marker.
+Other non-empty text is marked as withheld. Response-supplied request ids, response ids, and model
+names are also withheld because separate metadata fields can contain credential fragments. The adapter
+still parses the response in memory so a valid response object can supply the outcome and explanation.
 
 Status `completed` requires a valid response object. Outcome `no_match` requires a valid JSON no-match
 object with its own explanation, which the operator reads to understand why the evidence did not
 distinguish the candidates. A refusal or an empty-content completion carries no such explanation, so it
-is not `no_match`: it sets status `failed` with typed reason `backend_refusal` and retains the raw
-response for diagnostics.
+is not `no_match`: it sets status `failed` with typed reason `backend_refusal`. Its diagnostic retains
+the receipt and status but withholds non-empty response text.
 
 ### 7.4 Staleness
 
@@ -889,13 +896,14 @@ schema. Semantic checks after schema validation:
 
 An invented, missing, duplicated, or malformed candidate identifier is an invalid backend response. A
 wrong `finish_reason` is the same class. The proposal row already exists, so the runtime sets that row
-to status `failed` with its typed reason and the raw response text, and the attempt never produces a
+to status `failed` with its typed reason and response diagnostic, and the attempt never produces a
 candidate outcome. Never repair it with fuzzy matching. Never send a silent second request.
 
 A structured-output refusal (successful HTTP status, `finish_reason` `stop`, `message.refusal` set, no
 content) and an empty-content completion set status `failed` with typed reason `backend_refusal` and
-retain the raw response. Neither is `no_match`: `no_match` requires a valid JSON no-match object with
-its explanation. Neither is retried automatically, and neither is classified as an invalid response.
+retain the response diagnostic without non-empty response text. Neither is `no_match`: `no_match`
+requires a valid JSON no-match object with its explanation. Neither is retried automatically, and
+neither is classified as an invalid response.
 
 Opaque candidate ids are generated per request as zero-padded sequential strings of the form
 `candidate-0001` (spec default).
@@ -1125,9 +1133,11 @@ identical segment carries one row per contributing Source Trace (section 5.7).
 
 `ResolutionProposal` stores the immutable request content (including the resolved Device object type
 and id), the Candidate Snapshot, the five-value status, the completion content, the backend metadata
-and per-attempt records, the raw response text, the typed failure reason, and the one-shot decision
-fields (`decision`, deciding operator, decision time, and the `TerminationResolution` link). It stores
-no secret value.
+and per-attempt records, the response diagnostic, the typed failure reason, and the one-shot decision
+fields (`decision`, deciding operator, decision time, and the `TerminationResolution` link). The
+diagnostic stores receipt and status but withholds non-empty authenticated response text. Backend
+metadata stores configured values and validated fixed-domain values, not arbitrary response metadata.
+It stores no secret value.
 
 ### 9.2 Changed models
 
@@ -1467,8 +1477,8 @@ transaction.
 | Vault 401 or 403 | Non-transient | Fail closed, never try another credential source |
 | Missing secret path or field | Non-transient | Fail closed, identify the Inference Backend and not the secret path |
 | Empty or wrongly typed secret value | Non-transient | Fail closed, never send an inference request |
-| Backend refusal: `finish_reason` `stop` with empty content or a refusal payload | Non-transient, typed reason `backend_refusal` | Set the row to `failed`, retain the raw response, never produce a candidate outcome, no automatic retry |
-| Invalid backend response: content is present but fails JSON parsing, schema validation, or candidate-id validation. A malformed envelope or a non-`stop` finish reason classifies here too | Non-transient, typed reason `invalid_response` | Set the row to `failed`, retain the raw response, never produce a candidate outcome, no automatic retry |
+| Backend refusal: `finish_reason` `stop` with empty content or a refusal payload | Non-transient, typed reason `backend_refusal` | Set the row to `failed`, retain the response diagnostic without non-empty response text, never produce a candidate outcome, no automatic retry |
+| Invalid backend response: content is present but fails JSON parsing, schema validation, or candidate-id validation. A malformed envelope or a non-`stop` finish reason classifies here too | Non-transient, typed reason `invalid_response` | Set the row to `failed`, retain the response diagnostic without non-empty response text, never produce a candidate outcome, no automatic retry |
 
 The transient HTTP statuses are the four this table names. Every other status at or above 400 is
 non-transient, including any this table does not mention, so an unlisted status fails closed with its
@@ -1497,7 +1507,9 @@ plan.
 Progress reporting counts selected Synchronization Units and Planned Changes for an execution, and
 proposal state plus attempt count for an inference job. Logs never contain a secret value, an
 authorization header, a Vault token, a Vault response body, or inference request headers. A backend
-error body is diagnostic data and is stored redacted on the proposal row, not in application logs.
+response diagnostic is stored on the proposal row, not in application logs. It keeps receipt and
+status. It replaces a proven credential echo with a fixed redaction marker and withholds all other
+non-empty authenticated response text. It also withholds arbitrary response-supplied metadata.
 
 ## 14. Sequenced implementation tickets
 
@@ -1771,8 +1783,8 @@ validator, and the acceptance transaction that revalidates freshness and upserts
 - A transient failure retries at most twice and then fails; a non-transient failure fails immediately
   with the typed reason stored.
 - An invented, missing, duplicated, or malformed candidate id, or a wrong `finish_reason`, sets the
-  row to `failed` with its typed reason and the raw response text, and never produces a candidate
-  outcome.
+  row to `failed` with its typed reason and response diagnostic, and never produces a candidate
+  outcome. The diagnostic withholds non-empty authenticated response text.
 - A structured-output refusal and an empty-content completion set the row to `failed` with typed
   reason `backend_refusal`; neither is recorded as `no_match`.
 - A stale proposal cannot be accepted, and staleness is revalidated inside the acceptance transaction
