@@ -128,6 +128,25 @@ it('sends cancel with the field, attempt, revision and CSRF token once after rep
   ]);
 });
 
+it('keeps actions busy until the post-action refresh completes', async () => {
+  let finishRefresh;
+  fetch.mockImplementation((_url, options = {}) => options.method === 'POST'
+    ? response({ok: true})
+    : new Promise(done => { finishRefresh = done; }));
+  mount(completed());
+  button('accept').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(button('accept').disabled).toBe(true);
+  button('accept').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetch).toHaveBeenCalledTimes(2);
+
+  finishRefresh(response(completed()));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(button('accept').disabled).toBe(false);
+});
+
 it('refreshes an action refusal and shows the server reason', async () => {
   fetch.mockImplementation(async (_url, options) => options.method === 'POST'
     ? {ok: false, json: async () => ({ok: false, error: 'The proposal is stale.'})}
