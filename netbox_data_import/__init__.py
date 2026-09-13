@@ -40,10 +40,10 @@ class NetBoxDataImportConfig(PluginConfig):
             raise ImproperlyConfigured(f"Plugin {cls.__module__} has an invalid configuration: {exc}") from exc
 
     def ready(self):
-        """Import the jobs module, which NetBox does not load, so its @system_job registration runs."""
+        """Import the modules NetBox does not load, so their job and task registrations run."""
         super().ready()
 
-        from . import jobs
+        from . import jobs, termination_proposal
 
 
 config = NetBoxDataImportConfig

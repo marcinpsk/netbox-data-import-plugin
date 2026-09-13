@@ -797,22 +797,27 @@ class InterruptedAndMalformedTransportTest(SimpleTestCase):
         self.assertEqual(caught.exception.diagnostic.receipt, BODY_PRESENT)
         self.assertTrue(caught.exception.diagnostic.text.startswith("[[["))
 
-    def test_a_decode_failure_outside_the_value_error_tree_is_typed(self):
-        """The interpreter under test parses the body above, so the raise it makes is reproduced here."""
+    def test_each_json_decoder_exception_is_typed(self):
+        """The interpreter under test parses the body above, so both decoder failures are explicit."""
 
-        class Recursing(requests.Response):
+        class DecoderFailure(requests.Response):
+            error_type = ValueError
+
             def json(self, **kwargs):
-                raise RecursionError("maximum recursion depth exceeded")
+                raise self.error_type("decoder failure")
 
-        response = Recursing()
-        response.status_code = 200
-        response._content = b'{"deep": true}'
+        for error_type in (ValueError, RecursionError):
+            with self.subTest(error_type=error_type.__name__):
+                response = DecoderFailure()
+                response.error_type = error_type
+                response.status_code = 200
+                response._content = b'{"deep": true}'
 
-        with self.assertRaises(MalformedEnvelope) as caught:
-            adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])._read(response, API_KEY)
+                with self.assertRaises(MalformedEnvelope) as caught:
+                    adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])._read(response, API_KEY)
 
-        self.assertFalse(caught.exception.retryable)
-        self.assertEqual(caught.exception.diagnostic.text, '{"deep": true}')
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(caught.exception.diagnostic.text, '{"deep": true}')
 
     def test_a_malformed_redirect_target_is_typed(self):
         """`requests` raises a bare ValueError while preparing it, which no caller can classify."""

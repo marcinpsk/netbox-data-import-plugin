@@ -14,6 +14,7 @@ from .views import (
     SourceResolutionViewSet,
     ImportExecutionViewSet,
     InferenceBackendViewSet,
+    ResolutionProposalViewSet,
 )
 
 router = NetBoxRouter()
@@ -26,6 +27,7 @@ router.register("column-transforms", ColumnTransformRuleViewSet)
 router.register("source-resolutions", SourceResolutionViewSet)
 router.register("executions", ImportExecutionViewSet)
 router.register("ai-backends", InferenceBackendViewSet)
+router.register("resolution-proposals", ResolutionProposalViewSet)
 
 app_name = "netbox_data_import"
 urlpatterns = router.urls

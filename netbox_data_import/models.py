@@ -1198,6 +1198,214 @@ class InferenceBackend(JobsMixin, NetBoxModel):
         )
 
 
+class ProposalStatus:
+    """The five Resolution Proposal statuses and their edges (section 7.2)."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    CHOICES = (
+        (QUEUED, "Queued"),
+        (RUNNING, "Running"),
+        (COMPLETED, "Completed"),
+        (FAILED, "Failed"),
+        (CANCELLED, "Cancelled"),
+    )
+    ACTIVE = (QUEUED, RUNNING)
+    TERMINAL = (COMPLETED, FAILED, CANCELLED)
+
+    #: The only permitted edges. Every other transition is refused, and a retry is a new row.
+    EDGES = {
+        QUEUED: (RUNNING, CANCELLED, FAILED),
+        RUNNING: (COMPLETED, CANCELLED, FAILED),
+        COMPLETED: (),
+        FAILED: (),
+        CANCELLED: (),
+    }
+
+
+class ProposalOutcome:
+    """What a completed Resolution Proposal concluded (section 7.8)."""
+
+    CANDIDATE = "candidate"
+    NO_MATCH = "no_match"
+
+    CHOICES = ((CANDIDATE, "Candidate"), (NO_MATCH, "No match"))
+
+
+class ProposalDecision:
+    """The one-shot operator decision, which is not a status (section 7.2)."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+    CHOICES = ((ACCEPTED, "Accepted"), (REJECTED, "Rejected"))
+
+
+class ProposalFailureReason:
+    """Typed failure reasons a Resolution Proposal stores (section 13.3).
+
+    These are persisted values with their own vocabulary. The job maps adapter categories onto them
+    explicitly, so renaming an adapter category cannot silently change what is already stored.
+    """
+
+    BACKEND_REFUSAL = "backend_refusal"
+    INVALID_RESPONSE = "invalid_response"
+    RATE_LIMIT = "rate_limit"
+    TEMPORARY_BACKEND_FAILURE = "temporary_backend_failure"
+    QUEUE_UNAVAILABLE = "queue_unavailable"
+    TIMEOUT = "timeout"
+    AUTHENTICATION_FAILURE = "authentication_failure"
+    INVALID_CONFIGURATION = "invalid_configuration"
+    CREDENTIAL_UNAVAILABLE = "credential_unavailable"
+    CREDENTIAL_DENIED = "credential_denied"
+    CREDENTIAL_INVALID = "credential_invalid"
+
+    CHOICES = (
+        (BACKEND_REFUSAL, "Backend refusal"),
+        (INVALID_RESPONSE, "Invalid backend response"),
+        (RATE_LIMIT, "Rate limited"),
+        (TEMPORARY_BACKEND_FAILURE, "Temporary backend failure"),
+        (QUEUE_UNAVAILABLE, "Queue unavailable"),
+        (TIMEOUT, "Timeout"),
+        (AUTHENTICATION_FAILURE, "Backend authentication failure"),
+        (INVALID_CONFIGURATION, "Invalid configuration"),
+        (CREDENTIAL_UNAVAILABLE, "Credential infrastructure unavailable"),
+        (CREDENTIAL_DENIED, "Credential denied"),
+        (CREDENTIAL_INVALID, "Invalid credential reference or secret"),
+    )
+
+    #: Section 7.5: these retry at most twice inside the same proposal; every other reason fails at once.
+    TRANSIENT = (RATE_LIMIT, TEMPORARY_BACKEND_FAILURE, TIMEOUT, CREDENTIAL_UNAVAILABLE)
+
+
+class ResolutionProposal(DigestIndexedMixin, models.Model):
+    """One Resolution Proposal request, attempt, and operator decision (section 7).
+
+    A plain audit model on purpose: it carries no profile policy and must stay out of the profile
+    YAML policy export that `PolicySectionModel` subclasses enter.
+    """
+
+    DIGEST_SOURCE_FIELD = "field_key"
+    DIGEST_FIELD = "field_key_digest"
+
+    # NetBox's generic views scope a queryset with `restrict()`, which only this manager provides.
+    objects = RestrictedQuerySet.as_manager()
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="resolution_proposals",
+    )
+    task_type = models.CharField(
+        max_length=50,
+        choices=((SELECT_TERMINATION_TASK, "Select termination"),),
+    )
+    field_key = models.TextField()
+    field_key_digest = models.CharField(
+        max_length=64,
+        blank=True,
+        editable=False,
+        help_text="Fixed-width digest of field_key, which is what the index and constraint carry",
+    )
+    status = models.CharField(max_length=20, choices=ProposalStatus.CHOICES, default=ProposalStatus.QUEUED)
+
+    source_evidence = models.JSONField(help_text="The source values for the bound field, frozen at request time.")
+    resolved_device_type = models.ForeignKey(to="core.ObjectType", on_delete=models.PROTECT, related_name="+")
+    resolved_device_id = models.PositiveBigIntegerField()
+    prompt_version = models.PositiveIntegerField()
+    response_schema_version = models.PositiveIntegerField()
+    candidate_snapshot = models.JSONField(help_text="The eligible candidate set as it stood at request time.")
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created = models.DateTimeField(auto_now_add=True)
+    last_updated = models.DateTimeField(auto_now=True)
+
+    outcome = models.CharField(max_length=20, choices=ProposalOutcome.CHOICES, blank=True, default="")
+    selected_candidate_id = models.CharField(max_length=100, blank=True, default="")
+    selected_object_type = models.ForeignKey(
+        to="core.ObjectType", on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
+    selected_object_id = models.PositiveBigIntegerField(null=True, blank=True)
+    explanation = models.TextField(blank=True, default="")
+    backend_metadata = models.JSONField(null=True, blank=True)
+    # The adapter's whole diagnostic, so absent, empty and interrupted receipts stay distinguishable.
+    response_diagnostic = models.JSONField(null=True, blank=True)
+
+    failure_reason = models.CharField(max_length=50, choices=ProposalFailureReason.CHOICES, blank=True, default="")
+
+    decision = models.CharField(max_length=20, choices=ProposalDecision.CHOICES, blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    written_resolution = models.ForeignKey(
+        TerminationResolution, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    class Meta:
+        ordering = ["-created"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "task_type", "field_key_digest"],
+                condition=models.Q(status__in=ProposalStatus.ACTIVE),
+                name="ndi_resolutionproposal_one_active",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(status=ProposalStatus.COMPLETED) & ~models.Q(outcome=""))
+                | (~models.Q(status=ProposalStatus.COMPLETED) & models.Q(outcome="")),
+                name="ndi_resolutionproposal_completed_iff_outcome",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(status=ProposalStatus.FAILED) & ~models.Q(failure_reason=""))
+                | (~models.Q(status=ProposalStatus.FAILED) & models.Q(failure_reason="")),
+                name="ndi_resolutionproposal_failed_iff_reason",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(outcome=ProposalOutcome.CANDIDATE)
+                | (
+                    models.Q(selected_object_type__isnull=False, selected_object_id__isnull=False)
+                    & ~models.Q(selected_candidate_id="")
+                ),
+                name="ndi_resolutionproposal_candidate_has_selection",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(outcome=ProposalOutcome.NO_MATCH)
+                | models.Q(
+                    selected_object_type__isnull=True, selected_object_id__isnull=True, selected_candidate_id=""
+                ),
+                name="ndi_resolutionproposal_no_match_has_no_selection",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(decision="", decided_at__isnull=True)
+                | (~models.Q(decision="") & models.Q(decided_at__isnull=False)),
+                name="ndi_resolutionproposal_decision_group",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(decision="") | models.Q(status=ProposalStatus.COMPLETED),
+                name="ndi_resolutionproposal_decision_needs_completed",
+            ),
+        ]
+        verbose_name = "Resolution Proposal"
+        verbose_name_plural = "Resolution Proposals"
+
+    def clean(self):
+        """Reject a noncanonical field key, and derive the index key before validate_unique reads it."""
+        super().clean()
+        try:
+            _canonical_termination_field_key(self.field_key)
+        except ValidationError as exc:
+            raise ValidationError({"field_key": exc}) from exc
+        self._derive_digest()
+
+    def __str__(self):
+        return f"{self.task_type}: {self.status}"
+
+
 class IgnoredDevice(PolicySectionModel):
     """Per-device ignore record — prevents a specific source device from being imported."""
 

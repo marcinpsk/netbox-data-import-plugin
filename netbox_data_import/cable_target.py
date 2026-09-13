@@ -324,6 +324,17 @@ def _visible_devices(netbox_reader, names) -> dict[str, list]:
     return grouped
 
 
+def resolved_device_for(field_key: str, netbox_reader):
+    """Return the one visible Device a termination field key names, or None when it names no single one.
+
+    A proposal freezes this reference and revalidates it, so the retrieval and the freshness check
+    have to agree on what "the resolved Device" means.
+    """
+    device_name = parse_termination_field_key(field_key)["device"]
+    devices = _visible_devices(netbox_reader, [device_name]).get(identity_text(device_name), [])
+    return devices[0] if len(devices) == 1 else None
+
+
 def eligible_terminations(
     field_key: str,
     netbox_reader,
@@ -340,12 +351,11 @@ def eligible_terminations(
     query.
     """
     parsed = parse_termination_field_key(field_key)
-    device_name, kind = parsed["device"], parsed["kind"]
+    kind = parsed["kind"]
     accessor = _READER_ACCESSOR_BY_KIND[kind]
-    devices = _visible_devices(netbox_reader, [device_name]).get(identity_text(device_name), [])
-    if len(devices) != 1:
+    device = resolved_device_for(field_key, netbox_reader)
+    if device is None:
         return EligibleTerminations(candidates=(), total=0)
-    device = devices[0]
     candidates = getattr(netbox_reader, accessor)().filter(device_id=device.pk)
     if parsed["role"] == MAPPED_PEER_ROLE:
         from .models import TerminationResolution, index_digest

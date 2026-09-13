@@ -3800,9 +3800,16 @@ def _object_type_label(obj) -> str:
 class _TraceWorkspaceMixin:
     """Load the reviewed preview a trace workspace request acts on."""
 
+    preview_profile_action = "change"
+    requires_preview_revision = False
+
     def reviewed_preview(self, request):
         """Return the profile, the stored document and the reviewed workspace, or None."""
-        preview = load_cached_preview(request)
+        preview = load_cached_preview(
+            request,
+            profile_action=self.preview_profile_action,
+            require_revision=self.requires_preview_revision,
+        )
         if preview is None:
             return None
         profile, workspace = preview
@@ -3823,21 +3830,29 @@ class _TraceWorkspaceMixin:
         messages.warning(request, "The saved import target is no longer available. Start a new preview.")
         return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
-    def refuse_unregistered_adapter(self, request, profile):
-        """Return the response that ends a request this release cannot plan for, or None.
-
-        Planning raises UnknownSourceAdapter, so a workspace request that reaches it without this
-        gate answers a 500. The preview is discarded because no release-side decision revives it.
-        """
+    @staticmethod
+    def unregistered_adapter_reason(profile):
+        """Return why this release cannot plan for the profile's adapter, or None."""
         try:
             validate_registered_adapter(profile)
             # Planning raises the same error for a registered adapter no Target Module implements.
             validate_adapter_target_module(profile.source_adapter)
         except ValidationError as exc:
-            _discard_import_preview(request)
-            messages.warning(request, "; ".join(exc.messages))
-            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+            return "; ".join(exc.messages)
         return None
+
+    def refuse_unregistered_adapter(self, request, profile):
+        """Return the response that ends a request this release cannot plan for, or None.
+
+        Planning raises UnknownSourceAdapter, so a request that reaches it without this gate answers
+        a 500. The preview is discarded because no release-side decision revives it.
+        """
+        reason = self.unregistered_adapter_reason(profile)
+        if reason is None:
+            return None
+        _discard_import_preview(request)
+        messages.warning(request, reason)
+        return redirect(reverse("plugins:netbox_data_import:import_setup"))
 
     @staticmethod
     def live_plan(profile, document, request, planning_context):
@@ -4113,6 +4128,261 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
             return _preview_action_error(request, next_url, str(exc), status=409)
         messages.success(request, f"Termination resolved to '{chosen}'.")
         return redirect(next_url)
+
+
+class InvalidProposalId(ValueError):
+    """A proposal action received no integer id, with wording this plugin owns."""
+
+
+class _TraceProposalMixin(_TraceWorkspaceMixin):
+    """Bind proposal operations to the acting operator's preview and inventory scope."""
+
+    requires_preview_revision = True
+
+    def proposal_preview(self, request):
+        """Return the reviewed context, refusing requests without a preview."""
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            raise PreviewActionInvalid("No import preview in progress.")
+        return loaded
+
+    def proposal_context(self, request):
+        """Return the preview and scoped reader, refusing requests without a preview."""
+        profile, document, workspace, planning_context = self.proposal_preview(request)
+        reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        return profile, document, workspace, planning_context, reader
+
+    @staticmethod
+    def proposal_payload(proposal, reader):
+        """Return the audit record with both computed freshness triggers."""
+        from .api.serializers import ResolutionProposalSerializer
+        from .proposal_decisions import proposal_staleness
+
+        record = ResolutionProposalSerializer(proposal).data
+        if reader is None:
+            return {
+                "ok": True,
+                "proposal": record,
+                "staleness": None,
+                "staleness_error": "The saved import target is gone or outside your view scope.",
+            }
+        stale = proposal_staleness(proposal, netbox_reader=reader)
+        return {
+            "ok": True,
+            "proposal": record,
+            "staleness": {
+                "is_stale": stale.is_stale,
+                "resolved_device_changed": stale.resolved_device_changed,
+                "candidates_changed": stale.candidates_changed,
+            },
+        }
+
+    def dispatch(self, request, *args, **kwargs):
+        """Translate domain refusals into the workspace JSON envelope."""
+        from .proposal_tasks import UnusableCandidateSet
+        from .resolution_proposals import ActiveProposalExists
+        from .termination_proposal import UnsupportedProposalRole
+
+        try:
+            return super().dispatch(request, *args, **kwargs)
+        except InvalidProposalId as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+        except (PreviewActionInvalid, ActiveProposalExists) as exc:
+            return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+        except UnusableCandidateSet as exc:
+            return JsonResponse({"ok": False, "error": str(exc), "reason": exc.reason}, status=400)
+        except ObjectPermissionDenied as exc:
+            logger.warning(
+                "%s: proposal action refused outside the caller's object scope: %s", type(self).__name__, exc
+            )
+            return JsonResponse(
+                {"ok": False, "error": "Permission denied: this action is outside your NetBox object permissions."},
+                status=403,
+            )
+        except (PlanningTargetUnavailable, ValueError, UnsupportedProposalRole):
+            return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
+        except ValidationError as exc:
+            return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
+
+
+class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
+    """Freeze one unresolved field's evidence before dispatching inference."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Create the attempt row, then enqueue a job carrying its id alone."""
+        from core.models import ObjectType
+
+        from .cable_target import UNRESOLVED
+        from .field_keys import parse_termination_field_key
+        from .inference_backend import proposal_candidate_limit
+        from .jobs import ResolutionProposalJob
+        from .models import ProposalFailureReason
+        from .proposal_jobs import PROMPT_VERSION
+        from .proposal_response import RESPONSE_SCHEMA_VERSION
+        from .proposal_tasks import proposal_task
+        from .resolution_proposals import fail_proposal, request_proposal
+
+        profile, document, workspace, planning_context, reader = self.proposal_context(request)
+        reason = self.unregistered_adapter_reason(profile)
+        if reason is not None:
+            _discard_import_preview(request)
+            return JsonResponse({"ok": False, "error": reason}, status=409)
+        field_key = request.POST.get("field_key", "").strip()
+        if field_key not in _workspace_field_keys(workspace):
+            raise ValueError("This preview asked no question about that termination.")
+        task = proposal_task(SELECT_TERMINATION_TASK)
+        with locked_profile_policy(profile.pk):
+            live = ImportEngine.plan(profile, document, request.user, planning_context)
+            field = next(
+                (
+                    item
+                    for trace in ReviewWorkspace(live).traces
+                    for item in trace.terminations
+                    if item["field_key"] == field_key
+                ),
+                None,
+            )
+            if field is None:
+                raise ValueError("This field is no longer in the preview.")
+            if field["state"] != UNRESOLVED:
+                raise PreviewActionInvalid("This termination is already resolved.")
+            snapshot = task.current(
+                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_candidate_limit()
+            )
+            device = task.resolved_device(field_key=field_key, netbox_reader=reader)
+            if device is None:
+                raise PreviewActionInvalid("The resolved Device is no longer available.")
+            proposal = request_proposal(
+                profile=profile,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=field_key,
+                source_evidence={**parse_termination_field_key(field_key), "label": field["label"]},
+                resolved_device_type=ObjectType.objects.get_for_model(device),
+                resolved_device_id=device.pk,
+                prompt_version=PROMPT_VERSION,
+                response_schema_version=RESPONSE_SCHEMA_VERSION,
+                candidate_snapshot=snapshot,
+                requested_by=request.user,
+            )
+        try:
+            job = ResolutionProposalJob.enqueue(
+                name=ResolutionProposalJob.Meta.name, user=request.user, proposal_id=proposal.pk
+            )
+        except Exception:
+            fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
+            raise
+        return JsonResponse({"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "job_id": job.pk})
+
+
+class TraceProposalView(_TraceProposalMixin, PermissionRequiredMixin, View):
+    """Read the most recent attempt for a field, independent of its originating plan."""
+
+    permission_required = "netbox_data_import.view_importprofile"
+    preview_profile_action = "view"
+
+    def get(self, request):
+        """Return the current proposal and name each freshness trigger."""
+        from .field_keys import parse_termination_field_key
+        from .models import ResolutionProposal
+
+        profile, _document, _workspace, planning_context = self.proposal_preview(request)
+        field_key = request.GET.get("field_key", "").strip()
+        parse_termination_field_key(field_key)
+        proposal = (
+            ResolutionProposal.objects.filter(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key)
+            .order_by("-created", "-pk")
+            .first()
+        )
+        if proposal is None:
+            return JsonResponse({"ok": True, "proposal": None, "staleness": None})
+        try:
+            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+        except PlanningTargetUnavailable:
+            reader = None
+        return JsonResponse(self.proposal_payload(proposal, reader))
+
+
+class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, View):
+    """Locate a proposal within this preview's profile before applying a decision."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+    requires_reader = True
+
+    def post(self, request):
+        """Refuse an unavailable attempt or a transition that another operator already took."""
+        from .models import ResolutionProposal
+
+        if self.requires_reader:
+            profile, _document, workspace, _context, reader = self.proposal_context(request)
+        else:
+            profile, _document, workspace, _context = self.proposal_preview(request)
+            reader = None
+        try:
+            proposal_id = int(request.POST.get("proposal_id", ""))
+        except ValueError:
+            raise InvalidProposalId("Enter a valid proposal_id integer.") from None
+        proposal = get_object_or_404(
+            ResolutionProposal,
+            pk=proposal_id,
+            profile=profile,
+            task_type=SELECT_TERMINATION_TASK,
+        )
+        if proposal.field_key not in _workspace_field_keys(workspace):
+            raise ValueError("This preview asked no question about that termination.")
+        if not self.apply(proposal, request, reader):
+            raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
+        proposal.refresh_from_db()
+        payload = {"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "decision": proposal.decision}
+        if request.session.get(PREVIEW_DIRTY_SESSION_KEY) is True:
+            payload["preview_state"] = "recalculation_required"
+        return JsonResponse(payload)
+
+    def apply(self, proposal, request, reader):
+        """Apply the action implemented by the concrete endpoint."""
+        raise NotImplementedError
+
+
+class TraceCancelProposalView(_TraceProposalActionView):
+    """Allow any operator with preview and resolved Device access to cancel active work."""
+
+    def apply(self, proposal, request, reader):
+        """Cancel through the lifecycle's conditional transition."""
+        from .proposal_tasks import proposal_task
+        from .resolution_proposals import cancel_proposal
+
+        if (
+            proposal_task(proposal.task_type).resolved_device(field_key=proposal.field_key, netbox_reader=reader)
+            is None
+        ):
+            raise ObjectPermissionDenied("dcim.view_device")
+        return cancel_proposal(proposal.pk)
+
+
+class TraceAcceptProposalView(_TraceProposalActionView):
+    """Accept through the existing transaction; the operator replans their own preview."""
+
+    def apply(self, proposal, request, reader):
+        """Record the accepted resolution and require an explicit preview recalculation."""
+        from .proposal_decisions import accept_proposal
+
+        accepted = accept_proposal(proposal.pk, operator=request.user, netbox_reader=reader)
+        if accepted:
+            mark_preview_dirty(request.session)
+        return accepted
+
+
+class TraceRejectProposalView(_TraceProposalActionView):
+    """Record the explicit rejection without binding it to the requesting operator."""
+
+    requires_reader = False
+
+    def apply(self, proposal, request, reader):
+        """Reject through the permission-checked decision service."""
+        from .proposal_decisions import reject_proposal
+
+        return reject_proposal(proposal.pk, operator=request.user)
 
 
 class QuickResolveManufacturerView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):

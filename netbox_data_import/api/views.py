@@ -5,8 +5,8 @@
 from django.http import Http404
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 from rest_framework import viewsets, permissions
-from rest_framework.permissions import DjangoModelPermissions
 from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import DjangoModelPermissions
 
 from ..models import (
     locked_profile_policy,
@@ -20,6 +20,7 @@ from ..models import (
     SourceResolution,
     ImportExecution,
     InferenceBackend,
+    ResolutionProposal,
 )
 from .serializers import (
     ImportProfileSerializer,
@@ -31,6 +32,7 @@ from .serializers import (
     SourceResolutionSerializer,
     ImportExecutionSerializer,
     InferenceBackendSerializer,
+    ResolutionProposalSerializer,
 )
 
 
@@ -169,6 +171,14 @@ class ImportExecutionViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModel
 
     queryset = ImportExecution.objects.select_related("profile")
     serializer_class = ImportExecutionSerializer
+    permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
+
+
+class ResolutionProposalViewSet(_ProfileScopedQuerySetMixin, viewsets.ReadOnlyModelViewSet):
+    """Read-only viewset for Resolution Proposal history."""
+
+    queryset = ResolutionProposal.objects.select_related("profile")
+    serializer_class = ResolutionProposalSerializer
     permission_classes = [permissions.IsAuthenticated, DjangoModelPermissionsWithView]
 
 
