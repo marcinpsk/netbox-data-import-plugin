@@ -627,6 +627,7 @@ class _Dependencies:
     rack_identity: str | None = None
     planned_rack: Any = None
     rack_change_identity: str | None = None
+    unavailable_rack_name: str = ""
     role_slug: str = ""
     explicit_device_type: bool = False
     changes: tuple[PlannedChange, ...] = ()
@@ -665,11 +666,12 @@ class _Match:
 
 @dataclass(frozen=True)
 class _PlannedRack:
-    """The identity, operation, and final Rack state another unit will write."""
+    """One Rack row's final state and whether its write can run."""
 
     identity: str
     operation: str
     candidate: Any
+    executable: bool
 
     @property
     def change_identity(self) -> str:
@@ -1186,12 +1188,12 @@ class _DeviceBatch:
                 _source_text(row.get("source_id")),
             )
             actor = self.reader.actor
-            if validation is not None or (actor is not None and not _candidate_save_is_allowed(actor, candidate)):
-                continue
+            executable = validation is None and (actor is None or _candidate_save_is_allowed(actor, candidate))
             planned[name_key] = _PlannedRack(
                 rack_unit_identity(row),
                 "create" if rack is None else "update",
                 candidate,
+                executable,
             )
         return planned
 
@@ -1265,15 +1267,21 @@ class _DeviceBatch:
         planned_rack = self._planned_racks.get(rack_key) if rack_name else None
         if rack_name and rack is None and planned_rack is None:
             return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
+        executable_rack = planned_rack if planned_rack is not None and planned_rack.executable else None
         return _Dependencies(
             device_type=device_type,
             role=role,
             rack=rack,
             rack_identity=(
-                planned_rack.identity if planned_rack is not None and planned_rack.operation == "create" else None
+                executable_rack.identity
+                if executable_rack is not None and executable_rack.operation == "create"
+                else None
             ),
-            planned_rack=planned_rack.candidate if planned_rack is not None else None,
-            rack_change_identity=planned_rack.change_identity if planned_rack is not None else None,
+            planned_rack=executable_rack.candidate if executable_rack is not None else None,
+            rack_change_identity=executable_rack.change_identity if executable_rack is not None else None,
+            unavailable_rack_name=(
+                rack_name if rack is None and planned_rack is not None and not planned_rack.executable else ""
+            ),
             role_slug=role_slug,
             explicit_device_type=explicit,
             changes=tuple(changes),
@@ -1783,6 +1791,13 @@ class DeviceModule:
             "ip_fields": ip_fields,
         }
         if match.device is None:
+            if dependencies.unavailable_rack_name:
+                problem(
+                    Disposition.BLOCKED,
+                    "device.rack_missing",
+                    {"rack_name": dependencies.unavailable_rack_name},
+                )
+                return _with_issues(identity, issues)
             claim = batch.prepare_claim(
                 dependencies.rack,
                 dependencies.rack_identity,
@@ -1827,6 +1842,13 @@ class DeviceModule:
         review = batch.review(row, match.device, dependencies, placement, payload)
         display = self._review_display(display, review)
         payload = _reviewed_payload(payload, review, match.device)
+        if dependencies.unavailable_rack_name and payload["rack_id"] is None and payload["rack_name"]:
+            problem(
+                Disposition.BLOCKED,
+                "device.rack_missing",
+                {"rack_name": dependencies.unavailable_rack_name},
+            )
+            return _with_issues(identity, issues)
         relation_changes = () if "role" in review.ignored else dependencies.changes
         effective_type = dependencies.device_type
         if payload["device_type_id"] is not None and payload["device_type_id"] != dependencies.device_type.pk:

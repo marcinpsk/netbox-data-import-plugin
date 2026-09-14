@@ -221,6 +221,30 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
         self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE, device_unit.diagnostics)
         self.assertEqual(device_unit.changes[-1].dependencies, ())
 
+    def test_a_blocked_rack_create_does_not_leave_a_dangling_device_dependency(self):
+        """A Device stays blocked when its batch cannot create the Rack it needs."""
+        from dcim.models import Device, Rack, Site
+
+        self.rack.delete()
+        actor = user_with_object_permission(
+            "blocked-rack-create-planner",
+            [
+                (Site, ["view"], None),
+                (Rack, ["view"], None),
+                (Device, ["view", "add"], None),
+            ],
+        )
+
+        plan = self._plan(actor=actor)
+
+        rack_unit = plan.unit("rack:source:R-1")
+        device_unit = plan.unit("device:source:D-1")
+        self.assertEqual(rack_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(rack_unit.diagnostics[0].code, "rack.add_permission")
+        self.assertEqual(device_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.rack_missing")
+        self.assertEqual(device_unit.changes, ())
+
     def test_merged_rack_and_device_changes_apply_in_dependency_order(self):
         """Applying the merged changes places the device in the new rack."""
         from django.contrib.auth import get_user_model
