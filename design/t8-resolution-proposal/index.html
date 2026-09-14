@@ -1,0 +1,1045 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/design/t8-resolution-proposal/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>T8 Resolution Proposal: design record - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#t8-resolution-proposal-design-record" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              T8 Resolution Proposal: design record
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#problem-as-a-class" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem, as a class
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-this-record-was-produced" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How this record was produced
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#divergence-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Divergence table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#merged-design-r1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Merged design (r1)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#section-0-closed-and-refuted-claims" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Section 0: closed and refuted claims
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#blockers-found-in-round-1-and-their-r2-revisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Blockers found in round 1, and their r2 revisions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Blockers found in round 1, and their r2 revisions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#correction-in-r5-preserve-every-existing-classification-was-wrong" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Correction in r5: "preserve every existing classification" was wrong
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#split-round-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Split (round 3)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#open-work" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Open work
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#round-5-and-revision-r6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Round 5 and revision r6
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verdict" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verdict
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#candidate-ceiling-revision-2026-09-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Candidate ceiling revision, 2026-09-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#first-implementable-increment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        First implementable increment
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="t8-resolution-proposal-design-record">T8 Resolution Proposal: design record</h1>
+<p>Revision r6 (RATIFIED at round 5, after adversarial rounds 1-5). The adapter diagnostic mechanism was
+split to #94 and is now an implemented prerequisite, not a deferral. Implementation review corrected
+the diagnostic on 2026-09-13: it retains receipt and status but withholds non-empty authenticated
+response text. Scope: issue #95, the 13 acceptance criteria of ticket T8. T8 is now implemented in
+production code and covered by its acceptance tests.</p>
+<h2 id="problem-as-a-class">Problem, as a class</h2>
+<p>A suggestion must never silently become an authority. The failure class covers: a proposal accepted
+after the world moved, a decision recorded twice, a late worker response overwriting a terminal row,
+an LLM-invented candidate id treated as a selection, and a credential reachable through
+operator-supplied input.</p>
+<h2 id="how-this-record-was-produced">How this record was produced</h2>
+<p>Two designs from one factual brief, neither designer seeing the other's until both were complete.
+The blind design ran on <code>gpt-6-astra</code> at high reasoning in a fresh <code>codex exec</code> context; the brief
+carried the problem, the hard constraints, the merged seams and the known spec conflict, and no
+proposed solution. Convergence below is not treated as verification.</p>
+<h2 id="divergence-table">Divergence table</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Decision</th>
+<th>Primary (Claude)</th>
+<th>Blind (astra)</th>
+<th>Disposition</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Backend selection</td>
+<td>payload = proposal id; worker calls <code>resolve_active_backend()</code></td>
+<td>same</td>
+<td><strong>Converged.</strong> Requires a spec amendment to 7.5 and 10.6</td>
+<td><code>resolve_backend_by_id</code> docstring: "an editable key must not let a scoped operator resolve the deployment's own credential reference"</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Candidate-set completeness</td>
+<td>not addressed</td>
+<td>refuse unless <code>0 &lt; total &lt;= 20</code> and <code>total == len(candidates)</code></td>
+<td><strong>Revised in r2.</strong> Completeness kept, the ceiling of 20 rejected</td>
+<td>see blocker 1 below</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Raw-response retention vs no-secret rule</td>
+<td>not addressed</td>
+<td>credential-echo exception: fail, redact, record that redaction occurred</td>
+<td><strong>Take blind.</strong> Criterion 7 and constraint 12 cannot both mean unconditional byte-for-byte retention</td>
+<td>ticket criteria vs spec 8.6</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Lost worker / orphaned active row</td>
+<td>not addressed</td>
+<td>dispatch + execution deadlines, run token, recovery job</td>
+<td><strong>Take blind.</strong> Primary's partial unique index makes a stuck row block that key forever</td>
+<td>self-inflicted by disposition 6</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Model family</td>
+<td>unstated</td>
+<td>plain audit model, excluded from policy export</td>
+<td><strong>Take blind.</strong> <code>TerminationResolution</code> is a <code>PolicySectionModel</code>; making the proposal one too would put it in profile YAML export</td>
+<td><code>test_inference_secret_containment</code> asserts no <code>credential_reference</code> in the YAML export</td>
+</tr>
+<tr>
+<td>6</td>
+<td>One-active-per-key</td>
+<td>partial unique index <code>WHERE status IN ('queued','running')</code></td>
+<td>same</td>
+<td><strong>Converged</strong></td>
+<td>mirrors the <code>InferenceBackend</code> one-enabled-row index</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Snapshot equality</td>
+<td>exclude <code>display_name</code></td>
+<td>include <code>display_name</code>; a rename is stale</td>
+<td><strong>Take blind.</strong> The model chose on labels, so a changed label changes the evidence</td>
+<td>spec 7.4 "the eligible candidate set changed"</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Cancel vs late response</td>
+<td>conditional <code>UPDATE ... WHERE status='running'</code>; rowcount 0 = discard</td>
+<td>lock + reread + run token</td>
+<td><strong>Take primary as the mechanism, blind's run token as an addition.</strong> A conditional update needs no lock and cannot be lost to a read-then-write</td>
+<td></td>
+</tr>
+<tr>
+<td>9</td>
+<td>Temporal invariants</td>
+<td>conditional UPDATE + <code>CheckConstraint</code></td>
+<td><code>django-pgtrigger</code> OLD/NEW triggers</td>
+<td><strong>CONTESTED → round 1</strong></td>
+<td>a new runtime dependency needing DDL rights on every deployment</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Freshness protection</td>
+<td>row locks on frozen candidates + resolved Device, recompute under <code>locked_profile_policy</code></td>
+<td>SHARE relation locks on <code>dcim</code> tables with NOWAIT</td>
+<td><strong>CONTESTED → round 1.</strong> Primary's position: the repo already answers this</td>
+<td><code>locked_profile_policy</code> docstring: locking child rows "would leave an insert free to land in that window, because a row that does not exist yet cannot be locked" — the profile row is that lock, and <code>save_termination_resolution_and_replan</code> already takes it</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Response schema validation</td>
+<td>hand-written validator</td>
+<td>add <code>jsonschema</code> dependency</td>
+<td><strong>CONTESTED → round 1.</strong> Lean primary: the rules are a dozen exact checks</td>
+<td></td>
+</tr>
+<tr>
+<td>12</td>
+<td>Generic lifecycle vs concrete FK</td>
+<td>provider writes the resolution</td>
+<td>adapter returns an opaque <code>DecisionReceipt</code>; coordinator stores <code>written_resolution_id</code></td>
+<td><strong>Take blind.</strong> Cleaner: the coordinator never interprets a termination</td>
+<td></td>
+</tr>
+<tr>
+<td>13</td>
+<td>Task seam</td>
+<td>registry of task-type providers</td>
+<td>closed registry with <code>prepare</code>/<code>current</code>/<code>write_resolution</code></td>
+<td><strong>Converged</strong></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2 id="merged-design-r1">Merged design (r1)</h2>
+<p><strong>Modules.</strong> <code>resolution_proposals.py</code> (lifecycle: request, read, cancel, decide),
+<code>proposal_tasks.py</code> (closed task-type registry — the seam that keeps termination specifics out),
+<code>termination_proposal.py</code> (the only module knowing termination kinds and the <code>TerminationResolution</code>
+FK), <code>proposal_response.py</code> (pure strict validator), <code>proposal_jobs.py</code> + a thin <code>ResolutionProposalJob</code>.</p>
+<p><strong>Invariant ownership.</strong> Database: the partial unique index (one active per key), check constraints
+for decision-group shape, <code>no_match</code> carries no selection, terminal rows carry their content.
+Service: every ordering-dependent rule as a conditional <code>UPDATE</code> whose rowcount is the refusal —
+status edges, one-shot decision, and the cancel-versus-late-response race. Model: digest derivation
+and canonical-key validation only.</p>
+<p><strong>Acceptance transaction.</strong> <code>locked_profile_policy(profile_id)</code> → <code>select_for_update</code> the proposal →
+recheck completed/candidate/undecided → recompute candidates and resolved Device → compare → upsert
+<code>TerminationResolution</code> → conditional-write the decision group. Lock order is always profile, then
+proposal, then resolution.</p>
+<p><strong>Backend selection.</strong> The payload carries the proposal id alone. The worker calls
+<code>resolve_active_backend()</code> after claiming, and records its source. No operator-editable selector
+reaches credential resolution.</p>
+<h2 id="section-0-closed-and-refuted-claims">Section 0: closed and refuted claims</h2>
+<p>Round 1 (<code>gpt-6-astra</code>, high, fresh read-only context) returned <strong>BLOCKED r1</strong> with three contested
+items closed for the primary design.</p>
+<table>
+<thead>
+<tr>
+<th>Claim</th>
+<th>State</th>
+<th>Evidence</th>
+<th>Reopening condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Temporal invariants need <code>django-pgtrigger</code> OLD/NEW triggers</td>
+<td><strong>CLOSED for primary</strong></td>
+<td>Reviewer found no current or proposed proposal writer outside the service functions, and no race the conditional UPDATE leaves open</td>
+<td>An actual writer bypasses the service predicates</td>
+</tr>
+<tr>
+<td>Freshness needs <code>SHARE</code> relation locks on <code>dcim</code> tables</td>
+<td><strong>CLOSED for primary</strong></td>
+<td>Reviewer could not construct an interleaving meeting the overturn conditions; relation-wide SHARE is not justified for a revalidation requirement</td>
+<td>Acceptance must guarantee inventory equality <em>through commit</em> rather than revalidate inside the transaction</td>
+</tr>
+<tr>
+<td>Response validation needs a <code>jsonschema</code> dependency</td>
+<td><strong>CLOSED for primary</strong></td>
+<td>Fixed contract, a dozen exact checks</td>
+<td>The response contract becomes externally supplied or substantially more complex</td>
+</tr>
+<tr>
+<td>Narrowing candidates by port text removes the ceiling problem</td>
+<td><strong>REFUTED</strong> (round 2)</td>
+<td>Normal resolution already tries the normalized exact port name; zero or several matches is exactly what leaves the field unresolved. For source <code>Gi1/0/1</code> against inventory <code>GigabitEthernet1/0/1</code>, name filtering removes the candidate the proposal exists to consider. The <code>mapped_peer</code> narrowing at <code>cable_target.py:371</code> is justified by real <code>PortMapping</code> relationships, which have no equivalent for an unresolved termination name</td>
+<td>An authoritative naming or mapping rule proves excluded ports ineligible</td>
+</tr>
+</tbody>
+</table>
+<p>One correction the reviewer made to my own reasoning, recorded because it matters: <code>locked_profile_policy</code>
+orders <strong>cooperating profile-policy writers</strong>. It does not protect against arbitrary NetBox inventory
+inserts, and I overstated it when I cited it. The disposition still stands, on the weaker and correct
+ground that revalidation is not serialization.</p>
+<p>A second correction: duplicate JSON member names must be rejected <strong>during decoding</strong> via
+<code>object_pairs_hook</code>. Python's decoder keeps the last duplicate, so any check after <code>json.loads</code> cannot
+see that a duplicate existed.</p>
+<h2 id="blockers-found-in-round-1-and-their-r2-revisions">Blockers found in round 1, and their r2 revisions</h2>
+<p><strong>Blocker 1 — the ceiling of 20 would make the feature unusable.</strong> Verified in source: for the
+<code>termination</code> role, <code>eligible_terminations</code> returns every visible termination of the claimed kind on
+the resolved Device; the port-name narrowing at <code>cable_target.py:371</code> applies only to the
+<code>mapped_peer</code> role. A 48-port switch therefore yields <code>total=48</code>, and an <code>r1</code> request would refuse
+every interface question on ordinary equipment. The 20 is the <strong>picker's page size</strong>, not an
+eligibility bound.</p>
+<p><em>r3 (CLOSED in round 2):</em> keep complete-set comparison, and give the proposal its own retrieval
+bound, independent of <code>ELIGIBLE_TERMINATION_LIMIT</code>. Require <code>0 &lt; total &lt;= bound</code> and
+<code>len(candidates) == total</code>; refuse with <code>too_many_candidates</code> above it and <code>no_candidates</code> at zero.
+A truncated result must never establish freshness.</p>
+<p><strong>Operator decision, taken 2026-09-10: the bound is a plugin setting, <code>inference_proposal_candidate_limit</code>,
+defaulting to 64,</strong> so a deployment can support denser equipment or hold prompt cost down without a
+code change.</p>
+<p>Section 8.2.1 defines no shape for a new setting, so r4 states the predicate explicitly. It is
+validated at startup even when inference is otherwise unconfigured:</p>
+<ul>
+<li>accept a positive integer; reject <code>bool</code>, <code>float</code>, <code>str</code> and an explicit <code>None</code></li>
+<li>apply the default of 64 only when the key is <strong>omitted</strong></li>
+<li>reject a value above 1,024 before retrieval materializes or serializes candidates</li>
+</ul>
+<p><code>True</code> is the trap worth naming: it is numerically 1 and would silently admit a one-candidate set.
+The repository already excludes booleans this way in its integer timeout validation
+(<code>inference_settings.py:205</code>), and this setting follows it. Zero and negatives admit no set at all;
+<code>10**100</code> must never reach a database slice, because <code>eligible_terminations</code> materializes the slice
+before computing <code>total</code>. The hard ceiling is 1,024. The four supported NetBox termination models
+limit names to 64 characters. A compact candidate array at the ceiling stays below 1 MiB even when
+every name needs worst-case JSON escaping. The default remains 64 because a hard process and request
+size ceiling does not promise that every configured backend accepts the largest prompt.</p>
+<p><strong>Blocker 2: T7's adapter cannot supply the response diagnostic T8 requires.</strong> Neither design saw this.
+Verified in source: <code>InferenceCompletion</code> carries <code>content_text</code>, <code>is_refusal</code>, <code>finish_reason</code> and
+the backend ids only, so a structured refusal's text is discarded; and
+<code>inference_adapter.py:220</code> raises <code>MalformedEnvelope(...)</code> with a message string for a non-<code>stop</code>
+finish reason, before any content is read, so the body is lost. Criterion 7 ("sets the row to failed
+with its typed reason and response diagnostic) is not implementable through the current seam.</p>
+<p><em>r3, corrected after implementation review:</em> the adapter's <strong>diagnostic</strong> interface captures receipt
+state and HTTP status before validation, alongside its existing typed classifications. Transport
+ownership is unchanged and no <code>requests.Response</code>, session, headers, prepared request or
+credential-bearing object crosses the seam: strings and existing scalars suffice.</p>
+<p>The earlier design required the complete decoded HTTP body. That cannot satisfy the secret-containment
+invariant: a backend can reflect a bearer token in arbitrary fragments, and no bounded inspection can
+prove that retained text is safe. The corrected interface replaces a proven credential echo with a
+fixed redaction marker and marks every other non-empty authenticated body as withheld. The adapter
+still parses the body in memory. The application service stores only the validated content, configured
+backend metadata, and fixed-domain response values. It withholds arbitrary response-supplied metadata
+because separate fields can hold credential fragments. Raw response text does not cross the
+persistence seam.</p>
+<p>Round 2 found r2's version still short. <code>_read</code> raises <code>InvalidBackendConfiguration</code> (redirect),
+<code>AuthenticationFailure</code> (401/403), <code>RateLimited</code> (429) and <code>TransportFailure</code> (&gt;=400) <strong>before</strong>
+<code>response.json()</code> is ever called, verified at <code>inference_adapter.py:190-205</code>, so each path must still
+capture receipt state and status before classification.</p>
+<p><em>r3 therefore extends diagnostic carriage to</em> <strong>every typed adapter failure</strong>, distinguishing "no
+body received" from an interrupted, empty, or present body, and preserving every existing
+classification and retry behaviour.</p>
+<p>Sanitization is correspondingly wider: the worker withholds response-derived <strong>metadata</strong> (the adapter
+copies backend ids and model straight from the envelope) and sanitizes <strong>exception text</strong> (a non-<code>stop</code>
+finish reason was previously interpolated unchecked into the <code>MalformedEnvelope</code> message). It never
+persists non-empty authenticated response text.</p>
+<p><strong>Operator decision, taken 2026-09-10: this lands by reopening #94 (T7), not inside T8.</strong> Criterion 7
+of T8 was unbuildable against what T7 shipped, so it is a T7 defect. #94 is reopened and carries the
+full scope, including the two transport paths round 3 proved by execution: an interrupted body
+(<code>ChunkedEncodingError</code>, <code>response=None</code>, bytes unrecoverable after <code>post()</code> returns) and a malformed
+redirect target, which raises an <strong>untyped</strong> <code>ValueError</code> inside <code>requests</code> before <code>_read()</code> and so is
+not covered by "every typed adapter failure" at all.</p>
+<p><strong>T8 asserts the revised interface rather than tolerating either shape.</strong> Shared contract tests, run
+through the real adapter and through failure persistence, require: one diagnostic representation
+across successes and every typed failure; absent, empty, interrupted, and present receipt
+distinguishable; existing categories and <code>RateLimited.retry_after</code> intact; authenticated response text
+withheld; and only declared values crossing the seam, with <strong>no <code>getattr(..., None)</code></strong> fallback to the
+old shape.
+Field-existence tests alone would not stop drift.</p>
+<h3 id="correction-in-r5-preserve-every-existing-classification-was-wrong">Correction in r5: "preserve every existing classification" was wrong</h3>
+<p>r3 and r4 required the #94 work to preserve every existing classification. Round 4 showed that
+requirement contradicts spec 13.3, and it is my error: the blind design raised this as divergence 6,
+I dispositioned it "take blind", and then failed to carry it into the merged requirements.</p>
+<p>Spec 13.3 makes HTTP <strong>400, 404 and 405 non-transient</strong> (fail immediately) and <strong>500, 502, 503 and
+504 transient</strong> (bounded retry). <code>inference_adapter.py:200</code> collapses all seven into <code>TransportFailure</code>
+with category <code>transport_failure</code> and no status or retryability field. Verified by executing the real
+<code>_read()</code> against real <code>requests.Response</code> objects: every one of those statuses produced the same
+category.</p>
+<p>So T8 cannot derive its retry policy from the category. Retrying <code>transport_failure</code> gives a
+misconfigured 404 three attempts; not retrying it breaks the required retries for a temporary 5xx.</p>
+<p><strong>r5 requirement:</strong> the adapter interface must distinguish non-transient HTTP request and
+configuration errors from transient failures, by corrected typed classifications or a declared
+machine-readable discriminator. The worker never parses exception prose or HTTP objects to guess.
+Contract tests assert, through real T8 persistence, <strong>one outbound attempt for 400/404/405</strong> and
+<strong>three after repeated transient failures</strong>. The implementation belongs to #94 with the rest of the
+adapter work.</p>
+<h2 id="status">Status</h2>
+<p><strong>RATIFIED.</strong> See "Round 5 and revision r6" below for the verdict and its scope.</p>
+<h2 id="split-round-3">Split (round 3)</h2>
+<p>Blockers stopped clustering in the T8 core after round 1 and now sit entirely in the <strong>adapter
+diagnostic mechanism</strong>. That mechanism is deferred to #94 by the operator's decision above.</p>
+<p>The retained core is: the model and its database guarantees, the lifecycle and task seam, backend
+selection, candidate policy and freshness, the acceptance transaction and lock order, the strict
+validator, and worker ownership, cancellation and recovery. All were closed across rounds 1-3.</p>
+<p><strong>The core does not stand fully alone, and this record says so rather than claiming otherwise.</strong>
+T8 criterion 7 requires the response diagnostic, which only the #94 interface can supply. T8 is
+already declared blocked by T7 in the specification, so the dependency is stated, not introduced
+here. The core design is ratifiable; the <em>delivery</em> of T8 waits on #94.</p>
+<h2 id="open-work">Open work</h2>
+<p>Three spec amendments are required and are the operator's call, not this design's:</p>
+<ul>
+<li>Section 7.5's editable-key lookup with same-name file fallback, and the job-payload summary in
+  section 10.6. Both diverge from the ratified backend selection. The operator decided on
+  2026-09-10 that they land inside T8's first pull request, with the code that diverges from them.</li>
+<li>~~Section 13.3 does not name HTTP 408 Request Timeout.~~ <strong>Decided 2026-09-10:</strong> 408 stays
+  non-transient. RFC 9110 permits a retry there but does not require one. Rather than special-case
+  one status, 13.3 now states the rule the adapter implements: the four statuses it names are the
+  transient ones, and every other status at or above 400 fails closed with its diagnostic.</li>
+</ul>
+<h2 id="round-5-and-revision-r6">Round 5 and revision r6</h2>
+<p>Round 5 reviewed r5 against the implemented prerequisite and returned <strong>BLOCKED</strong>. It closed the
+design half of the retry requirement and blocked on two defects in the adapter itself.</p>
+<p><strong>Half B belongs to T8's first increment, not to this ratification.</strong> The r5 requirement asked for
+contract tests "through real T8 persistence". Round 5 accepted that requiring them before any T8 code
+exists confuses design acceptance with delivery acceptance. They stay mandatory as acceptance
+conditions on T8's first increment: real adapter, real worker, real proposal row, proving one outbound
+attempt for 400/404/405 and three after repeated transient failures, with the terminal failure and its
+diagnostic stored.</p>
+<p><strong>Two defects in the prerequisite, both verified here before being accepted, both fixed in <code>ce49271</code>.</strong></p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Defect</th>
+<th>Verification</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>5.1</td>
+<td>Every error status outside 400/404/405 was retryable</td>
+<td>Reproduced 406, 409, 413, 415, 422 and 501 as <code>TransportFailure(retryable=True)</code> against a real local HTTP server</td>
+<td>The default is inverted. Specification 13.3 enumerates the transient statuses and nothing else, so <code>TRANSIENT_STATUSES</code> decides and every other status at or above 400 is non-transient</td>
+</tr>
+<tr>
+<td>5.2</td>
+<td>A decoder failure escaped <code>complete()</code> untyped</td>
+<td><code>response.json()</code> on <code>[</code>x10000 <code>0</code> <code>]</code>x10000, real <code>requests.Response</code>: <strong>3.12.14 and 3.13.5 raise <code>RecursionError</code>, 3.14.4 parses it</strong></td>
+<td>Caught with <code>(ValueError, RecursionError)</code>. Two tests, because the suite's own interpreter cannot reproduce the raise</td>
+</tr>
+</tbody>
+</table>
+<p>5.2 carries a trap worth stating plainly: <code>requires-python</code> is <code>&gt;=3.12.0</code>, so the defect is real on
+supported deployments, but the NetBox image the suite runs in ships Python 3.14.4, where CPython's
+decoder no longer recurses. An end-to-end test of that input alone would be an assertion incapable of
+failing. The guard that can fail on any interpreter drives the real <code>_read</code> with a <code>requests.Response</code>
+subclass whose <code>json()</code> raises, and removing <code>RecursionError</code> from the catch fails it.</p>
+<p>The unused-constant finding closed as a side effect of 5.1: <code>NON_TRANSIENT_STATUSES</code> is deleted, and
+specification 13.3's transient list now has one declaration that both <code>_read</code> and the test read.</p>
+<p><strong>Closed specification question.</strong> HTTP 408 Request Timeout is non-transient under the inverted
+default, as the 2026-09-10 decision above records.</p>
+<h2 id="verdict">Verdict</h2>
+<p><code>RATIFY — revision r5 core, prerequisite at ce49271</code>, returned after findings 5.1, 5.2 and the
+unused-constant finding closed against that commit and the independence objection was re-answered
+with the record in scope.</p>
+<p>The reviewer's reasoning on independence is recorded because it decides how this protocol treats a
+prerequisite: the rule that a retained core must stand "without the deferred mechanism" permits
+dependencies on established implementations, or an ordinary dependency on NetBox or the database
+would defeat every ratification. The adapter is still a correctness dependency of T8. Its required
+function is no longer deferred, because it is built, reviewed and lands first. The r5 text calling
+that mechanism "deferred", at lines 194-197, describes the state before ce49271 and is superseded.</p>
+<p>Ratification is not a claim that T8 passes its acceptance tests. It must still prove failure
+persistence through this interface.</p>
+<h2 id="candidate-ceiling-revision-2026-09-13">Candidate ceiling revision, 2026-09-13</h2>
+<p>The failure class is resource exhaustion through an operator-configured candidate count. The
+<code>inference_settings</code> module owns the interface and rejects an unsupported count before the retrieval
+seam materializes a queryset. Complete-set comparison remains unchanged, so the proposal refuses a
+set above the configured count instead of truncating it.</p>
+<p>The primary design considered a ceiling of 128 to keep the largest prompt near the default. A blind
+Codex design, produced from the problem and evidence without the primary candidate, proposed 1,024
+to preserve dense-equipment headroom. Both used the session's GPT-5 model family and reasoning
+setting. The merged r1 chose 1,024 because the installed NetBox 4.7 models limit Device, Interface,
+Front Port, and Rear Port names to 64 characters. A measured compact JSON array of 1,024 entries,
+using worst-case escaped names and maximum signed-bigint object ids, is 904,193 bytes. The 128 shape
+would reduce prompt cost, but that is already the default setting's purpose. The maximum is the
+process and request safety ceiling.</p>
+<p>An adversarial review recomputed the size, verified the configuration and complete-set failure
+paths, and returned <code>RATIFY r1</code> with no open finding. Values from 1 through 1,024 are valid. Larger
+values fail at startup and when read at runtime. Supporting larger sets requires authoritative
+pre-filtering or another selection mechanism, not a larger materialized prompt. Boundary tests keep
+1,025 out of both validation paths. The existing proposal tests prove that an oversized eligible
+set returns <code>too_many_candidates</code> without persisting a partial snapshot.</p>
+<h2 id="first-implementable-increment">First implementable increment</h2>
+<p>The <code>ResolutionProposal</code> model, its generated schema migration, and the transition service.</p>
+<p>Observable acceptance conditions:</p>
+<ul>
+<li>The five statuses and the edge table, each edge enforced by a conditional <code>UPDATE</code> whose rowcount
+  is the refusal.</li>
+<li>The partial unique index refuses a second active row for one key.</li>
+<li>Check constraints refuse a half-attributed decision, a <code>no_match</code> carrying a selection, and a
+  terminal row with no content.</li>
+<li><code>field_key_digest</code> is populated on write.</li>
+<li>The migration depends on <code>("extras", "0001_initial")</code>, so the oldest job in the test matrix does
+  not error at setup.</li>
+</ul>
+<p>Carried into that increment, per the operator on 2026-09-10: the specification amendments to 7.5 and
+10.6, so the sections and the code that diverges from them change together.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
