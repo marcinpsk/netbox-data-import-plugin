@@ -55,18 +55,27 @@ def _private_engine_references(path: pathlib.Path) -> set[str]:
     """Return private coordinator attributes and imports referenced by one test."""
     tree = ast.parse(path.read_text())
     engine_names = {"ImportEngine"}
+    engine_module_names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
-        if node.module not in {"import_engine", "netbox_data_import.import_engine"}:
-            continue
-        engine_names.update(name.asname or name.name for name in node.names if name.name == "ImportEngine")
+        if node.module in {"import_engine", "netbox_data_import.import_engine"}:
+            engine_names.update(name.asname or name.name for name in node.names if name.name == "ImportEngine")
+        elif node.module in {None, "netbox_data_import"}:
+            engine_module_names.update(name.asname or name.name for name in node.names if name.name == "import_engine")
     references = {
         node.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id in engine_names
+        and (
+            (isinstance(node.value, ast.Name) and node.value.id in engine_names)
+            or (
+                isinstance(node.value, ast.Attribute)
+                and node.value.attr == "ImportEngine"
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id in engine_module_names
+            )
+        )
         and node.attr.startswith("_")
     }
     for node in ast.walk(tree):
@@ -76,6 +85,15 @@ def _private_engine_references(path: pathlib.Path) -> set[str]:
             continue
         references.update(name.name for name in node.names if name.name.startswith("_"))
     return references
+
+
+def _private_engine_offenders(test_root: pathlib.Path) -> dict[str, list[str]]:
+    """Return private coordinator references in all test modules."""
+    return {
+        str(path.relative_to(test_root)): sorted(references)
+        for path in test_root.rglob("test_*.py")
+        if (references := _private_engine_references(path))
+    }
 
 
 def _import_root(name: str) -> str:
@@ -165,13 +183,36 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
             self.assertEqual(_private_engine_references(path), {"_private_helper"})
 
+    def test_private_coordinator_module_alias_references_are_detected(self):
+        """A package-level module alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "from netbox_data_import import import_engine as engine\n"
+                "callback = engine.ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_scan_includes_nested_test_modules(self):
+        """The test boundary scans test modules below subdirectories too."""
+        with TemporaryDirectory() as directory:
+            test_root = pathlib.Path(directory)
+            nested = test_root / "nested"
+            nested.mkdir()
+            path = nested / "test_private.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine\ncallback = ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(
+                _private_engine_offenders(test_root),
+                {"nested/test_private.py": ["_private_helper"]},
+            )
+
     def test_tests_use_only_the_public_coordinator_interface(self):
         """Tests exercise planning and execution, not coordinator implementation details."""
-        offenders = {
-            path.name: sorted(references)
-            for path in (PACKAGE / "tests").glob("test_*.py")
-            if (references := _private_engine_references(path))
-        }
+        offenders = _private_engine_offenders(PACKAGE / "tests")
 
         self.assertEqual(offenders, {})
 
