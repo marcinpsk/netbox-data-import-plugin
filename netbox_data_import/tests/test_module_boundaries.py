@@ -57,11 +57,19 @@ def _private_engine_references(path: pathlib.Path) -> set[str]:
     engine_names = {"ImportEngine"}
     engine_module_names: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ImportFrom):
-            continue
-        if node.module in {"import_engine", "netbox_data_import.import_engine"}:
+        if isinstance(node, ast.Import):
+            engine_module_names.update(
+                name.asname or name.name
+                for name in node.names
+                if name.name == "import_engine"
+                or (name.name == "netbox_data_import.import_engine" and name.asname is not None)
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module in {
+            "import_engine",
+            "netbox_data_import.import_engine",
+        }:
             engine_names.update(name.asname or name.name for name in node.names if name.name == "ImportEngine")
-        elif node.module in {None, "netbox_data_import"}:
+        elif isinstance(node, ast.ImportFrom) and node.module in {None, "netbox_data_import"}:
             engine_module_names.update(name.asname or name.name for name in node.names if name.name == "import_engine")
     references = {
         node.attr
@@ -190,6 +198,16 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             path.write_text(
                 "from netbox_data_import import import_engine as engine\n"
                 "callback = engine.ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_import_alias_references_are_detected(self):
+        """A direct module alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "import netbox_data_import.import_engine as engine\ncallback = engine.ImportEngine._private_helper\n"
             )
 
             self.assertEqual(_private_engine_references(path), {"_private_helper"})
