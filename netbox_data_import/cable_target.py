@@ -36,6 +36,13 @@ from .field_keys import (
 from .object_permissions import enforce_saved_object_permission
 from .plan import Diagnostic, Disposition, PlannedChange, Severity, SynchronizationUnit
 from .target_runtime import DeletedObject, PreconditionFailed
+from .trace_device_resolution import (
+    STALE as DEVICE_STALE,
+    collect_trace_device_evidence,
+    resolve_trace_devices,
+    resolved_trace_device,
+    source_device_key,
+)
 from .values import identity_text, source_text
 
 CABLE_STATUS = "connected"
@@ -207,6 +214,7 @@ class _TraceAnalysis:
     segments: list = field(default_factory=list)
     proven: dict = field(default_factory=dict)
     policies: dict = field(default_factory=dict)
+    devices: dict = field(default_factory=dict)
     terminations: dict = field(default_factory=dict)
     topology_read: bool = False
     logical_cable: Any = None
@@ -303,38 +311,19 @@ def _source_record(trace, segment_index: int) -> dict:
     }
 
 
-def _visible_devices(netbox_reader, names, *, _lock_rows=False) -> dict[str, list]:
-    """Return the visible Devices at the import target, grouped by comparison name."""
-    from django.db.models import Q
-
-    wanted = {identity_text(name) for name in names if identity_text(name)}
-    if not wanted:
-        return {}
-    devices = netbox_reader.devices()
-    if netbox_reader.site is not None:
-        devices = devices.filter(site=netbox_reader.site)
-    if _lock_rows:
-        devices = devices.order_by("pk").select_for_update(of=("self",))
-    lookup = Q()
-    for name in sorted(wanted):
-        lookup |= Q(name__iexact=name)
-    grouped: dict[str, list] = {}
-    for device in devices.filter(lookup):
-        comparison = identity_text(device.name)
-        if comparison in wanted:
-            grouped.setdefault(comparison, []).append(device)
-    return grouped
-
-
-def resolved_device_for(field_key: str, netbox_reader, *, _lock_rows=False):
+def resolved_device_for(field_key: str, netbox_reader, *, profile, _lock_rows=False):
     """Return the one visible Device a termination field key names, or None when it names no single one.
 
     A proposal freezes this reference and revalidates it, so the retrieval and the freshness check
     have to agree on what "the resolved Device" means.
     """
     device_name = parse_termination_field_key(field_key)["device"]
-    devices = _visible_devices(netbox_reader, [device_name], _lock_rows=_lock_rows).get(identity_text(device_name), [])
-    return devices[0] if len(devices) == 1 else None
+    return resolved_trace_device(
+        profile=profile,
+        reader=netbox_reader,
+        source_label=device_name,
+        lock_rows=_lock_rows,
+    )
 
 
 _RESOLVED_DEVICE_UNSET = object()
@@ -361,7 +350,7 @@ def eligible_terminations(
     kind = parsed["kind"]
     accessor = _READER_ACCESSOR_BY_KIND[kind]
     device = (
-        resolved_device_for(field_key, netbox_reader, _lock_rows=_lock_rows)
+        resolved_device_for(field_key, netbox_reader, profile=profile, _lock_rows=_lock_rows)
         if _resolved_device is _RESOLVED_DEVICE_UNSET
         else _resolved_device
     )
@@ -430,6 +419,7 @@ class _CableBatch:
     """Plan every Source Trace in one batch, so an identical shared segment plans once."""
 
     def __init__(self, traces, profile, netbox_reader, *, lock_plan_references: bool = False):
+        traces = tuple(traces)
         self.profile = profile
         self.reader = netbox_reader
         self.actor = netbox_reader.actor
@@ -445,7 +435,13 @@ class _CableBatch:
         self._occupied: dict[tuple[str, int], _ExistingCable] = {}
         self._mapping_rows: dict[str, Any] | None = None
         self._stored = self._stored_resolutions()
-        self._devices = self._load_devices()
+        self._device_evidence = collect_trace_device_evidence(traces)
+        self._device_resolutions = resolve_trace_devices(
+            profile=self.profile,
+            reader=self.reader,
+            evidence=self._device_evidence,
+            lock_rows=self.lock_plan_references,
+        )
         self._resolve_terminations()
         self._load_mappings()
         self._build_segments()
@@ -512,16 +508,6 @@ class _CableBatch:
         ).select_related("selected_object_type")
         return {row.field_key: row for row in rows}
 
-    def _load_devices(self) -> dict[str, list]:
-        """Return the visible Devices every planned trace names, grouped by comparison name."""
-        names = [
-            reference.device
-            for analysis in self.analyses
-            if not analysis.stopped
-            for reference in self._references(analysis.trace)
-        ]
-        return _visible_devices(self.reader, names)
-
     def _components_for(self, device_id: int, kind: str) -> dict[str, list]:
         """Return one Device's terminations of one kind, grouped by comparison name."""
         cached = self._components.get((device_id, kind))
@@ -548,19 +534,24 @@ class _CableBatch:
 
     def _resolve_one(self, analysis: _TraceAnalysis, reference) -> _Termination | None:
         """Return the NetBox object one Termination Reference names, or record the open decision."""
-        devices = self._devices.get(identity_text(reference.device), [])
-        if len(devices) != 1:
-            analysis.block("trace.device_unresolved", {**_reference_display(reference), "matches": len(devices)})
+        resolution = self._device_resolutions[source_device_key(reference.device)]
+        analysis.devices.setdefault(resolution.evidence.key, resolution.to_question())
+        if resolution.device is None:
+            code = "trace.device_resolution_stale" if resolution.state == DEVICE_STALE else "trace.device_unresolved"
+            analysis.block(
+                code,
+                {**_reference_display(reference), "matches": resolution.exact_match_count},
+            )
             # With no resolved Device there is nothing to pick from, so the picker cannot help here.
             self._record_resolution(
                 analysis,
                 reference,
                 UNRESOLVED,
                 None,
-                reason=f"The source names {len(devices)} matching Devices, so no port list applies.",
+                reason="Resolve the source Device before choosing one of its ports.",
             )
             return None
-        device = devices[0]
+        device = resolution.device
         stored = self._stored.get(_field_key(reference))
         if stored is not None:
             termination = self._stored_termination(analysis, reference, device, stored)
@@ -1225,6 +1216,7 @@ class _CableBatch:
             "topology_known": analysis.topology_read,
             # A unit with no changes proposes nothing, so the panel must not offer to delete one.
             "deletes_logical_cable": writes and analysis.deleted_logical_cable is not None,
+            "devices": list(analysis.devices.values()),
             "terminations": list(analysis.terminations.values()),
         }
 

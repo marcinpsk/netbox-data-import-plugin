@@ -27,3 +27,7 @@ class VaultTransportGuidanceTest(SimpleTestCase):
         self.assertIn("NetBox-to-Proxy connection must remain encrypted", vault_guide)
         self.assertIn("Inference Backend `api_root` is separate", vault_guide)
         self.assertIn("NetBox web and worker processes", vault_guide)
+        self.assertIn("small request", vault_guide)
+        self.assertIn("GET {api_root}/models", vault_guide)
+        self.assertIn("Model discovery is optional", vault_guide)
+        self.assertIn("exact model id manually", vault_guide)

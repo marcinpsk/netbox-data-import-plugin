@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The OpenAI-compatible Inference Backend adapter (specification 8.1, 8.3, 8.4).
 
-One non-streaming Chat Completions call, built entirely from configuration. The adapter knows
-nothing about NetBox, candidates, proposals or jobs: it takes an InferenceRequest and returns an
-InferenceCompletion, or raises a typed backend error.
+The adapter makes one non-streaming Chat Completions call and can discover optional model-id
+suggestions. It knows nothing about NetBox, candidates, proposals or jobs: it takes an
+InferenceRequest and returns an InferenceCompletion, or raises a typed backend error.
 
 A returned completion means the call reached the backend and the envelope parsed. Deciding what the
 content means belongs to the application service, not here.
@@ -20,6 +20,7 @@ import requests
 from urllib3.exceptions import ReadTimeoutError
 
 from .inference_transport import ResponseProcessingFailure, is_preconnect_failure, request_to_resolved_address
+from .inference_settings import MODEL_MAX_LENGTH
 from .inference_trust import (
     InvalidInferenceConfiguration,
     assert_resolved_address_allowed,
@@ -28,6 +29,8 @@ from .inference_trust import (
 )
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"
+MODELS_PATH = "/models"
+MODEL_DISCOVERY_LIMIT = 100
 DIAGNOSTIC_TEXT_LIMIT = 4096
 
 # Section 8.4 rejects every other terminal reason: only a completed answer is a completion.
@@ -259,11 +262,12 @@ class OpenAICompatibleAdapter:
             raise InvalidBackendConfiguration(str(exc)) from None
         return addresses
 
-    def complete(self, request: InferenceRequest, api_key: str) -> InferenceCompletion:
-        """Return one completion, or raise the typed error the backend condition maps to."""
-        self._check_response_mode(request)
+    def _send(self, method: str, path: str, api_key: str, **kwargs) -> requests.Response:
+        """Send one authenticated request through the checked and pinned destination boundary."""
         resolved_addresses = self._resolved_destinations()
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        headers = {"Accept": "application/json"}
+        if "json" in kwargs:
+            headers["Content-Type"] = "application/json"
         if self.authentication == "bearer":
             headers["Authorization"] = f"Bearer {api_key}"
         connection_failure: requests.RequestException | None = None
@@ -271,14 +275,14 @@ class OpenAICompatibleAdapter:
             try:
                 response = request_to_resolved_address(
                     self._session,
-                    "POST",
-                    f"{self.api_root}{CHAT_COMPLETIONS_PATH}",
+                    method,
+                    f"{self.api_root}{path}",
                     resolved_address,
-                    json=self._body(request),
                     headers=headers,
                     timeout=(self.connect_timeout, self.read_timeout),
                     # A redirect is a different destination, so it is refused rather than followed.
                     allow_redirects=False,
+                    **kwargs,
                 )
             except ResponseProcessingFailure as exc:
                 if isinstance(exc.cause, ValueError):
@@ -321,7 +325,7 @@ class OpenAICompatibleAdapter:
                 raise InvalidBackendConfiguration(
                     f"The backend answered with a location this delivery cannot use ({type(exc).__name__})."
                 ) from None
-            return self._read(response, api_key)
+            return response
 
         if isinstance(connection_failure, requests.ConnectTimeout):
             raise BackendTimeout("The backend did not answer inside the configured limits.") from None
@@ -330,9 +334,9 @@ class OpenAICompatibleAdapter:
             diagnostic=ABSENT_DIAGNOSTIC,
         ) from None
 
-    def _read(self, response, api_key: str = "") -> InferenceCompletion:
-        """Classify the answer, then parse the one envelope a completed call returns."""
-        # Captured before any classification, so every failure below can carry what it received.
+    @staticmethod
+    def _raise_for_status(response: requests.Response, api_key: str) -> ResponseDiagnostic:
+        """Return a safe diagnostic for success, or raise the typed HTTP failure."""
         diagnostic = _diagnostic(response, api_key)
         status = response.status_code
         if status in (301, 302, 303, 307, 308):
@@ -352,6 +356,50 @@ class OpenAICompatibleAdapter:
                 f"The backend rejected the request (HTTP {status}), which repeating cannot fix.",
                 diagnostic=diagnostic,
             )
+        return diagnostic
+
+    def complete(self, request: InferenceRequest, api_key: str) -> InferenceCompletion:
+        """Return one completion, or raise the typed error the backend condition maps to."""
+        self._check_response_mode(request)
+        response = self._send("POST", CHAT_COMPLETIONS_PATH, api_key, json=self._body(request))
+        return self._read(response, api_key)
+
+    def discover_models(self, api_key: str) -> tuple[str, ...]:
+        """Return bounded model-id suggestions from a compatible optional models endpoint."""
+        response = self._send("GET", MODELS_PATH, api_key)
+        diagnostic = self._raise_for_status(response, api_key)
+        if diagnostic.redacted:
+            raise MalformedEnvelope("The backend model list contained credential material.", diagnostic=diagnostic)
+        try:
+            envelope = response.json()
+        except (ValueError, RecursionError):
+            raise MalformedEnvelope("The backend model list is not JSON.", diagnostic=diagnostic) from None
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("data"), list):
+            raise MalformedEnvelope("The backend did not provide a compatible model list.", diagnostic=diagnostic)
+
+        models = []
+        seen = set()
+        for item in envelope["data"]:
+            model_id = item.get("id") if isinstance(item, dict) else None
+            if (
+                not isinstance(model_id, str)
+                or not model_id
+                or model_id != model_id.strip()
+                or not model_id.isprintable()
+                or len(model_id) > MODEL_MAX_LENGTH
+                or model_id in seen
+            ):
+                continue
+            seen.add(model_id)
+            models.append(model_id)
+            if len(models) == MODEL_DISCOVERY_LIMIT:
+                break
+        return tuple(models)
+
+    def _read(self, response, api_key: str = "") -> InferenceCompletion:
+        """Classify the answer, then parse the one envelope a completed call returns."""
+        # Captured before any parsing, so every failure below can carry what it received.
+        diagnostic = self._raise_for_status(response, api_key)
         try:
             envelope = response.json()
         except (ValueError, RecursionError):
@@ -405,6 +453,8 @@ def encode_payload(value) -> str:
 
 __all__ = (
     "CHAT_COMPLETIONS_PATH",
+    "MODELS_PATH",
+    "MODEL_DISCOVERY_LIMIT",
     "AuthenticationFailure",
     "BackendTimeout",
     "InferenceBackendError",

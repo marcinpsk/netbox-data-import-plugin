@@ -220,6 +220,58 @@
 
       </div>
 
+      <section class="mt-3" data-trace-devices>
+        <h3>Devices</h3>
+        <ul class="list-unstyled mb-0">
+          {% for device in attention_devices %}
+            <li class="mb-3">
+              {{ device.label }}
+              <span class="badge ndi-trace-state-{{ device.state_style }}">{{ device.state }}</span>
+              {% if device.locations or device.racks or device.u_positions %}
+                <div class="ndi-trace-claim">
+                  Source hints:
+                  {% if device.locations %}Location {{ device.locations|join:", " }}{% endif %}
+                  {% if device.racks %}{% if device.locations %}; {% endif %}Rack {{ device.racks|join:", " }}{% endif %}
+                  {% if device.u_positions %}{% if device.locations or device.racks %}; {% endif %}U {{ device.u_positions|join:", " }}{% endif %}
+                </div>
+              {% endif %}
+              <div class="ndi-trace-actions mt-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        data-trace-device-picker="{{ device.key }}"
+                        data-trace-device-label="{{ device.label }}">Choose Device</button>
+              </div>
+              {% if device.reason %}<div class="ndi-trace-reason">{{ device.reason }}</div>{% endif %}
+            </li>
+          {% empty %}
+            <li class="text-secondary">Every source Device on this trace resolves in NetBox.</li>
+          {% endfor %}
+        </ul>
+        {% if settled_devices %}
+          <details data-trace-resolved-devices>
+            <summary>{{ settled_devices|length }} Device(s) resolved</summary>
+            <div class="table-responsive">
+              <table class="table table-sm mb-0">
+                <thead><tr><th>Source Device</th><th>Selected Device</th><th>State</th><th></th></tr></thead>
+                <tbody>
+                  {% for device in settled_devices %}
+                    <tr>
+                      <td>{{ device.label }}</td>
+                      <td>{{ device.selected }}</td>
+                      <td><span class="badge ndi-trace-state-{{ device.state_style }}">{{ device.state }}</span></td>
+                      <td class="text-end">
+                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                                data-trace-device-picker="{{ device.key }}"
+                                data-trace-device-label="{{ device.label }}">Change Device</button>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        {% endif %}
+      </section>
+
       <section class="mt-3" data-trace-terminations>
         <h3>Terminations</h3>
         <ul class="list-unstyled mb-0">
@@ -302,6 +354,38 @@
   </div>
 </div>
 
+<div class="modal" id="traceDevicePicker" tabindex="-1" aria-labelledby="traceDevicePickerTitle">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <form id="traceDeviceForm" method="post"
+            action="{% url 'plugins:netbox_data_import:trace_resolve_device' %}"
+            data-candidates-url="{% url 'plugins:netbox_data_import:trace_device_candidates' %}">
+        {% csrf_token %}
+        <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+        <input type="hidden" name="search" id="traceDeviceOfferedSearch">
+        <input type="hidden" name="device_key" id="traceDeviceKey">
+        <input type="hidden" name="device_id" id="traceDeviceId">
+        <div class="modal-header">
+          <h5 class="modal-title" id="traceDevicePickerTitle">Choose the NetBox Device for <span id="traceDeviceLabel"></span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <input type="search" class="form-control mb-2" id="traceDeviceSearch"
+                 aria-label="Search eligible Devices"
+                 placeholder="Search eligible Devices" autocomplete="off">
+          <div class="text-secondary small mb-2" id="traceDeviceCount" aria-live="polite" hidden></div>
+          <div class="alert alert-danger" id="traceDeviceError" hidden></div>
+          <div class="list-group" id="traceDeviceCandidates"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-link" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="traceDeviceSubmit" disabled>Save decision</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="traceTerminationPicker" tabindex="-1" aria-labelledby="traceTerminationPickerTitle">
   <div class="modal-dialog modal-lg" role="document">
     <div class="modal-content">
@@ -337,5 +421,6 @@
 
 {{ proposal_fields|json_script:"traceProposalFields" }}
 <script src="{% static 'netbox_data_import/js/trace_proposals.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/trace_device_picker.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
 {% endblock %}

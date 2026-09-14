@@ -26,6 +26,7 @@ from netbox_data_import.inference_backend import resolve_active_backend
 from netbox_data_import.models import ExecutionOutcome, ImportExecution, ImportProfile, InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.inference_http import issue_server_certificate, serving_tls
+from netbox_data_import.tests.test_inference_adapter import serving as serving_backend
 
 SECRET = "sk-never-persisted-anywhere"
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -62,11 +63,11 @@ def vault():
             }
 
 
-def settings_for(vault_settings, *, inference_backend=None):
+def settings_for(vault_settings, *, inference_backend=None, origin_allowlist=None):
     """Return a PLUGINS_CONFIG entry pointing the plugin at one Vault stand-in."""
     settings = {
         "netbox_data_import": {
-            "inference_backend_origin_allowlist": ["https://backend.example.invalid:443"],
+            "inference_backend_origin_allowlist": origin_allowlist or ["https://backend.example.invalid:443"],
             "vault": vault_settings,
         }
     }
@@ -113,10 +114,23 @@ class SecretContainmentTest(TestCase):
         )
 
     def resolve_once(self):
-        """Run one connection test against a Vault that serves the secret."""
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                return run_connection_test(self.row.pk, "primary")
+        """Run one connection test against real Vault and Inference Backend stand-ins."""
+        with serving_backend() as (root, _seen, allowlist):
+            self.row.api_root = root
+            self.row.save(update_fields=("api_root",))
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    return run_connection_test(self.row.pk, "primary")
+
+    @contextmanager
+    def configured_connection(self):
+        """Configure the client-facing connection-test view with both real HTTP boundaries."""
+        with serving_backend(models_payload={"data": [{"id": "model-a"}]}) as (root, _seen, allowlist):
+            self.row.api_root = root
+            self.row.save(update_fields=("api_root",))
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    yield
 
     def test_the_secret_resolves_so_the_sweep_is_meaningful(self):
         self.assertEqual(self.resolve_once().category, "ok")
@@ -140,9 +154,8 @@ class SecretContainmentTest(TestCase):
         self.client.force_login(user)
         url = reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk])
 
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                self.client.post(url)
+        with self.configured_connection():
+            self.client.post(url)
 
         self.assertFalse(Job.objects.exists())
 
@@ -150,11 +163,8 @@ class SecretContainmentTest(TestCase):
         user = user_with_object_permission("session-tester", [(InferenceBackend, ["change"], {})])
         self.client.force_login(user)
 
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                self.client.post(
-                    reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk])
-                )
+        with self.configured_connection():
+            self.client.post(reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]))
 
         self.assertNotIn(SECRET, json.dumps(dict(self.client.session), default=str))
 
@@ -192,7 +202,7 @@ class SecretContainmentTest(TestCase):
             root.setLevel(previous)
 
         written = stream.getvalue()
-        self.assertNotIn("127.0.0.1", written)
+        self.assertNotIn("localhost", written)
         self.assertNotIn("/v1/secret/data/", written)
 
     def test_the_profile_yaml_export_holds_no_backend_credential(self):
@@ -241,36 +251,41 @@ class SecretContainmentTest(TestCase):
         previous = root.level
         root.setLevel(logging.DEBUG)
         try:
-            with vault() as vault_settings:
-                configuration = settings_for(vault_settings)
-                with override_settings(PLUGINS_CONFIG=configuration):
-                    edit_response = self.client.post(
-                        reverse(
-                            "plugins:netbox_data_import:inferencebackend_edit",
-                            kwargs={"pk": self.row.pk},
-                        ),
-                        {
-                            "backend_key": self.row.backend_key,
-                            "display_name": "Updated primary",
-                            "adapter_type": self.row.adapter_type,
-                            "api_root": self.row.api_root,
-                            "model": self.row.model,
-                            "authentication": self.row.authentication,
-                            "response_mode": self.row.response_mode,
-                            "credential_reference": json.dumps(REFERENCE),
-                            "connect_timeout": self.row.connect_timeout,
-                            "read_timeout": self.row.read_timeout,
-                            "enabled": "on",
-                        },
-                    )
-                    self.assertEqual(edit_response.status_code, 302, edit_response.content)
-                    self.client.post(url)
-                    state = {
-                        **persisted_state(),
-                        "session": dict(self.client.session),
-                        "logs": stream.getvalue(),
-                        "inference_backend_setting": configuration["netbox_data_import"].get("inference_backend"),
-                    }
+            with serving_backend(models_payload={"data": [{"id": "model-a"}]}) as (
+                api_root,
+                _seen,
+                allowlist,
+            ):
+                with vault() as vault_settings:
+                    configuration = settings_for(vault_settings, origin_allowlist=allowlist)
+                    with override_settings(PLUGINS_CONFIG=configuration):
+                        edit_response = self.client.post(
+                            reverse(
+                                "plugins:netbox_data_import:inferencebackend_edit",
+                                kwargs={"pk": self.row.pk},
+                            ),
+                            {
+                                "backend_key": self.row.backend_key,
+                                "display_name": "Updated primary",
+                                "adapter_type": self.row.adapter_type,
+                                "api_root": api_root,
+                                "model": self.row.model,
+                                "authentication": self.row.authentication,
+                                "response_mode": self.row.response_mode,
+                                "credential_reference": json.dumps(REFERENCE),
+                                "connect_timeout": self.row.connect_timeout,
+                                "read_timeout": self.row.read_timeout,
+                                "enabled": "on",
+                            },
+                        )
+                        self.assertEqual(edit_response.status_code, 302, edit_response.content)
+                        self.client.post(url)
+                        state = {
+                            **persisted_state(),
+                            "session": dict(self.client.session),
+                            "logs": stream.getvalue(),
+                            "inference_backend_setting": configuration["netbox_data_import"].get("inference_backend"),
+                        }
         finally:
             root.removeHandler(handler)
             root.setLevel(previous)

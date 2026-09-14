@@ -232,7 +232,7 @@ applicable sections. Validation rejects an inapplicable row.
 | update-existing, create-missing-device-types, capture-extra-data, primary-contact settings, preview view mode | Device and Rack target policy stored in `adapter_config` | `flat_workbook` |
 | CableClass mappings | Cable target policy | `trace_workbook` |
 | SourceResolution, DeviceExistingMatch, IgnoredFieldDifference | Decision persistence scoped to the flat adapter output | `flat_workbook` |
-| `TerminationResolution` | Decision persistence scoped to the trace adapter output | `trace_workbook` |
+| `TraceDeviceResolution`, `TerminationResolution` | Decision persistence scoped to the trace adapter output | `trace_workbook` |
 
 No model moves beyond the `adapter_config` change. Sections stay in their own tables.
 
@@ -417,7 +417,8 @@ operator and the Inference Backend. Deterministic matching never uses it: port r
 the unique exact port-name match on the resolved Device (section 6.1). This supersedes the phrasing in
 issue #84 that said the cards label narrows port matching, and follows the rule set in issue #86.
 
-Corroboration values support validation and review display. They never identify anything.
+Corroboration values support validation, Device candidate ranking, and review display. They never
+identify anything or select a Device.
 
 ### 5.2 Identity and content fingerprint
 
@@ -493,6 +494,7 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 | Raw export metadata longer than the provenance column that stores it | `trace.metadata_too_long` | `invalid` | Source Adapter |
 | The resolved object is not an Interface, FrontPort, or RearPort | `cable.unsupported_termination_kind` | `invalid` | Cable Target Module |
 | Ambiguous or missing Device, panels included | `trace.device_unresolved` | `blocked` | Cable Target Module |
+| Saved Device is deleted, hidden, or outside the selected Site | `trace.device_resolution_stale` | `blocked` | Cable Target Module |
 | Endpoint evidence only and no matching direct Cable | `trace.endpoint_evidence_only` | `blocked` | Cable Target Module |
 
 Diagnostic code strings are spec defaults; the conditions, dispositions, and owners are normative.
@@ -552,8 +554,21 @@ the test matrix covers.
 
 ### 6.1 Port resolution
 
-Each Termination Reference resolves inside its resolved Device. Endpoint Device resolution uses the
-existing explicit matching approach and runs before port resolution begins.
+Each Termination Reference resolves inside its resolved Device. Device resolution runs before port
+resolution begins. A saved `TraceDeviceResolution` maps the normalized source Device label to one
+NetBox Device for the Import Profile. The mapping applies to every port under that label and to later
+source documents that use the same normalized label. A saved choice takes precedence over exact-name
+matching.
+
+Without a saved choice, one exact Device-name match inside the actor's view scope and selected Site
+resolves automatically. Zero or several matches leave one Device question open in the Trace Review
+Workspace. Rack, Location, and U position can rank candidates and explain the order. The operator
+must select the Device. Each placement hint is used only when the actor can also view its related
+Rack or Location.
+
+A saved Device that is deleted, hidden, or outside the selected Site becomes stale. Planning does not
+fall back to another exact-name match and does not show the saved display snapshot. A placement
+change inside the selected Site does not invalidate the choice.
 
 The adapter's fixed PortClass vocabulary claims the termination kind:
 
@@ -1074,8 +1089,10 @@ place: the enabled `InferenceBackend` row, or the `inference_backend` file fallb
 row exists. It is restricted configuration metadata, never copied elsewhere.
 
 The foreground connection test receives only the authorized backend row id and its display key. The
-request-handling process resolves the credential, reports a typed redacted result, and discards the
-credential before it sends the response.
+request-handling process resolves the credential, sends one small Chat Completions request with the
+configured model, reports a typed redacted result, and discards the credential before it sends the
+response. The test also tries the optional models endpoint. A discovery failure does not override the
+Chat Completions result.
 
 Plugin audit and job state may record the backend key, the proposal job id, the credential backend
 name, the resolution outcome category, and request start and completion times. They must not record
@@ -1085,8 +1102,15 @@ headers. The Vault mount, path, and field are restricted configuration metadata.
 Vault availability is never required at startup. The connection test runs in the foreground request so
 the operator sees its result immediately. It resolves the configured reference and returns a typed
 result: `ok`, `credential_unavailable`, `credential_denied`, `invalid_credential_reference`,
-`invalid_secret_material`, or `invalid_configuration`. It never returns a secret value or a Vault
-response body, and it creates no native NetBox Job.
+`invalid_secret_material`, `invalid_configuration`, `transport_failure`, `timeout`,
+`authentication_failure`, `rate_limit`, `malformed_envelope`, or `invalid_response`. It never returns
+a secret value, a Vault response body, or Inference Backend response text, and it creates no native
+NetBox Job.
+
+A compatible `GET {api_root}/models` response can provide at most 100 unique model ids of at most the
+stored model field length. These ids are one-use edit suggestions. The picker opens the normal edit
+form with the selected value, so standard validation, permissions, change logging, and explicit save
+still apply. Manual model entry remains available and is the only path when discovery is unsupported.
 
 Running the connection test is authorized by the dedicated `InferenceBackend` object permission in
 section 13.1. There is no separate administrator or superuser check.
@@ -1102,6 +1126,7 @@ whose operations cannot be generated, and that migration contains data operation
 | Model (spec default names) | Purpose | Key | Introduced by |
 | --- | --- | --- | --- |
 | `SourceDocument` | The stored uploaded workbook that `source_document` references | Content fingerprint indexed per Import Profile | T2 |
+| `TraceDeviceResolution` | A trace source Device label selected as one NetBox Device | (Import Profile, normalized source Device key) unique | T6 |
 | `TerminationResolution` | The trace-side Row Resolution written by manual selection or proposal acceptance | (Import Profile, task type, field key) unique | T4 |
 | `CableClassMapping` | Cable target policy for one CableClass value | (Import Profile, CableClass value) unique | T4 |
 | `CableImportSource` | Provenance for one Cable and one contributing Source Trace | (Cable, Import Profile, trace identity) unique | T5 |
@@ -1126,6 +1151,11 @@ type, the canonical JSON field key (which carries the role marker, section 7.1),
 type, the selected object id, and the display name at selection time. The three value columns hold the
 selection for both the `termination` and `mapped_peer` roles. `SourceResolution` keeps its flat
 `(profile, source_id, source_column)` shape and stays flat-adapter-specific.
+
+`TraceDeviceResolution` stores the canonical source Device key, its fixed-width digest, the selected
+Device ID, and a display snapshot. The plain Device ID preserves a stale decision after Device
+deletion so the operator can replace it. The snapshot is never shown unless the Device is still in
+the actor's view scope. Installation-local Device IDs are not part of portable profile YAML.
 
 `CableImportSource` records the Import Profile, the Cable (a plain foreign key), the trace identity,
 the segment index, the original From/To text and direction, the workbook provenance (fingerprint,
@@ -1695,11 +1725,12 @@ Until T10 lands, a trace profile is configurable through the UI only.
 ### T6. Trace Review Workspace UI
 
 **Scope.** Build the review workspace: summary strip, trace list with disposition badges, the three
-per-trace panels, termination field state badges, the searchable candidate picker with its eligible
-count, the `Sync with dependencies` selection, the drift warning strip with its re-read action, and
-the disabled-with-reason pattern for every action. Consume the `TerminationResolution` write path from
-T4 and the eligible-candidate retrieval from T5. Wire review commands through the Review Workspace
-module so they persist decisions and request a new plan. Adopt NetBox theme variables.
+per-trace panels, Device and termination state badges, searchable candidate pickers with their
+eligible counts, the `Sync with dependencies` selection, the drift warning strip with its re-read
+action, and the disabled-with-reason pattern for every action. Consume the `TerminationResolution`
+write path from T4 and the eligible-candidate retrieval from T5. Wire review commands through the
+Review Workspace module so they persist decisions and request a new plan. Adopt NetBox theme
+variables.
 
 **Acceptance criteria.**
 
@@ -1708,6 +1739,11 @@ module so they persist decisions and request a new plan. Adopt NetBox theme vari
   conflict.
 - The picker lists only eligible candidates of the claimed kind on the resolved Device and shows the
   "N of M eligible" count.
+- A trace-only profile opens this workspace directly. An open source Device label offers a Device
+  picker before its termination picker.
+- Selecting a Device writes one profile-owned `TraceDeviceResolution` and replans. A later source
+  document reuses it for the same normalized label and for every port under that label.
+- Rack, Location, and U position only rank visible Device candidates. They never select one.
 - Selecting a candidate writes a `TerminationResolution` row through its owning model and triggers a
   replan; no review command edits an Import Plan.
 - A termination matched by the exact-name rule shows `automatically resolved`; one selected by an
@@ -1752,8 +1788,11 @@ permitted `vault.auth_method` values. Add the foreground connection test, author
 - No test can find a secret value in any model row, serializer output, YAML export, session, job
   payload, audit record, or log record. The typed credential reference exists in exactly one
   authoritative place.
-- The connection test runs in the foreground, creates no Job, and shows one typed result category. It
-  never shows a secret value or a Vault response body.
+- The connection test runs in the foreground, sends one small Chat Completions request, creates no
+  Job, and shows one typed result category. It never shows a secret value, a Vault response body, or
+  Inference Backend response text.
+- Compatible model discovery provides bounded suggestions through the normal edit form. Discovery is
+  optional, never controls job execution, and never removes manual model entry.
 - A user holding the dedicated `InferenceBackend` object permission can run the connection test, and a
   user without it cannot; no separate administrator or superuser check exists.
 - The change is independently mergeable with all tests passing.

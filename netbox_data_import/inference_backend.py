@@ -93,6 +93,23 @@ class ResolvedInferenceBackend:
         }
 
 
+def adapter_for_backend(backend: ResolvedInferenceBackend):
+    """Build the adapter that both proposal jobs and foreground tests use for this backend."""
+    if backend.adapter_type != "openai_compatible":
+        raise InvalidInferenceConfiguration(f"Unsupported Inference Backend adapter '{backend.adapter_type}'.")
+    from .inference_adapter import OpenAICompatibleAdapter
+
+    return OpenAICompatibleAdapter(
+        api_root=backend.api_root,
+        model=backend.model,
+        allowlist=origin_allowlist(),
+        authentication=backend.authentication,
+        response_mode=backend.response_mode,
+        connect_timeout=backend.connect_timeout,
+        read_timeout=backend.read_timeout,
+    )
+
+
 def _from_row(row, allowlist) -> ResolvedInferenceBackend:
     """Return the resolved backend one enabled database row describes."""
     # A saved row outlives the allowlist that approved it, so spec 8.3 validates both sources alike.

@@ -61,7 +61,7 @@ class SelectTerminationTask:
     def current(self, *, profile, field_key, netbox_reader, limit):
         """Return the Candidate Snapshot as the world stands now, for a request or a freshness read."""
         self._require_termination_role(field_key)
-        device = resolved_device_for(field_key, netbox_reader)
+        device = resolved_device_for(field_key, netbox_reader, profile=profile)
         return self._current_for_device(
             profile=profile,
             field_key=field_key,
@@ -101,7 +101,7 @@ class SelectTerminationTask:
     def _inventory(self, *, profile, field_key, netbox_reader, limit, lock_rows) -> ProposalInventory:
         """Read one inventory, locking its target rows when a resolution write follows."""
         self._require_termination_role(field_key)
-        device = resolved_device_for(field_key, netbox_reader, _lock_rows=lock_rows)
+        device = resolved_device_for(field_key, netbox_reader, profile=profile, _lock_rows=lock_rows)
         candidate_error: UnusableCandidateSet | None
         try:
             candidate_snapshot = self._current_for_device(
@@ -123,10 +123,10 @@ class SelectTerminationTask:
             candidate_error=candidate_error,
         )
 
-    def resolved_device(self, *, field_key, netbox_reader):
+    def resolved_device(self, *, profile, field_key, netbox_reader):
         """Return the one Device this key resolves to now, or None when it does not resolve to one."""
         self._require_termination_role(field_key)
-        return resolved_device_for(field_key, netbox_reader)
+        return resolved_device_for(field_key, netbox_reader, profile=profile)
 
     def _resolution_write(self, *, profile, field_key, entry):
         """Return the validated lookup and values shared by assessment and execution."""

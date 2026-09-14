@@ -151,7 +151,7 @@ class ImportProfileForm(NetBoxModelForm):
             return self.instance.source_adapter
         if self.is_bound:
             return self.data.get(self.add_prefix("source_adapter")) or self.instance.source_adapter
-        return self.instance.source_adapter
+        return self.initial.get("source_adapter") or self.instance.source_adapter
 
     def clean(self):
         """Collect the adapter-declared fields into ``adapter_config``."""
@@ -326,6 +326,10 @@ class InferenceBackendForm(NetBoxModelForm):
         )
         help_texts = {
             "credential_reference": _CREDENTIAL_REFERENCE_HELP,
+            "model": (
+                "Enter the exact model id. After you save the backend, run the connection test to discover "
+                "model suggestions when the endpoint supports them."
+            ),
         }
 
 

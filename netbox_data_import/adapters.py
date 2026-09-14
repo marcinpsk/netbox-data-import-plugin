@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from .catalog import OutputKind, has_implemented_module
 
 if TYPE_CHECKING:
-    from .trace_workbook import SourceTrace
+    from .source_trace import SourceTrace
 
 
 class UnknownSourceAdapter(Exception):

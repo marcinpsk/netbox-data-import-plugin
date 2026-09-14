@@ -4,6 +4,7 @@
 
 import re
 from io import BytesIO
+from types import SimpleNamespace
 
 from dcim.models import Interface
 from django.db import connection
@@ -11,6 +12,7 @@ from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
+from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.models import ImportProfile, TerminationResolution
 from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
@@ -33,6 +35,19 @@ from netbox_data_import.tests.helpers import (
     trace_workbook_bytes,
 )
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
+from netbox_data_import.views import _review_workspace_url
+
+
+class ReviewWorkspaceRouteTest(TestCase):
+    def test_a_mixed_output_profile_keeps_the_generic_workspace(self):
+        profile = SimpleNamespace(
+            output_kinds=frozenset({OutputKind.SOURCE_TRACE, OutputKind.DEVICE_SOURCE_ROW}),
+        )
+
+        self.assertEqual(
+            _review_workspace_url(profile),
+            reverse("plugins:netbox_data_import:import_preview"),
+        )
 
 
 class TraceWorkspaceTest(CableTopologyMixin, TestCase):
@@ -221,19 +236,37 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertEqual(setup.status_code, 200)
         return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
-    def test_the_preview_offers_the_workspace_for_a_trace_profile(self):
-        """The workspace has to be reachable, and only from a preview that planned traces."""
+    def test_trace_setup_opens_the_trace_workspace_directly(self):
+        """A trace-only profile starts on its review surface instead of the flat preview."""
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
         upload.name = "traces.xlsx"
         response = self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-            follow=True,
         )
 
-        self.assertTrue(response.context["trace_workspace_available"])
-        self.assertContains(response, reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:trace_workspace"),
+            fetch_redirect_response=False,
+        )
+
+    def test_an_empty_trace_workbook_still_opens_the_trace_workspace(self):
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes())
+        upload.name = "empty-traces.xlsx"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:trace_workspace"),
+            fetch_redirect_response=False,
+        )
 
     def test_the_page_lists_every_trace_with_its_panels(self):
         """One page per preview: the strip, the list, and the panels of the selected trace."""
@@ -323,7 +356,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         trace = response.context["traces"][0]
         blocked = next(item for item in trace.terminations if item["label"] == "NO-SUCH-DEVICE eth0")
         self.assertFalse(blocked["selectable"])
-        self.assertIn("matching Devices", blocked["reason"])
+        self.assertIn("Resolve the source Device", blocked["reason"])
         self.assertContains(response, blocked["reason"])
 
     def test_the_termination_search_carries_an_accessible_name(self):

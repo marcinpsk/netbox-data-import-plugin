@@ -1524,11 +1524,11 @@ class TraceWizardRenderTest(CableTopologyMixin, TestCase):
 
         self.assertContains(response, "DEV-A eth0 to DEV-B eth1")
 
-    def test_a_trace_profile_falls_back_to_the_row_view(self):
-        """Only the flat adapter declares a stored view mode, and reading it answered 500."""
+    def test_a_trace_profile_opens_the_trace_workspace(self):
+        """A trace-only profile starts on the review surface that understands Source Traces."""
         response = self._upload()
 
-        self.assertEqual(response.context["view_mode"], "rows")
+        self.assertTemplateUsed(response, "netbox_data_import/trace_workspace.html")
 
     def test_the_view_query_parameter_overrides_the_fallback(self):
         """The Rack view link has to keep working for a profile that declares no mode."""

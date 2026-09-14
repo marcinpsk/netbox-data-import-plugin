@@ -37,7 +37,7 @@ from .forms import (
     ImportProfileImportForm,
     ImportSetupForm,
 )
-from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS
+from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
 from .values import (
     effective_device_name,
     identity_text,
@@ -119,7 +119,12 @@ from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
 from .field_keys import SELECT_TERMINATION_TASK
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, fingerprint_of
-from .review_workspace import ReviewWorkspace, save_termination_resolution_and_replan
+from .review_workspace import (
+    ReviewWorkspace,
+    save_termination_resolution_and_replan,
+    save_trace_device_resolution_and_replan,
+)
+from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -481,6 +486,7 @@ class ImportProfileEditView(generic.ObjectEditView):
 
     queryset = ImportProfile.objects.all()
     form = ImportProfileForm
+    template_name = "netbox_data_import/importprofile_edit.html"
 
 
 class ImportProfileDeleteView(generic.ObjectDeleteView):
@@ -496,10 +502,23 @@ class InferenceBackendListView(generic.ObjectListView):
     table = InferenceBackendTable
 
 
+_INFERENCE_MODELS_SESSION_KEY = "netbox_data_import.inference_backend_models"
+
+
 class InferenceBackendView(generic.ObjectView):
     """One backend row, as `resolve_active_backend` reads it while this row is the enabled one."""
 
     queryset = InferenceBackend.objects.all()
+
+    def get_extra_context(self, request, instance):
+        """Offer model suggestions once, immediately after a connection test discovered them."""
+        discovery = request.session.pop(_INFERENCE_MODELS_SESSION_KEY, None)
+        if not isinstance(discovery, Mapping) or discovery.get("backend_id") != instance.pk:
+            return {}
+        models = discovery.get("models")
+        if not isinstance(models, list) or not all(isinstance(model, str) for model in models):
+            return {}
+        return {"model_choices": tuple(models)}
 
 
 class InferenceBackendEditView(generic.ObjectEditView):
@@ -533,6 +552,12 @@ class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
         # restrict() applies the ObjectPermission constraints a model-level check would ignore.
         backend = get_object_or_404(InferenceBackend.objects.restrict(request.user, "change"), pk=pk)
         result = run_connection_test(backend.pk, backend.backend_key)
+        request.session.pop(_INFERENCE_MODELS_SESSION_KEY, None)
+        if result.models:
+            request.session[_INFERENCE_MODELS_SESSION_KEY] = {
+                "backend_id": backend.pk,
+                "models": list(result.models),
+            }
         if result.category == "ok":
             messages.success(request, f"Connection test succeeded. {result.detail}")
         else:
@@ -863,6 +888,14 @@ class DeviceTypeMappingDeleteView(_ProfileChildDeleteView):
 # Import Wizard — Phase 2 (setup + preview)
 # ---------------------------------------------------------------------------
 
+
+def _review_workspace_url(profile):
+    """Return the review surface declared for one profile's complete output set."""
+    if profile.output_kinds == frozenset({OutputKind.SOURCE_TRACE}):
+        return reverse("plugins:netbox_data_import:trace_workspace")
+    return reverse("plugins:netbox_data_import:import_preview")
+
+
 # These views intentionally use raw django.views.View rather than a NetBox
 # generic view base.  The wizard is a three-step, session-backed state machine
 # (setup → preview → run → results) that does not correspond to any single
@@ -927,14 +960,18 @@ class ImportSetupView(PermissionRequiredMixin, View):
         request.session["import_rows"] = workspace.source_rows
         request.session["import_context"] = context_data
         request.session["import_preview_pending"] = True
-        request.session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        review_url = _review_workspace_url(profile)
+        if review_url == reverse("plugins:netbox_data_import:import_preview"):
+            request.session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        else:
+            request.session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
         request.session.pop("import_preview_source_job_id", None)
         _clear_restored_import_job(request)
         request.session["import_unused_columns"] = {
             column["name"]: {"count": column["count"], "samples": column["samples"]}
             for column in workspace.unused_columns
         }
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        return redirect(review_url)
 
 
 _DEVICE_CONFLICT_ROW_LIST_KEYS = (
@@ -3449,6 +3486,17 @@ def _workspace_field_keys(workspace) -> set:
     return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
 
 
+def _workspace_device_questions(workspace) -> dict[str, dict]:
+    """Return the active plan's Device questions, keyed by canonical source label."""
+    questions: dict[str, dict] = {}
+    for trace in workspace.traces:
+        for item in trace.devices:
+            key = source_device_key(item.get("key", ""))
+            if key:
+                questions.setdefault(key, item)
+    return questions
+
+
 def _object_type_label(obj) -> str:
     """Return the ``app_label.model_name`` key one termination is offered under."""
     return f"{obj._meta.app_label}.{obj._meta.model_name}"
@@ -3551,9 +3599,12 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         wanted = request.GET.get("trace", "")
         selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
         summary = dict(workspace.trace_summary)
-        from .models import TerminationResolution
+        from .models import TerminationResolution, TraceDeviceResolution
 
-        summary["saved_decisions"] = TerminationResolution.objects.filter(profile=profile).count()
+        summary["saved_decisions"] = (
+            TerminationResolution.objects.filter(profile=profile).count()
+            + TraceDeviceResolution.objects.filter(profile=profile).count()
+        )
         summary["preview_state"] = self._preview_state(request, drift)
         from .proposal_presentation import ProposalPresentation, group_terminations
 
@@ -3578,6 +3629,9 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 ],
             )
         attention, settled = group_terminations(selected.terminations if selected else [])
+        selected_devices = selected.devices if selected else []
+        attention_devices = [device for device in selected_devices if device.get("selectable")]
+        settled_devices = [device for device in selected_devices if not device.get("selectable")]
         from .models import ProposalStatus, ResolutionProposal
 
         if proposal_display.view_reason:
@@ -3597,6 +3651,8 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "traces": traces,
                 "selected_trace": selected,
                 "proposal_fields": proposal_fields,
+                "attention_devices": attention_devices,
+                "settled_devices": settled_devices,
                 "attention_terminations": attention,
                 "settled_terminations": settled,
                 "summary": summary,
@@ -3739,6 +3795,122 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         """Return the eligible page, inside the caller's own read scope."""
         reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
         return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit)
+
+
+class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Serve one bounded page of visible Device candidates for a plan-authored question."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+    requires_preview_revision = True
+
+    def get(self, request):
+        """Return permission-scoped candidates and their source-evidence explanations."""
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            return JsonResponse({"ok": False, "error": "No current import preview matches this request."}, status=409)
+        _profile, _document, workspace, planning_context = loaded
+        device_key = source_device_key(request.GET.get("device_key", ""))
+        question = _workspace_device_questions(workspace).get(device_key)
+        if question is None:
+            return JsonResponse({"ok": False, "error": "This preview asked no question about that Device."}, status=400)
+        search = request.GET.get("search", "")
+        if len(search) > 200:
+            return JsonResponse({"ok": False, "error": "Device search must be 200 characters or fewer."}, status=400)
+        try:
+            requested = int(request.GET.get("limit", ELIGIBLE_TERMINATION_LIMIT))
+        except (TypeError, ValueError):
+            requested = ELIGIBLE_TERMINATION_LIMIT
+        limit = min(max(requested, 1), ELIGIBLE_TERMINATION_LIMIT)
+        try:
+            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+            found = eligible_trace_devices(
+                reader=reader,
+                evidence=DeviceEvidence.from_dict(question),
+                search=search,
+                limit=limit,
+            )
+        except (PlanningTargetUnavailable, ValueError):
+            return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
+        return JsonResponse(
+            {
+                "ok": True,
+                "candidates": [
+                    {
+                        "id": candidate.device.pk,
+                        "name": candidate.device.name,
+                        "display": str(candidate.device),
+                        "matched_hints": candidate.matched_hints,
+                        "conflicting_hints": candidate.conflicting_hints,
+                    }
+                    for candidate in found.candidates
+                ],
+                "shown": len(found.candidates),
+                "total": found.total,
+            }
+        )
+
+
+class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+    """Save one plan-authored source Device decision and replan the workspace."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Recheck the offered Device, save it under the profile policy lock, and replan."""
+        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        if stale_reason := _stale_preview_reason(request):
+            return _preview_action_error(request, next_url, stale_reason, status=409)
+        if retained_reason := _retained_sync_block_reason(request):
+            return _preview_action_error(request, next_url, retained_reason, status=409)
+        device_key = source_device_key(request.POST.get("device_key", ""))
+        question = _workspace_device_questions(workspace).get(device_key)
+        if question is None:
+            return _preview_action_error(
+                request,
+                next_url,
+                "This preview asked no question about that Device.",
+                status=400,
+            )
+        search = request.POST.get("search", "")
+        if len(search) > 200:
+            return _preview_action_error(
+                request,
+                next_url,
+                "Device search must be 200 characters or fewer.",
+                status=400,
+            )
+        try:
+            device_id = int(request.POST.get("device_id", ""))
+            plan, chosen = save_trace_device_resolution_and_replan(
+                profile=profile,
+                source_document=document,
+                actor=request.user,
+                planning_context=planning_context,
+                evidence=DeviceEvidence.from_dict(question),
+                selected_device_id=device_id,
+                search=search,
+                limit=ELIGIBLE_TERMINATION_LIMIT,
+            )
+        except (TypeError, ValueError):
+            return _preview_action_error(
+                request,
+                next_url,
+                "That Device is not one of the eligible candidates.",
+                status=400,
+            )
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
+        try:
+            record_recalculated_preview(request.session, plan, user=request.user)
+        except PreviewLocked as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        messages.success(request, f"Source Device resolved to '{chosen}'.")
+        return redirect(next_url)
 
 
 class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
@@ -4045,7 +4217,11 @@ class TraceCancelProposalView(_TraceProposalActionView):
         from .resolution_proposals import cancel_proposal
 
         if (
-            proposal_task(proposal.task_type).resolved_device(field_key=proposal.field_key, netbox_reader=reader)
+            proposal_task(proposal.task_type).resolved_device(
+                profile=proposal.profile,
+                field_key=proposal.field_key,
+                netbox_reader=reader,
+            )
             is None
         ):
             raise ObjectPermissionDenied("dcim.view_device")

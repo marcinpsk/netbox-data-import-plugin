@@ -1321,7 +1321,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertRegex(attention, r">\s*DEV-A absent-port\s*<span")
         self.assertNotIn("DEV-B eth1", attention)
         self.assertLess(html.index("Proposed physical topology"), html.index("data-trace-terminations"))
-        self.assertRegex(html, r'</div>\s*</div>\s*<section class="mt-3" data-trace-terminations>')
+        self.assertLess(html.index("data-trace-devices"), html.index("data-trace-terminations"))
 
     def test_automatic_match_with_history_stays_in_attention(self):
         proposal = self.completed(no_match=True)

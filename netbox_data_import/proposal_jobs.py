@@ -17,12 +17,11 @@ from .inference_adapter import (
     InferenceRequest,
     InvalidBackendConfiguration,
     MalformedEnvelope,
-    OpenAICompatibleAdapter,
     RateLimited,
     TransportFailure,
     encode_payload,
 )
-from .inference_backend import NoActiveInferenceBackend, origin_allowlist, plugin_settings, resolve_active_backend
+from .inference_backend import NoActiveInferenceBackend, adapter_for_backend, plugin_settings, resolve_active_backend
 from .inference_credentials import (
     CredentialFailure,
     CredentialUnavailable,
@@ -124,6 +123,7 @@ def _run_claimed_proposal(proposal_id, metadata):
         backend = resolve_active_backend()
         metadata.update(backend.metadata())
         request, snapshot = _request(proposal, backend.response_mode)
+        adapter = adapter_for_backend(backend)
     except (NoActiveInferenceBackend, InvalidInferenceConfiguration, InvalidBackendConfiguration):
         fail_proposal(
             proposal_id,
@@ -140,15 +140,6 @@ def _run_claimed_proposal(proposal_id, metadata):
             backend_metadata=metadata,
         )
         return
-    adapter = OpenAICompatibleAdapter(
-        api_root=backend.api_root,
-        model=backend.model,
-        allowlist=origin_allowlist(),
-        authentication=backend.authentication,
-        response_mode=backend.response_mode,
-        connect_timeout=backend.connect_timeout,
-        read_timeout=backend.read_timeout,
-    )
     for attempt in range(3):
         if not ResolutionProposal.objects.filter(pk=proposal_id, status=ProposalStatus.RUNNING).exists():
             return

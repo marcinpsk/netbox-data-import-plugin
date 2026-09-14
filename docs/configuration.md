@@ -106,6 +106,16 @@ from Vault KV v2. It has this JSON shape:
 the inference API key. This reference contains no Vault address, Vault credential, or inference API
 key.
 
+Save the AI backend, then open its detail page and select **Run connection test**. The foreground
+test resolves the credential and sends a small request to the configured
+`{api_root}/chat/completions` endpoint. This request can consume provider tokens and can have a
+provider cost.
+
+The test also tries `GET {api_root}/models`. If the endpoint returns a compatible model list, the
+detail page shows up to 100 model ids. Select one to open the normal edit form with that value. Review
+the value and save the form. Model discovery is optional. If the endpoint does not support it, enter
+the exact model id manually.
+
 ## Native primary contacts
 
 Map the source contact column to the `primary_contact` target field. Then configure these fields on the Import Profile:
@@ -157,10 +167,25 @@ belongs to that format. A different source format needs a new Import Profile.
 The selected adapter declares the profile's remaining settings, which the profile stores together as
 its adapter configuration. The flat workbook adapter declares the sheet name, the source ID column,
 the custom field name, the update and create switches, the extra-data switch, the primary contact
-role and lookup field, and the preview view mode. The trace workbook adapter declares no settings.
+role and lookup field, and the preview view mode. The trace workbook adapter currently declares no
+settings. It reads the fixed `Trace From To` and optional `Trace List` workbook sheets.
 
-Only the flat workbook adapter is selectable today. An adapter becomes selectable when a Target
-Module that consumes its output ships, so the plugin never offers a source format it cannot import.
+The flat workbook and trace workbook adapters are selectable. An adapter becomes selectable when a
+Target Module that consumes its output ships, so the plugin never offers a source format it cannot
+import.
+
+A trace import opens the **Trace Review Workspace** directly. If a source Device label does not
+match exactly one visible NetBox Device in the selected Site, select **Choose Device**. The Import
+Profile stores that choice. A later trace file reuses it when the source Device label has the same
+letters after case and whitespace normalization. The choice applies to all ports on that source
+Device.
+
+Rack, Location, and U position are search hints. They can change the candidate order, but they never
+select a Device. A Rack or Location hint is used only when you can view that NetBox object.
+
+The trace workbook layout is not configurable in this release. A later adapter setting can map other
+sheet names and columns to the same Source Trace values. Device choices do not depend on Excel column
+names, so they remain reusable across that change.
 
 An object reference inside the adapter configuration uses a natural key, never a database id. The
 primary contact role is referenced by its name, so a profile exported as YAML imports into a

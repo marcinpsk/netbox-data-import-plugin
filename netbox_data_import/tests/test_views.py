@@ -315,6 +315,32 @@ class ImportProfileEditViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
+    def test_add_view_renders_the_selected_source_adapter_configuration(self):
+        """Selecting Trace workbook removes unrelated Flat workbook settings before creation."""
+        url = reverse("plugins:netbox_data_import:importprofile_add")
+
+        response = self.client.get(url, {"source_adapter": "trace_workbook"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["form"]["source_adapter"].value(), "trace_workbook")
+        self.assertNotIn("sheet_name", response.context["form"].fields)
+        self.assertContains(response, "CableClass mappings are configured after you create the profile.")
+        self.assertContains(response, "adapter.addEventListener('change'")
+
+    def test_add_profile_post_creates_a_trace_workbook_profile(self):
+        """The add view creates a Trace workbook profile without Flat workbook settings."""
+        url = reverse("plugins:netbox_data_import:importprofile_add")
+
+        response = self.client.post(
+            url,
+            {"name": "Posted Trace Profile", "source_adapter": "trace_workbook", "_create": "1"},
+        )
+
+        self.assertEqual(response.status_code, 302, getattr(response, "context", None))
+        profile = ImportProfile.objects.get(name="Posted Trace Profile")
+        self.assertEqual(profile.source_adapter, "trace_workbook")
+        self.assertEqual(profile.adapter_config, {})
+
     def test_add_profile_post(self):
         """POST to add view creates a profile and redirects."""
         url = reverse("plugins:netbox_data_import:importprofile_add")

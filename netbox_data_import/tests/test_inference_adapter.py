@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""The OpenAI-compatible adapter: one non-streaming Chat Completion, typed failures (specification 8.1, 8.4)."""
+"""The OpenAI-compatible adapter: Chat Completions, model discovery, and typed failures."""
 
 import ast
 import json
@@ -26,6 +26,7 @@ from netbox_data_import.inference_adapter import (
     BODY_INTERRUPTED,
     BODY_PRESENT,
     DIAGNOSTIC_TEXT_LIMIT,
+    MODEL_DISCOVERY_LIMIT,
     AuthenticationFailure,
     BackendTimeout,
     InferenceRequest,
@@ -67,6 +68,8 @@ class RecordingBackend(BaseHTTPRequestHandler):
 
     status = 200
     payload: object = {}
+    models_status = 200
+    models_payload: object = {"data": []}
     headers_out: dict = {}
     seen: list = []
     delay = 0.0
@@ -89,6 +92,22 @@ class RecordingBackend(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         for name, value in self.headers_out.items():
             self.send_header(name, value)
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def do_GET(self):
+        type(self).seen.append(
+            {
+                "path": self.path,
+                "headers": {name.lower(): value for name, value in self.headers.items()},
+                "body": "",
+            }
+        )
+        raw = self.models_payload if isinstance(self.models_payload, str) else json.dumps(self.models_payload)
+        encoded = raw.encode()
+        self.send_response(self.models_status)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
@@ -117,7 +136,7 @@ class DisconnectingFirstBackend(RecordingBackend):
 
 
 @contextmanager
-def serving(status=200, payload=None, headers_out=None, delay=0.0):
+def serving(status=200, payload=None, headers_out=None, delay=0.0, models_status=200, models_payload=None):
     """Run a Chat Completions stand-in on loopback and yield its api_root and request log."""
 
     class Handler(RecordingBackend):
@@ -125,6 +144,8 @@ def serving(status=200, payload=None, headers_out=None, delay=0.0):
 
     Handler.status = status
     Handler.payload = completion() if payload is None else payload
+    Handler.models_status = models_status
+    Handler.models_payload = {"data": []} if models_payload is None else models_payload
     Handler.headers_out = headers_out or {}
     Handler.seen = []
     Handler.delay = delay
@@ -283,6 +304,44 @@ class ChatCompletionRequestTest(SimpleTestCase):
             adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
 
         self.assertEqual(seen[0]["headers"]["authorization"], f"Bearer {API_KEY}")
+
+
+class ModelDiscoveryTest(SimpleTestCase):
+    """Model discovery uses the same authenticated, destination-pinned adapter boundary."""
+
+    def test_a_compatible_models_endpoint_returns_unique_model_ids(self):
+        payload = {"data": [{"id": "model-b"}, {"id": "model-a"}, {"id": "model-b"}]}
+        with serving(models_payload=payload) as (root, seen, allowlist):
+            models = adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertEqual(models, ("model-b", "model-a"))
+        self.assertEqual(seen[0]["path"], "/models")
+        self.assertEqual(seen[0]["headers"]["authorization"], f"Bearer {API_KEY}")
+
+    def test_an_incompatible_models_envelope_is_typed(self):
+        with serving(models_payload={"models": ["model-a"]}) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope):
+                adapter_for(root, allowlist).discover_models(API_KEY)
+
+    def test_a_credential_echo_is_never_returned_as_a_model_id(self):
+        with serving(models_payload={"data": [{"id": API_KEY}]}) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope):
+                adapter_for(root, allowlist).discover_models(API_KEY)
+
+    def test_model_suggestions_are_bounded(self):
+        payload = {"data": [{"id": f"model-{number:03}"} for number in range(MODEL_DISCOVERY_LIMIT + 10)]}
+        with serving(models_payload=payload) as (root, _seen, allowlist):
+            models = adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertEqual(len(models), MODEL_DISCOVERY_LIMIT)
+        self.assertEqual(models[-1], f"model-{MODEL_DISCOVERY_LIMIT - 1:03}")
+
+    def test_unusable_model_ids_are_not_offered(self):
+        payload = {"data": [{"id": " valid "}, {"id": "line\nbreak"}, {"id": "x" * 201}, {"id": "valid"}]}
+        with serving(models_payload=payload) as (root, _seen, allowlist):
+            models = adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertEqual(models, ("valid",))
 
     def test_streaming_is_never_requested(self):
         """Section 8.4 rejects streaming."""

@@ -22,6 +22,7 @@ from netbox_data_import.inference_connection_test import (
 from netbox_data_import.models import InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.inference_http import issue_server_certificate, serving_tls
+from netbox_data_import.tests.test_inference_adapter import completion, serving as serving_backend
 
 SECRET = "sk-connection-test-secret"
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -87,11 +88,11 @@ def make_row(**overrides):
     return InferenceBackend.objects.create(**values)
 
 
-def settings_for(vault_settings):
+def settings_for(vault_settings, *, origin_allowlist=None):
     """Return a PLUGINS_CONFIG entry pointing the plugin at one Vault stand-in."""
     return {
         "netbox_data_import": {
-            "inference_backend_origin_allowlist": ["https://backend.example.invalid:443"],
+            "inference_backend_origin_allowlist": origin_allowlist or ["https://backend.example.invalid:443"],
             "vault": vault_settings,
         }
     }
@@ -101,12 +102,80 @@ class ConnectionTestResultTest(TestCase):
     """The test resolves the reference and returns one typed category, never a secret."""
 
     def test_a_readable_secret_is_ok(self):
-        row = make_row()
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test(row.pk, "primary")
+        with serving_backend() as (root, _seen, allowlist):
+            row = make_row(api_root=root)
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "ok")
+
+    def test_a_successful_test_calls_chat_completions_and_returns_discovered_models(self):
+        models_payload = {"data": [{"id": "model-a"}, {"id": "model-b"}]}
+        with serving_backend(models_payload=models_payload) as (root, seen, allowlist):
+            row = make_row(api_root=root, model="model-a")
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "ok")
+        self.assertEqual(result.models, ("model-a", "model-b"))
+        self.assertEqual([request["path"] for request in seen], ["/models", "/chat/completions"])
+        self.assertEqual(json.loads(seen[1]["body"])["model"], "model-a")
+
+    def test_unsupported_model_discovery_does_not_fail_a_working_completion(self):
+        with serving_backend(models_status=404, models_payload={"detail": "not found"}) as (root, seen, allowlist):
+            row = make_row(api_root=root)
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "ok")
+        self.assertEqual(result.models, ())
+        self.assertEqual([request["path"] for request in seen], ["/models", "/chat/completions"])
+
+    def test_a_completion_failure_stays_typed_and_keeps_discovered_models(self):
+        models_payload = {"data": [{"id": "working-model"}]}
+        with serving_backend(status=401, payload={"detail": "denied"}, models_payload=models_payload) as (
+            root,
+            _seen,
+            allowlist,
+        ):
+            row = make_row(api_root=root)
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "authentication_failure")
+        self.assertEqual(result.models, ("working-model",))
+
+    def test_a_rejected_request_with_discovered_models_explains_how_to_correct_the_model(self):
+        models_payload = {"data": [{"id": "working-model"}]}
+        with serving_backend(status=400, payload={"detail": "invalid model"}, models_payload=models_payload) as (
+            root,
+            _seen,
+            allowlist,
+        ):
+            row = make_row(api_root=root, model="unknown-model")
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "invalid_configuration")
+        self.assertEqual(result.models, ("working-model",))
+        self.assertIn(
+            "Select one of the available models below, save the backend, and run the test again.", result.detail
+        )
+
+    def test_a_completion_that_echoes_the_credential_returns_no_backend_text(self):
+        with serving_backend(payload=completion(content=SECRET)) as (root, _seen, allowlist):
+            row = make_row(api_root=root)
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "invalid_response")
+        self.assertNotIn(SECRET, json.dumps(asdict(result)))
 
     def test_a_denied_read_reports_credential_denied(self):
         row = make_row()
@@ -172,10 +241,11 @@ class ConnectionTestResultTest(TestCase):
         self.assertEqual(result.category, "invalid_configuration")
 
     def test_every_category_is_one_the_specification_names(self):
-        row = make_row()
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                self.assertIn(run_connection_test(row.pk, "primary").category, CONNECTION_TEST_CATEGORIES)
+        with serving_backend() as (root, _seen, allowlist):
+            row = make_row(api_root=root)
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    self.assertIn(run_connection_test(row.pk, "primary").category, CONNECTION_TEST_CATEGORIES)
 
     def test_the_result_never_carries_the_secret_or_a_vault_body(self):
         row = make_row()
@@ -197,10 +267,11 @@ class ConnectionTestResultTest(TestCase):
                 self.assertNotIn("denied ", serialized)
 
     def test_a_successful_result_names_the_backend_but_not_its_reference(self):
-        row = make_row()
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test(row.pk, "primary")
+        with serving_backend() as (root, _seen, allowlist):
+            row = make_row(api_root=root)
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "primary")
 
         payload = asdict(result)
         self.assertEqual(payload["backend_key"], "primary")
@@ -217,23 +288,26 @@ class SelectedBackendTest(TestCase):
         The two rows reference different Vault paths, so the assertion is which secret was read,
         not merely which key the result names.
         """
-        row = make_row(
-            backend_key="selected",
-            display_name="Selected",
-            enabled=False,
-            credential_reference={**REFERENCE, "path": "inference/selected"},
-        )
-        make_row(
-            backend_key="other-enabled",
-            display_name="Other",
-            enabled=True,
-            credential_reference={**REFERENCE, "path": "inference/other"},
-        )
+        with serving_backend() as (root, _seen, allowlist):
+            row = make_row(
+                backend_key="selected",
+                display_name="Selected",
+                enabled=False,
+                api_root=root,
+                credential_reference={**REFERENCE, "path": "inference/selected"},
+            )
+            make_row(
+                backend_key="other-enabled",
+                display_name="Other",
+                enabled=True,
+                credential_reference={**REFERENCE, "path": "inference/other"},
+            )
 
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test(row.pk, "selected")
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "selected")
 
+        self.assertEqual(result.category, "ok")
         self.assertEqual(result.backend_key, "selected")
         self.assertEqual([path for path in SEEN_PATHS if "inference/" in path], ["/v1/secret/data/inference/selected"])
 
@@ -265,11 +339,12 @@ class SelectedBackendTest(TestCase):
 
     def test_a_disabled_row_can_be_tested_before_it_is_enabled(self):
         """The operator tests a row to decide whether to enable it, so enabled is not the filter."""
-        row = make_row(backend_key="selected", display_name="Selected", enabled=False)
+        with serving_backend() as (root, _seen, allowlist):
+            row = make_row(backend_key="selected", display_name="Selected", enabled=False, api_root=root)
 
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                result = run_connection_test(row.pk, "selected")
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "selected")
 
         self.assertEqual(result.category, "ok")
         self.assertEqual(result.backend_key, "selected")
@@ -370,20 +445,44 @@ class BackendDetailPageTest(TestCase):
         self.assertContains(response, "inference/backend")
         self.assertNotContains(response, SECRET)
 
+    def test_the_detail_page_has_no_model_picker_before_a_connection_test(self):
+        response = self.client.get(self.row.get_absolute_url())
+
+        self.assertNotContains(response, "Available models")
+
     def test_the_connection_test_runs_in_the_request_and_reports_the_result_on_the_backend_page(self):
         from core.models import Job
 
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                response = self.client.post(
-                    reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
-                    follow=True,
-                )
+        models_payload = {"data": [{"id": "model-a"}, {"id": "model-b"}]}
+        with serving_backend(models_payload=models_payload) as (root, seen, allowlist):
+            self.row.api_root = root
+            self.row.model = "model-a"
+            self.row.save(update_fields=("api_root", "model"))
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    response = self.client.post(
+                        reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
+                        follow=True,
+                    )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.redirect_chain, [(self.row.get_absolute_url(), 302)])
         self.assertContains(response, "Connection test succeeded")
+        self.assertContains(response, "Available models")
+        self.assertContains(response, '<option value="model-b">model-b</option>', html=True)
+        self.assertEqual([request["path"] for request in seen], ["/models", "/chat/completions"])
         self.assertFalse(Job.objects.exists())
+        self.assertNotContains(response, SECRET)
+
+        edit_response = self.client.get(
+            reverse("plugins:netbox_data_import:inferencebackend_edit", args=[self.row.pk]),
+            {"model": "model-b"},
+        )
+        self.assertEqual(edit_response.context["form"]["model"].value(), "model-b")
+        self.assertContains(edit_response, "Enter the exact model id")
+
+        second_detail = self.client.get(self.row.get_absolute_url())
+        self.assertNotContains(second_detail, "Available models")
 
     def test_a_failed_foreground_connection_test_reports_its_safe_category_and_detail(self):
         from core.models import Job

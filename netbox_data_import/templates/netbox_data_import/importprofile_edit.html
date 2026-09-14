@@ -1,0 +1,32 @@
+{% extends 'generic/object_edit.html' %}
+{% load i18n %}
+{# SPDX-License-Identifier: Apache-2.0 #}
+{# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> #}
+
+{% block pre_form_fields %}
+  {% if not object.pk and form.source_adapter.value == 'trace_workbook' %}
+    <div class="alert alert-info" role="status">
+      The Trace workbook format has a fixed structure. CableClass mappings are configured after you create the profile.
+    </div>
+  {% endif %}
+{% endblock pre_form_fields %}
+
+{% block javascript %}
+  {{ block.super }}
+  {% if not object.pk %}
+    <script>
+      (() => {
+        const adapter = document.getElementById('id_source_adapter');
+        if (!adapter) {
+          return;
+        }
+        adapter.addEventListener('change', () => {
+          const url = new URL(window.location.href);
+          url.search = '';
+          url.searchParams.set('source_adapter', adapter.value);
+          window.location.assign(url);
+        });
+      })();
+    </script>
+  {% endif %}
+{% endblock javascript %}

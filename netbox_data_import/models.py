@@ -27,6 +27,7 @@ from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_se
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from . import inference_settings as _inference_settings
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
+from .values import identity_text
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -794,6 +795,61 @@ class TerminationResolution(DigestIndexedMixin, PolicySectionModel):
 
     def __str__(self):
         return f"{self.task_type}: {self.selected_display_name}"
+
+
+class TraceDeviceResolution(DigestIndexedMixin, PolicySectionModel):
+    """Store one selected NetBox Device for a canonical source Device label."""
+
+    POLICY_SECTION = "trace_device_resolutions"
+    DIGEST_SOURCE_FIELD = "source_device_key"
+    DIGEST_FIELD = "source_device_key_digest"
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="trace_device_resolutions",
+    )
+    source_device_key = models.TextField(
+        help_text="Canonical source Device label shared by every port on that Device",
+    )
+    source_device_key_digest = models.CharField(
+        max_length=64,
+        blank=True,
+        editable=False,
+        help_text="Fixed-width digest of source_device_key, which the index and constraint carry",
+    )
+    selected_device_id = models.PositiveBigIntegerField(
+        help_text="Primary key of the selected NetBox Device",
+    )
+    selected_display_name = models.CharField(
+        max_length=200,
+        help_text="Device display name at selection time; it can become stale",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_device_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "source_device_key_digest"],
+                name="ndi_tracedevresolution_profile_key",
+            ),
+        ]
+        verbose_name = "Trace Device Resolution"
+        verbose_name_plural = "Trace Device Resolutions"
+
+    def clean(self):
+        """Require a nonempty exact canonical key on a trace-only profile."""
+        super().clean()
+        canonical = identity_text(self.source_device_key)
+        if not canonical or canonical != self.source_device_key:
+            raise ValidationError(
+                {"source_device_key": "Enter the canonical source Device key."},
+                code="invalid",
+            )
+        self._derive_digest()
+
+    def __str__(self):
+        return f"{self.source_device_key} → Device #{self.selected_device_id}"
 
 
 class SourceDocument(models.Model):
