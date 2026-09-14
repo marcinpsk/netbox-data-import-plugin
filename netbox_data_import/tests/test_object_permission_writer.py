@@ -14,7 +14,7 @@ from django.core.exceptions import ValidationError
 from django.db import connection, models
 from django.db.models.signals import post_save, pre_save
 from django.test import TestCase, TransactionTestCase
-from django.test.utils import CaptureQueriesContext
+from django.test.utils import CaptureQueriesContext, isolate_apps
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
 from netbox_data_import.models import (
@@ -35,39 +35,6 @@ from netbox_data_import.object_permissions import (
     save_permission_scoped_object,
 )
 from netbox_data_import.tests.helpers import make_dcim_objects, run_on_separate_connection, user_with_object_permission
-
-
-class ProspectiveTargetTestModel(models.Model):
-    """A test-only relation target whose stable key is not its primary key."""
-
-    code = models.CharField(max_length=32, unique=True)
-
-    def __str__(self):
-        return self.code
-
-    class Meta:
-        app_label = "netbox_data_import"
-        db_table = "netbox_data_import_test_prospective_target"
-        managed = False
-
-
-class ProspectiveRootTestModel(models.Model):
-    """A test-only root whose foreign key stores a related natural key."""
-
-    target = models.ForeignKey(
-        ProspectiveTargetTestModel,
-        db_constraint=False,
-        on_delete=models.CASCADE,
-        to_field="code",
-    )
-
-    def __str__(self):
-        return str(self.target_id)
-
-    class Meta:
-        app_label = "netbox_data_import"
-        db_table = "netbox_data_import_test_prospective_root"
-        managed = False
 
 
 class EnforceSavedObjectPermissionTest(TestCase):
@@ -108,8 +75,44 @@ class EnforceSavedObjectPermissionTest(TestCase):
 class ProspectiveForeignKeyTargetTest(TransactionTestCase):
     """Prospective relations use the concrete value named by each foreign key."""
 
+    @isolate_apps("netbox_data_import")
     def test_a_non_primary_foreign_key_uses_its_known_target_value(self):
         """A generated related primary key does not hide a known natural relation key."""
+
+        class CopyableTestModel(models.Model):
+            def __copy__(self):
+                duplicate = type(self)()
+                duplicate.__dict__.update(self.__dict__)
+                return duplicate
+
+            class Meta:
+                abstract = True
+                app_label = "netbox_data_import"
+
+        class ProspectiveTargetTestModel(CopyableTestModel):
+            code = models.CharField(max_length=32, unique=True)
+
+            def __str__(self):
+                return self.code
+
+            class Meta:
+                app_label = "netbox_data_import"
+                db_table = "netbox_data_import_test_prospective_target"
+
+        class ProspectiveRootTestModel(CopyableTestModel):
+            target = models.ForeignKey(
+                ProspectiveTargetTestModel,
+                db_constraint=False,
+                on_delete=models.CASCADE,
+                to_field="code",
+            )
+
+            def __str__(self):
+                return str(self.target_id)
+
+            class Meta:
+                app_label = "netbox_data_import"
+                db_table = "netbox_data_import_test_prospective_root"
 
         with connection.schema_editor() as schema_editor:
             schema_editor.create_model(ProspectiveTargetTestModel)
