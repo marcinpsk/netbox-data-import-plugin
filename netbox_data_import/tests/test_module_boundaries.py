@@ -51,6 +51,15 @@ def _import_engine_calls(path: pathlib.Path) -> set[str]:
     }
 
 
+def _qualified_name(node: ast.expr) -> str | None:
+    """Return the dotted name represented by one expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute) and (parent := _qualified_name(node.value)):
+        return f"{parent}.{node.attr}"
+    return None
+
+
 def _private_engine_references(path: pathlib.Path) -> set[str]:
     """Return private coordinator attributes and imports referenced by one test."""
     tree = ast.parse(path.read_text())
@@ -61,8 +70,7 @@ def _private_engine_references(path: pathlib.Path) -> set[str]:
             engine_module_names.update(
                 name.asname or name.name
                 for name in node.names
-                if name.name == "import_engine"
-                or (name.name == "netbox_data_import.import_engine" and name.asname is not None)
+                if name.name in {"import_engine", "netbox_data_import.import_engine"}
             )
         elif isinstance(node, ast.ImportFrom) and node.module in {
             "import_engine",
@@ -71,19 +79,12 @@ def _private_engine_references(path: pathlib.Path) -> set[str]:
             engine_names.update(name.asname or name.name for name in node.names if name.name == "ImportEngine")
         elif isinstance(node, ast.ImportFrom) and node.module in {None, "netbox_data_import"}:
             engine_module_names.update(name.asname or name.name for name in node.names if name.name == "import_engine")
+    engine_qualifiers = engine_names | {f"{name}.ImportEngine" for name in engine_module_names}
     references = {
         node.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
-        and (
-            (isinstance(node.value, ast.Name) and node.value.id in engine_names)
-            or (
-                isinstance(node.value, ast.Attribute)
-                and node.value.attr == "ImportEngine"
-                and isinstance(node.value.value, ast.Name)
-                and node.value.value.id in engine_module_names
-            )
-        )
+        and _qualified_name(node.value) in engine_qualifiers
         and node.attr.startswith("_")
     }
     for node in ast.walk(tree):
@@ -208,6 +209,17 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             path = pathlib.Path(directory) / "caller.py"
             path.write_text(
                 "import netbox_data_import.import_engine as engine\ncallback = engine.ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_qualified_import_references_are_detected(self):
+        """A qualified module import cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "import netbox_data_import.import_engine\n"
+                "callback = netbox_data_import.import_engine.ImportEngine._private_helper\n"
             )
 
             self.assertEqual(_private_engine_references(path), {"_private_helper"})
