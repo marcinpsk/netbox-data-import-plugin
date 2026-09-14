@@ -101,7 +101,7 @@ def _private_engine_offenders(test_root: pathlib.Path) -> dict[str, list[str]]:
     """Return private coordinator references in all test modules."""
     return {
         str(path.relative_to(test_root)): sorted(references)
-        for path in test_root.rglob("test_*.py")
+        for path in test_root.rglob("*.py")
         if (references := _private_engine_references(path))
     }
 
@@ -249,6 +249,20 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             self.assertEqual(
                 _private_engine_offenders(test_root),
                 {"nested/test_private.py": ["_private_helper"]},
+            )
+
+    def test_private_coordinator_scan_includes_test_support_modules(self):
+        """A test helper cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            test_root = pathlib.Path(directory)
+            path = test_root / "helpers.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine\ncallback = ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(
+                _private_engine_offenders(test_root),
+                {"helpers.py": ["_private_helper"]},
             )
 
     def test_tests_use_only_the_public_coordinator_interface(self):
