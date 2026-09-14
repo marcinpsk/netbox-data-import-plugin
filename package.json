@@ -13,10 +13,10 @@
     "node": "^24.15.0 || >=26.0.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "^1.63.0",
     "bootstrap": "^5.3.8",
     "jsdom": "^30.0.1",
     "tom-select": "^2.4.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.0"
   }
 }
