@@ -79,8 +79,12 @@ def _prospective_ip_relations(candidate, ip_fields) -> dict[str, ProspectiveRela
 def _planned_device_relations(payload, dependencies) -> dict[str, Any]:
     """Return only planned relations that the reviewed Device payload still uses."""
     relations = {}
-    if payload["rack_id"] is None and payload["rack_name"] and dependencies.planned_rack is not None:
-        relations["rack"] = dependencies.planned_rack
+    planned_rack = dependencies.planned_rack
+    if planned_rack is not None and (
+        (planned_rack.pk is None and payload["rack_id"] is None and payload["rack_name"])
+        or (planned_rack.pk is not None and payload["rack_id"] == planned_rack.pk)
+    ):
+        relations["rack"] = planned_rack
     if payload["role_id"] is None and dependencies.role.pk is None:
         relations["role"] = dependencies.role
     return relations
@@ -622,6 +626,7 @@ class _Dependencies:
     rack: Any = None
     rack_identity: str | None = None
     planned_rack: Any = None
+    rack_change_identity: str | None = None
     role_slug: str = ""
     explicit_device_type: bool = False
     changes: tuple[PlannedChange, ...] = ()
@@ -660,10 +665,16 @@ class _Match:
 
 @dataclass(frozen=True)
 class _PlannedRack:
-    """The identity and final unsaved state of a Rack another unit will create."""
+    """The identity, operation, and final Rack state another unit will write."""
 
     identity: str
+    operation: str
     candidate: Any
+
+    @property
+    def change_identity(self) -> str:
+        """Return the exact Planned Change identity for this Rack write."""
+        return f"{self.identity}:{self.operation}"
 
 
 _REVIEWED_PAYLOAD_FIELDS: dict[str, tuple[str, Any]] = {
@@ -1140,7 +1151,7 @@ class _DeviceBatch:
         return {value: numbers for value, numbers in found.items() if len(numbers) > 1}
 
     def _planned_racks_by_name(self, source_batch, profile) -> dict[str, _PlannedRack]:
-        """Return valid Rack candidates in this batch, keyed by comparison name."""
+        """Return final Rack candidates in this batch, keyed by comparison name."""
         rows = RackModule._rack_rows(source_batch, profile)
         ignored = _ignored_source_ids(profile)
         duplicate_names, duplicate_source_ids = rack_duplicate_keys(rows)
@@ -1150,21 +1161,35 @@ class _DeviceBatch:
             if rack_row_rejection(row, ignored, duplicate_names, duplicate_source_ids) is not None:
                 continue
             name_key = identity_text(rack_row_name(row))
-            # A rack NetBox already holds is an update, so it is there before any device change runs.
-            if name_key in self._racks:
+            matches = self._racks.get(name_key, ())
+            if len(matches) > 1:
                 continue
+            rack = matches[0] if matches else None
             mapping = mappings[_source_text(row.get("device_class"))]
+            height = _coerce_rack_height(row.get("u_height"))
+            serial = _source_text(row.get("serial"))
+            rack_type_id = mapping.rack_type_id
+            tenant_id = self.reader.tenant.pk if self.reader.tenant is not None else None
+            if rack is not None and (
+                not profile.adapter_settings.update_existing
+                or not RackModule._differs(rack, height, serial, rack_type_id, self.reader.location, tenant_id)
+            ):
+                continue
             candidate, _validation = RackModule._validated_candidate(
-                None,
+                rack,
                 rack_row_name(row),
-                _coerce_rack_height(row.get("u_height")),
-                _source_text(row.get("serial")),
-                mapping.rack_type_id,
+                height,
+                serial,
+                rack_type_id,
                 self.reader,
                 profile.adapter_settings.custom_field_name,
                 _source_text(row.get("source_id")),
             )
-            planned[name_key] = _PlannedRack(rack_unit_identity(row), candidate)
+            planned[name_key] = _PlannedRack(
+                rack_unit_identity(row),
+                "create" if rack is None else "update",
+                candidate,
+            )
         return planned
 
     def clash(self, row) -> tuple[str, str, list[int]] | None:
@@ -1234,15 +1259,18 @@ class _DeviceBatch:
 
             # The name scan above cannot lock, and this rack decides the placement claim.
             rack = self.placement_reference(Rack, rack.pk)
-        planned_rack = self._planned_racks.get(rack_key) if rack_name and rack is None else None
+        planned_rack = self._planned_racks.get(rack_key) if rack_name else None
         if rack_name and rack is None and planned_rack is None:
             return _Dependencies(missing=("device.rack_missing", {"rack_name": rack_name}))
         return _Dependencies(
             device_type=device_type,
             role=role,
             rack=rack,
-            rack_identity=planned_rack.identity if planned_rack is not None else None,
+            rack_identity=(
+                planned_rack.identity if planned_rack is not None and planned_rack.operation == "create" else None
+            ),
             planned_rack=planned_rack.candidate if planned_rack is not None else None,
+            rack_change_identity=planned_rack.change_identity if planned_rack is not None else None,
             role_slug=role_slug,
             explicit_device_type=explicit,
             changes=tuple(changes),
@@ -1782,7 +1810,7 @@ class DeviceModule:
                 "create",
                 payload,
                 None,
-                dependencies.rack_identity,
+                dependencies.rack_change_identity if "rack" in prospective_relations else None,
                 dependencies.changes,
                 batch.profile,
             )
@@ -1896,7 +1924,7 @@ class DeviceModule:
             "update",
             payload,
             match.device,
-            dependencies.rack_identity,
+            dependencies.rack_change_identity if "rack" in prospective_relations else None,
             relation_changes,
             batch.profile,
         )
@@ -2158,7 +2186,7 @@ class DeviceModule:
         operation,
         payload,
         device,
-        rack_identity=None,
+        rack_change_identity=None,
         relation_changes=(),
         profile=None,
     ) -> PlannedChange:
@@ -2171,8 +2199,8 @@ class DeviceModule:
                 "state": DeviceModule._precondition_state(device, profile, payload.get("source_id") or ""),
             }
         dependencies = [change.identity for change in relation_changes]
-        if rack_identity is not None and payload["rack_name"] is not None:
-            dependencies.append(f"{rack_identity}:create")
+        if rack_change_identity is not None:
+            dependencies.append(rack_change_identity)
         return PlannedChange(
             identity=f"{identity}:{operation}",
             target_module=DeviceModule.key,

@@ -559,6 +559,61 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         self.assertEqual(null_role_unit.disposition, Disposition.BLOCKED)
         self.assertEqual(null_role_unit.diagnostics[0].code, "device.add_permission")
 
+    def test_device_permission_uses_an_existing_racks_planned_final_state(self):
+        """A Device constraint sees the Rack update that its batch will apply first."""
+        from dcim.models import Device, Rack
+
+        actor = user_with_object_permission(
+            "planned-rack-update-device-creator",
+            [
+                (Rack, ["view", "change"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"rack__u_height": self.rack.u_height}),
+            ],
+        )
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PLANNED-RACK-UPDATE",
+                    "device_class": "Cabinet",
+                    "rack_name": self.rack.name,
+                    "u_height": 20,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="PLANNED-RACK-UPDATE-DEVICE",
+                    device_name="planned-rack-update-device",
+                    rack_name=self.rack.name,
+                ),
+            ),
+        )
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+
+        rack_unit = RackModule().plan(batch, self.profile, CATALOG, reader)[0]
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+        self.assertEqual(device_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.add_permission")
+
+        final_actor = user_with_object_permission(
+            "planned-final-rack-device-creator",
+            [
+                (Rack, ["view", "change"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"rack__u_height": 20}),
+            ],
+        )
+        final_reader = NetBoxReader.for_actor(final_actor).for_target(site=self.site)
+
+        final_unit = DeviceModule().plan(batch, self.profile, CATALOG, final_reader)[0]
+
+        self.assertEqual(final_unit.disposition, Disposition.ACTIONABLE, final_unit.diagnostics)
+        self.assertIn(rack_unit.changes[0].identity, final_unit.changes[-1].dependencies)
+
     def test_planned_role_create_permission_is_checked_against_the_candidate(self):
         """A constrained Device Role add grant must cover the role the plan creates."""
         from dcim.models import Device, DeviceRole, Rack
