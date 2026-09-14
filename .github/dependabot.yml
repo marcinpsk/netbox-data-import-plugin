@@ -52,3 +52,13 @@ updates:
       include: "scope"
     cooldown:
       default-days: 7
+
+  - package-ecosystem: "npm" # See documentation for possible values
+    directory: "/" 
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    cooldown:
+      default-days: 7
