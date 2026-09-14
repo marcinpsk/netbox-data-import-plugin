@@ -2,13 +2,18 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The three Inference Backend plugin settings and the startup shape gate (specification 8.2.1)."""
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
+from netbox_data_import.inference_backend import proposal_candidate_limit
 from netbox_data_import.inference_settings import (
     FILE_FALLBACK_KEY,
+    PROPOSAL_CANDIDATE_LIMIT_DEFAULT,
+    PROPOSAL_CANDIDATE_LIMIT_MAX,
+    PROPOSAL_CANDIDATE_LIMIT_SETTING,
     InvalidInferenceConfiguration,
     validate_credential_reference,
     validate_plugin_settings,
+    validate_proposal_candidate_limit,
 )
 
 
@@ -164,62 +169,60 @@ class VaultSettingTest(SimpleTestCase):
         self.assertIn("scheme", self.rejects({"address": "vault.example.invalid:8200"}))
 
 
+def file_fallback(**overrides):
+    """Return a valid file-fallback mapping with the named keys replaced, or dropped when None."""
+    mapping = {
+        "display_name": "Fallback backend",
+        "adapter_type": "openai_compatible",
+        "api_root": "https://backend.example.invalid:443",
+        "model": "gpt-4o-mini",
+        "authentication": "bearer",
+        "response_mode": "prompt_json",
+        "credential_reference": {
+            "backend": "vault_kv_v2",
+            "mount": "secret",
+            "path": "inference/backend",
+            "field": "api_key",
+        },
+        "connect_timeout": 5,
+        "read_timeout": 60,
+    }
+    mapping.update(overrides)
+    return {key: value for key, value in mapping.items() if value is not None}
+
+
 class FileFallbackSettingTest(SimpleTestCase):
     """The whole-backend fallback carries the row fields minus the backend key and enabled."""
 
-    def fallback(self, **overrides):
-        """Return a valid file-fallback mapping with the named keys replaced."""
-        mapping = {
-            "display_name": "Fallback backend",
-            "adapter_type": "openai_compatible",
-            "api_root": "https://backend.example.invalid:443",
-            "model": "gpt-4o-mini",
-            "authentication": "bearer",
-            "response_mode": "prompt_json",
-            "credential_reference": {
-                "backend": "vault_kv_v2",
-                "mount": "secret",
-                "path": "inference/backend",
-                "field": "api_key",
-            },
-            "connect_timeout": 5,
-            "read_timeout": 60,
-        }
-        mapping.update(overrides)
-        for key, value in list(mapping.items()):
-            if value is None:
-                del mapping[key]
-        return mapping
-
     def test_a_complete_fallback_is_accepted(self):
-        validate_plugin_settings(settings_with(inference_backend=self.fallback()))
+        validate_plugin_settings(settings_with(inference_backend=file_fallback()))
 
     def test_the_setting_is_optional(self):
         validate_plugin_settings(settings_with())
 
     def test_a_missing_field_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(model=None)))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(model=None)))
 
         self.assertIn("model", str(caught.exception))
 
     def test_an_unknown_field_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(enabled=True)))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(enabled=True)))
 
         self.assertIn("enabled", str(caught.exception))
 
     def test_a_backend_key_is_rejected(self):
         """The fallback's key is the fixed value, so the mapping cannot name its own."""
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(backend_key="mine")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(backend_key="mine")))
 
         self.assertIn("backend_key", str(caught.exception))
 
     def test_an_api_root_outside_the_allowlist_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
             validate_plugin_settings(
-                settings_with(inference_backend=self.fallback(api_root="https://elsewhere.example.invalid:443"))
+                settings_with(inference_backend=file_fallback(api_root="https://elsewhere.example.invalid:443"))
             )
 
         self.assertIn("allowlist", str(caught.exception))
@@ -227,26 +230,26 @@ class FileFallbackSettingTest(SimpleTestCase):
     def test_an_adapter_type_outside_the_row_choices_is_rejected(self):
         """The fallback is one whole backend row, so every field carries the row's constraint."""
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(adapter_type="anthropic")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(adapter_type="anthropic")))
 
         self.assertIn("adapter_type", str(caught.exception))
 
     def test_a_response_mode_outside_the_row_choices_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(response_mode="freeform")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(response_mode="freeform")))
 
         self.assertIn("response_mode", str(caught.exception))
 
     def test_an_empty_model_is_rejected(self):
         """The worker never chooses a model, so an empty one has no request to make."""
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(model="   ")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(model="   ")))
 
         self.assertIn("model", str(caught.exception))
 
     def test_a_model_longer_than_the_column_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(model="m" * 201)))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(model="m" * 201)))
 
         self.assertIn("model", str(caught.exception))
 
@@ -260,26 +263,26 @@ class FileFallbackSettingTest(SimpleTestCase):
             for value in (-1, 0, "five", 1.5, True, 2**31):
                 with self.subTest(field=field, value=value):
                     with self.assertRaises(InvalidInferenceConfiguration) as caught:
-                        validate_plugin_settings(settings_with(inference_backend=self.fallback(**{field: value})))
+                        validate_plugin_settings(settings_with(inference_backend=file_fallback(**{field: value})))
 
                     self.assertIn(field, str(caught.exception))
 
     def test_an_authentication_method_outside_the_row_choices_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(authentication="basic")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(authentication="basic")))
 
         self.assertIn("authentication", str(caught.exception))
 
     def test_an_empty_display_name_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(display_name="  ")))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(display_name="  ")))
 
         self.assertIn("display_name", str(caught.exception))
 
     def test_an_api_root_longer_than_the_column_is_rejected(self):
         root = "https://backend.example.invalid:443/" + "p" * 500
         with self.assertRaises(InvalidInferenceConfiguration) as caught:
-            validate_plugin_settings(settings_with(inference_backend=self.fallback(api_root=root)))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback(api_root=root)))
 
         self.assertIn("api_root", str(caught.exception))
 
@@ -306,7 +309,7 @@ class StartupContactTest(SimpleTestCase):
 
         socket.socket.connect = record
         try:
-            validate_plugin_settings(settings_with(inference_backend=FileFallbackSettingTest().fallback()))
+            validate_plugin_settings(settings_with(inference_backend=file_fallback()))
         finally:
             socket.socket.connect = original
 
@@ -480,3 +483,64 @@ class VaultCaBundleTest(SimpleTestCase):
     def test_a_non_string_is_rejected(self):
         with self.assertRaises(InvalidInferenceConfiguration):
             validate_plugin_settings(settings_with(vault=self.vault(ca_bundle=["/a/b.pem"])))
+
+
+class ProposalCandidateLimitTest(SimpleTestCase):
+    """The candidate bound is a deployment setting, validated at startup (section 7.3)."""
+
+    def test_a_positive_integer_is_accepted(self):
+        self.assertEqual(validate_proposal_candidate_limit(96), 96)
+
+    def test_the_upper_bound_is_accepted(self):
+        self.assertEqual(validate_proposal_candidate_limit(PROPOSAL_CANDIDATE_LIMIT_MAX), PROPOSAL_CANDIDATE_LIMIT_MAX)
+
+    def test_a_value_above_the_supported_candidate_array_bound_is_rejected(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_proposal_candidate_limit(1025)
+
+    def test_a_value_past_the_range_is_rejected(self):
+        """`10**100` must never reach a database slice, because the retrieval materializes it."""
+        for value in (PROPOSAL_CANDIDATE_LIMIT_MAX + 1, 10**100):
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_proposal_candidate_limit(value)
+
+    def test_zero_and_negatives_are_rejected(self):
+        for value in (0, -1):
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_proposal_candidate_limit(value)
+
+    def test_a_boolean_is_rejected(self):
+        """`True` is numerically 1 and would silently admit a one-candidate set."""
+        for value in (True, False):
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_proposal_candidate_limit(value)
+
+    def test_a_float_a_string_and_none_are_rejected(self):
+        for value in (64.0, "64", None):
+            with self.subTest(value=value):
+                with self.assertRaises(InvalidInferenceConfiguration):
+                    validate_proposal_candidate_limit(value)
+
+    def test_startup_validation_reaches_it_without_any_other_inference_setting(self):
+        with self.assertRaises(InvalidInferenceConfiguration):
+            validate_plugin_settings({PROPOSAL_CANDIDATE_LIMIT_SETTING: 0})
+
+    def test_the_default_applies_only_when_the_key_is_omitted(self):
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {}}):
+            self.assertEqual(proposal_candidate_limit(), PROPOSAL_CANDIDATE_LIMIT_DEFAULT)
+
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: 128}}):
+            self.assertEqual(proposal_candidate_limit(), 128)
+
+    def test_a_configured_value_is_validated_when_it_is_read(self):
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: True}}):
+            with self.assertRaises(InvalidInferenceConfiguration):
+                proposal_candidate_limit()
+
+    def test_an_oversized_candidate_limit_is_rejected_when_it_is_read(self):
+        with override_settings(PLUGINS_CONFIG={"netbox_data_import": {PROPOSAL_CANDIDATE_LIMIT_SETTING: 1025}}):
+            with self.assertRaises(InvalidInferenceConfiguration):
+                proposal_candidate_limit()

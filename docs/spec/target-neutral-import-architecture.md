@@ -769,15 +769,22 @@ The row is created when the request is made, so it is also the attempt record. I
 Inference Backend call and survives every outcome.
 
 Completion adds the outcome (`candidate` or `no_match`), the selected candidate reference, the
-required explanation, backend metadata (model, request and response ids, finish reason, per-attempt
-records, and which configuration source supplied the Inference Backend), and the raw response text for
-diagnostics. Failure adds the typed failure reason and the raw response text when one was received.
+required explanation, backend metadata (the configured model, validated finish reason, per-attempt
+records, and which configuration source supplied the Inference Backend), and a response diagnostic.
+Failure adds the typed failure reason and the same diagnostic shape.
+
+The response diagnostic records whether the body was absent, interrupted, empty, or present, and it
+records the HTTP status when one was received. The delivery uses bearer authentication, so it never
+retains non-empty response text. A proven credential echo is replaced with a fixed redaction marker.
+Other non-empty text is marked as withheld. Response-supplied request ids, response ids, and model
+names are also withheld because separate metadata fields can contain credential fragments. The adapter
+still parses the response in memory so a valid response object can supply the outcome and explanation.
 
 Status `completed` requires a valid response object. Outcome `no_match` requires a valid JSON no-match
 object with its own explanation, which the operator reads to understand why the evidence did not
 distinguish the candidates. A refusal or an empty-content completion carries no such explanation, so it
-is not `no_match`: it sets status `failed` with typed reason `backend_refusal` and retains the raw
-response for diagnostics.
+is not `no_match`: it sets status `failed` with typed reason `backend_refusal`. Its diagnostic retains
+the receipt and status but withholds non-empty response text.
 
 ### 7.4 Staleness
 
@@ -795,12 +802,16 @@ transaction. There are no change-signal listeners and no background sweeper.
 
 ### 7.5 Jobs and failures
 
-The job receives the Resolution Proposal id and the stable Inference Backend key, which is the
-backend's unique name. It never receives a database id for the backend and never receives a secret.
-The worker resolves the key itself: it reads the database row with that key first, and falls back to
-the `inference_backend` plugin setting with the same `name` only when no database row exists. The
-worker records which source it used in backend metadata, so an operator can tell a database-configured
-run from a file-configured run.
+The job receives the Resolution Proposal id alone. It never receives an Inference Backend key, a
+database id for a backend, or a secret. The worker resolves the active backend itself: the enabled
+database row, or the `inference_backend` plugin setting when no row is enabled. The worker records
+which source it used in backend metadata, so an operator can tell a database-configured run from a
+file-configured run.
+
+A value an operator can edit must never select a credential. A backend key in the payload is such a
+value, and the same-name file fallback would let a scoped operator steer resolution onto the
+deployment's own credential reference. Which backend is active is a deployment-level choice, so the
+worker makes it and the request does not carry it.
 
 The job issues one Inference Backend request at a time through the existing NetBox job system. Vault
 credentials resolve in the worker.
@@ -822,7 +833,8 @@ results appear in the next preview. After a failure, the operator re-requests ma
 | Request a proposal | Preview access to the Import Profile, including view rights on the resolved Device |
 | View proposals | Import Profile view access |
 | Cancel a queued or running proposal | The same permission as requesting a proposal, not restricted to the requesting operator |
-| Accept or reject | The same permission as creating a manual Row Resolution, not restricted to the requesting operator |
+| Accept | The same permission as creating a manual Row Resolution, not restricted to the requesting operator |
+| Reject | Preview access to the Import Profile, not restricted to the requesting operator |
 
 Plan ownership under ADR 0001 is untouched. Acceptance only writes the decision. The operator still
 replans their own preview.
@@ -840,7 +852,9 @@ The last explicit operator action wins across proposals for that key. A `no_matc
 informational and cannot be accepted. A proposal never changes NetBox and never applies itself.
 
 Rejection sets the same one-shot decision fields, records the operator and time, and does not block
-re-requesting a fresh proposal for the same key. Neither acceptance nor rejection changes the status.
+re-requesting a fresh proposal for the same key. It writes no Row Resolution, so it takes the preview
+permission rather than the permission to create one: an operator who may work this preview may
+dismiss a suggestion made for it. Neither acceptance nor rejection changes the status.
 
 All proposal rows are retained indefinitely in this delivery. Cleanup tooling is future scope.
 
@@ -882,13 +896,14 @@ schema. Semantic checks after schema validation:
 
 An invented, missing, duplicated, or malformed candidate identifier is an invalid backend response. A
 wrong `finish_reason` is the same class. The proposal row already exists, so the runtime sets that row
-to status `failed` with its typed reason and the raw response text, and the attempt never produces a
+to status `failed` with its typed reason and response diagnostic, and the attempt never produces a
 candidate outcome. Never repair it with fuzzy matching. Never send a silent second request.
 
 A structured-output refusal (successful HTTP status, `finish_reason` `stop`, `message.refusal` set, no
 content) and an empty-content completion set status `failed` with typed reason `backend_refusal` and
-retain the raw response. Neither is `no_match`: `no_match` requires a valid JSON no-match object with
-its explanation. Neither is retried automatically, and neither is classified as an invalid response.
+retain the response diagnostic without non-empty response text. Neither is `no_match`: `no_match`
+requires a valid JSON no-match object with its explanation. Neither is retried automatically, and
+neither is classified as an invalid response.
 
 Opaque candidate ids are generated per request as zero-padded sequential strings of the form
 `candidate-0001` (spec default).
@@ -926,7 +941,7 @@ InferenceBackend.complete(InferenceRequest) -> InferenceCompletion
 
 InferenceRequest:  system_instruction, user_payload_json, requested_response_mode
 InferenceCompletion: content_text (optional), is_refusal, finish_reason,
-                     backend_request_id, backend_response_id, backend_model
+                     backend_request_id, backend_response_id, backend_model, diagnostic
 
   is_refusal is derived by the adapter: finish_reason `stop` with empty content,
   or with a refusal payload instead of content. Any other finish_reason, or a
@@ -946,7 +961,7 @@ A plugin-level model holds named Inference Backend rows with at most one enabled
 
 | Field | Requirement | Meaning |
 | --- | --- | --- |
-| Backend key | Required | The unique name of the Inference Backend, and the only identifier a job payload carries |
+| Backend key | Required | The unique name of the Inference Backend. Only an Inference Backend connection-test job carries this key; a proposal job carries its Resolution Proposal id. |
 | Display name | Required | Operator-facing label |
 | Adapter type | Required | `openai_compatible` in this delivery (spec default key) |
 | `api_root` | Required | Exact API root without a trailing slash. The client appends `/chat/completions` or `/models`. It never adds `/v1`. |
@@ -1001,7 +1016,9 @@ row and for an `inference_backend` setting value:
 - Require `https` when `authentication` is `bearer`. Allow `http` only for an origin the allowlist
   marks as an approved local endpoint.
 - Resolve the host and reject a private, link-local, loopback, or cloud metadata destination unless
-  the allowlist approves that exact origin. Recheck after resolution.
+  the allowlist approves that exact origin. Recheck after resolution, then connect to one of the
+  checked addresses without resolving the hostname again. Keep the original HTTP Host header and
+  TLS hostname verification.
 - Disable redirects in the HTTP client, or revalidate every redirect target against the same rules
   before following it.
 
@@ -1056,7 +1073,7 @@ The typed credential reference is different from a secret value. It lives in exa
 place: the enabled `InferenceBackend` row, or the `inference_backend` file fallback when no enabled
 row exists. It is restricted configuration metadata, never copied elsewhere.
 
-The inference job receives only the stable backend key and resolves the credential itself. The
+The connection-test job receives only the stable backend key and resolves the credential itself. The
 request-handling process never resolves a secret and passes it to the worker.
 
 Plugin audit and job state may record the backend key, the proposal job id, the credential backend
@@ -1116,9 +1133,11 @@ identical segment carries one row per contributing Source Trace (section 5.7).
 
 `ResolutionProposal` stores the immutable request content (including the resolved Device object type
 and id), the Candidate Snapshot, the five-value status, the completion content, the backend metadata
-and per-attempt records, the raw response text, the typed failure reason, and the one-shot decision
-fields (`decision`, deciding operator, decision time, and the `TerminationResolution` link). It stores
-no secret value.
+and per-attempt records, the response diagnostic, the typed failure reason, and the one-shot decision
+fields (`decision`, deciding operator, decision time, and the `TerminationResolution` link). The
+diagnostic stores receipt and status but withholds non-empty authenticated response text. Backend
+metadata stores configured values and validated fixed-domain values, not arbitrary response metadata.
+It stores no secret value.
 
 ### 9.2 Changed models
 
@@ -1225,16 +1244,19 @@ Proposal card contract:
 | --- | --- |
 | Completed with a candidate | A "Proposal - not applied" badge, the suggested candidate with its kind, the required explanation, backend metadata with attempt count, and explicit Accept and Reject buttons |
 | Completed and stale | The same card with a "Proposal - stale, not applied" badge and a disabled Accept action showing its reason |
-| Completed with no match | The backend's own explanation of why the evidence did not distinguish the candidates, and no accept action |
+| Completed with no match | The backend's own explanation of why the evidence did not distinguish the candidates, and a disabled accept action naming that reason |
 | Failed | The typed failure reason, including `backend_refusal` for a refusal or an empty-content completion, and an Ask AI again action that creates a new proposal |
 | Queued or running | Live progress refreshed in place, with its own cancel action |
 
 A pending card polls its own state every 3 seconds and stops on a terminal state (spec default). The
 operator never leaves the field to learn what the Inference Backend is doing.
 
-Every action is always visible. An illegal action renders disabled with its reason underneath.
+Every action is always visible. An illegal action renders disabled with its reason underneath, never
+hidden: an absent control tells the operator nothing about why it is absent. The proposal card itself
+appears only once a proposal exists, so Accept and Reject are card actions and not field actions.
 
-A per-field proposal history list shows every attempt, its status, and its outcome.
+A per-field proposal history list shows the ten most recent attempts, their status, and their outcome.
+The list links to a field-filtered, paginated history endpoint for all older attempts.
 
 A drift warning strip appears when live NetBox differs from the reviewed snapshot, with a re-read
 action. The workspace compares the reviewed plan fingerprint with a freshly computed plan fingerprint
@@ -1253,6 +1275,9 @@ not final.
   instead, which is how the Inference Backend endpoint works.
 - New read-write endpoints: CableClass mapping and Inference Backend.
 - New read-only endpoints: Resolution Proposal and per-Cable provenance.
+- A field-history endpoint requires one Import Profile id and one canonical field key. It uses the
+  workspace's Import Profile view scope, returns newest attempts first with a stable id tie-breaker,
+  and applies the standard REST pagination limit.
 - The Inference Backend serializer exposes the credential reference as write-only, and never exposes
   a secret value (spec default, consistent with the Vault research).
 - Requesting, accepting, and rejecting a Resolution Proposal happen through Review Workspace
@@ -1279,11 +1304,13 @@ Three job types run through the NetBox job system:
 | Job | Input | Output |
 | --- | --- | --- |
 | Import execution | Import Profile id, `source_document`, accepted serialized plan, selection, idempotency key, actor | An `ImportExecution` row linked one-to-one from the native NetBox Job |
-| Inference proposal | Resolution Proposal id and the stable Inference Backend key | A completed, failed, or cancelled Resolution Proposal |
+| Inference proposal | Resolution Proposal id | A completed, failed, or cancelled Resolution Proposal |
 | Inference Backend connection test | The stable Inference Backend key | A typed result category, never a secret value or a Vault response body |
 
-No job receives a secret value or a database id for an Inference Backend. Import execution progress
-counts Synchronization Units and Planned Changes.
+No job receives a secret value or a database id for an Inference Backend. The connection test still
+carries a backend key, because an administrator starts it against one named row; a proposal carries
+none, because a scoped operator starts it from an editable field (section 7.5). Import execution
+progress counts Synchronization Units and Planned Changes.
 
 ### 10.7 Audit
 
@@ -1417,7 +1444,8 @@ runner.
 | Delete a Logical Cable, create a Cable | The corresponding NetBox Cable permissions, checked at planning and again inside the transaction |
 | Request a Resolution Proposal | Preview access to the profile, including view rights on the resolved Device |
 | Cancel a queued or running Resolution Proposal | The same permission as requesting one, not requester-bound |
-| Accept or reject a Resolution Proposal | The same permission as creating a manual Row Resolution |
+| Accept a Resolution Proposal | The same permission as creating a manual Row Resolution |
+| Reject a Resolution Proposal | Preview access to the Import Profile |
 | Change an Inference Backend or run the connection test | The dedicated NetBox object permission on the `InferenceBackend` model. This one rule authorizes both actions; there is no separate administrator or superuser check. |
 
 An accepted plan belongs to its operator. A background job executes as that operator and rechecks
@@ -1449,8 +1477,12 @@ transaction.
 | Vault 401 or 403 | Non-transient | Fail closed, never try another credential source |
 | Missing secret path or field | Non-transient | Fail closed, identify the Inference Backend and not the secret path |
 | Empty or wrongly typed secret value | Non-transient | Fail closed, never send an inference request |
-| Backend refusal: `finish_reason` `stop` with empty content or a refusal payload | Non-transient, typed reason `backend_refusal` | Set the row to `failed`, retain the raw response, never produce a candidate outcome, no automatic retry |
-| Invalid backend response: content is present but fails JSON parsing, schema validation, or candidate-id validation. A malformed envelope or a non-`stop` finish reason classifies here too | Non-transient, typed reason `invalid_response` | Set the row to `failed`, retain the raw response, never produce a candidate outcome, no automatic retry |
+| Backend refusal: `finish_reason` `stop` with empty content or a refusal payload | Non-transient, typed reason `backend_refusal` | Set the row to `failed`, retain the response diagnostic without non-empty response text, never produce a candidate outcome, no automatic retry |
+| Invalid backend response: content is present but fails JSON parsing, schema validation, or candidate-id validation. A malformed envelope or a non-`stop` finish reason classifies here too | Non-transient, typed reason `invalid_response` | Set the row to `failed`, retain the response diagnostic without non-empty response text, never produce a candidate outcome, no automatic retry |
+
+The transient HTTP statuses are the four this table names. Every other status at or above 400 is
+non-transient, including any this table does not mention, so an unlisted status fails closed with its
+diagnostic instead of consuming the retry budget.
 
 A credential or backend failure affects only the Resolution Proposal request. Device, Rack, Cable, and
 Source Trace preview and import workflows stay available.
@@ -1475,7 +1507,9 @@ plan.
 Progress reporting counts selected Synchronization Units and Planned Changes for an execution, and
 proposal state plus attempt count for an inference job. Logs never contain a secret value, an
 authorization header, a Vault token, a Vault response body, or inference request headers. A backend
-error body is diagnostic data and is stored redacted on the proposal row, not in application logs.
+response diagnostic is stored on the proposal row, not in application logs. It keeps receipt and
+status. It replaces a proven credential echo with a fixed redaction marker and withholds all other
+non-empty authenticated response text. It also withholds arbitrary response-supplied metadata.
 
 ## 14. Sequenced implementation tickets
 
@@ -1749,8 +1783,8 @@ validator, and the acceptance transaction that revalidates freshness and upserts
 - A transient failure retries at most twice and then fails; a non-transient failure fails immediately
   with the typed reason stored.
 - An invented, missing, duplicated, or malformed candidate id, or a wrong `finish_reason`, sets the
-  row to `failed` with its typed reason and the raw response text, and never produces a candidate
-  outcome.
+  row to `failed` with its typed reason and response diagnostic, and never produces a candidate
+  outcome. The diagnostic withholds non-empty authenticated response text.
 - A structured-output refusal and an empty-content completion set the row to `failed` with typed
   reason `backend_refusal`; neither is recorded as `no_match`.
 - A stale proposal cannot be accepted, and staleness is revalidated inside the acceptance transaction
@@ -1780,11 +1814,12 @@ permissions at the view boundary.
 - A completed card shows the "Proposal - not applied" badge, the candidate with its kind, the
   explanation, the backend metadata with attempt count, and explicit Accept and Reject buttons.
 - A stale card shows the stale badge and a disabled Accept with its reason.
-- A no-match card has no accept action; a failed card offers Ask AI again.
+- A no-match card has a disabled accept action with its reason; a failed card offers Ask AI again.
 - Accepting writes a `TerminationResolution` row, marks the termination `accepted`, and triggers a
   replan.
 - Cancel is offered to any operator with request permission, not only the requester.
-- The per-field history lists every attempt with its status and outcome.
+- The per-field history lists the ten most recent attempts with their status and outcome. A link opens
+  the field-filtered, paginated history endpoint for all older attempts.
 - The change is independently mergeable with all tests passing.
 
 **Blocked by.** T6, T8.

@@ -19,6 +19,8 @@ from ..models import (
     ColumnTransformRule,
     SourceResolution,
     ImportExecution,
+    InferenceBackend,
+    ResolutionProposal,
     validate_adapter_target_module,
     validate_contact_candidate_resolution,
     validate_section_applicability,
@@ -278,3 +280,78 @@ class ImportExecutionSerializer(serializers.ModelSerializer):
             "failure_detail",
         ]
         read_only_fields = fields
+
+
+class ResolutionProposalSerializer(serializers.ModelSerializer):
+    """Read-only serializer for the Resolution Proposal audit record."""
+
+    class Meta:
+        model = ResolutionProposal
+        fields = [
+            "id",
+            "profile",
+            "task_type",
+            "field_key",
+            "status",
+            "source_evidence",
+            "resolved_device_type",
+            "resolved_device_id",
+            "prompt_version",
+            "response_schema_version",
+            "candidate_snapshot",
+            "requested_by",
+            "created",
+            "last_updated",
+            "outcome",
+            "selected_candidate_id",
+            "selected_object_type",
+            "selected_object_id",
+            "explanation",
+            "backend_metadata",
+            "response_diagnostic",
+            "failure_reason",
+            "decision",
+            "decided_by",
+            "decided_at",
+            "written_resolution",
+        ]
+        read_only_fields = fields
+
+
+class ResolutionProposalHistorySerializer(serializers.ModelSerializer):
+    """Serialize one attempt summary for profile-scoped field history."""
+
+    class Meta:
+        model = ResolutionProposal
+        fields = ["id", "created", "status", "outcome", "decision", "failure_reason"]
+        read_only_fields = fields
+
+
+class InferenceBackendSerializer(NetBoxModelSerializer):
+    """Serialize one Inference Backend row, without its credential reference.
+
+    NetBox resolves this class by model name to freeze a delete event payload.
+    """
+
+    class Meta:
+        model = InferenceBackend
+        fields = [
+            "id",
+            "url",
+            "display",
+            "backend_key",
+            "display_name",
+            "adapter_type",
+            "api_root",
+            "model",
+            "authentication",
+            "response_mode",
+            "connect_timeout",
+            "read_timeout",
+            "enabled",
+            "tags",
+            "custom_fields",
+            "created",
+            "last_updated",
+        ]
+        brief_fields = ["id", "url", "display", "backend_key", "display_name", "enabled"]
