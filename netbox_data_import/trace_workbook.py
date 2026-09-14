@@ -494,10 +494,17 @@ def _pass_through_error(block: _Block, segments: Sequence[_ParsedSegment]) -> So
             previous.evidence.right.port_class in INTERFACE_PORT_CLASSES
             or following.evidence.left.port_class in INTERFACE_PORT_CLASSES
         ):
+            entry = previous.evidence.right
+            exit_reference = following.evidence.left
             return _error(
                 block,
                 "trace.pass_through_at_interface",
-                "A Pass-Through Claim enters or exits through an interface PortClass.",
+                (
+                    f"The path continues through {entry.device} from {entry.port} ({entry.port_class}) "
+                    f"to {exit_reference.port} ({exit_reference.port_class}). "
+                    "An interface PortClass can terminate a trace, "
+                    "but it cannot join two cable segments. Correct the source path or PortClass."
+                ),
                 following.row_number,
             )
     return None

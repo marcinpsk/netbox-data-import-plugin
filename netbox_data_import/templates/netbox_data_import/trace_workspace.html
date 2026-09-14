@@ -136,6 +136,16 @@
       </div>
     </div>
     <div class="card-body">
+      {% if trace.disposition == "invalid" and trace.findings %}
+        <div class="alert alert-danger" role="alert" data-trace-findings>
+          <strong>Why this trace is invalid</strong>
+          <ul class="mb-0 mt-1 ps-3">
+            {% for finding in trace.findings %}
+              <li>{{ finding.message }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
       <div class="row g-3">
 
         <div class="col-md-4">
@@ -243,7 +253,11 @@
               {% if device.reason %}<div class="ndi-trace-reason">{{ device.reason }}</div>{% endif %}
             </li>
           {% empty %}
-            <li class="text-secondary">Every source Device on this trace resolves in NetBox.</li>
+            {% if trace.resolution_started %}
+              <li class="text-secondary">Every source Device on this trace resolves in NetBox.</li>
+            {% else %}
+              <li class="text-secondary">Planning stopped before it resolved source Devices.</li>
+            {% endif %}
           {% endfor %}
         </ul>
         {% if settled_devices %}
@@ -313,7 +327,11 @@
               <div class="alert alert-danger mt-2 mb-0" role="alert" data-proposal-error hidden></div>
             </li>
           {% empty %}
-            <li class="text-secondary">Every termination on this trace resolves to a NetBox port.</li>
+            {% if trace.resolution_started %}
+              <li class="text-secondary">Every termination on this trace resolves to a NetBox port.</li>
+            {% else %}
+              <li class="text-secondary">Planning stopped before it resolved source terminations.</li>
+            {% endif %}
           {% endfor %}
         </ul>
         {% if settled_terminations %}
@@ -338,7 +356,7 @@
         {% endif %}
       </section>
 
-      {% if trace.findings %}
+      {% if trace.findings and trace.disposition != "invalid" %}
         <ul class="list-unstyled mt-3 mb-0">
           {% for finding in trace.findings %}
             <li class="ndi-trace-reason">{{ finding.message }}</li>

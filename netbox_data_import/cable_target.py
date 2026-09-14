@@ -216,6 +216,7 @@ class _TraceAnalysis:
     policies: dict = field(default_factory=dict)
     devices: dict = field(default_factory=dict)
     terminations: dict = field(default_factory=dict)
+    resolution_started: bool = False
     topology_read: bool = False
     logical_cable: Any = None
     retains_logical_cable: bool = False
@@ -523,6 +524,7 @@ class _CableBatch:
         for analysis in self.analyses:
             if analysis.stopped:
                 continue
+            analysis.resolution_started = True
             resolved: dict[tuple, _Termination] = {}
             for reference in self._references(analysis.trace):
                 if reference.identity_key in resolved:
@@ -1213,6 +1215,7 @@ class _CableBatch:
             },
             "segments": segments,
             "logical_cable": self._logical_cable_display(analysis),
+            "resolution_started": analysis.resolution_started,
             "topology_known": analysis.topology_read,
             # A unit with no changes proposes nothing, so the panel must not offer to delete one.
             "deletes_logical_cable": writes and analysis.deleted_logical_cable is not None,

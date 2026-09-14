@@ -514,6 +514,7 @@ class TraceWorkspaceUnit:
     segments: list[dict[str, Any]]
     logical_cable: dict[str, Any] | None
     deletes_logical_cable: bool
+    resolution_started: bool
     topology_known: bool
     devices: list[dict[str, Any]]
     terminations: list[dict[str, Any]]
@@ -540,6 +541,7 @@ class TraceWorkspaceUnit:
             segments=[dict(segment) for segment in workspace.get("segments") or ()],
             logical_cable=workspace.get("logical_cable"),
             deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
+            resolution_started=bool(workspace.get("resolution_started")),
             topology_known=bool(workspace.get("topology_known")),
             devices=[dict(item) for item in workspace.get("devices") or ()],
             terminations=[dict(item) for item in workspace.get("terminations") or ()],

@@ -31,6 +31,7 @@ from netbox_data_import.tests.helpers import (
     cables_on,
     competing_write_during,
     trace_endpoint_line,
+    trace_segment,
     trace_termination,
     trace_workbook_bytes,
 )
@@ -335,6 +336,34 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertFalse(trace.actions[0].enabled)
         self.assertRegex(response.content.decode(), r'<button\b[^>]*data-trace-action="sync"[^>]*\sdisabled(?=[\s>])')
         self.assertContains(response, trace.actions[0].reason)
+
+    def test_an_invalid_pass_through_explains_why_resolution_did_not_run(self):
+        """An early source failure must not look like successful Device and port resolution."""
+        source = trace_termination("DEV-A", "", "eth0", "Port")
+        destination = trace_termination("DEV-B", "", "eth1", "NIC")
+        interface_entry = trace_termination("PANEL-1", "", "F1", "Port")
+        panel_exit = trace_termination("PANEL-1", "", "R1", "Punch-Down")
+        invalid = (
+            trace_endpoint_line(source),
+            trace_endpoint_line(destination),
+            (
+                trace_segment(source, "Patch", interface_entry),
+                trace_segment(panel_exit, "Patch", destination),
+            ),
+        )
+
+        response = self.open_workspace(invalid)
+
+        self.assertContains(response, "Why this trace is invalid")
+        self.assertContains(
+            response,
+            "The path continues through PANEL-1 from F1 (Port) to R1 (Punch-Down). "
+            "An interface PortClass can terminate a trace, but it cannot join two cable segments.",
+        )
+        self.assertContains(response, "Planning stopped before it resolved source Devices.")
+        self.assertContains(response, "Planning stopped before it resolved source terminations.")
+        self.assertNotContains(response, "Every source Device on this trace resolves in NetBox.")
+        self.assertNotContains(response, "Every termination on this trace resolves to a NetBox port.")
 
     def test_the_re_read_action_is_visible_even_without_drift(self):
         """Every action is always visible, so a quiet workspace still offers its re-read."""
