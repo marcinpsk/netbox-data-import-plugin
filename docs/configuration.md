@@ -1,5 +1,101 @@
 # Configuration
 
+## Inference backend credentials
+
+Configure the Vault connection before you add an Inference Backend. The recommended setup uses a
+Vault Proxy. The Proxy authenticates to Vault and renews its token. The NetBox worker calls the
+Proxy without holding a Vault credential.
+
+```python
+PLUGINS_CONFIG = {
+    "netbox_data_import": {
+        "vault": {
+            "address": "http://198.18.0.4:8100",
+            "auth_method": "proxy",
+            "connect_timeout": 5,
+            "read_timeout": 10,
+        },
+    },
+}
+```
+
+The HTTP address above is a placeholder for a Proxy on a deployment-owned private network. Use the
+Proxy's real private address. Use HTTPS if the connection can leave that network.
+
+If Vault Proxy uses AppRole, give the RoleID and SecretID to the Proxy deployment. For local
+development, its gitignored `.env` file can supply them. For production, use the deployment's
+secret store. Do not give these values to the NetBox process, and do not put them in
+`PLUGINS_CONFIG`.
+
+The Proxy needs an AppRole auto-auth method, a listener, and API proxying. This is the essential
+Vault Proxy configuration:
+
+```hcl
+vault {
+  address = "https://vault.example.invalid:8200"
+}
+
+auto_auth {
+  method {
+    type = "approle"
+
+    config = {
+      role_id_file_path = "/run/secrets/vault-role-id"
+      secret_id_file_path = "/run/secrets/vault-secret-id"
+      remove_secret_id_file_after_reading = false
+    }
+  }
+}
+
+listener "tcp" {
+  address = "0.0.0.0:8100"
+  tls_disable = true
+  require_request_header = true
+}
+
+api_proxy {
+  use_auto_auth_token = "force"
+}
+```
+
+Mount the RoleID and SecretID at the two configured file paths. A local Docker Compose deployment
+can source them from its gitignored `.env` file and expose them only to the Proxy as Compose
+secrets:
+
+```dotenv
+NBDI_VAULT_PROXY_ADDRESS=http://198.18.0.4:8100
+NBDI_VAULT_ADDRESS=https://vault.example.invalid:8200
+NBDI_VAULT_NAMESPACE=
+NBDI_VAULT_ROLE_ID=replace-with-vault-role-id
+NBDI_VAULT_SECRET_ID=replace-with-vault-secret-id
+```
+
+Give the AppRole only `read` access to the required KV v2 data paths. Set `token_num_uses` to `0`,
+because Vault auto-auth does not support limited-use tokens. See HashiCorp's
+[AppRole auto-auth documentation](https://developer.hashicorp.com/vault/docs/agent-and-proxy/autoauth/methods/approle)
+and [Vault Proxy API documentation](https://developer.hashicorp.com/vault/docs/agent-and-proxy/proxy/apiproxy).
+The plugin sends `X-Vault-Request: true`, so the Proxy listener can require this header as shown.
+
+The plugin does not perform an AppRole login directly. It supports `auth_method: "proxy"` as shown
+above. It also supports `auth_method: "token"`, which reads a token from the NetBox worker's
+`VAULT_TOKEN` environment variable.
+
+The **Credential reference** field on an Inference Backend tells the plugin which value to read
+from Vault KV v2. It has this JSON shape:
+
+```json
+{
+  "backend": "vault_kv_v2",
+  "mount": "secret",
+  "path": "inference/backend",
+  "field": "api_key"
+}
+```
+
+`mount` is the KV v2 mount. `path` is the secret path in that mount. `field` is the key that holds
+the inference API key. This reference contains no Vault address, Vault credential, or inference API
+key.
+
 ## Native primary contacts
 
 Map the source contact column to the `primary_contact` target field. Then configure these fields on the Import Profile:

@@ -345,6 +345,12 @@ class VaultReadTest(SimpleTestCase):
         self.assertEqual(seen[0]["body"], "")
         self.assertEqual(seen[0]["method"], "GET")
 
+    def test_the_request_supports_the_vault_proxy_request_header_guard(self):
+        with serving() as (settings, seen):
+            self.resolve(settings)
+
+        self.assertEqual(seen[0]["headers"]["x-vault-request"], "true")
+
     def test_the_proxy_auth_method_sends_no_token(self):
         with serving() as (settings, seen):
             self.resolve(settings)

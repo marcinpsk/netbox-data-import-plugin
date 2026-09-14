@@ -181,7 +181,7 @@ class VaultKvV2CredentialBackend:
 
     def _headers(self) -> dict[str, str]:
         """Return the request headers, reading a token only when the deployment selected one."""
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "X-Vault-Request": "true"}
         if namespace := self._settings.get("namespace"):
             headers["X-Vault-Namespace"] = namespace
         if self._settings.get("auth_method", "proxy") != "token":

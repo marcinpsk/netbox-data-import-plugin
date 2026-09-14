@@ -3,6 +3,7 @@
 import copy
 
 from django import forms
+from django.utils.html import format_html
 from dcim.models import Site, Location
 from tenancy.models import Tenant
 from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
@@ -24,6 +25,24 @@ from .models import (
 )
 
 _EXPLICIT_NONE = "__explicit_none__"
+
+_CREDENTIAL_REFERENCE_EXAMPLE = """{
+  "backend": "vault_kv_v2",
+  "mount": "secret",
+  "path": "inference/backend",
+  "field": "api_key"
+}"""
+
+_CREDENTIAL_REFERENCE_HELP = format_html(
+    "This JSON tells the plugin where to find the API key in Vault. It does not contain the API key. "
+    "Configure Vault first in the NetBox plugin settings at "
+    "<code>PLUGINS_CONFIG[&quot;netbox_data_import&quot;][&quot;vault&quot;]</code>. "
+    '<details class="mt-1" data-credential-reference-help>'
+    "<summary>Show the required JSON shape</summary>"
+    '<pre class="mt-2 mb-0"><code>{}</code></pre>'
+    "</details>",
+    _CREDENTIAL_REFERENCE_EXAMPLE,
+)
 
 
 class _RuntimeCableChoiceField(forms.ChoiceField):
@@ -306,9 +325,7 @@ class InferenceBackendForm(NetBoxModelForm):
             "tags",
         )
         help_texts = {
-            "credential_reference": (
-                "A typed Vault KV v2 reference: backend, mount, path and field. It never holds a key value."
-            ),
+            "credential_reference": _CREDENTIAL_REFERENCE_HELP,
         }
 
 
