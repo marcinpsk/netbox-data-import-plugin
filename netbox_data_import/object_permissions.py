@@ -57,12 +57,22 @@ class ProspectiveRelation:
 
 
 @dataclass(frozen=True)
+class _PreparedCandidate:
+    """One related candidate row shared by forward relations."""
+
+    instance: models.Model
+    generated_primary_key: bool
+    generated_fields: frozenset[str]
+
+
+@dataclass(frozen=True)
 class _ProspectiveRelationState:
-    """One prepared forward relation in the read-only database world."""
+    """One connected forward relation in the read-only database world."""
 
     field: models.ForeignKey
     instance: models.Model
     generated_primary_key: bool
+    generated_target_value: bool
     generated_fields: frozenset[str]
 
 
@@ -164,11 +174,12 @@ def _depends_on_generated_relation_value(constraint, relations) -> bool:
             if parts[0] not in {relation_name, field.attname}:
                 continue
             suffix = parts[1:]
-            if relation.generated_primary_key:
+            if relation.generated_target_value:
                 if _is_nullness_lookup(suffix, value):
                     continue
                 if parts[0] == field.attname or not suffix or suffix[0] in field.get_lookups():
                     return True
+            if relation.generated_primary_key and suffix:
                 related_pk = relation.instance._meta.pk
                 if suffix[0] in {"pk", related_pk.name, related_pk.attname} and not _is_nullness_lookup(
                     suffix[1:], value
@@ -267,7 +278,7 @@ def _prepare_prospective_world(instance, prospective_relations):
                 if existing_values != row_values or prepared.generated_fields != generated_fields:
                     raise ValueError(f"Prospective {related._meta.label} rows with key {related.pk} conflict.")
             else:
-                prepared = _ProspectiveRelationState(field, related, generated_key, generated_fields)
+                prepared = _PreparedCandidate(related, generated_key, generated_fields)
                 prepared_by_key[candidate_key] = (prepared, row_values)
                 candidates.setdefault(expected_model, []).append(related)
             if unsaved:
@@ -283,16 +294,19 @@ def _prepare_prospective_world(instance, prospective_relations):
             generated_values.setdefault(expected_model, {}).setdefault(related.pk, set()).update(
                 related_generated_fields
             )
+        relation_key = field.target_field.value_from_object(related)
+        generated_target_value = field.target_field.attname in related_generated_fields
         current_key = getattr(root, field.attname)
-        if current_key is not None and current_key != related.pk:
+        if current_key is not None and current_key != relation_key:
             raise ValueError(f"The prospective {root._meta.label} already names a different {relation_name}.")
-        setattr(root, field.attname, related.pk)
-        if prepared.generated_primary_key:
+        setattr(root, field.attname, relation_key)
+        if generated_target_value:
             generated_values.setdefault(root._meta.concrete_model, {}).setdefault(root.pk, set()).add(field.attname)
         relations[relation_name] = _ProspectiveRelationState(
             field,
             related,
             prepared.generated_primary_key,
+            generated_target_value,
             prepared.generated_fields,
         )
     return _ProspectiveWorld(root, candidates, relations, generated_values)

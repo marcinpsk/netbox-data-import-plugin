@@ -11,7 +11,7 @@ permission check would only restate the assumption under test.
 from copy import copy
 
 from django.core.exceptions import ValidationError
-from django.db import connection
+from django.db import connection, models
 from django.db.models.signals import post_save, pre_save
 from django.test import TestCase, TransactionTestCase
 from django.test.utils import CaptureQueriesContext
@@ -27,12 +27,47 @@ from netbox_data_import.models import (
 from netbox_data_import.object_permissions import (
     ObjectPermissionDenied,
     ProspectiveRelation,
+    _prepare_prospective_world,
+    _prospective_row_matches,
     assess_permission_scoped_save,
     delete_permission_scoped_objects,
     enforce_saved_object_permission,
     save_permission_scoped_object,
 )
 from netbox_data_import.tests.helpers import make_dcim_objects, run_on_separate_connection, user_with_object_permission
+
+
+class ProspectiveTargetTestModel(models.Model):
+    """A test-only relation target whose stable key is not its primary key."""
+
+    code = models.CharField(max_length=32, unique=True)
+
+    def __str__(self):
+        return self.code
+
+    class Meta:
+        app_label = "netbox_data_import"
+        db_table = "netbox_data_import_test_prospective_target"
+        managed = False
+
+
+class ProspectiveRootTestModel(models.Model):
+    """A test-only root whose foreign key stores a related natural key."""
+
+    target = models.ForeignKey(
+        ProspectiveTargetTestModel,
+        db_constraint=False,
+        on_delete=models.CASCADE,
+        to_field="code",
+    )
+
+    def __str__(self):
+        return str(self.target_id)
+
+    class Meta:
+        app_label = "netbox_data_import"
+        db_table = "netbox_data_import_test_prospective_root"
+        managed = False
 
 
 class EnforceSavedObjectPermissionTest(TestCase):
@@ -68,6 +103,53 @@ class EnforceSavedObjectPermissionTest(TestCase):
         """Background imports run without a request user and keep their own authorization path."""
         mapping = DeviceTypeMapping.objects.create(profile=self.profile, source_make="A", source_model="B")
         enforce_saved_object_permission(mapping, None, "view")
+
+
+class ProspectiveForeignKeyTargetTest(TransactionTestCase):
+    """Prospective relations use the concrete value named by each foreign key."""
+
+    def test_a_non_primary_foreign_key_uses_its_known_target_value(self):
+        """A generated related primary key does not hide a known natural relation key."""
+
+        with connection.schema_editor() as schema_editor:
+            schema_editor.create_model(ProspectiveTargetTestModel)
+            schema_editor.create_model(ProspectiveRootTestModel)
+        try:
+            saved_target = ProspectiveTargetTestModel.objects.create(code="saved-target")
+            saved_world = _prepare_prospective_world(ProspectiveRootTestModel(), {"target": saved_target})
+            planned_target = ProspectiveTargetTestModel(code="planned-target")
+            planned_world = _prepare_prospective_world(ProspectiveRootTestModel(), {"target": planned_target})
+
+            self.assertEqual(saved_world.root.target_id, saved_target.code)
+            self.assertTrue(
+                _prospective_row_matches(
+                    None,
+                    ProspectiveRootTestModel,
+                    {"target__code": saved_target.code},
+                    saved_world,
+                )
+            )
+            self.assertEqual(planned_world.root.target_id, planned_target.code)
+            self.assertTrue(
+                _prospective_row_matches(
+                    None,
+                    ProspectiveRootTestModel,
+                    {"target_id": planned_target.code},
+                    planned_world,
+                )
+            )
+            self.assertFalse(
+                _prospective_row_matches(
+                    None,
+                    ProspectiveRootTestModel,
+                    {"target__pk": -1},
+                    planned_world,
+                )
+            )
+        finally:
+            with connection.schema_editor() as schema_editor:
+                schema_editor.delete_model(ProspectiveRootTestModel)
+                schema_editor.delete_model(ProspectiveTargetTestModel)
 
 
 class AssessPermissionScopedSaveTest(TestCase):
