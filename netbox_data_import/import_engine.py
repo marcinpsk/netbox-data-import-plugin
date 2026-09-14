@@ -18,7 +18,7 @@ from django.db import DatabaseError
 from . import adapter_config, adapters, catalog, target_modules
 from .models import FailureReason, ImportExecution, SourceDocument, locked_profile_policy
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
-from .object_permissions import ObjectPermissionDenied
+from .object_permissions import ObjectPermissionDenied, clear_user_permission_caches
 from .plan import Diagnostic, Disposition, ImportPlan, PlanInvalid, Severity, executable_units, merge_changes
 from .source_resolution import derive_effective_rows
 from .target_runtime import DeletedObject, ExecutionContext, PreconditionFailed
@@ -225,6 +225,7 @@ class ImportEngine:
         progress_callback,
     ) -> None:
         """Compare the selection against a fresh plan and apply it, inside the caller's transaction."""
+        clear_user_permission_caches(actor)
         current = cls.plan(
             profile,
             source_document,
@@ -253,6 +254,7 @@ class ImportEngine:
             if runtime is None:
                 raise EngineConfigurationError(f"No Target Module runtime is registered for '{change.target_module}'.")
             try:
+                clear_user_permission_caches(actor)
                 applied = runtime.apply(change, context)
             except (PreconditionFailed, ObjectPermissionDenied, ValidationError, DatabaseError) as exc:
                 raise _ExecutionFailed(

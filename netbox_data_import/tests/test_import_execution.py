@@ -375,8 +375,6 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
             with run_on_separate_connection(revoke):
                 pass
-            for cache in ("_perm_cache", "_user_perm_cache", "_group_perm_cache", "_object_perm_cache"):
-                self.actor.__dict__.pop(cache, None)
 
         post_save.connect(revoke_device_permission, sender=Rack, weak=False)
         self.addCleanup(post_save.disconnect, revoke_device_permission, sender=Rack)

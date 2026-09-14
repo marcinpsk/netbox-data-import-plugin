@@ -27,9 +27,24 @@ from utilities.permissions import get_permission_for_model, qs_filter_from_const
 
 logger = logging.getLogger(__name__)
 
+_USER_PERMISSION_CACHE_ATTRIBUTES = (
+    "_perm_cache",
+    "_user_perm_cache",
+    "_group_perm_cache",
+    "_object_perm_cache",
+)
+
 
 class ObjectPermissionDenied(Exception):
     """Reject a write outside the caller's NetBox object scope."""
+
+
+def clear_user_permission_caches(user) -> None:
+    """Discard cached grants so the next permission check reads current policy."""
+    if user is None:
+        return
+    for attribute in _USER_PERMISSION_CACHE_ATTRIBUTES:
+        user.__dict__.pop(attribute, None)
 
 
 @dataclass(frozen=True)
