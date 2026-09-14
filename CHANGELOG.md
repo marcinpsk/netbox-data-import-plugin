@@ -2,6 +2,45 @@
 
 <!-- version list -->
 
+## v2.3.0 (2026-09-14)
+
+### Bug Fixes
+
+- Serialize profile YAML policy writes
+  ([`0945cd1`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0945cd18b2443ef722d264964bb6f0785b24e959))
+
+- **api**: Enforce resolution permission scope
+  ([`7c77968`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7c779683be5e20e63ada7c42913efab4f02101fa))
+
+- **api**: Preserve model-cleaned policy values
+  ([`4fd0bbd`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4fd0bbdcd4b0a265e6feb6ae9517e4343a2f168c))
+
+- **api**: Revalidate creates under policy lock
+  ([`77afa71`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/77afa71561a17e8b6da49929a7ca8b11fa11e9c7))
+
+- **api**: Scope cable provenance by profile
+  ([`1857fcd`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1857fcdd53954b7a560144853d4d1f75b8c80edc))
+
+- **api**: Scope profile policy mutations
+  ([`cababa9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cababa98c2c166212e16666cfe04422fa6d8a56b))
+
+### Features
+
+- **api**: Complete configuration surfaces
+  ([`7dc880f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7dc880f405163d1d1c89e12d48f2de5ce2ee6a44))
+
+### Testing
+
+- Synchronize policy API concurrency through database locks
+  ([`31e418f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/31e418f3827a654fd611aa7cfca34ca4fe3f98da))
+
+- **graphql**: Enforce workflow surface boundary
+  ([`e282342`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e282342d408b262a0cc70d4b67a08bebd9e70ce8))
+
+- **yaml**: Audit successful import commit
+  ([`ec14c0a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ec14c0a9bd7f888f9439dc6c5fb2d6a8e7e2a286))
+
+
 ## v2.2.0 (2026-09-14)
 
 ### Bug Fixes
