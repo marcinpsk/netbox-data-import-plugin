@@ -665,16 +665,33 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
     def test_an_unrelated_unit_change_does_not_block_a_safe_selection(self):
         """Only selected unit fingerprints take part in selective execution comparison."""
-        from dcim.models import Device
+        from dcim.models import Device, Rack
 
-        accepted = self._plan()
+        other_rack = Rack.objects.create(name="other-rack", site=self.site, u_height=42)
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=_workbook(
+                ("R-OTHER", "Cabinet", "", other_rack.name, "", "", 42),
+                (
+                    "D-1",
+                    "Server",
+                    "server-a",
+                    self.rack.name,
+                    self.manufacturer.name,
+                    self.device_type.model,
+                    1,
+                ),
+            ),
+            filename="unrelated-rack.xlsx",
+        )
+        accepted = self._plan(document)
         unit = accepted.unit("device:source:D-1")
-        self.rack.u_height = 41
-        self.rack.save(update_fields=["u_height"])
+        other_rack.u_height = 41
+        other_rack.save(update_fields=["u_height"])
 
         execution = ImportEngine.execute(
             self.profile,
-            self.document,
+            document,
             accepted.to_dict(),
             [unit.identity],
             "unrelated-unit-moved",
@@ -683,8 +700,8 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
         self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED)
         self.assertTrue(Device.objects.filter(name="server-a", site=self.site).exists())
-        self.rack.refresh_from_db()
-        self.assertEqual(self.rack.u_height, 41)
+        other_rack.refresh_from_db()
+        self.assertEqual(other_rack.u_height, 41)
 
     def test_a_selected_unit_cannot_silently_expand_to_its_dependency(self):
         """Leaving a required Rack unit out makes the explicit Device selection invalid."""
