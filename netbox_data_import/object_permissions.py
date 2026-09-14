@@ -21,6 +21,7 @@ from django.core.exceptions import EmptyResultSet, FieldDoesNotExist, FieldError
 from django.db import DatabaseError, IntegrityError, connection, models, transaction
 from django.db.models.expressions import Col
 from django.db.models.lookups import IsNull
+from django.utils.functional import LazyObject, empty
 from users.constants import CONSTRAINT_TOKEN_USER
 from utilities.permissions import get_permission_for_model, qs_filter_from_constraints
 
@@ -43,8 +44,14 @@ def clear_user_permission_caches(user) -> None:
     """Discard cached grants so the next permission check reads current policy."""
     if user is None:
         return
-    for attribute in _USER_PERMISSION_CACHE_ATTRIBUTES:
-        user.__dict__.pop(attribute, None)
+    cache_owners = [user]
+    if isinstance(user, LazyObject):
+        if user._wrapped is empty:
+            user._setup()
+        cache_owners.append(user._wrapped)
+    for owner in cache_owners:
+        for attribute in _USER_PERMISSION_CACHE_ATTRIBUTES:
+            owner.__dict__.pop(attribute, None)
 
 
 @dataclass(frozen=True)

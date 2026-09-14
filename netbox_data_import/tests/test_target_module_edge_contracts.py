@@ -467,6 +467,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             "planned-rack-device-creator",
             [
                 (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "planned-rack"}),
                 (Device, ["view"], None),
                 (Device, ["add"], {"rack__name": "planned-rack"}),
             ],
@@ -500,6 +501,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             "null-rack-device-creator",
             [
                 (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "planned-rack"}),
                 (Device, ["view"], None),
                 (Device, ["add"], {"rack__isnull": True}),
             ],

@@ -969,6 +969,56 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
         self.assertFalse(ImportExecution.objects.exists())
 
+    def test_single_row_sync_rechecks_permissions_on_the_wrapped_request_user(self):
+        """The final HTTP write reads permissions again from the concrete request user."""
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Rack, Site
+        from users.models import ObjectPermission
+
+        from netbox_data_import import target_modules
+
+        actor = user_with_object_permission(
+            "cutover-revoked-writer",
+            [
+                (ImportProfile, ("change",), {"pk": self.profile.pk}),
+                (Site, ("view",), {"pk": self.site.pk}),
+                (Rack, ("view", "add"), None),
+            ],
+        )
+        self.client.force_login(actor)
+        upload = self._upload()
+        self.assertRedirects(
+            upload,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        runtime = target_modules.MODULE_RUNTIMES["rack"]
+
+        class RevokingRackRuntime:
+            @staticmethod
+            def plan(*args, **kwargs):
+                return runtime.plan(*args, **kwargs)
+
+            @staticmethod
+            def apply(*args, **kwargs):
+                ObjectPermission.objects.filter(
+                    users=actor,
+                    object_types=ContentType.objects.get_for_model(Rack),
+                ).delete()
+                return runtime.apply(*args, **kwargs)
+
+        target_modules.MODULE_RUNTIMES["rack"] = RevokingRackRuntime()
+        self.addCleanup(target_modules.MODULE_RUNTIMES.__setitem__, "rack", runtime)
+
+        response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
+        self.assertEqual(
+            ImportExecution.objects.latest("pk").failure_detail["reason"],
+            FailureReason.PERMISSION,
+        )
+
     def test_single_row_sync_marks_the_materialized_preview_stale(self):
         """A selective execution returns immediately and leaves recalculation to the operator."""
         from dcim.models import Rack
