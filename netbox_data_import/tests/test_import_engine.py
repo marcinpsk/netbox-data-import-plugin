@@ -183,6 +183,44 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
         self.assertEqual(device_change.payload["rack_name"], "rack-a")
         self.assertEqual([change.identity for change in ordered], [rack_change.identity, device_change.identity])
 
+    def test_a_blocked_rack_update_is_not_a_device_dependency(self):
+        """A blocked Rack stays unchanged, so Device planning uses its stored state."""
+        from dcim.models import Device, Rack, Site
+
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=_workbook(
+                ("R-1", "Cabinet", "", self.rack.name, "", "", 20),
+                (
+                    "D-1",
+                    "Server",
+                    "server-a",
+                    self.rack.name,
+                    self.manufacturer.name,
+                    self.device_type.model,
+                    1,
+                ),
+            ),
+            filename="blocked-rack-update.xlsx",
+        )
+        actor = user_with_object_permission(
+            "blocked-rack-update-planner",
+            [
+                (Site, ["view"], None),
+                (Rack, ["view", "change"], {"u_height": self.rack.u_height}),
+                (Device, ["view", "add"], None),
+            ],
+        )
+
+        plan = self._plan(document, actor)
+
+        rack_unit = plan.unit("rack:source:R-1")
+        device_unit = plan.unit("device:source:D-1")
+        self.assertEqual(rack_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(rack_unit.diagnostics[0].code, "rack.change_permission")
+        self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE, device_unit.diagnostics)
+        self.assertEqual(device_unit.changes[-1].dependencies, ())
+
     def test_merged_rack_and_device_changes_apply_in_dependency_order(self):
         """Applying the merged changes places the device in the new rack."""
         from django.contrib.auth import get_user_model

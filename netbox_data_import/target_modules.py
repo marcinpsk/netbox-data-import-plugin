@@ -1175,7 +1175,7 @@ class _DeviceBatch:
                 or not RackModule._differs(rack, height, serial, rack_type_id, self.reader.location, tenant_id)
             ):
                 continue
-            candidate, _validation = RackModule._validated_candidate(
+            candidate, validation = RackModule._validated_candidate(
                 rack,
                 rack_row_name(row),
                 height,
@@ -1185,6 +1185,9 @@ class _DeviceBatch:
                 profile.adapter_settings.custom_field_name,
                 _source_text(row.get("source_id")),
             )
+            actor = self.reader.actor
+            if validation is not None or (actor is not None and not _candidate_save_is_allowed(actor, candidate)):
+                continue
             planned[name_key] = _PlannedRack(
                 rack_unit_identity(row),
                 "create" if rack is None else "update",
