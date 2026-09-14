@@ -2,6 +2,285 @@
 
 <!-- version list -->
 
+## v2.2.0 (2026-09-14)
+
+### Bug Fixes
+
+- Address inference and proposal review findings
+  ([`75b9a51`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/75b9a517d1b2a5370c66279b030d669a27d6df5d))
+
+- Address proposal review findings
+  ([`468a96d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/468a96da70ec8223d1236605af7653745d237188))
+
+- Align Ask AI cards with the ratified workspace
+  ([`6a6fdf9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6a6fdf9ecb78a2010e73bf46a3f318bc369062ee))
+
+- Harden proposal access and failures
+  ([`92558b8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/92558b820ec213c61f76b0f714c338f5352164c5))
+
+- Preserve digest permission checks
+  ([`db4b1cf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/db4b1cfde483a36d454558667067588d759837d0))
+
+- Preserve proposal lifecycle after conflicts and worker errors
+  ([`390a859`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/390a859aaea330aa83d4520dcafae845547e53a7))
+
+- Reject invalid typed permission constraints
+  ([`ce3a4f3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ce3a4f380c6f0aab2d422ed82a239a1078f2af72))
+
+- Report malformed proposal action ids accurately
+  ([`979638f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/979638f873f3cb380a5d1bb060e0545d64926988))
+
+- **api**: Answer a backend delete, through a read-only Inference Backend endpoint
+  ([`06bfe1a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/06bfe1a192d865b214e383eede8cf59e5974a702))
+
+- **api**: Drop the duplicate ValidationError import
+  ([`62231ce`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/62231cef556b03df66830666e802d8bf5e09f7c0))
+
+- **api**: Enforce proposal visibility and validate profile filters
+  ([`777aee8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/777aee84341abb3ab315bc94d15bb2436ba4f69c))
+
+- **api**: Limit profile-scoped proposal history
+  ([`0ee8ce6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0ee8ce67fc1a50676746bda534da064efd1e4d1b))
+
+- **api**: Preserve profile-scoped history access
+  ([`e771dfe`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e771dfec769cf91af39cd7a9ba50dc72a6bec777))
+
+- **api**: Restrict profile querysets and validate profile IDs
+  ([`8716170`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/8716170bc27fdaea0bba149c4736561167b21bba))
+
+- **inference**: Apply the decidability rule at every decoded layer
+  ([`ce7cc36`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ce7cc3659d2961eaeac9e40ac1ef3f7f30c4772a))
+
+- **inference**: Bound retained response diagnostics
+  ([`522c6d8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/522c6d84815348215ad86373686b90afa8a48afa))
+
+- **inference**: Cap the rate-limit delay a backend can ask a worker to wait
+  ([`56e0fd9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/56e0fd955f35dd51156ee12effed3fc315cc7e8d))
+
+- **inference**: Carry the response a failed call received, and say what may be retried
+  ([`ed537b2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ed537b2527001f4d3f33078bb5efb466b5a2d0da))
+
+- **inference**: Fail a duplicated candidate snapshot as invalid configuration
+  ([`4326b47`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4326b475e0fb891e2b261e1658293d15404f4dbf))
+
+- **inference**: Fail closed on an error status, and type a decoder failure
+  ([`1cb58e3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1cb58e3ced969174bfa0283ec90bcd35af987d52))
+
+- **inference**: Keep a response body only when its content can be established
+  ([`9c9d41a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9c9d41a5f1d5fb948ca1532bdf22d6b9e951b554))
+
+- **inference**: Preserve unmapped adapter diagnostics
+  ([`5b3ff76`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5b3ff76323a2ae2cc7f50ecd202797188c8abfc5))
+
+- **inference**: Redact a credential the backend escaped into its body
+  ([`2dcd1b5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2dcd1b56eb8f6f02bfeb22994c30bc4f26e5d456))
+
+- **inference**: Redact a credential whose own characters need JSON escaping
+  ([`a1b9e61`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a1b9e616d5298b8f36688ab7a4374cc97fe274b5))
+
+- **inference**: Redact an escaped credential in a body that never parses
+  ([`6786fcf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6786fcfee5694ac8dd713c485b5e98c069778f81))
+
+- **inference**: Treat any backslash as an escape when deciding what to keep
+  ([`484af1c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/484af1ccb3565bbdffc5959289055d7f9dcf9638))
+
+- **migrations**: Regenerate resolution proposal schema
+  ([`11b8188`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/11b8188f402e9dc3c55f48937bcb4629ff795f2d))
+
+- **permissions**: Align proposal actions with scoped writes
+  ([`d6142ef`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d6142efc9410948fe75d4888cb74f83fac5959c7))
+
+- **permissions**: Assess missing keep constraints
+  ([`b2c41b4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b2c41b4c9e48f6a741d3a45bc5e9ce2e9132ee04))
+
+- **permissions**: Contain existing-scope errors
+  ([`852efc2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/852efc20ea37debbd5b6795871dd55782ae3cbd7))
+
+- **permissions**: Fail closed on empty constraints
+  ([`9453ecd`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9453ecdb13aef232131ba73168b2805ee85d9e8c))
+
+- **permissions**: Isolate generated key aliases
+  ([`58b6cb1`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/58b6cb1ff07f188945dec490483caf58ffb6af5a))
+
+- **permissions**: Preserve saved-row authority
+  ([`89b2011`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/89b201198a608b8bfe6eb50769568942795d3875))
+
+- **proposals**: Align permissions and presentation contracts
+  ([`a1d539b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a1d539bc10d6ef64884826be0253e350b887f973))
+
+- **proposals**: Bound candidate requests
+  ([`c058673`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c058673017828eca388d0104d52e755bde798e14))
+
+- **proposals**: Bound workspace history responses
+  ([`23e92dc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/23e92dccbabedc81658956a6761cd83fec6d3082))
+
+- **proposals**: Distinguish task queue failures
+  ([`ec7b8ae`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ec7b8ae7c8ef225e1674b186df6af4682198311f))
+
+- **proposals**: Explain unusable candidate sets
+  ([`d53efcd`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d53efcde9b3a349f65ccb450098ab5bf9e94487b))
+
+- **proposals**: Freeze request inventory atomically
+  ([`14759bc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/14759bc03ba70b8caabea92d2f911cb11a4851b7))
+
+- **proposals**: Harden reviewed boundaries
+  ([`587e42e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/587e42e2ca2c0edf85b90180d3f1e946e3bf500a))
+
+- **proposals**: Hide scoped candidate evidence
+  ([`a27da4d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a27da4d7233680b62e43a7fabbebd6b9acfe61c7))
+
+- **proposals**: Keep cancellation available after drift
+  ([`4cff964`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4cff9640b5eeeb8bba8930f2cf5b7476f234d8d1))
+
+- **proposals**: Report unavailable devices accurately
+  ([`28bf0ab`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/28bf0ab3a37953bb160d2ceecfd9dc0e2363b110))
+
+- **proposals**: Require a candidate ID for candidate outcomes
+  ([`793f9ac`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/793f9ac52571c8cd5e7b8ca986d9d3d6070f7c3a))
+
+- **proposals**: Require decision attribution
+  ([`3ecc26e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3ecc26ee15971245a8b0176f88183d059cb88eaa))
+
+- **proposals**: Validate lifecycle inputs and contain permission detail
+  ([`395bbc7`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/395bbc72432ae592ecbb2fbd9f6978ed1f149493))
+
+- **security**: Pin inference connections after DNS resolution
+  ([`e0e1668`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e0e1668ea9a31df10395536a6b8aea974ff6b07f))
+
+- **templates**: Stop the field actions stretching across the workspace
+  ([`ba04ea5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ba04ea579633990f1e9033dac452dd5fe67e3eed))
+
+- **tests**: Carry the bounded diagnostic into the stored assertions
+  ([`a047617`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a04761764e13368330bac8407d396978c77c5f28))
+
+- **ui**: Keep proposal actions busy
+  ([`4cb6f62`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4cb6f627d749fae9fc8eab63d99c1171d8b7ad0c))
+
+- **views**: Contain target loss during workspace display
+  ([`dce2e2a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/dce2e2ae701aa611772ea2693d49fdda29180266))
+
+- **views**: Keep the proposal card in step with what acceptance permits
+  ([`c7fa52b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c7fa52b4d4cb6f3e756fe8515d27be1ec6acc414))
+
+- **views**: Make the preview-revision requirement explicit, and reject without a reader
+  ([`93e564f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/93e564f1f1c0c219267cd877f728b06404710cd2))
+
+- **views**: Reject retired adapters and fail stranded proposals
+  ([`9dd7f72`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9dd7f7291c76d53ea54caeec90692573f0a40737))
+
+### Chores
+
+- **deps-dev**: Bump @playwright/test from 1.62.1 to 1.63.0
+  ([`4cf7c86`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4cf7c86bcc93de16c175f2fdbf9cf4fe0e00e64e))
+
+- **deps-dev**: Bump ruff from 0.16.5 to 0.16.6
+  ([`60f8d89`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/60f8d89263554906a081557350679b5be44b6e27))
+
+- **deps-dev**: Bump types-pyyaml
+  ([`0a71428`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0a71428e9a8a747f37f370f18296d77f8fd803e2))
+
+- **deps-dev**: Bump vitest from 4.1.10 to 5.0.0
+  ([`8642e5b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/8642e5bfe150a83aa7ec90ec5adf93640bf575c0))
+
+- **migrations**: Remove duplicate license metadata
+  ([`2520fec`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2520fecc66a583169fb02cade2ffb32606bfe043))
+
+### Documentation
+
+- Qualify the connection-test backend key requirement
+  ([`07af68c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/07af68c5c315570d3a5f87873db1753cc4a6c160))
+
+- **api**: Trim two comments to the non-obvious line
+  ([`0dab429`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0dab4290c91314412c5129c7845c4cc16817807e))
+
+- **design**: Ratify T8 at round 5, and record what the prerequisite had to fix
+  ([`853a4d2`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/853a4d25f56054f28b2058b6d81d2d1b7b2fbe89))
+
+- **design**: Record proposal permission seam
+  ([`046a2e8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/046a2e810cc206f7ce099ae02efa9b297abf6ff8))
+
+- **design**: Record the ratified T8 Resolution Proposal design
+  ([`b8660ef`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b8660efec63750a294989aefd249f147ed1ad520))
+
+- **inference**: Give the decidability rule its reason in one line
+  ([`491d101`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/491d1018d2255c0256f90052b22bda4c2d5dde87))
+
+- **spec**: Say that an illegal action is disabled, never hidden
+  ([`1eafc2e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1eafc2e446a7d012baa023cf33648d288b62efc1))
+
+- **spec**: State which HTTP statuses 13.3 treats as transient
+  ([`df09cfc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/df09cfcc6449de66d10ed2df059395e668fa1ed3))
+
+### Features
+
+- Add Ask AI cards to the trace workspace
+  ([`9b95bd1`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9b95bd1baebb0c8905094adf7d45b806cd642427))
+
+- Expose proposal history and workspace action states
+  ([`74cee98`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/74cee98cb27bbd585011bdf2f93bac745197fdf3))
+
+- **api**: Expose Resolution Proposals through a read-only endpoint
+  ([`6bd802f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6bd802f8390735a8e7548302a4ad51a7f1647e29))
+
+- **inference**: Add the proposal candidate bound as a plugin setting
+  ([`8917ca5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/8917ca582d023da827103d7d83e47c91092e832f))
+
+- **inference**: Add the proposal task registry and the Candidate Snapshot
+  ([`f5646aa`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f5646aabf22eff360670b5e16cce611ebfa18b74))
+
+- **inference**: Add the Resolution Proposal row and its transition service
+  ([`7c52229`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7c52229dc2004a67dc01de640063659022987d8a))
+
+- **inference**: Add the strict Resolution Proposal response validator
+  ([`20c04f0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/20c04f069528d3d05fe60593a806020b65440fb6))
+
+- **inference**: Revalidate freshness and serialize the operator decision
+  ([`7bb1d47`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7bb1d47221c9cc1922016bb6faa10d64a658d637))
+
+- **inference**: Run a Resolution Proposal through the active backend
+  ([`a5e2e1e`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/a5e2e1e7b39ce7177f6002c35839f3d9f03f691f))
+
+- **views**: Add the Review Workspace commands for Resolution Proposals
+  ([`f595922`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f5959225b02c5605d0e33773fb34176e9edb20a0))
+
+### Refactoring
+
+- **api**: Scope Resolution Proposal history with the shared mixin
+  ([`32c9747`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/32c9747c32ad65fd78ccc69b2f45138a446c3abe))
+
+- **models**: Centralize digest index synchronization
+  ([`e8a31cf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e8a31cf93cfadd38482b5c5917170387490d19bc))
+
+- **proposals**: Make Candidate Snapshot the request interface
+  ([`3a46213`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3a46213a7f48803e03941584c67279def1b329e1))
+
+- **proposals**: Share digest maintenance through the mixin
+  ([`ec8345b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ec8345be5d69e247589db5b2e033d22b4805be23))
+
+### Testing
+
+- Cover proposal object constraints
+  ([`667e3f0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/667e3f0bee9c98bd743c5d0f2f880656261f7d15))
+
+- Use persisted proposal candidates
+  ([`d1ebe3b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d1ebe3be6d9384592b55725d903a4bc88924c7d1))
+
+- **inference**: Make the file-fallback mapping a module-level helper
+  ([`33e0f4a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/33e0f4a999512006878415975ffde1919ba6dafd))
+
+- **inference**: Pin 408 as non-transient, and shorten one rationale
+  ([`ecdd2b1`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/ecdd2b1584ed8c8c27dc17ef45363b63972d060c))
+
+- **security**: Cover pinned transport trust cases
+  ([`35a8a5f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/35a8a5f5bf0411d8d60773476785c36f5b76572c))
+
+- **trace**: Guard the disposition set the summary strip counts
+  ([`c28b9be`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c28b9be311b89ef08dc3abc75587ecc5fd21cca6))
+
+- **views**: Apply NetBox's view contract to Inference Backend
+  ([`04799a0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/04799a08bc333aa8113956487483048aeada5a6f))
+
+
 ## v2.1.0 (2026-09-09)
 
 ### Bug Fixes
