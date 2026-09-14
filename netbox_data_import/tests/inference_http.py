@@ -17,7 +17,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 
 @contextmanager
-def serving_rebinding(handler, payload):
+def serving_rebinding(handler, payload, *, tls_context=None):
     """Run approved and private stand-ins that DNS can select on the same port."""
 
     class Approved(handler):
@@ -34,6 +34,9 @@ def serving_rebinding(handler, payload):
     port = approved_server.server_address[1]
     private_server = ThreadingHTTPServer(("127.0.0.2", port), Private)
     servers = (approved_server, private_server)
+    if tls_context is not None:
+        for server in servers:
+            server.socket = tls_context.wrap_socket(server.socket, server_side=True)
     threads = tuple(threading.Thread(target=server.serve_forever, daemon=True) for server in servers)
     for thread in threads:
         thread.start()
@@ -48,7 +51,7 @@ def serving_rebinding(handler, payload):
 
 
 @contextmanager
-def serving_after_unavailable_address(handler, payload):
+def serving_after_unavailable_address(handler, payload, *, tls_context=None):
     """Keep the first loopback address closed and serve the same port on the second."""
 
     class Handler(handler):
@@ -61,6 +64,8 @@ def serving_after_unavailable_address(handler, payload):
     port = unavailable.getsockname()[1]
     try:
         server = ThreadingHTTPServer(("127.0.0.2", port), Handler)
+        if tls_context is not None:
+            server.socket = tls_context.wrap_socket(server.socket, server_side=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

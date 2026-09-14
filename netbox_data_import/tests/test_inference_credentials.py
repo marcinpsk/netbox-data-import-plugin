@@ -2,17 +2,16 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The credential boundary and its Vault KV v2 implementation (specification 8.5, 8.6).
 
-Every case runs against a real HTTP server on the loopback interface, so the request the plugin
+Every case runs against a real HTTPS server on the loopback interface, so the request the plugin
 actually builds is the one under test: its path, its headers, and its body.
 """
 
 import json
 import pathlib
 import socket
-import threading
 
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -37,6 +36,7 @@ from netbox_data_import.tests.inference_http import (
     serving_after_unavailable_address as _serving_after_unavailable_address,
     serving_rebinding as _serving_rebinding,
     serving_tls as _serving_tls,
+    tls_server_context,
 )
 
 SECRET = "sk-do-not-leak-this-value"
@@ -83,56 +83,64 @@ def serving(status=200, payload=None, handler=RecordingVault):
     Handler.status = status
     Handler.payload = {"data": {"data": {"api_key": SECRET}}} if payload is None else payload
     Handler.seen = []
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield (
-            {
-                "address": f"http://127.0.0.1:{server.server_address[1]}",
-                "auth_method": "proxy",
-                "connect_timeout": 2,
-                "read_timeout": 2,
-            },
-            Handler.seen,
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with TemporaryDirectory() as temporary:
+        ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+        with _serving_tls(Handler, Handler.payload, certificate_path, key_path) as (port, seen, _server_names):
+            yield (
+                {
+                    "address": f"https://localhost:{port}",
+                    "auth_method": "proxy",
+                    "ca_bundle": str(ca_path),
+                    "connect_timeout": 2,
+                    "read_timeout": 2,
+                },
+                seen,
+            )
 
 
 @contextmanager
 def serving_rebinding():
     """Run approved and private Vault stand-ins that share one port."""
     payload = {"data": {"data": {"api_key": SECRET}}}
-    with _serving_rebinding(RecordingVault, payload) as (port, approved_seen, private_seen):
-        yield (
-            {
-                "address": f"http://localhost:{port}",
-                "auth_method": "proxy",
-                "connect_timeout": 2,
-                "read_timeout": 2,
-            },
+    with TemporaryDirectory() as temporary:
+        ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+        context = tls_server_context(certificate_path, key_path)
+        with _serving_rebinding(RecordingVault, payload, tls_context=context) as (
+            port,
             approved_seen,
             private_seen,
-        )
+        ):
+            yield (
+                {
+                    "address": f"https://localhost:{port}",
+                    "auth_method": "proxy",
+                    "ca_bundle": str(ca_path),
+                    "connect_timeout": 2,
+                    "read_timeout": 2,
+                },
+                approved_seen,
+                private_seen,
+            )
 
 
 @contextmanager
 def serving_after_unavailable_address():
     """Keep the first loopback address closed and serve the same port on the second."""
     payload = {"data": {"data": {"api_key": SECRET}}}
-    with _serving_after_unavailable_address(RecordingVault, payload) as (port, seen):
-        yield (
-            {
-                "address": f"http://localhost:{port}",
-                "auth_method": "proxy",
-                "connect_timeout": 2,
-                "read_timeout": 2,
-            },
-            seen,
-        )
+    with TemporaryDirectory() as temporary:
+        ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+        context = tls_server_context(certificate_path, key_path)
+        with _serving_after_unavailable_address(RecordingVault, payload, tls_context=context) as (port, seen):
+            yield (
+                {
+                    "address": f"https://localhost:{port}",
+                    "auth_method": "proxy",
+                    "ca_bundle": str(ca_path),
+                    "connect_timeout": 2,
+                    "read_timeout": 2,
+                },
+                seen,
+            )
 
 
 @contextmanager
@@ -291,7 +299,7 @@ class VaultReadTest(SimpleTestCase):
                 self.assertEqual(self.resolve(settings), SECRET)
 
         self.assertEqual(len(approved_seen), 1)
-        self.assertEqual(approved_seen[0]["headers"]["host"], settings["address"].removeprefix("http://"))
+        self.assertEqual(approved_seen[0]["headers"]["host"], settings["address"].removeprefix("https://"))
         self.assertEqual(private_seen, [])
 
     def test_a_connection_failure_tries_the_next_resolved_vault_address(self):
@@ -451,20 +459,20 @@ class VaultFailureClassificationTest(SimpleTestCase):
         )
 
     def test_an_unreachable_vault_is_credential_unavailable(self):
-        settings = {"address": "http://127.0.0.1:1", "auth_method": "proxy", "connect_timeout": 1, "read_timeout": 1}
+        settings = {"address": "https://127.0.0.1:1", "auth_method": "proxy", "connect_timeout": 1, "read_timeout": 1}
         backend = VaultKvV2CredentialBackend(settings)
 
         with self.assertRaises(CredentialUnavailable):
             backend.resolve(CredentialReference.from_mapping(REFERENCE))
 
     def test_an_unreachable_vault_does_not_quote_its_address(self):
-        """`run_connection_test` stores this text in `Job.data`, which is readable in the UI.
+        """`run_connection_test` shows this text in the UI.
 
         The address is deployment infrastructure, so the failure names the class of fault only.
         """
         # Loopback: a hostname here is answered by the environment's proxy instead of raising.
         settings = {
-            "address": "http://127.0.0.1:9",
+            "address": "https://127.0.0.1:9",
             "auth_method": "proxy",
             "connect_timeout": 1,
             "read_timeout": 1,
