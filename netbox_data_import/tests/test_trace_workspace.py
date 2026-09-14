@@ -4,7 +4,6 @@
 
 import re
 from io import BytesIO
-from types import SimpleNamespace
 
 from dcim.models import Interface
 from django.db import connection
@@ -12,6 +11,8 @@ from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
+from netbox_data_import import adapters as adapter_registry
+from netbox_data_import.adapters import TraceWorkbookAdapter
 from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.models import ImportProfile, TerminationResolution
@@ -39,10 +40,21 @@ from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 from netbox_data_import.views import _review_workspace_url
 
 
+class _MixedOutputTestAdapter(TraceWorkbookAdapter):
+    """A registered test adapter whose complete output needs the generic workspace."""
+
+    key = "mixed_output_test"
+    output_kinds = frozenset({OutputKind.SOURCE_TRACE, OutputKind.DEVICE_SOURCE_ROW})
+
+
 class ReviewWorkspaceRouteTest(TestCase):
     def test_a_mixed_output_profile_keeps_the_generic_workspace(self):
-        profile = SimpleNamespace(
-            output_kinds=frozenset({OutputKind.SOURCE_TRACE, OutputKind.DEVICE_SOURCE_ROW}),
+        adapter_registry._ADAPTERS_BY_KEY[_MixedOutputTestAdapter.key] = _MixedOutputTestAdapter
+        self.addCleanup(adapter_registry._ADAPTERS_BY_KEY.pop, _MixedOutputTestAdapter.key)
+        profile = ImportProfile.objects.create(
+            name="Mixed output workspace",
+            source_adapter=_MixedOutputTestAdapter.key,
+            adapter_config={},
         )
 
         self.assertEqual(

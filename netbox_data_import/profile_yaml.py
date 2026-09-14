@@ -142,8 +142,28 @@ def serialize_profile(profile: ImportProfile, actor=None) -> dict[str, Any]:
             rows = visible
         if schema.natural_keys:
             rows = rows.select_related(*(field.name for field in schema.natural_keys))
+            if actor is not None:
+                _enforce_natural_key_view_permissions(schema, rows, actor)
         document[section.key] = [_serialize_policy_row(schema, row) for row in rows]
     return document
+
+
+def _enforce_natural_key_view_permissions(schema: PolicyDocumentSchema, rows, actor) -> None:
+    """Reject export when a natural-key reference names an object the actor cannot view."""
+    for natural_key in schema.natural_keys:
+        relation = schema.model._meta.get_field(natural_key.name)
+        related_model = relation.remote_field.model
+        referenced_ids = set(
+            rows.exclude(**{f"{natural_key.name}__isnull": True}).values_list(
+                f"{natural_key.name}__pk",
+                flat=True,
+            )
+        )
+        visible_ids = set(
+            related_model.objects.restrict(actor, "view").filter(pk__in=referenced_ids).values_list("pk", flat=True)
+        )
+        if referenced_ids - visible_ids:
+            raise ObjectPermissionDenied(f"{related_model._meta.app_label}.view_{related_model._meta.model_name}")
 
 
 def apply_profile_document(data: Any, actor=None) -> tuple[ImportProfile, dict[str, int]]:

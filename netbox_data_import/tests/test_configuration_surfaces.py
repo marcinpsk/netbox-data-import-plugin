@@ -1069,6 +1069,37 @@ class ProfileYamlPermissionTest(TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_export_requires_view_access_to_a_policy_rows_natural_key_object(self):
+        from dcim.models import RackType
+
+        _site, manufacturer, _device_type, _role = make_dcim_objects("YAMLNaturalKey")
+        rack_type = RackType.objects.create(
+            manufacturer=manufacturer,
+            model="Export Rack",
+            slug="export-rack",
+            u_height=42,
+        )
+        mapping = ClassRoleMapping.objects.create(
+            profile=self.allowed,
+            source_class="Cabinet",
+            creates_rack=True,
+            rack_type=rack_type,
+        )
+        actor = user_with_object_permission(
+            "profile-yaml-related-viewer",
+            [
+                (ImportProfile, ["view"], {"pk": self.allowed.pk}),
+                (ClassRoleMapping, ["view"], {"pk": mapping.pk}),
+            ],
+        )
+        self.client.force_login(actor)
+
+        response = self.client.get(
+            reverse("plugins:netbox_data_import:exportprofile_yaml", kwargs={"pk": self.allowed.pk})
+        )
+
+        self.assertEqual(response.status_code, 403)
+
     def test_import_cannot_update_a_profile_outside_the_actor_scope(self):
         actor = user_with_object_permission(
             "profile-yaml-editor",

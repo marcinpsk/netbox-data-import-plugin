@@ -236,7 +236,7 @@ class SecretContainmentTest(TestCase):
     def test_one_foreground_test_leaves_no_secret_and_one_authoritative_database_reference(self):
         """One sweep covers persisted rows, an audit, the session, and logs."""
         profile = ImportProfile.objects.create(name="Redaction audit", adapter_config={})
-        ImportExecution.objects.create(
+        execution = ImportExecution.objects.create(
             profile=profile,
             outcome=ExecutionOutcome.FAILED,
             failure_detail={"reason": "planning"},
@@ -292,7 +292,8 @@ class SecretContainmentTest(TestCase):
 
         serialized = json.dumps(state, default=str)
         self.assertNotIn(SECRET, serialized)
-        self.assertIn("netbox_data_import.ImportExecution", state["plugin_rows"])
+        execution_rows = state["plugin_rows"]["netbox_data_import.ImportExecution"]
+        self.assertIn(execution.pk, [row["id"] for row in execution_rows])
         self.assertTrue(state["object_changes"])
         self.assertEqual(occurrences(state, REFERENCE), 1)
 

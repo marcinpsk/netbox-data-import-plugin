@@ -3867,6 +3867,9 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
             return _preview_action_error(request, next_url, stale_reason, status=409)
         if retained_reason := _retained_sync_block_reason(request):
             return _preview_action_error(request, next_url, retained_reason, status=409)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
         device_key = source_device_key(request.POST.get("device_key", ""))
         question = _workspace_device_questions(workspace).get(device_key)
         if question is None:

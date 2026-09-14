@@ -25,6 +25,8 @@ class VaultTransportGuidanceTest(SimpleTestCase):
         self.assertIn("NBDI_VAULT_PROXY_ADDRESS=https://", vault_guide)
         self.assertIn("both `proxy` and `token`", vault_guide)
         self.assertIn("NetBox-to-Proxy connection must remain encrypted", vault_guide)
+        self.assertIn("Do not publish the listener outside the isolated container network", vault_guide)
+        self.assertIn("restrict network ingress and authenticate each client", vault_guide)
         self.assertIn("Inference Backend `api_root` is separate", vault_guide)
         self.assertIn("NetBox web and worker processes", vault_guide)
         self.assertIn("small request", vault_guide)

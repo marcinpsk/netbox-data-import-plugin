@@ -66,6 +66,11 @@ api_proxy {
 }
 ```
 
+The TCP example lets a sibling container reach the Proxy. Keep both containers on an isolated
+container network. Do not publish the listener outside the isolated container network. The
+`X-Vault-Request` header is SSRF protection, not client authentication. If NetBox connects to a
+separate Proxy, restrict network ingress and authenticate each client, for example with mTLS.
+
 Mount the RoleID, SecretID, Proxy certificate, and Proxy key at the configured file paths. Mount the
 CA that signed the Proxy certificate in the NetBox web and worker processes. A local Docker Compose
 deployment can source the AppRole values from its gitignored `.env` file and expose them only to the

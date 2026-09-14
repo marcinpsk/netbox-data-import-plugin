@@ -1273,9 +1273,7 @@ class _DeviceBatch:
             role=role,
             rack=rack,
             rack_identity=(
-                executable_rack.identity
-                if executable_rack is not None and executable_rack.operation == "create"
-                else None
+                planned_rack.identity if planned_rack is not None and planned_rack.operation == "create" else None
             ),
             planned_rack=executable_rack.candidate if executable_rack is not None else None,
             rack_change_identity=executable_rack.change_identity if executable_rack is not None else None,

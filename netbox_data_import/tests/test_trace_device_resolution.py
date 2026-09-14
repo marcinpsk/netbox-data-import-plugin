@@ -256,6 +256,30 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         )
         self.assertContains(saved, "manually resolved")
 
+    def test_saving_a_device_choice_refuses_an_adapter_this_release_dropped(self):
+        """The POST discards an unusable preview before it writes the Device decision."""
+        response = self.start_alias_preview()
+        revision = response.context["preview_revision"]
+        ImportProfile.objects.filter(pk=self.profile.pk).update(source_adapter="retired-adapter")
+
+        saved = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                "preview_revision": revision,
+            },
+        )
+
+        self.assertRedirects(
+            saved,
+            reverse("plugins:netbox_data_import:import_setup"),
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
+        self.assertFalse(self.client.session["import_preview_pending"])
+
     def test_a_later_file_reuses_the_choice_for_another_port_and_label_spacing(self):
         response = self.start_alias_preview()
         self.client.post(

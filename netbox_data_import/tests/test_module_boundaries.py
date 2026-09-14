@@ -67,11 +67,12 @@ def _private_engine_references(path: pathlib.Path) -> set[str]:
     engine_module_names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            engine_module_names.update(
-                name.asname or name.name
-                for name in node.names
-                if name.name in {"import_engine", "netbox_data_import.import_engine"}
-            )
+            for name in node.names:
+                local_name = name.asname or name.name
+                if name.name == "netbox_data_import":
+                    engine_module_names.add(f"{local_name}.import_engine")
+                elif name.name in {"import_engine", "netbox_data_import.import_engine"}:
+                    engine_module_names.add(local_name)
         elif isinstance(node, ast.ImportFrom) and node.module in {
             "import_engine",
             "netbox_data_import.import_engine",
@@ -220,6 +221,16 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             path.write_text(
                 "import netbox_data_import.import_engine\n"
                 "callback = netbox_data_import.import_engine.ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_package_alias_references_are_detected(self):
+        """A package alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "import netbox_data_import as ndi\ncallback = ndi.import_engine.ImportEngine._private_helper\n"
             )
 
             self.assertEqual(_private_engine_references(path), {"_private_helper"})
