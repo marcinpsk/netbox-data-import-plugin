@@ -239,8 +239,9 @@ reports only success or a redacted failure category.
 ## Threat considerations
 
 - **Secret persistence:** The highest local risk is accidental serialization through RQ, native
-  Job data, `ImportJob`, sessions, profile YAML, API serializers, or proposal state. Resolve only
-  in the worker and pass only a provider ID through those boundaries.
+  Job data, `ImportJob`, sessions, profile YAML, API serializers, or proposal state. Proposal jobs
+  resolve credentials in the worker. The explicit connection test resolves one in the web process,
+  reports only a redacted result, and discards it before the response.
 - **Log disclosure:** HTTP client exceptions and debug logging can include headers or response
   bodies. Use a redacting transport boundary and controlled error types.
 - **SSRF and reference abuse:** Keep the Vault address deployment-owned. Validate mount, path,
@@ -260,14 +261,12 @@ reports only success or a redacted failure category.
 2. Which platform auth method is available to Vault Proxy? If none is available, how will an
    AppRole SecretID be delivered and rotated?
 3. Which Vault namespace, KV v2 mount, path convention, and field name will operators use?
-4. Will the web process also reach Vault for an administrator connection test, or will that test
-   run as a background job on the inference worker?
-5. Does the deployment use Vault Enterprise static-secret caching? This affects request volume,
+4. Does the deployment use Vault Enterprise static-secret caching? This affects request volume,
    not the credential-provider interface.
-6. Which NetBox permission controls provider configuration and the administrator connection test?
-7. Should provider credential references be visible to all users who can view provider
+5. Which NetBox permission controls provider configuration and the administrator connection test?
+6. Should provider credential references be visible to all users who can view provider
    configuration, or only to users who can change it?
-8. What are the required Vault and inference timeouts, retry limits, and proposal failure retention
+7. What are the required Vault and inference timeouts, retry limits, and proposal failure retention
    periods?
 
 [approle-best-practices]: https://developer.hashicorp.com/vault/docs/auth/approle/approle-pattern

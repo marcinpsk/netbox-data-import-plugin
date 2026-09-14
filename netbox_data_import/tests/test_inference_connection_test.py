@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""The connection test: a worker Job, a typed result, and one object permission (specification 8.6, 13.1)."""
+"""The foreground connection test and its one object permission (specification 8.6, 13.1)."""
 
 import json
+import pathlib
 import socket
-import threading
 
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import asdict
+from http.server import BaseHTTPRequestHandler
+from tempfile import TemporaryDirectory
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -19,6 +21,7 @@ from netbox_data_import.inference_connection_test import (
 )
 from netbox_data_import.models import InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
+from netbox_data_import.tests.inference_http import issue_server_certificate, serving_tls
 
 SECRET = "sk-connection-test-secret"
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -58,20 +61,16 @@ def vault(status=200, payload=None):
     Handler.status = status
     Handler.payload = {"data": {"data": {"api_key": SECRET}}} if payload is None else payload
     SEEN_PATHS.clear()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield {
-            "address": f"http://127.0.0.1:{server.server_address[1]}",
-            "auth_method": "proxy",
-            "connect_timeout": 2,
-            "read_timeout": 2,
-        }
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with TemporaryDirectory() as temporary:
+        ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+        with serving_tls(Handler, Handler.payload, certificate_path, key_path) as (port, _seen, _server_names):
+            yield {
+                "address": f"https://localhost:{port}",
+                "auth_method": "proxy",
+                "ca_bundle": str(ca_path),
+                "connect_timeout": 2,
+                "read_timeout": 2,
+            }
 
 
 def make_row(**overrides):
@@ -122,7 +121,7 @@ class ConnectionTestResultTest(TestCase):
         with socket.socket() as bound_socket:
             bound_socket.bind(("127.0.0.1", 0))
             unreachable = {
-                "address": f"http://127.0.0.1:{bound_socket.getsockname()[1]}",
+                "address": f"https://127.0.0.1:{bound_socket.getsockname()[1]}",
                 "auth_method": "proxy",
                 "connect_timeout": 1,
                 "read_timeout": 1,
@@ -177,7 +176,7 @@ class ConnectionTestResultTest(TestCase):
                     with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
                         result = run_connection_test(row.pk, "primary")
 
-                serialized = json.dumps(result.as_dict())
+                serialized = json.dumps(asdict(result))
                 self.assertNotIn(SECRET, serialized)
                 self.assertNotIn("denied ", serialized)
 
@@ -187,14 +186,14 @@ class ConnectionTestResultTest(TestCase):
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
                 result = run_connection_test(row.pk, "primary")
 
-        payload = result.as_dict()
+        payload = asdict(result)
         self.assertEqual(payload["backend_key"], "primary")
         self.assertNotIn("credential_reference", payload)
         self.assertNotIn("mount", json.dumps(payload))
 
 
 class SelectedBackendTest(TestCase):
-    """The view authorizes one row, so the worker has to test that row and no other."""
+    """The view authorizes one row, so the foreground test must use that row and no other."""
 
     def test_the_named_backend_is_tested_rather_than_the_active_one(self):
         """A second enabled row must not answer for the row the operator selected.
@@ -223,7 +222,7 @@ class SelectedBackendTest(TestCase):
         self.assertEqual([path for path in SEEN_PATHS if "inference/" in path], ["/v1/secret/data/inference/selected"])
 
     def test_a_deleted_row_does_not_reach_the_deployment_credential(self):
-        """A missing authorized row is a refusal, even when its queued key names the file fallback."""
+        """A missing authorized row is a refusal, even when its key names the file fallback."""
         row = make_row(backend_key="file-fallback", display_name="Mine", enabled=False)
         pk = row.pk
         row.delete()
@@ -248,7 +247,7 @@ class SelectedBackendTest(TestCase):
         self.assertEqual(result.category, "invalid_configuration")
         self.assertNotIn("/v1/secret/data/inference/deployment", SEEN_PATHS)
 
-    def test_a_row_disabled_after_the_job_was_queued_is_still_the_one_tested(self):
+    def test_a_disabled_row_can_be_tested_before_it_is_enabled(self):
         """The operator tests a row to decide whether to enable it, so enabled is not the filter."""
         row = make_row(backend_key="selected", display_name="Selected", enabled=False)
 
@@ -268,94 +267,6 @@ class SelectedBackendTest(TestCase):
 
         self.assertEqual(result.category, "invalid_configuration")
         self.assertIn("gone", result.detail)
-
-    def test_the_view_hands_the_worker_the_pk_and_key_of_the_row_it_authorized(self):
-        """The worker needs the authorized row identity and its operator-facing key."""
-        row = make_row(backend_key="selected", display_name="Selected", enabled=False)
-        permitted = user_with_object_permission("queuer", [(InferenceBackend, ["change"], {})])
-        self.client.force_login(permitted)
-
-        # NetBox enqueues through transaction.on_commit, so the real call is a captured partial.
-        with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            self.client.post(reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[row.pk]))
-
-        keywords = [getattr(callback, "keywords", {}) for callback in callbacks]
-        self.assertIn(row.pk, [item.get("pk") for item in keywords])
-        self.assertIn("selected", [item.get("backend_key") for item in keywords])
-
-
-class ConnectionTestQueuedPathTest(TestCase):
-    """The whole queued path: the view enqueues, and the worker runs what the view authorized."""
-
-    def test_a_deleted_row_is_not_replaced_by_another_row_with_the_same_key(self):
-        from core.models import Job
-
-        from netbox_data_import.jobs import InferenceBackendConnectionTestJob
-
-        row = make_row()
-        self.client.force_login(user_with_object_permission("queuer", [(InferenceBackend, ["change"], {})]))
-        with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            response = self.client.post(
-                reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[row.pk])
-            )
-        self.assertEqual(response.status_code, 302)
-        queued = next(keywords for callback in callbacks if (keywords := getattr(callback, "keywords", {})))
-        # The worker loads the Job before the backend deletion cascades to its database row.
-        job = Job.objects.get(name=InferenceBackendConnectionTestJob.Meta.name)
-        row.delete()
-        make_row(credential_reference={**REFERENCE, "path": "inference/replacement"})
-
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                InferenceBackendConnectionTestJob.handle(
-                    job, **{key: value for key, value in queued.items() if key != "job"}
-                )
-
-        job.refresh_from_db()
-        self.assertEqual(SEEN_PATHS, [])
-        self.assertEqual(job.data["category"], "invalid_configuration")
-        self.assertEqual(job.data["backend_key"], "primary")
-        self.assertIn("primary", job.data["detail"])
-
-    def test_the_queued_job_tests_the_row_the_view_named_even_once_it_is_disabled(self):
-        """Resolution happens on the worker later, so the row's state can change before it runs."""
-        from core.models import Job
-
-        from netbox_data_import.jobs import InferenceBackendConnectionTestJob
-
-        row = make_row(
-            backend_key="selected",
-            display_name="Selected",
-            enabled=True,
-            credential_reference={**REFERENCE, "path": "inference/selected"},
-        )
-        # Only one row may be enabled, so this one waits to take over once `selected` steps down.
-        other = make_row(
-            backend_key="other-enabled",
-            display_name="Other",
-            enabled=False,
-            credential_reference={**REFERENCE, "path": "inference/other"},
-        )
-        self.client.force_login(user_with_object_permission("queuer", [(InferenceBackend, ["change"], {})]))
-
-        # NetBox pushes to the queue on commit; the Job row itself is written before that.
-        with self.captureOnCommitCallbacks(execute=False) as callbacks:
-            self.client.post(reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[row.pk]))
-
-        queued = next(keywords for callback in callbacks if (keywords := getattr(callback, "keywords", {})))
-        # The operator retires the tested row and promotes another before the worker picks the Job up.
-        InferenceBackend.objects.filter(pk=row.pk).update(enabled=False)
-        InferenceBackend.objects.filter(pk=other.pk).update(enabled=True)
-        job = Job.objects.get(name=InferenceBackendConnectionTestJob.Meta.name)
-
-        with vault() as vault_settings:
-            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
-                InferenceBackendConnectionTestJob.handle(job, pk=queued["pk"], backend_key=queued["backend_key"])
-
-        job.refresh_from_db()
-        self.assertEqual(job.data["backend_key"], "selected")
-        self.assertIn(job.data["category"], CONNECTION_TEST_CATEGORIES)
-        self.assertEqual([path for path in SEEN_PATHS if "inference/" in path], ["/v1/secret/data/inference/selected"])
 
 
 class ConnectionTestAuthorizationTest(TestCase):
@@ -443,10 +354,33 @@ class BackendDetailPageTest(TestCase):
         self.assertContains(response, "inference/backend")
         self.assertNotContains(response, SECRET)
 
-    def test_the_connection_test_redirect_lands_on_a_page_that_renders(self):
-        response = self.client.post(
-            reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
-            follow=True,
-        )
+    def test_the_connection_test_runs_in_the_request_and_reports_the_result_on_the_backend_page(self):
+        from core.models import Job
+
+        with vault() as vault_settings:
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                response = self.client.post(
+                    reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
+                    follow=True,
+                )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.redirect_chain, [(self.row.get_absolute_url(), 302)])
+        self.assertContains(response, "Connection test succeeded")
+        self.assertFalse(Job.objects.exists())
+
+    def test_a_failed_foreground_connection_test_reports_its_safe_category_and_detail(self):
+        from core.models import Job
+
+        with vault(status=403, payload={"errors": ["denied"]}) as vault_settings:
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                response = self.client.post(
+                    reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
+                    follow=True,
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.redirect_chain, [(self.row.get_absolute_url(), 302)])
+        self.assertContains(response, "Connection test failed (credential denied)")
+        self.assertContains(response, "The credential store refused the read (HTTP 403)")
+        self.assertFalse(Job.objects.exists())

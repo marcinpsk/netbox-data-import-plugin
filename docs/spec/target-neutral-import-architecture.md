@@ -961,7 +961,7 @@ A plugin-level model holds named Inference Backend rows with at most one enabled
 
 | Field | Requirement | Meaning |
 | --- | --- | --- |
-| Backend key | Required | The unique name of the Inference Backend. Only an Inference Backend connection-test job carries this key; a proposal job carries its Resolution Proposal id. |
+| Backend key | Required | The unique name of the Inference Backend. The foreground connection test shows this key; a proposal job carries only its Resolution Proposal id. |
 | Display name | Required | Operator-facing label |
 | Adapter type | Required | `openai_compatible` in this delivery (spec default key) |
 | `api_root` | Required | Exact API root without a trailing slash. The client appends `/chat/completions` or `/models`. It never adds `/v1`. |
@@ -1073,19 +1073,20 @@ The typed credential reference is different from a secret value. It lives in exa
 place: the enabled `InferenceBackend` row, or the `inference_backend` file fallback when no enabled
 row exists. It is restricted configuration metadata, never copied elsewhere.
 
-The connection-test job receives only the stable backend key and resolves the credential itself. The
-request-handling process never resolves a secret and passes it to the worker.
+The foreground connection test receives only the authorized backend row id and its display key. The
+request-handling process resolves the credential, reports a typed redacted result, and discards the
+credential before it sends the response.
 
 Plugin audit and job state may record the backend key, the proposal job id, the credential backend
 name, the resolution outcome category, and request start and completion times. They must not record
 the secret value, the authorization header, a Vault token, a Vault response body, or inference request
 headers. The Vault mount, path, and field are restricted configuration metadata.
 
-Vault availability is never required at startup. The connection test runs as a worker Job, on the same
-queue and the same secret boundary as a proposal job, so no web process ever resolves a credential. It
-resolves the configured reference and returns a typed result: `ok`, `credential_unavailable`,
-`credential_denied`, `invalid_credential_reference`, `invalid_secret_material`, or
-`invalid_configuration`. It never returns a secret value or a Vault response body.
+Vault availability is never required at startup. The connection test runs in the foreground request so
+the operator sees its result immediately. It resolves the configured reference and returns a typed
+result: `ok`, `credential_unavailable`, `credential_denied`, `invalid_credential_reference`,
+`invalid_secret_material`, or `invalid_configuration`. It never returns a secret value or a Vault
+response body, and it creates no native NetBox Job.
 
 Running the connection test is authorized by the dedicated `InferenceBackend` object permission in
 section 13.1. There is no separate administrator or superuser check.
@@ -1299,18 +1300,17 @@ Inference Backend is never part of profile YAML.
 
 ### 10.6 Jobs
 
-Three job types run through the NetBox job system:
+Two job types run through the NetBox job system:
 
 | Job | Input | Output |
 | --- | --- | --- |
 | Import execution | Import Profile id, `source_document`, accepted serialized plan, selection, idempotency key, actor | An `ImportExecution` row linked one-to-one from the native NetBox Job |
 | Inference proposal | Resolution Proposal id | A completed, failed, or cancelled Resolution Proposal |
-| Inference Backend connection test | The stable Inference Backend key | A typed result category, never a secret value or a Vault response body |
 
-No job receives a secret value or a database id for an Inference Backend. The connection test still
-carries a backend key, because an administrator starts it against one named row; a proposal carries
-none, because a scoped operator starts it from an editable field (section 7.5). Import execution
-progress counts Synchronization Units and Planned Changes.
+No job receives a secret value or a database id for an Inference Backend. A proposal carries no backend
+identifier because a scoped operator starts it from an editable field (section 7.5). The foreground
+connection test reports against the named row without creating a Job. Import execution progress counts
+Synchronization Units and Planned Changes.
 
 ### 10.7 Audit
 
@@ -1727,8 +1727,8 @@ file fallback. Implement `api_root` validation with the origin allowlist, scheme
 checks, and redirect handling. Implement the OpenAI-compatible backend adapter for non-streaming Chat
 Completions with typed error classification. Implement the credential backend seam and its Vault KV v2
 implementation. Add the three plugin settings with the shapes in section 8.2.1, including the two
-permitted `vault.auth_method` values. Add the connection test as a worker Job, authorized by the
-dedicated `InferenceBackend` object permission in section 13.1.
+permitted `vault.auth_method` values. Add the foreground connection test, authorized by the dedicated
+`InferenceBackend` object permission in section 13.1.
 
 **Acceptance criteria.**
 
@@ -1752,8 +1752,8 @@ dedicated `InferenceBackend` object permission in section 13.1.
 - No test can find a secret value in any model row, serializer output, YAML export, session, job
   payload, audit record, or log record. The typed credential reference exists in exactly one
   authoritative place.
-- The connection test runs as a worker Job and returns one of the typed result categories, never a
-  secret value and never a Vault response body.
+- The connection test runs in the foreground, creates no Job, and shows one typed result category. It
+  never shows a secret value or a Vault response body.
 - A user holding the dedicated `InferenceBackend` object permission can run the connection test, and a
   user without it cannot; no separate administrator or superuser check exists.
 - The change is independently mergeable with all tests passing.

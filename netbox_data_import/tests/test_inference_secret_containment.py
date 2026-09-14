@@ -2,18 +2,19 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Secrets never persist (specification 8.6).
 
-The sweep looks for the secret value in every surface section 8.6 names: a model row, a YAML export,
-the session, a job payload, and a log record. The typed reference is different from a secret value,
-so it lives in exactly one authoritative place and the sweep checks that too.
+The sweep looks for the secret value in every surface section 8.6 names: model rows, a YAML export,
+the session, job payloads, and log records. The typed reference is different from a secret value, so
+it lives in exactly one authoritative place and the sweep checks that too.
 """
 
 import json
 import logging
-import threading
+import pathlib
 
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from io import StringIO
+from tempfile import TemporaryDirectory
 
 from core.models import Job, ObjectChange
 from django.apps import apps
@@ -21,10 +22,10 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from netbox_data_import.inference_connection_test import run_connection_test
-from netbox_data_import.jobs import InferenceBackendConnectionTestJob
 from netbox_data_import.inference_backend import resolve_active_backend
 from netbox_data_import.models import ExecutionOutcome, ImportExecution, ImportProfile, InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
+from netbox_data_import.tests.inference_http import issue_server_certificate, serving_tls
 
 SECRET = "sk-never-persisted-anywhere"
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -48,20 +49,17 @@ class Vault(BaseHTTPRequestHandler):
 @contextmanager
 def vault():
     """Run a Vault stand-in on loopback and yield the settings that reach it."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Vault)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield {
-            "address": f"http://127.0.0.1:{server.server_address[1]}",
-            "auth_method": "proxy",
-            "connect_timeout": 2,
-            "read_timeout": 2,
-        }
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    payload = {"data": {"data": {"api_key": SECRET}}}
+    with TemporaryDirectory() as temporary:
+        ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+        with serving_tls(Vault, payload, certificate_path, key_path) as (port, _seen, _server_names):
+            yield {
+                "address": f"https://localhost:{port}",
+                "auth_method": "proxy",
+                "ca_bundle": str(ca_path),
+                "connect_timeout": 2,
+                "read_timeout": 2,
+            }
 
 
 def settings_for(vault_settings, *, inference_backend=None):
@@ -137,7 +135,7 @@ class SecretContainmentTest(TestCase):
         self.assertNotIn(SECRET, json.dumps(self.row.credential_reference))
         self.assertEqual(set(self.row.credential_reference), {"backend", "mount", "path", "field"})
 
-    def test_no_job_payload_holds_the_secret(self):
+    def test_the_foreground_connection_test_creates_no_job_payload(self):
         user = user_with_object_permission("tester", [(InferenceBackend, ["change"], {})])
         self.client.force_login(user)
         url = reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk])
@@ -145,13 +143,8 @@ class SecretContainmentTest(TestCase):
         with vault() as vault_settings:
             with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
                 self.client.post(url)
-                # The view only queues, so an unrun body would leave the payload empty to assert on.
-                InferenceBackendConnectionTestJob.handle(Job.objects.get(), pk=self.row.pk, backend_key="primary")
 
-        job = Job.objects.get()
-        self.assertEqual(job.data.get("category"), "ok")
-        payloads = json.dumps(list(Job.objects.values("data", "name", "error")), default=str)
-        self.assertNotIn(SECRET, payloads)
+        self.assertFalse(Job.objects.exists())
 
     def test_no_session_holds_the_secret(self):
         user = user_with_object_permission("session-tester", [(InferenceBackend, ["change"], {})])
@@ -230,15 +223,15 @@ class SecretContainmentTest(TestCase):
         self.assertNotIn("credential_reference", body)
         self.assertNotIn("inference/backend", body)
 
-    def test_one_real_job_leaves_no_secret_and_one_authoritative_database_reference(self):
-        """One sweep covers persisted rows, an audit, a job payload, the session, and logs."""
+    def test_one_foreground_test_leaves_no_secret_and_one_authoritative_database_reference(self):
+        """One sweep covers persisted rows, an audit, the session, and logs."""
         profile = ImportProfile.objects.create(name="Redaction audit", adapter_config={})
         ImportExecution.objects.create(
             profile=profile,
             outcome=ExecutionOutcome.FAILED,
             failure_detail={"reason": "planning"},
         )
-        user = user_with_object_permission("redaction-job", [(InferenceBackend, ["change"], {})])
+        user = user_with_object_permission("redaction-foreground", [(InferenceBackend, ["change"], {})])
         self.client.force_login(user)
         url = reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk])
         stream = StringIO()
@@ -272,7 +265,6 @@ class SecretContainmentTest(TestCase):
                     )
                     self.assertEqual(edit_response.status_code, 302, edit_response.content)
                     self.client.post(url)
-                    InferenceBackendConnectionTestJob.handle(Job.objects.get(), pk=self.row.pk, backend_key="primary")
                     state = {
                         **persisted_state(),
                         "session": dict(self.client.session),

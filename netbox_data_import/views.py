@@ -522,25 +522,22 @@ class InferenceBackendChangeLogView(generic.ObjectChangeLogView):
 
 
 class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
-    """Queue the connection test. Specification 13.1 authorizes it with this one permission."""
+    """Run the connection test. Specification 13.1 authorizes it with this one permission."""
 
     permission_required = "netbox_data_import.change_inferencebackend"
 
     def post(self, request, pk):
-        """Enqueue the worker Job, so no web process ever resolves a credential."""
-        from .jobs import InferenceBackendConnectionTestJob
+        """Run the test now and show its redacted result where the configuration lives."""
+        from .inference_connection_test import run_connection_test
 
         # restrict() applies the ObjectPermission constraints a model-level check would ignore.
         backend = get_object_or_404(InferenceBackend.objects.restrict(request.user, "change"), pk=pk)
-        job = InferenceBackendConnectionTestJob.enqueue(
-            name=InferenceBackendConnectionTestJob.Meta.name,
-            instance=backend,
-            user=request.user,
-            # The row ID binds authorization; the editable key is operator-facing text.
-            pk=backend.pk,
-            backend_key=backend.backend_key,
-        )
-        messages.success(request, f"Connection test queued as job {job.pk}.")
+        result = run_connection_test(backend.pk, backend.backend_key)
+        if result.category == "ok":
+            messages.success(request, f"Connection test succeeded. {result.detail}")
+        else:
+            category = result.category.replace("_", " ")
+            messages.error(request, f"Connection test failed ({category}). {result.detail}")
         return redirect(backend.get_absolute_url())
 
 
