@@ -10,8 +10,9 @@ Proxy without holding a Vault credential.
 PLUGINS_CONFIG = {
     "netbox_data_import": {
         "vault": {
-            "address": "http://198.18.0.4:8100",
+            "address": "https://vault-proxy.example.invalid:8100",
             "auth_method": "proxy",
+            "ca_bundle": "/etc/ssl/certs/vault-proxy-ca.pem",
             "connect_timeout": 5,
             "read_timeout": 10,
         },
@@ -19,8 +20,14 @@ PLUGINS_CONFIG = {
 }
 ```
 
-The HTTP address above is a placeholder for a Proxy on a deployment-owned private network. Use the
-Proxy's real private address. Use HTTPS if the connection can leave that network.
+Configure `vault.address` with HTTPS for both `proxy` and `token` authentication. The connection
+carries either a Vault token or a resolved inference API key. TLS can terminate at the Proxy, but
+the NetBox-to-Proxy connection must remain encrypted through the Proxy's HTTPS listener.
+
+The example uses a private CA. Mount that CA bundle in the NetBox worker and set `ca_bundle` to its
+path. This adds the private CA to certificate verification. It does not disable verification. The
+Inference Backend `api_root` is separate: it can use HTTP only for an exact local endpoint in
+`inference_backend_origin_allowlist`.
 
 If Vault Proxy uses AppRole, give the RoleID and SecretID to the Proxy deployment. For local
 development, its gitignored `.env` file can supply them. For production, use the deployment's
@@ -49,7 +56,8 @@ auto_auth {
 
 listener "tcp" {
   address = "0.0.0.0:8100"
-  tls_disable = true
+  tls_cert_file = "/run/secrets/vault-proxy-cert.pem"
+  tls_key_file = "/run/secrets/vault-proxy-key.pem"
   require_request_header = true
 }
 
@@ -58,12 +66,13 @@ api_proxy {
 }
 ```
 
-Mount the RoleID and SecretID at the two configured file paths. A local Docker Compose deployment
-can source them from its gitignored `.env` file and expose them only to the Proxy as Compose
-secrets:
+Mount the RoleID, SecretID, Proxy certificate, and Proxy key at the configured file paths. Mount the
+CA that signed the Proxy certificate in the NetBox worker. A local Docker Compose deployment can
+source the AppRole values from its gitignored `.env` file and expose them only to the Proxy as
+Compose secrets:
 
 ```dotenv
-NBDI_VAULT_PROXY_ADDRESS=http://198.18.0.4:8100
+NBDI_VAULT_PROXY_ADDRESS=https://vault-proxy.example.invalid:8100
 NBDI_VAULT_ADDRESS=https://vault.example.invalid:8200
 NBDI_VAULT_NAMESPACE=
 NBDI_VAULT_ROLE_ID=replace-with-vault-role-id
@@ -78,7 +87,8 @@ The plugin sends `X-Vault-Request: true`, so the Proxy listener can require this
 
 The plugin does not perform an AppRole login directly. It supports `auth_method: "proxy"` as shown
 above. It also supports `auth_method: "token"`, which reads a token from the NetBox worker's
-`VAULT_TOKEN` environment variable.
+`VAULT_TOKEN` environment variable. Direct token authentication uses the same HTTPS and CA-bundle
+requirements.
 
 The **Credential reference** field on an Inference Backend tells the plugin which value to read
 from Vault KV v2. It has this JSON shape:
