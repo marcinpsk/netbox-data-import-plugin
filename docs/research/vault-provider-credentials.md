@@ -143,11 +143,11 @@ a later credential backend without changing proposal or inference logic.
 
 ### Recommended baseline: Vault Proxy
 
-Run a Vault Proxy dedicated to the inference worker, near every process group that executes
-inference jobs. Configure auto-auth for the deployment platform and force the Proxy to use its
-auto-auth token. The worker then calls the Vault API through the Proxy without possessing the
-token. Vault Proxy is the current HashiCorp component for API proxy workflows. The older Vault
-Agent API proxy is deprecated. [Vault Proxy][vault-proxy]
+Run a Vault Proxy dedicated to this plugin, near every NetBox process group that resolves inference
+credentials. Configure auto-auth for the deployment platform and force the Proxy to use its
+auto-auth token. The web and worker processes then call the Vault API through the Proxy without
+possessing the token. Vault Proxy is the current HashiCorp component for API proxy workflows. The
+older Vault Agent API proxy is deprecated. [Vault Proxy][vault-proxy]
 [Vault Agent API proxy deprecation][vault-agent-proxy]
 
 The Proxy must not be shared with another application while auto-auth is forced. A forced

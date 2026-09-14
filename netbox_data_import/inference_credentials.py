@@ -190,7 +190,7 @@ class VaultKvV2CredentialBackend:
         if not token:
             raise InvalidCredentialConfiguration(
                 f"vault.auth_method is 'token' but {VAULT_TOKEN_ENVIRONMENT_VARIABLE} is not set in the "
-                f"worker environment."
+                f"NetBox process environment."
             )
         headers["X-Vault-Token"] = token
         return headers
@@ -235,6 +235,10 @@ class VaultKvV2CredentialBackend:
                     f"The credential store could not be reached ({type(exc).__name__}). "
                     f"Check the configured vault address."
                 ) from None
+            except OSError:
+                raise InvalidCredentialConfiguration(
+                    "The configured Vault TLS CA bundle could not be used. Check vault.ca_bundle."
+                ) from None
         failure_name = type(connection_failure).__name__ if connection_failure is not None else "NoAddress"
         raise CredentialUnavailable(
             f"The credential store could not be reached ({failure_name}). Check the configured vault address."
@@ -254,7 +258,7 @@ class VaultKvV2CredentialBackend:
         if response.status_code in (401, 403):
             raise CredentialDenied(f"The credential store refused the read (HTTP {response.status_code}).")
         if response.status_code == 404:
-            raise CredentialUnavailable("The credential store holds no secret at the referenced path.")
+            raise InvalidCredentialReference("The credential store holds no secret for this Inference Backend.")
         if response.status_code >= 400:
             raise CredentialUnavailable(f"The credential store answered HTTP {response.status_code}.")
         try:
@@ -265,7 +269,7 @@ class VaultKvV2CredentialBackend:
         if not isinstance(data, Mapping):
             raise CredentialUnavailable("The credential store answered with an unreadable KV v2 envelope.") from None
         if reference.field not in data:
-            raise InvalidSecretMaterial("The referenced field is absent from the stored secret.")
+            raise InvalidCredentialReference("The credential store holds no secret for this Inference Backend.")
         value = data[reference.field]
         if not isinstance(value, str):
             raise InvalidSecretMaterial("The referenced field does not hold a string.")

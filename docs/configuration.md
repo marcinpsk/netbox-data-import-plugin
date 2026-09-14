@@ -3,8 +3,8 @@
 ## Inference backend credentials
 
 Configure the Vault connection before you add an Inference Backend. The recommended setup uses a
-Vault Proxy. The Proxy authenticates to Vault and renews its token. The NetBox worker calls the
-Proxy without holding a Vault credential.
+Vault Proxy. The Proxy authenticates to Vault and renews its token. The NetBox web and worker
+processes call the Proxy without holding a Vault credential.
 
 ```python
 PLUGINS_CONFIG = {
@@ -24,10 +24,10 @@ Configure `vault.address` with HTTPS for both `proxy` and `token` authentication
 carries either a Vault token or a resolved inference API key. TLS can terminate at the Proxy, but
 the NetBox-to-Proxy connection must remain encrypted through the Proxy's HTTPS listener.
 
-The example uses a private CA. Mount that CA bundle in the NetBox worker and set `ca_bundle` to its
-path. This adds the private CA to certificate verification. It does not disable verification. The
-Inference Backend `api_root` is separate: it can use HTTP only for an exact local endpoint in
-`inference_backend_origin_allowlist`.
+The example uses a private CA. Mount that CA bundle in the NetBox web and worker processes. Set
+`ca_bundle` to its path. This adds the private CA to certificate verification. It does not disable
+verification. The Inference Backend `api_root` is separate: it can use HTTP only for an exact local
+endpoint in `inference_backend_origin_allowlist`.
 
 If Vault Proxy uses AppRole, give the RoleID and SecretID to the Proxy deployment. For local
 development, its gitignored `.env` file can supply them. For production, use the deployment's
@@ -67,9 +67,9 @@ api_proxy {
 ```
 
 Mount the RoleID, SecretID, Proxy certificate, and Proxy key at the configured file paths. Mount the
-CA that signed the Proxy certificate in the NetBox worker. A local Docker Compose deployment can
-source the AppRole values from its gitignored `.env` file and expose them only to the Proxy as
-Compose secrets:
+CA that signed the Proxy certificate in the NetBox web and worker processes. A local Docker Compose
+deployment can source the AppRole values from its gitignored `.env` file and expose them only to the
+Proxy as Compose secrets:
 
 ```dotenv
 NBDI_VAULT_PROXY_ADDRESS=https://vault-proxy.example.invalid:8100
@@ -86,9 +86,9 @@ and [Vault Proxy API documentation](https://developer.hashicorp.com/vault/docs/a
 The plugin sends `X-Vault-Request: true`, so the Proxy listener can require this header as shown.
 
 The plugin does not perform an AppRole login directly. It supports `auth_method: "proxy"` as shown
-above. It also supports `auth_method: "token"`, which reads a token from the NetBox worker's
-`VAULT_TOKEN` environment variable. Direct token authentication uses the same HTTPS and CA-bundle
-requirements.
+above. It also supports `auth_method: "token"`, which reads a token from each NetBox process that
+resolves credentials. Set `VAULT_TOKEN` in both the web and worker process environments. Direct
+token authentication uses the same HTTPS and CA-bundle requirements.
 
 The **Credential reference** field on an Inference Backend tells the plugin which value to read
 from Vault KV v2. It has this JSON shape:

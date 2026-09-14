@@ -544,6 +544,17 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
         self.assertEqual(proposal.response_diagnostic["receipt"], "absent")
         self.assertEqual(len(proposal.backend_metadata["attempts"]), 3)
 
+    def test_a_missing_secret_path_fails_without_retry_or_inference(self):
+        proposal = self.frozen_proposal()
+        with serving() as (root, seen, allowed), self.configured(root, allowed, vault_status=404) as vault_seen:
+            run_proposal(proposal.pk)
+        proposal.refresh_from_db()
+        self.assertEqual(len(vault_seen), 1)
+        self.assertEqual(seen, [])
+        self.assertEqual(proposal.status, ProposalStatus.FAILED)
+        self.assertEqual(proposal.failure_reason, ProposalFailureReason.CREDENTIAL_INVALID)
+        self.assertEqual(len(proposal.backend_metadata["attempts"]), 1)
+
     def test_credential_denial_fails_without_retry_or_inference(self):
         proposal = self.frozen_proposal()
         with serving() as (root, seen, allowed), self.configured(root, allowed, vault_status=403) as vault_seen:

@@ -25,7 +25,6 @@ from netbox_data_import.inference_credentials import (
     CredentialReference,
     CredentialUnavailable,
     InvalidCredentialReference,
-    InvalidSecretMaterial,
     VaultKvV2CredentialBackend,
 )
 from netbox_data_import.tests.inference_http import (
@@ -432,11 +431,11 @@ class VaultFailureClassificationTest(SimpleTestCase):
             self.failure(status=401, payload={"errors": ["missing client token"]}).category, "credential_denied"
         )
 
-    def test_a_missing_path_is_credential_unavailable(self):
+    def test_a_missing_path_is_an_invalid_credential_reference(self):
         failure = self.failure(status=404, payload={"errors": []})
 
-        self.assertIsInstance(failure, CredentialUnavailable)
-        self.assertEqual(failure.category, "credential_unavailable")
+        self.assertIsInstance(failure, InvalidCredentialReference)
+        self.assertEqual(failure.category, "invalid_credential_reference")
 
     def test_a_server_error_is_credential_unavailable(self):
         self.assertEqual(self.failure(status=500, payload={"errors": ["sealed"]}).category, "credential_unavailable")
@@ -444,11 +443,11 @@ class VaultFailureClassificationTest(SimpleTestCase):
     def test_a_malformed_envelope_is_credential_unavailable(self):
         self.assertEqual(self.failure(payload="not json at all").category, "credential_unavailable")
 
-    def test_an_absent_field_is_invalid_secret_material(self):
+    def test_an_absent_field_is_an_invalid_credential_reference(self):
         failure = self.failure(payload={"data": {"data": {"other": SECRET}}})
 
-        self.assertIsInstance(failure, InvalidSecretMaterial)
-        self.assertEqual(failure.category, "invalid_secret_material")
+        self.assertIsInstance(failure, InvalidCredentialReference)
+        self.assertEqual(failure.category, "invalid_credential_reference")
 
     def test_an_empty_field_is_invalid_secret_material(self):
         self.assertEqual(self.failure(payload={"data": {"data": {"api_key": ""}}}).category, "invalid_secret_material")

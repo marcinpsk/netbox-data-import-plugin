@@ -132,6 +132,22 @@ class ConnectionTestResultTest(TestCase):
 
             self.assertEqual(result.category, "credential_unavailable")
 
+    def test_a_missing_ca_bundle_reports_invalid_configuration(self):
+        row = make_row()
+        with TemporaryDirectory() as temporary:
+            vault_settings = {
+                "address": "https://127.0.0.1:1",
+                "auth_method": "proxy",
+                "ca_bundle": str(pathlib.Path(temporary) / "missing-ca.pem"),
+                "connect_timeout": 1,
+                "read_timeout": 1,
+            }
+
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "invalid_configuration")
+
     def test_an_empty_field_reports_invalid_secret_material(self):
         row = make_row()
         with vault(payload={"data": {"data": {"api_key": ""}}}) as vault_settings:

@@ -991,8 +991,8 @@ All three settings live under the plugin's `PLUGINS_CONFIG` entry.
 
 | Value | Meaning |
 | --- | --- |
-| `proxy` | Default. The worker calls Vault through a Vault Proxy that holds an auto-auth token. The plugin stores and handles no Vault credential. |
-| `token` | The worker reads a Vault token from a deployment environment variable. The token is never stored in the database, in a plugin setting value, or in any plugin-managed file. |
+| `proxy` | Default. Each NetBox process calls Vault through a Vault Proxy that holds an auto-auth token. The plugin stores and handles no Vault credential. |
+| `token` | Each NetBox process that resolves credentials reads a Vault token from its deployment environment. The token is never stored in the database, in a plugin setting value, or in any plugin-managed file. |
 
 The `vault` mapping never contains a KV v2 mount. The mount belongs to the credential reference (section 8.5), whether that
 reference lives on the Inference Backend row or in the file fallback, so one deployment can serve references on different mounts
@@ -1055,9 +1055,9 @@ The Vault implementation supports KV v2 only, reads one named field from one con
 a missing, empty, or non-string value, and omits the secret from all exception text. It sends no
 Source Trace, device, contact, or operator data to Vault.
 
-Vault Proxy auto-auth is the recommended deployment baseline. The worker calls the Vault API through
-the Proxy without possessing the token. Direct Vault access is a valid deployment variant, but this
-delivery does not implement direct AppRole login.
+Vault Proxy auto-auth is the recommended deployment baseline. The web and worker processes call the
+Vault API through the Proxy without possessing the token. Direct Vault access is a valid deployment
+variant, but this delivery does not implement direct AppRole login.
 
 Resolution happens in the inference worker, once per outbound inference attempt. The plugin caches no
 API-key value. Key rotation takes effect on the next resolution. An already running HTTP request
