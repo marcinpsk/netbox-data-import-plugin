@@ -891,10 +891,11 @@ POST {api_root}/chat/completions
 The response must be one JSON object:
 
 ```json
-{"schema_version": 1, "outcome": "candidate", "candidate_id": "candidate-0001", "explanation": "..."}
+{"schema_version": 2, "outcome": "candidate", "candidate_id": "candidate-0001", "candidate_display_name": "Ethernet 1/1", "explanation": "..."}
 ```
 
-`outcome` is `candidate` or `no_match`. For `no_match`, `candidate_id` must be null.
+`outcome` is `candidate` or `no_match`. For `no_match`, `candidate_id` and
+`candidate_display_name` must be null.
 
 The plugin validates every response itself, even when the Inference Backend reports that it enforced a
 schema. Semantic checks after schema validation:
@@ -904,6 +905,8 @@ schema. Semantic checks after schema validation:
   them.
 - For `candidate`, require the identifier to be an exact member of the immutable request candidate
   set.
+- For `candidate`, require `candidate_display_name` to equal the display name paired with that
+  identifier in the immutable request candidate set.
 - Require a non-empty explanation and enforce a length limit of 2000 characters (spec default).
 - Recheck that the selected target object still exists and is still eligible before display and again
   before acceptance.
