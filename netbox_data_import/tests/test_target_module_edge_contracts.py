@@ -358,6 +358,37 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         self.assertEqual(blocked.disposition, Disposition.BLOCKED)
         self.assertEqual(blocked.diagnostics[0].code, "rack.add_permission")
 
+    def test_rack_update_permission_is_checked_against_the_candidate(self):
+        """A constrained change grant must cover the Rack state the plan would write."""
+        from dcim.models import Rack
+
+        actor = user_with_object_permission(
+            "rack-edge-editor",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["change"], {"u_height": self.rack.u_height}),
+            ],
+        )
+        scoped = NetBoxReader.for_actor(actor).for_target(site=self.site)
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "SCOPED-RACK-UPDATE",
+                    "device_class": "Cabinet",
+                    "rack_name": self.rack.name,
+                    "u_height": 20,
+                    "serial": "",
+                },
+            ),
+        )
+
+        unit = RackModule().plan(batch, self.profile, CATALOG, scoped)[0]
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.diagnostics[0].code, "rack.change_permission")
+
     def test_missing_device_type_and_role_dependencies_are_explicit_diagnostics(self):
         """Missing Device Type and Device Role dependencies block the unit that needs them."""
         from dcim.models import Device, Rack

@@ -412,7 +412,7 @@ class RackModule:
             else:
                 existing_display["detail"] = f"Rack '{name}' already exists (update_existing=False)"
             return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP, display=existing_display)
-        _candidate, validation = self._validated_candidate(
+        candidate, validation = self._validated_candidate(
             rack,
             name,
             height,
@@ -424,7 +424,7 @@ class RackModule:
         )
         if validation is not None:
             return _refused(identity, "rack.validation_failed", {**existing_display, "message": validation})
-        if netbox_reader.actor is not None and not netbox_reader.racks("change").filter(pk=rack.pk).exists():
+        if netbox_reader.actor is not None and not _candidate_save_is_allowed(netbox_reader.actor, candidate):
             return _refused(
                 identity,
                 "rack.change_permission",
