@@ -725,6 +725,48 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         self.assertEqual(device_unit.disposition, Disposition.INVALID)
         self.assertEqual(device_unit.diagnostics[0].code, "device.rack_position_occupied")
 
+    def test_device_placement_uses_a_new_rack_types_starting_unit(self):
+        """A Device cannot use a unit below a new Rack Type's starting unit."""
+        from dcim.models import RackType
+
+        rack_type = RackType.objects.create(
+            manufacturer=self.manufacturer,
+            model="Raised Starting Unit",
+            slug="raised-starting-unit",
+            u_height=20,
+            starting_unit=10,
+        )
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Cabinet").update(rack_type=rack_type)
+        rack_name = "planned-new-typed-rack"
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PLANNED-NEW-TYPED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": rack_name,
+                    "u_height": 20,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="DEVICE-BELOW-PLANNED-RACK-TYPE",
+                    device_name="device-below-planned-rack-type",
+                    rack_name=rack_name,
+                    u_position="5",
+                    face="Front",
+                ),
+            ),
+        )
+
+        rack_unit = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+        self.assertEqual(device_unit.disposition, Disposition.INVALID)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.rack_position_occupied")
+
     def test_planned_role_create_permission_is_checked_against_the_candidate(self):
         """A constrained Device Role add grant must cover the role the plan creates."""
         from dcim.models import Device, DeviceRole, Rack

@@ -566,6 +566,7 @@ class RackModule:
         if serial:
             candidate.serial = serial
         candidate.rack_type_id = rack_type_id
+        candidate.copy_racktype_attrs()
         if reader.location is not None:
             candidate.location = reader.location
         if reader.tenant is not None:

@@ -1232,6 +1232,32 @@ class AddressPinnedSessionTest(SimpleTestCase):
         self.assertTrue(caught.exception.response.raw.closed)
         self.assertEqual(hook_bodies, [])
 
+    def test_response_limit_preserves_a_hooks_replacement_response(self):
+        """A response hook sees bounded content and can replace a valid response."""
+        payload = {"ok": True}
+        hook_bodies = []
+        replacement = requests.Response()
+        replacement.status_code = 204
+        replacement._content = b""
+        replacement._content_consumed = True
+
+        def replace_response(response, *_args, **_kwargs):
+            hook_bodies.append(response.content)
+            return replacement
+
+        with serving(models_payload=payload) as (root, _seen, _allowlist):
+            response = request_to_resolved_address(
+                requests.Session(),
+                "GET",
+                f"{root}/models",
+                "127.0.0.1",
+                response_body_limit=len(json.dumps(payload).encode()),
+                hooks={"response": replace_response},
+            )
+
+        self.assertIs(response, replacement)
+        self.assertEqual(hook_bodies, [json.dumps(payload).encode()])
+
     def test_concurrent_deadlines_start_independent_blocking_operations(self):
         """One slow resolver must not consume another foreground operation's budget."""
         all_started = threading.Event()
