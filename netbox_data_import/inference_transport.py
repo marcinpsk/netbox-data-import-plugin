@@ -3,18 +3,23 @@
 """Address-pinned HTTP transport for inference and credential requests."""
 
 import ipaddress
+import socket
 import time
 
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import suppress
 from dataclasses import dataclass
-from threading import Lock, RLock
+from threading import Event, Lock, RLock, Timer
 from typing import Any, Callable, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
 import requests
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import MaxRetryError, NewConnectionError
+from urllib3.response import HTTPResponse
 from urllib3.util import Timeout as Urllib3Timeout
 
 
@@ -65,6 +70,74 @@ class WallClockDeadline:
         except FutureTimeoutError:
             future.cancel()
             raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
+
+
+def _run_connection_until_deadline(
+    connection: HTTPConnection,
+    deadline: WallClockDeadline,
+    operation: Callable[[], _Result],
+) -> _Result:
+    """Interrupt connection or response-header I/O when its wall-clock budget expires."""
+    expired = Event()
+
+    def abort_socket() -> None:
+        expired.set()
+        connected_socket = connection.sock
+        if connected_socket is None:
+            return
+        with suppress(OSError):
+            connected_socket.shutdown(socket.SHUT_RDWR)
+        with suppress(OSError):
+            connected_socket.close()
+
+    timer = Timer(deadline.remaining(), abort_socket)
+    timer.daemon = True
+    timer.start()
+    try:
+        result = operation()
+    except Exception:
+        if expired.is_set():
+            raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
+        raise
+    else:
+        deadline.remaining()
+        return result
+    finally:
+        timer.cancel()
+
+    def connect(self) -> None:
+        """Bound TCP and TLS connection work to the shared deadline."""
+        self._run_until_deadline(self._connect_without_deadline)
+
+    def getresponse(self) -> HTTPResponse:
+        """Bound the status line and response headers to the shared deadline."""
+        return self._run_until_deadline(self._getresponse_without_deadline)
+
+
+def _deadline_pool_classes(deadline: WallClockDeadline):
+    """Return urllib3 pools whose connections enforce one operation deadline."""
+
+    class DeadlineHTTPConnection(HTTPConnection):
+        def connect(self) -> None:
+            _run_connection_until_deadline(self, deadline, super().connect)
+
+        def getresponse(self) -> HTTPResponse:  # type: ignore[override]
+            return _run_connection_until_deadline(self, deadline, super().getresponse)
+
+    class DeadlineHTTPSConnection(HTTPSConnection):
+        def connect(self) -> None:
+            _run_connection_until_deadline(self, deadline, super().connect)
+
+        def getresponse(self) -> HTTPResponse:  # type: ignore[override]
+            return _run_connection_until_deadline(self, deadline, super().getresponse)
+
+    class DeadlineHTTPConnectionPool(HTTPConnectionPool):
+        ConnectionCls = DeadlineHTTPConnection
+
+    class DeadlineHTTPSConnectionPool(HTTPSConnectionPool):
+        ConnectionCls = DeadlineHTTPSConnection
+
+    return {"http": DeadlineHTTPConnectionPool, "https": DeadlineHTTPSConnectionPool}
 
 
 class ResponseProcessingFailure(requests.RequestException):
@@ -130,12 +203,20 @@ def _consume_response(response, response_body_limit, deadline: WallClockDeadline
 class _AddressPinnedAdapter(requests.adapters.HTTPAdapter):
     """Connect to one numeric address while preserving the origin hostname."""
 
-    def __init__(self, origin_url: str, resolved_address: str):
+    def __init__(
+        self,
+        origin_url: str,
+        resolved_address: str,
+        deadline: WallClockDeadline | None = None,
+    ):
         super().__init__()
         parts = urlsplit(origin_url)
         self._origin = (parts.scheme.lower(), parts.hostname, parts.port)
         address = ipaddress.ip_address(resolved_address)
         self._address = f"[{address}]" if address.version == 6 else str(address)
+        self._deadline = deadline
+        if deadline is not None:
+            self.poolmanager.pool_classes_by_scheme = _deadline_pool_classes(deadline)
 
     def build_connection_pool_key_attributes(self, request, verify, cert=None):
         """Keep TLS SNI and certificate verification bound to the origin hostname."""
@@ -157,8 +238,13 @@ class _AddressPinnedAdapter(requests.adapters.HTTPAdapter):
         request.url = urlunsplit((parts.scheme, f"{self._address}{port}", parts.path, parts.query, parts.fragment))
         request.headers["Host"] = parts.netloc
         try:
-            # A proxy would resolve the hostname again and bypass the pinned address.
-            response = super().send(request, *args, **{**kwargs, "proxies": {}})
+            try:
+                # A proxy would resolve the hostname again and bypass the pinned address.
+                response = super().send(request, *args, **{**kwargs, "proxies": {}})
+            except requests.RequestException:
+                if self._deadline is not None:
+                    self._deadline.remaining()
+                raise
             response.url = original_url
             return response
         finally:
@@ -185,7 +271,7 @@ def request_to_resolved_address(
         kwargs["stream"] = True
     with _session_lock(session):
         previous_adapters = OrderedDict(session.adapters)
-        adapter = _AddressPinnedAdapter(url, resolved_address)
+        adapter = _AddressPinnedAdapter(url, resolved_address, deadline)
         captured_response = None
 
         def capture_response(response, *_args, **_kwargs):

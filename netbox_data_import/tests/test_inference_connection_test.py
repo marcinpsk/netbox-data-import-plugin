@@ -128,6 +128,43 @@ def slow_drip_backend():
         thread.join(timeout=5)
 
 
+@contextmanager
+def slow_header_backend():
+    """Send response headers one byte at a time without triggering an inactivity timeout."""
+
+    class Handler(RecordingBackend):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            encoded = json.dumps(completion()).encode()
+            headers = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n" + f"Content-Length: {len(encoded)}\r\n".encode() + b"\r\n"
+            )
+            try:
+                for byte in headers:
+                    self.connection.sendall(bytes((byte,)))
+                    time.sleep(0.1)
+                self.connection.sendall(encoded)
+            except OSError:
+                pass
+
+    Handler.models_status = 404
+    Handler.models_payload = {"detail": "not found"}
+    Handler.seen = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        root = f"http://127.0.0.1:{port}"
+        yield root, [root]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def make_row(**overrides):
     """Create one enabled Inference Backend row."""
     values = {
@@ -280,6 +317,21 @@ class ConnectionTestResultTest(TestCase):
                 result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "timeout")
+
+    def test_slow_response_headers_cannot_exceed_the_shared_deadline(self):
+        row = make_row(connect_timeout=1, read_timeout=1)
+
+        with slow_header_backend() as (root, allowlist):
+            row.api_root = root
+            row.save(update_fields=("api_root",))
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    started = time.monotonic()
+                    result = run_connection_test(row.pk, "primary")
+                    elapsed = time.monotonic() - started
+
+        self.assertEqual(result.category, "timeout")
+        self.assertLess(elapsed, 4)
 
     def test_a_missing_ca_bundle_reports_invalid_configuration(self):
         row = make_row()
