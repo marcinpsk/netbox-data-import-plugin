@@ -138,7 +138,7 @@ Content-Type: application/json
     },
     {
       "role": "user",
-      "content": "{\"schema_version\":1,\"task\":\"select_termination\",\"source_evidence\":{\"port_label\":\"source-port-label\",\"card_label\":\"source-card-label\"},\"candidates\":[{\"candidate_id\":\"candidate-0001\",\"name\":\"interface-label-a\"},{\"candidate_id\":\"candidate-0002\",\"name\":\"interface-label-b\"}]}"
+      "content": "{\"schema_version\":2,\"task\":\"select_termination\",\"source_evidence\":{\"port_label\":\"source-port-label\",\"card_label\":\"source-card-label\"},\"candidates\":[{\"candidate_id\":\"candidate-0001\",\"display_name\":\"interface-label-a\"},{\"candidate_id\":\"candidate-0002\",\"display_name\":\"interface-label-b\"}]}"
     }
   ]
 }
@@ -160,9 +160,10 @@ The model must return one JSON object in this shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "outcome": "candidate",
   "candidate_id": "candidate-0001",
+  "candidate_display_name": "interface-label-a",
   "explanation": "The source appears to use one-based numbering for the first interface."
 }
 ```
@@ -171,9 +172,10 @@ It can decline to select a candidate:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "outcome": "no_match",
   "candidate_id": null,
+  "candidate_display_name": null,
   "explanation": "The source evidence does not distinguish the eligible terminations."
 }
 ```
@@ -185,7 +187,7 @@ The application validator should use this schema regardless of provider response
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "schema_version": {"type": "integer", "enum": [1]},
+    "schema_version": {"type": "integer", "enum": [2]},
     "outcome": {"type": "string", "enum": ["candidate", "no_match"]},
     "candidate_id": {
       "anyOf": [
@@ -193,9 +195,15 @@ The application validator should use this schema regardless of provider response
         {"type": "null"}
       ]
     },
+    "candidate_display_name": {
+      "anyOf": [
+        {"type": "string"},
+        {"type": "null"}
+      ]
+    },
     "explanation": {"type": "string"}
   },
-  "required": ["schema_version", "outcome", "candidate_id", "explanation"]
+  "required": ["schema_version", "outcome", "candidate_id", "candidate_display_name", "explanation"]
 }
 ```
 
@@ -206,7 +214,9 @@ Apply these semantic checks after schema validation:
   fuzzy-match them.
 - For `candidate`, require `candidate_id` to be an exact member of the immutable request
   candidate set.
-- For `no_match`, require `candidate_id` to be null.
+- For `candidate`, require `candidate_display_name` to equal the display name paired with that
+  identifier in the immutable request candidate set.
+- For `no_match`, require `candidate_id` and `candidate_display_name` to be null.
 - Require a non-empty explanation and enforce a local length limit.
 - Re-check that the selected target object still exists and is still eligible before displaying
   or accepting the proposal.

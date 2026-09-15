@@ -10,21 +10,27 @@ from netbox_data_import.proposal_response import (
     EXPLANATION_MAX_LENGTH,
     OUTCOME_CANDIDATE,
     OUTCOME_NO_MATCH,
+    RESPONSE_SCHEMA_VERSION,
     InvalidProposalResponse,
     candidate_id_for,
     validate_candidate_ids,
     validate_response,
 )
 
-CANDIDATES = ("candidate-0001", "candidate-0002", "candidate-0003")
+CANDIDATES = {
+    "candidate-0001": "Ethernet 1/1",
+    "candidate-0002": "Ethernet 1/2",
+    "candidate-0003": "Ethernet 1/3",
+}
 
 
 def response(**overrides):
     """Return the JSON text of one valid candidate response, with *overrides* applied."""
     body = {
-        "schema_version": 1,
+        "schema_version": RESPONSE_SCHEMA_VERSION,
         "outcome": OUTCOME_CANDIDATE,
         "candidate_id": "candidate-0002",
+        "candidate_display_name": "Ethernet 1/2",
         "explanation": "The port name matches this interface exactly.",
     }
     body.update(overrides)
@@ -35,22 +41,31 @@ class ValidResponseTest(SimpleTestCase):
     """The two answers a proposal may conclude."""
 
     def test_a_candidate_response_returns_its_selection(self):
-        answer = validate_response(response(), candidate_ids=CANDIDATES)
+        answer = validate_response(response(), candidate_display_names=CANDIDATES)
 
         self.assertEqual(answer.outcome, OUTCOME_CANDIDATE)
         self.assertEqual(answer.candidate_id, "candidate-0002")
+        self.assertEqual(answer.candidate_display_name, "Ethernet 1/2")
         self.assertEqual(answer.explanation, "The port name matches this interface exactly.")
 
     def test_a_no_match_response_carries_no_selection(self):
-        text = response(outcome=OUTCOME_NO_MATCH, candidate_id=None, explanation="Two ports fit equally.")
+        text = response(
+            outcome=OUTCOME_NO_MATCH,
+            candidate_id=None,
+            candidate_display_name=None,
+            explanation="Two ports fit equally.",
+        )
 
-        answer = validate_response(text, candidate_ids=CANDIDATES)
+        answer = validate_response(text, candidate_display_names=CANDIDATES)
 
         self.assertEqual(answer.outcome, OUTCOME_NO_MATCH)
         self.assertIsNone(answer.candidate_id)
+        self.assertIsNone(answer.candidate_display_name)
 
     def test_an_explanation_at_the_limit_is_accepted(self):
-        answer = validate_response(response(explanation="x" * EXPLANATION_MAX_LENGTH), candidate_ids=CANDIDATES)
+        answer = validate_response(
+            response(explanation="x" * EXPLANATION_MAX_LENGTH), candidate_display_names=CANDIDATES
+        )
 
         self.assertEqual(len(answer.explanation), EXPLANATION_MAX_LENGTH)
 
@@ -58,15 +73,15 @@ class ValidResponseTest(SimpleTestCase):
 class RejectedResponseTest(SimpleTestCase):
     """Everything section 7.8 classifies as an invalid backend response."""
 
-    def assert_rejected(self, text, candidate_ids=CANDIDATES):
+    def assert_rejected(self, text, candidate_display_names=CANDIDATES):
         """Require the validator to refuse *text* rather than repair it."""
         with self.assertRaises(InvalidProposalResponse) as caught:
-            validate_response(text, candidate_ids=candidate_ids)
+            validate_response(text, candidate_display_names=candidate_display_names)
         return str(caught.exception)
 
     def test_a_repeated_member_is_rejected(self):
         """`json.loads` keeps the last duplicate, so a check after decoding cannot see there was one."""
-        text = '{"schema_version": 1, "outcome": "candidate", "outcome": "no_match", "candidate_id": null, "explanation": "x"}'
+        text = '{"schema_version": 2, "outcome": "candidate", "outcome": "no_match", "candidate_id": null, "candidate_display_name": null, "explanation": "x"}'
 
         self.assertIn("repeats the member", self.assert_rejected(text))
 
@@ -74,7 +89,7 @@ class RejectedResponseTest(SimpleTestCase):
         self.assert_rejected("not json at all")
 
     def test_a_json_array_is_not_one_object(self):
-        self.assert_rejected('[{"schema_version": 1}]')
+        self.assert_rejected('[{"schema_version": 2}]')
 
     def test_a_json_scalar_is_not_one_object(self):
         self.assert_rejected("42")
@@ -88,7 +103,7 @@ class RejectedResponseTest(SimpleTestCase):
         self.assert_rejected(response(confidence=0.9))
 
     def test_every_missing_member_is_rejected(self):
-        for member in ("schema_version", "outcome", "candidate_id", "explanation"):
+        for member in ("schema_version", "outcome", "candidate_id", "candidate_display_name", "explanation"):
             with self.subTest(member=member):
                 body = json.loads(response())
                 del body[member]
@@ -96,13 +111,13 @@ class RejectedResponseTest(SimpleTestCase):
                 self.assertIn(member, self.assert_rejected(json.dumps(body)))
 
     def test_a_wrong_schema_version_is_rejected(self):
-        self.assert_rejected(response(schema_version=2))
+        self.assert_rejected(response(schema_version=RESPONSE_SCHEMA_VERSION - 1))
 
     def test_a_string_schema_version_is_rejected(self):
-        self.assert_rejected(response(schema_version="1"))
+        self.assert_rejected(response(schema_version=str(RESPONSE_SCHEMA_VERSION)))
 
     def test_a_boolean_schema_version_is_rejected(self):
-        """`True` is numerically 1, so it would otherwise pass an equality check against version 1."""
+        """A JSON boolean is not an integer schema version."""
         self.assert_rejected(response(schema_version=True))
 
     def test_an_unknown_outcome_is_rejected(self):
@@ -119,6 +134,11 @@ class RejectedResponseTest(SimpleTestCase):
     def test_a_no_match_carrying_a_candidate_is_rejected(self):
         self.assert_rejected(response(outcome=OUTCOME_NO_MATCH))
 
+    def test_a_no_match_carrying_a_candidate_display_name_is_rejected(self):
+        self.assert_rejected(
+            response(outcome=OUTCOME_NO_MATCH, candidate_id=None, candidate_display_name="Ethernet 1/2")
+        )
+
     def test_an_invented_candidate_is_rejected(self):
         self.assert_rejected(response(candidate_id="candidate-9999"))
 
@@ -132,7 +152,7 @@ class RejectedResponseTest(SimpleTestCase):
         self.assert_rejected(response(candidate_id=2))
 
     def test_a_candidate_response_against_an_empty_request_set_is_rejected(self):
-        self.assert_rejected(response(), candidate_ids=())
+        self.assert_rejected(response(), candidate_display_names={})
 
 
 class CandidateIdentifierTest(SimpleTestCase):
@@ -147,4 +167,4 @@ class CandidateIdentifierTest(SimpleTestCase):
             validate_candidate_ids(("candidate-0001", "candidate-0001"))
 
     def test_unique_identifiers_are_returned_in_order(self):
-        self.assertEqual(validate_candidate_ids(CANDIDATES), CANDIDATES)
+        self.assertEqual(validate_candidate_ids(CANDIDATES), tuple(CANDIDATES))

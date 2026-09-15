@@ -175,11 +175,21 @@ urlpatterns = [
         views.TraceTerminationCandidatesView.as_view(),
         name="trace_termination_candidates",
     ),
+    path(
+        "trace-workspace/device-candidates/",
+        views.TraceDeviceCandidatesView.as_view(),
+        name="trace_device_candidates",
+    ),
     path("trace-workspace/sync/", views.TraceSyncView.as_view(), name="trace_sync"),
     path(
         "trace-workspace/resolve-termination/",
         views.TraceResolveTerminationView.as_view(),
         name="trace_resolve_termination",
+    ),
+    path(
+        "trace-workspace/resolve-device/",
+        views.TraceResolveDeviceView.as_view(),
+        name="trace_resolve_device",
     ),
     path("trace-workspace/proposals/", views.TraceProposalView.as_view(), name="trace_proposal"),
     path("trace-workspace/proposals/request/", views.TraceRequestProposalView.as_view(), name="trace_request_proposal"),

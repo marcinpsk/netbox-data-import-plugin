@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""The OpenAI-compatible adapter: one non-streaming Chat Completion, typed failures (specification 8.1, 8.4)."""
+"""The OpenAI-compatible adapter: Chat Completions, model discovery, and typed failures."""
 
 import ast
 import json
@@ -26,6 +26,7 @@ from netbox_data_import.inference_adapter import (
     BODY_INTERRUPTED,
     BODY_PRESENT,
     DIAGNOSTIC_TEXT_LIMIT,
+    MODEL_DISCOVERY_LIMIT,
     AuthenticationFailure,
     BackendTimeout,
     InferenceRequest,
@@ -36,7 +37,13 @@ from netbox_data_import.inference_adapter import (
     TransportFailure,
     TRANSIENT_STATUSES,
 )
-from netbox_data_import.inference_transport import request_to_resolved_address
+from netbox_data_import.inference_transport import (
+    ResponseBodyTooLarge,
+    ResponseProcessingFailure,
+    WallClockDeadline,
+    WallClockDeadlineExceeded,
+    request_to_resolved_address,
+)
 from netbox_data_import.tests.inference_http import (
     issue_server_certificate,
     local_dns,
@@ -67,6 +74,8 @@ class RecordingBackend(BaseHTTPRequestHandler):
 
     status = 200
     payload: object = {}
+    models_status = 200
+    models_payload: object = {"data": []}
     headers_out: dict = {}
     seen: list = []
     delay = 0.0
@@ -89,6 +98,22 @@ class RecordingBackend(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         for name, value in self.headers_out.items():
             self.send_header(name, value)
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def do_GET(self):
+        type(self).seen.append(
+            {
+                "path": self.path,
+                "headers": {name.lower(): value for name, value in self.headers.items()},
+                "body": "",
+            }
+        )
+        raw = self.models_payload if isinstance(self.models_payload, str) else json.dumps(self.models_payload)
+        encoded = raw.encode()
+        self.send_response(self.models_status)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
@@ -117,7 +142,7 @@ class DisconnectingFirstBackend(RecordingBackend):
 
 
 @contextmanager
-def serving(status=200, payload=None, headers_out=None, delay=0.0):
+def serving(status=200, payload=None, headers_out=None, delay=0.0, models_status=200, models_payload=None):
     """Run a Chat Completions stand-in on loopback and yield its api_root and request log."""
 
     class Handler(RecordingBackend):
@@ -125,6 +150,8 @@ def serving(status=200, payload=None, headers_out=None, delay=0.0):
 
     Handler.status = status
     Handler.payload = completion() if payload is None else payload
+    Handler.models_status = models_status
+    Handler.models_payload = {"data": []} if models_payload is None else models_payload
     Handler.headers_out = headers_out or {}
     Handler.seen = []
     Handler.delay = delay
@@ -284,6 +311,63 @@ class ChatCompletionRequestTest(SimpleTestCase):
 
         self.assertEqual(seen[0]["headers"]["authorization"], f"Bearer {API_KEY}")
 
+
+class ModelDiscoveryTest(SimpleTestCase):
+    """Model discovery uses the same authenticated, destination-pinned adapter boundary."""
+
+    def test_a_compatible_models_endpoint_returns_unique_model_ids(self):
+        payload = {"data": [{"id": "model-b"}, {"id": "model-a"}, {"id": "model-b"}]}
+        with serving(models_payload=payload) as (root, seen, allowlist):
+            models = adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertEqual(models, ("model-b", "model-a"))
+        self.assertEqual(seen[0]["path"], "/models")
+        self.assertEqual(seen[0]["headers"]["authorization"], f"Bearer {API_KEY}")
+
+    def test_an_incompatible_models_envelope_is_typed(self):
+        with serving(models_payload={"models": ["model-a"]}) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope):
+                adapter_for(root, allowlist).discover_models(API_KEY)
+
+    def test_a_models_body_that_is_not_json_is_typed(self):
+        with serving(models_payload="not json") as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertIn("not JSON", str(caught.exception))
+
+    def test_a_credential_echo_is_never_returned_as_a_model_id(self):
+        with serving(models_payload={"data": [{"id": API_KEY}]}) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope):
+                adapter_for(root, allowlist).discover_models(API_KEY)
+
+    def test_model_suggestions_are_bounded(self):
+        payload = {"data": [{"id": f"model-{number:03}"} for number in range(MODEL_DISCOVERY_LIMIT + 10)]}
+        with serving(models_payload=payload) as (root, _seen, allowlist):
+            models = adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertEqual(len(models), MODEL_DISCOVERY_LIMIT)
+        self.assertEqual(models[-1], f"model-{MODEL_DISCOVERY_LIMIT - 1:03}")
+
+    def test_an_oversized_model_response_is_rejected(self):
+        payload = {"data": [{"id": "model-a"}], "padding": "x" * 65_536}
+        with serving(models_payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertIn("too large", str(caught.exception))
+
+    def test_unusable_model_ids_are_not_offered(self):
+        payload = {"data": [{"id": " valid "}, {"id": "line\nbreak"}, {"id": "x" * 201}, {"id": "valid"}]}
+        with serving(models_payload=payload) as (root, _seen, allowlist):
+            models = adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertEqual(models, ("valid",))
+
+
+class ChatCompletionPayloadTest(SimpleTestCase):
+    """The adapter sends only the supported Chat Completions request shape."""
+
     def test_streaming_is_never_requested(self):
         """Section 8.4 rejects streaming."""
         with serving() as (root, seen, allowlist):
@@ -382,6 +466,15 @@ class CompletionParsingTest(SimpleTestCase):
         with self.assertRaises(MalformedEnvelope):
             self.complete(envelope)
 
+    def test_unreadable_choice_members_raise_typed_errors(self):
+        envelopes = (
+            {"choices": ["not an object"]},
+            {"choices": [{"finish_reason": "stop", "message": "not an object"}]},
+        )
+        for envelope in envelopes:
+            with self.subTest(envelope=envelope), self.assertRaises(MalformedEnvelope):
+                self.complete(envelope)
+
 
 class FailureClassificationTest(SimpleTestCase):
     """Each documented backend condition maps to its typed failure class."""
@@ -411,6 +504,11 @@ class FailureClassificationTest(SimpleTestCase):
 
         self.assertEqual(failure.retry_after, 17)
 
+    def test_a_429_ignores_an_invalid_retry_after(self):
+        failure = self.failure(429, headers_out={"Retry-After": "later"})
+
+        self.assertIsNone(failure.retry_after)
+
     def test_a_500_is_a_transport_failure(self):
         self.assertIsInstance(self.failure(500), TransportFailure)
 
@@ -418,6 +516,32 @@ class FailureClassificationTest(SimpleTestCase):
         adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])
 
         with self.assertRaises(TransportFailure):
+            adapter.complete(REQUEST, api_key=API_KEY)
+
+    def test_a_request_library_failure_is_a_transport_failure(self):
+        session = requests.Session()
+
+        def fail_request(_method, _url, **_kwargs):
+            raise requests.RequestException("request failed")
+
+        session.request = fail_request
+        adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"], session=session)
+
+        with self.assertRaises(TransportFailure) as caught:
+            adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_ABSENT)
+
+    def test_connect_timeouts_from_every_address_are_a_backend_timeout(self):
+        session = requests.Session()
+
+        def time_out(_method, _url, **_kwargs):
+            raise requests.ConnectTimeout("connect timed out")
+
+        session.request = time_out
+        adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"], session=session)
+
+        with self.assertRaises(BackendTimeout):
             adapter.complete(REQUEST, api_key=API_KEY)
 
     def test_a_slow_backend_times_out(self):
@@ -722,6 +846,21 @@ class ResponseDiagnosticTest(SimpleTestCase):
         self.assertIsNone(caught.exception.diagnostic.text)
         self.assertTrue(caught.exception.diagnostic.withheld)
         self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_an_undecodable_response_body_is_reported_as_interrupted(self):
+        class UndecodableResponse(requests.Response):
+            @property
+            def text(self):
+                raise UnicodeError("cannot decode response")
+
+        response = UndecodableResponse()
+        response.status_code = 500
+
+        with self.assertRaises(TransportFailure) as caught:
+            OpenAICompatibleAdapter._raise_for_status(response, API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_INTERRUPTED)
+        self.assertEqual(caught.exception.diagnostic.status_code, 500)
 
     def test_an_authenticated_body_within_the_prior_budget_is_withheld(self):
         for size in (DIAGNOSTIC_TEXT_LIMIT - 1, DIAGNOSTIC_TEXT_LIMIT):
@@ -1064,6 +1203,156 @@ class InterruptedAndMalformedTransportTest(SimpleTestCase):
 class AddressPinnedSessionTest(SimpleTestCase):
     """A shared injected session must not expose one temporary adapter to another call."""
 
+    def test_response_limit_runs_before_a_hook_can_replace_the_response(self):
+        """A response hook cannot read and replace an oversized backend response."""
+        hook_bodies = []
+        payload = {"data": [{"id": "oversized-model-name"}]}
+
+        def replace_response(response, *_args, **_kwargs):
+            hook_bodies.append(response.content)
+            replacement = requests.Response()
+            replacement.status_code = 200
+            replacement._content = b"{}"
+            replacement._content_consumed = True
+            replacement.url = response.url
+            return replacement
+
+        with serving(models_payload=payload) as (root, _seen, _allowlist):
+            with self.assertRaises(ResponseProcessingFailure) as caught:
+                request_to_resolved_address(
+                    requests.Session(),
+                    "GET",
+                    f"{root}/models",
+                    "127.0.0.1",
+                    response_body_limit=len(json.dumps(payload).encode()) - 1,
+                    hooks={"response": replace_response},
+                )
+
+        self.assertIsInstance(caught.exception.cause, ResponseBodyTooLarge)
+        self.assertTrue(caught.exception.response.raw.closed)
+        self.assertEqual(hook_bodies, [])
+
+    def test_response_limit_preserves_a_hooks_replacement_response(self):
+        """A response hook sees bounded content and can replace a valid response."""
+        payload = {"ok": True}
+        hook_bodies = []
+        replacement = requests.Response()
+        replacement.status_code = 204
+        replacement._content = b""
+        replacement._content_consumed = True
+
+        def replace_response(response, *_args, **_kwargs):
+            hook_bodies.append(response.content)
+            return replacement
+
+        with serving(models_payload=payload) as (root, _seen, _allowlist):
+            response = request_to_resolved_address(
+                requests.Session(),
+                "GET",
+                f"{root}/models",
+                "127.0.0.1",
+                response_body_limit=len(json.dumps(payload).encode()),
+                hooks={"response": replace_response},
+            )
+
+        self.assertIs(response, replacement)
+        self.assertEqual(hook_bodies, [json.dumps(payload).encode()])
+
+    def test_concurrent_deadlines_start_independent_blocking_operations(self):
+        """One slow resolver must not consume another foreground operation's budget."""
+        all_started = threading.Event()
+        release = threading.Event()
+        state_lock = threading.Lock()
+        started = 0
+
+        def blocking_operation():
+            nonlocal started
+            with state_lock:
+                started += 1
+                if started == 5:
+                    all_started.set()
+            release.wait(timeout=5)
+            return True
+
+        def run_with_deadline():
+            return WallClockDeadline.after(5).run(blocking_operation)
+
+        with ThreadPoolExecutor(max_workers=5) as callers:
+            futures = [callers.submit(run_with_deadline) for _ in range(5)]
+            try:
+                self.assertTrue(all_started.wait(timeout=1))
+            finally:
+                release.set()
+
+            self.assertTrue(all(future.result(timeout=2) for future in futures))
+
+    def test_timed_out_deadlines_retain_a_bounded_number_of_workers(self):
+        """Repeated blocked resolvers must not leave one worker behind per request."""
+        operation_count = 40
+        begin = threading.Event()
+        release = threading.Event()
+        state_lock = threading.Lock()
+        started = 0
+
+        def blocking_operation():
+            nonlocal started
+            with state_lock:
+                started += 1
+            release.wait(timeout=5)
+
+        def run_until_timeout():
+            begin.wait(timeout=2)
+            try:
+                WallClockDeadline.after(2).run(blocking_operation)
+            except WallClockDeadlineExceeded:
+                return True
+            return False
+
+        with ThreadPoolExecutor(max_workers=operation_count) as callers:
+            futures = [callers.submit(run_until_timeout) for _ in range(operation_count)]
+            begin.set()
+            try:
+                self.assertTrue(all(future.result(timeout=4) for future in futures))
+                self.assertLess(started, operation_count)
+            finally:
+                release.set()
+
+    def test_deadline_transport_accepts_requests_timeout_shapes(self):
+        """A deadline caps missing and scalar timeouts without changing Requests input rules."""
+        with serving() as (root, _seen, _allowlist):
+            for kwargs in ({}, {"timeout": 1}):
+                with self.subTest(kwargs=kwargs):
+                    response = request_to_resolved_address(
+                        requests.Session(),
+                        "GET",
+                        f"{root}/models",
+                        "127.0.0.1",
+                        deadline=WallClockDeadline.after(2),
+                        **kwargs,
+                    )
+
+                    self.assertEqual(response.status_code, 200)
+
+    def test_deadline_caps_each_requests_timeout_shape(self):
+        for supplied in (None, 10, (10, 20)):
+            with self.subTest(supplied=supplied):
+                timeout = WallClockDeadline.after(1).request_timeout(supplied)
+
+                self.assertLessEqual(timeout.connect_timeout, 1)
+                self.assertLessEqual(timeout.read_timeout, 1)
+
+    def test_deadline_transport_rejects_an_invalid_timeout_as_value_error(self):
+        with serving() as (root, _seen, _allowlist):
+            with self.assertRaises(ValueError):
+                request_to_resolved_address(
+                    requests.Session(),
+                    "GET",
+                    f"{root}/models",
+                    "127.0.0.1",
+                    deadline=WallClockDeadline.after(2),
+                    timeout=(1,),
+                )
+
     def test_requests_through_one_session_are_serialized(self):
         session = requests.Session()
         first_entered = threading.Event()
@@ -1106,6 +1395,16 @@ class AddressPinnedSessionTest(SimpleTestCase):
         self.assertTrue(first_entered.is_set())
         self.assertEqual([response.status_code for response in responses], [200, 200])
         self.assertEqual(maximum_active, 1)
+
+    def test_a_response_body_limit_must_be_positive(self):
+        with self.assertRaisesMessage(ValueError, "response body limit must be positive"):
+            request_to_resolved_address(
+                requests.Session(),
+                "GET",
+                "http://backend.example.invalid/models",
+                "198.18.0.1",
+                response_body_limit=0,
+            )
 
 
 def test_tls_server_context_requires_tls_1_2():

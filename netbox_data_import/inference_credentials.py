@@ -26,7 +26,13 @@ from .inference_settings import (
     validate_credential_reference,
     validate_vault_settings,
 )
-from .inference_transport import is_preconnect_failure, request_to_resolved_address
+from .inference_transport import (
+    ResponseProcessingFailure,
+    WallClockDeadline,
+    WallClockDeadlineExceeded,
+    is_preconnect_failure,
+    request_to_resolved_address,
+)
 from .inference_trust import InvalidInferenceConfiguration, resolve_addresses
 
 # The deployment owns the token; the plugin never stores one.
@@ -155,13 +161,19 @@ class VaultKvV2CredentialBackend:
 
     name = CREDENTIAL_REFERENCE_BACKEND
 
-    def __init__(self, settings: Mapping[str, Any], session: requests.Session | None = None):
+    def __init__(
+        self,
+        settings: Mapping[str, Any],
+        session: requests.Session | None = None,
+        deadline: WallClockDeadline | None = None,
+    ):
         try:
             self._settings = validate_vault_settings(settings)
         except InvalidInferenceConfiguration as exc:
             raise InvalidCredentialConfiguration(str(exc)) from exc
         self._owns_session = session is None
         self._session = requests.Session() if session is None else session
+        self._deadline = deadline
 
     def close(self) -> None:
         """Close the session only when this backend created it."""
@@ -181,7 +193,7 @@ class VaultKvV2CredentialBackend:
 
     def _headers(self) -> dict[str, str]:
         """Return the request headers, reading a token only when the deployment selected one."""
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "X-Vault-Request": "true"}
         if namespace := self._settings.get("namespace"):
             headers["X-Vault-Namespace"] = namespace
         if self._settings.get("auth_method", "proxy") != "token":
@@ -190,7 +202,7 @@ class VaultKvV2CredentialBackend:
         if not token:
             raise InvalidCredentialConfiguration(
                 f"vault.auth_method is 'token' but {VAULT_TOKEN_ENVIRONMENT_VARIABLE} is not set in the "
-                f"worker environment."
+                f"NetBox process environment."
             )
         headers["X-Vault-Token"] = token
         return headers
@@ -207,7 +219,13 @@ class VaultKvV2CredentialBackend:
             self._settings.get("read_timeout", DEFAULT_READ_TIMEOUT),
         )
         try:
-            resolved_addresses = resolve_addresses(address, setting="vault.address")
+            resolved_addresses = (
+                resolve_addresses(address, setting="vault.address")
+                if self._deadline is None
+                else self._deadline.run(resolve_addresses, address, setting="vault.address")
+            )
+        except WallClockDeadlineExceeded:
+            raise
         except InvalidInferenceConfiguration as exc:
             raise CredentialUnavailable(
                 f"The credential store could not be reached ({type(exc).__name__}). Check the configured vault address."
@@ -223,10 +241,15 @@ class VaultKvV2CredentialBackend:
                         resolved_address,
                         headers=self._headers(),
                         timeout=timeout,
+                        deadline=self._deadline,
                         verify=self._settings.get("ca_bundle", True),
                         allow_redirects=False,
                     )
+            except WallClockDeadlineExceeded:
+                raise
             except requests.RequestException as exc:
+                if isinstance(exc, ResponseProcessingFailure) and isinstance(exc.cause, WallClockDeadlineExceeded):
+                    raise exc.cause from None
                 if is_preconnect_failure(exc):
                     connection_failure = exc
                     continue
@@ -234,6 +257,10 @@ class VaultKvV2CredentialBackend:
                 raise CredentialUnavailable(
                     f"The credential store could not be reached ({type(exc).__name__}). "
                     f"Check the configured vault address."
+                ) from None
+            except OSError:
+                raise InvalidCredentialConfiguration(
+                    "The configured Vault TLS CA bundle could not be used. Check vault.ca_bundle."
                 ) from None
         failure_name = type(connection_failure).__name__ if connection_failure is not None else "NoAddress"
         raise CredentialUnavailable(
@@ -254,7 +281,7 @@ class VaultKvV2CredentialBackend:
         if response.status_code in (401, 403):
             raise CredentialDenied(f"The credential store refused the read (HTTP {response.status_code}).")
         if response.status_code == 404:
-            raise CredentialUnavailable("The credential store holds no secret at the referenced path.")
+            raise InvalidCredentialReference("The credential store holds no secret for this Inference Backend.")
         if response.status_code >= 400:
             raise CredentialUnavailable(f"The credential store answered HTTP {response.status_code}.")
         try:
@@ -265,7 +292,7 @@ class VaultKvV2CredentialBackend:
         if not isinstance(data, Mapping):
             raise CredentialUnavailable("The credential store answered with an unreadable KV v2 envelope.") from None
         if reference.field not in data:
-            raise InvalidSecretMaterial("The referenced field is absent from the stored secret.")
+            raise InvalidCredentialReference("The credential store holds no secret for this Inference Backend.")
         value = data[reference.field]
         if not isinstance(value, str):
             raise InvalidSecretMaterial("The referenced field does not hold a string.")
@@ -274,10 +301,15 @@ class VaultKvV2CredentialBackend:
         return value
 
 
-def credential_backend_for(reference: CredentialReference, vault_settings: Mapping[str, Any]) -> CredentialBackend:
+def credential_backend_for(
+    reference: CredentialReference,
+    vault_settings: Mapping[str, Any],
+    *,
+    deadline: WallClockDeadline | None = None,
+) -> CredentialBackend:
     """Return the credential backend that resolves this reference."""
     if reference.backend == CREDENTIAL_REFERENCE_BACKEND:
-        return VaultKvV2CredentialBackend(vault_settings)
+        return VaultKvV2CredentialBackend(vault_settings, deadline=deadline)
     raise InvalidCredentialReference(f"No credential backend resolves '{reference.backend}' references.")
 
 

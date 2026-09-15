@@ -105,6 +105,12 @@ class NetBoxReader:
 
         return self._scoped(Rack, action)
 
+    def locations(self, action: str = "view"):
+        """Return the Locations the actor may take *action* on."""
+        from dcim.models import Location
+
+        return self._scoped(Location, action)
+
     def interfaces(self, action: str = "view"):
         """Return the Interfaces the actor may take *action* on."""
         from dcim.models import Interface

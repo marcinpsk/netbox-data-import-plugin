@@ -31,12 +31,12 @@ from netbox_data_import.target_modules import MODULE_RUNTIMES, runtime_for
 from netbox_data_import.tests.helpers import make_dcim_objects, user_with_object_permission
 
 
-def _workbook(*rows) -> bytes:
+def _workbook(*rows, headers=None) -> bytes:
     """Return one stored-source workbook with the coordinator test columns."""
     book = openpyxl.Workbook()
     sheet = book.worksheets[0]
     sheet.title = "Data"
-    sheet.append(["Source ID", "Class", "Name", "Rack", "Make", "Model", "Height"])
+    sheet.append(headers or ["Source ID", "Class", "Name", "Rack", "Make", "Model", "Height"])
     for row in rows:
         sheet.append(list(row))
     buffer = BytesIO()
@@ -182,6 +182,113 @@ class ImportEnginePlanTest(ImportEngineTestDataMixin, TestCase):
         self.assertIsNone(device_change.payload["rack_id"])
         self.assertEqual(device_change.payload["rack_name"], "rack-a")
         self.assertEqual([change.identity for change in ordered], [rack_change.identity, device_change.identity])
+
+    def test_a_blocked_rack_update_is_not_a_device_dependency(self):
+        """A blocked Rack stays unchanged, so Device planning uses its stored state."""
+        from dcim.models import Device, Rack, Site
+
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=_workbook(
+                ("R-1", "Cabinet", "", self.rack.name, "", "", 20),
+                (
+                    "D-1",
+                    "Server",
+                    "server-a",
+                    self.rack.name,
+                    self.manufacturer.name,
+                    self.device_type.model,
+                    1,
+                ),
+            ),
+            filename="blocked-rack-update.xlsx",
+        )
+        actor = user_with_object_permission(
+            "blocked-rack-update-planner",
+            [
+                (Site, ["view"], None),
+                (Rack, ["view", "change"], {"u_height": self.rack.u_height}),
+                (Device, ["view", "add"], None),
+            ],
+        )
+
+        plan = self._plan(document, actor)
+
+        rack_unit = plan.unit("rack:source:R-1")
+        device_unit = plan.unit("device:source:D-1")
+        self.assertEqual(rack_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(rack_unit.diagnostics[0].code, "rack.change_permission")
+        self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE, device_unit.diagnostics)
+        self.assertEqual(device_unit.changes[-1].dependencies, ())
+
+    def test_a_blocked_rack_create_does_not_leave_a_dangling_device_dependency(self):
+        """A Device stays blocked when its batch cannot create the Rack it needs."""
+        from dcim.models import Device, Rack, Site
+
+        self.rack.delete()
+        actor = user_with_object_permission(
+            "blocked-rack-create-planner",
+            [
+                (Site, ["view"], None),
+                (Rack, ["view"], None),
+                (Device, ["view", "add"], None),
+            ],
+        )
+
+        plan = self._plan(actor=actor)
+
+        rack_unit = plan.unit("rack:source:R-1")
+        device_unit = plan.unit("device:source:D-1")
+        self.assertEqual(rack_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(rack_unit.diagnostics[0].code, "rack.add_permission")
+        self.assertEqual(device_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.rack_missing")
+        self.assertEqual(device_unit.changes, ())
+
+    def test_a_positioned_device_waits_for_a_blocked_rack_create(self):
+        """A placement remains recoverably blocked while its planned Rack cannot be created."""
+        from dcim.models import Device, Rack, Site
+
+        self.rack.delete()
+        ColumnMapping.objects.create(profile=self.profile, source_column="Position", target_field="u_position")
+        ColumnMapping.objects.create(profile=self.profile, source_column="Face", target_field="face")
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=_workbook(
+                ("R-1", "Cabinet", "", "rack-a", "", "", 42, "", ""),
+                (
+                    "D-1",
+                    "Server",
+                    "server-a",
+                    "rack-a",
+                    self.manufacturer.name,
+                    self.device_type.model,
+                    1,
+                    7,
+                    "Front",
+                ),
+                headers=["Source ID", "Class", "Name", "Rack", "Make", "Model", "Height", "Position", "Face"],
+            ),
+            filename="blocked-positioned-rack-create.xlsx",
+        )
+        actor = user_with_object_permission(
+            "blocked-positioned-rack-create-planner",
+            [
+                (Site, ["view"], None),
+                (Rack, ["view"], None),
+                (Device, ["view", "add"], None),
+            ],
+        )
+
+        plan = self._plan(document, actor)
+
+        rack_unit = plan.unit("rack:source:R-1")
+        device_unit = plan.unit("device:source:D-1")
+        self.assertEqual(rack_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(rack_unit.diagnostics[0].code, "rack.add_permission")
+        self.assertEqual(device_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.rack_missing")
+        self.assertEqual(device_unit.changes, ())
 
     def test_merged_rack_and_device_changes_apply_in_dependency_order(self):
         """Applying the merged changes places the device in the new rack."""

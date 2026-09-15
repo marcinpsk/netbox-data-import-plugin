@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -37,7 +37,7 @@ from .forms import (
     ImportProfileImportForm,
     ImportSetupForm,
 )
-from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS
+from .catalog import CANDIDATE_TARGET_PREFIX, CATALOG, POLICY_SECTIONS, OutputKind
 from .values import (
     effective_device_name,
     identity_text,
@@ -85,10 +85,11 @@ from .contact_resolution import PrimaryContactResolver, contact_identity, sugges
 from .device_field_review import DeviceFieldReviewer
 from .object_permissions import (
     ObjectPermissionDenied,
+    assess_permission_scoped_save_option,
     delete_permission_scoped_objects,
-    save_or_refetch,
     save_permission_scoped_object,
 )
+from .profile_yaml import DuplicateYamlKeyError, apply_profile_document, load_yaml_document, serialize_profile
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -119,7 +120,13 @@ from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
 from .field_keys import SELECT_TERMINATION_TASK
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, fingerprint_of
-from .review_workspace import ReviewWorkspace, save_termination_resolution_and_replan
+from .review_workspace import (
+    IneligibleDeviceSelection,
+    ReviewWorkspace,
+    save_termination_resolution_and_replan,
+    save_trace_device_resolution_and_replan,
+)
+from .trace_device_resolution import DeviceEvidence, eligible_trace_devices, source_device_key
 
 
 def _safe_next_url(request, fallback: str) -> str:
@@ -481,6 +488,7 @@ class ImportProfileEditView(generic.ObjectEditView):
 
     queryset = ImportProfile.objects.all()
     form = ImportProfileForm
+    template_name = "netbox_data_import/importprofile_edit.html"
 
 
 class ImportProfileDeleteView(generic.ObjectDeleteView):
@@ -496,10 +504,23 @@ class InferenceBackendListView(generic.ObjectListView):
     table = InferenceBackendTable
 
 
+_INFERENCE_MODELS_SESSION_KEY = "netbox_data_import.inference_backend_models"
+
+
 class InferenceBackendView(generic.ObjectView):
     """One backend row, as `resolve_active_backend` reads it while this row is the enabled one."""
 
     queryset = InferenceBackend.objects.all()
+
+    def get_extra_context(self, request, instance):
+        """Offer model suggestions once, immediately after a connection test discovered them."""
+        discovery = request.session.pop(_INFERENCE_MODELS_SESSION_KEY, None)
+        if not isinstance(discovery, Mapping) or discovery.get("backend_id") != instance.pk:
+            return {}
+        models = discovery.get("models")
+        if not isinstance(models, list) or not all(isinstance(model, str) for model in models):
+            return {}
+        return {"model_choices": tuple(models)}
 
 
 class InferenceBackendEditView(generic.ObjectEditView):
@@ -522,25 +543,28 @@ class InferenceBackendChangeLogView(generic.ObjectChangeLogView):
 
 
 class InferenceBackendConnectionTestView(PermissionRequiredMixin, View):
-    """Queue the connection test. Specification 13.1 authorizes it with this one permission."""
+    """Run the connection test. Specification 13.1 authorizes it with this one permission."""
 
     permission_required = "netbox_data_import.change_inferencebackend"
 
     def post(self, request, pk):
-        """Enqueue the worker Job, so no web process ever resolves a credential."""
-        from .jobs import InferenceBackendConnectionTestJob
+        """Run the test now and show its redacted result where the configuration lives."""
+        from .inference_connection_test import run_connection_test
 
         # restrict() applies the ObjectPermission constraints a model-level check would ignore.
         backend = get_object_or_404(InferenceBackend.objects.restrict(request.user, "change"), pk=pk)
-        job = InferenceBackendConnectionTestJob.enqueue(
-            name=InferenceBackendConnectionTestJob.Meta.name,
-            instance=backend,
-            user=request.user,
-            # The row ID binds authorization; the editable key is operator-facing text.
-            pk=backend.pk,
-            backend_key=backend.backend_key,
-        )
-        messages.success(request, f"Connection test queued as job {job.pk}.")
+        result = run_connection_test(backend.pk, backend.backend_key)
+        request.session.pop(_INFERENCE_MODELS_SESSION_KEY, None)
+        if result.models:
+            request.session[_INFERENCE_MODELS_SESSION_KEY] = {
+                "backend_id": backend.pk,
+                "models": list(result.models),
+            }
+        if result.category == "ok":
+            messages.success(request, f"Connection test succeeded. {result.detail}")
+        else:
+            category = result.category.replace("_", " ")
+            messages.error(request, f"Connection test failed ({category}). {result.detail}")
         return redirect(backend.get_absolute_url())
 
 
@@ -566,11 +590,6 @@ class ImportProfileChangeLogView(generic.ObjectChangeLogView):
     queryset = ImportProfile.objects.all()
 
 
-# Scalar profile fields handled by _apply_profile_yaml_data.
-# 'tags' (M2M) is intentionally excluded — use the edit UI or the flat import path.
-_PROFILE_FIELDS = ("description", "source_adapter")
-
-
 def _validate_model_instance(instance, label):
     """Call full_clean() and surface ValidationErrors as ValueError so the atomic block rolls back."""
     from django.core.exceptions import ValidationError as DjangoValidationError
@@ -585,300 +604,9 @@ def _validate_model_instance(instance, label):
         raise PreviewActionInvalid(f"Validation error in {label}: {msg}") from exc
 
 
-def _legacy_adapter_config(profile_data):
-    """Return the top-level `profile` keys releases up to 1.5.2 exported, as adapter configuration."""
-    from .adapter_forms import FlatWorkbookConfigForm
-
-    # The legacy keys are exactly the flat-workbook adapter's own settings.
-    legacy_keys = set(FlatWorkbookConfigForm.base_fields) & set(profile_data)
-    if not legacy_keys:
-        return None
-    conflicting = sorted({"adapter_config", "source_adapter"} & set(profile_data))
-    if conflicting:
-        raise ValueError(
-            f"Profile key(s) {', '.join(sorted(legacy_keys))} belong to a release before the adapter "
-            f"cutover and cannot be combined with {', '.join(conflicting)}."
-        )
-    config = {key: profile_data[key] for key in legacy_keys}
-    # The legacy file names the Contact Role by slug; adapter_config stores its name.
-    slug = config.get("primary_contact_role")
-    if slug:
-        from tenancy.models import ContactRole
-
-        role = ContactRole.objects.filter(slug=slug).first()
-        if role is None:
-            raise ValueError(f"No Contact Role matches the primary_contact_role slug '{slug}'.")
-        config["primary_contact_role"] = role.name
-    return config
-
-
-def _profile_defaults_from_yaml(profile_data):
-    """Resolve the scalar profile values and the adapter configuration from YAML."""
-    legacy_config = _legacy_adapter_config(profile_data)
-    accepted = {"name", "adapter_config", *_PROFILE_FIELDS}
-    if legacy_config is not None:
-        accepted |= set(legacy_config)
-    unknown = sorted(set(profile_data) - accepted)
-    if unknown:
-        raise ValueError(f"Unknown profile key(s): {', '.join(unknown)}")
-    profile_defaults = {field: profile_data[field] for field in _PROFILE_FIELDS if field in profile_data}
-    if legacy_config is not None:
-        from .adapters import FlatWorkbookAdapter
-
-        # Pinned, not DEFAULT_ADAPTER_KEY: a legacy file is a flat workbook whatever the default becomes.
-        profile_defaults["source_adapter"] = FlatWorkbookAdapter.key
-        profile_defaults["adapter_config"] = legacy_config
-    elif "adapter_config" in profile_data:
-        profile_defaults["adapter_config"] = profile_data["adapter_config"]
-    return profile_defaults
-
-
 def _get_or_init(model_class, **lookup):
-    """Return the existing persisted instance matching *lookup*, or a new unsaved one.
-
-    This enables validate-before-save semantics: callers can set fields on the
-    returned instance, call ``_validate_model_instance``, and only then call
-    ``instance.save()``.  DB-level errors (e.g. overlength strings) are thus
-    caught by Django's field validators before any write reaches the database.
-    """
+    """Return an existing object for a natural lookup, or one unsaved object."""
     return model_class.objects.filter(**lookup).first() or model_class(**lookup)
-
-
-def _set_if_present(instance, data, fields):
-    """Set attributes on *instance* only when the corresponding key exists in *data*."""
-    for name in fields:
-        if name in data:
-            setattr(instance, name, data[name])
-
-
-def _save_or_refetch(instance, model_class, **lookup):
-    """Persist *instance*, or return the row that won the concurrent insert."""
-    resolved, _saved = save_or_refetch(instance, model_class, lookup)
-    return resolved
-
-
-def _iter_yaml_section(data, section_name, required_keys=()):
-    """Yield mapping items for a named section in a parsed YAML dict.
-
-    - Absent key → yields nothing (caller skips reconciliation).
-    - Explicit null or non-list value → raises ValueError.
-    - Explicit empty list → yields nothing (caller reconcile-deletes all).
-    - Item missing a required key → raises ValueError with index and key name(s),
-      preventing a bare KeyError from bubbling up with no context.
-    """
-    if section_name not in data:
-        return
-    section = data[section_name]
-    if section is None or not isinstance(section, list):
-        raise ValueError(
-            f"'{section_name}' must be a list of mappings; "
-            f"use [] to explicitly remove all entries, got {type(section).__name__}."
-        )
-    for idx, item in enumerate(section, start=1):
-        if not isinstance(item, dict):
-            raise TypeError(f"'{section_name}[{idx}]' must be a mapping, got {type(item).__name__}.")
-        missing = [k for k in required_keys if k not in item]
-        if missing:
-            raise ValueError(f"'{section_name}[{idx}]' missing required key(s): {', '.join(missing)}")
-        yield item
-
-
-def _delete_stale_device_type_mappings(profile, keep_keys):
-    """Delete DeviceTypeMapping rows whose (source_make, source_model) is not in *keep_keys*.
-
-    Uses a single DB-level exclusion via Q objects, consistent with how other sections
-    handle reconcile-deletes, and avoids loading all existing rows into Python.
-    """
-    from django.db.models import Q
-
-    qs = DeviceTypeMapping.objects.filter(profile=profile)
-    if keep_keys:
-        keep_q = Q()
-        for make, model in keep_keys:
-            keep_q |= Q(source_make=make, source_model=model)
-        qs = qs.exclude(keep_q)
-    qs.delete()
-
-
-def _import_class_role_mappings(data, profile, stats):
-    """Import class_role_mappings from YAML data into the given profile."""
-    crm_source_classes = []
-    for m in _iter_yaml_section(data, "class_role_mappings", ("source_class",)):
-        instance = _get_or_init(ClassRoleMapping, profile=profile, source_class=m["source_class"])
-        _set_if_present(instance, m, ("creates_rack", "role_slug", "ignore"))
-        if m.get("rack_type"):
-            from dcim.models import RackType
-
-            try:
-                instance.rack_type = RackType.objects.get(slug=m["rack_type"])
-            except RackType.DoesNotExist as exc:
-                raise ValueError(
-                    f"class_role_mappings[{m['source_class']}]: RackType with slug '{m['rack_type']}' not found"
-                ) from exc
-        elif "rack_type" in m:
-            instance.rack_type = None
-        _validate_model_instance(instance, f"class_role_mappings[{m['source_class']}]")
-        _save_or_refetch(instance, ClassRoleMapping, profile=profile, source_class=m["source_class"])
-        crm_source_classes.append(m["source_class"])
-        stats["class_role_mappings"] = stats.get("class_role_mappings", 0) + 1
-    if "class_role_mappings" in data:
-        ClassRoleMapping.objects.filter(profile=profile).exclude(source_class__in=crm_source_classes).delete()
-
-
-def _import_cable_class_mappings(data, profile, stats):
-    """Import cable_class_mappings from YAML data into the given profile."""
-    ccm_cable_classes = []
-    for m in _iter_yaml_section(data, "cable_class_mappings", ("cable_class",)):
-        instance = _get_or_init(CableClassMapping, profile=profile, cable_class=m["cable_class"])
-        _set_if_present(instance, m, ("cable_type_resolved", "cable_type", "cable_profile_resolved", "cable_profile"))
-        _validate_model_instance(instance, f"cable_class_mappings[{m['cable_class']}]")
-        _save_or_refetch(instance, CableClassMapping, profile=profile, cable_class=m["cable_class"])
-        ccm_cable_classes.append(m["cable_class"])
-        stats["cable_class_mappings"] = stats.get("cable_class_mappings", 0) + 1
-    if "cable_class_mappings" in data:
-        CableClassMapping.objects.filter(profile=profile).exclude(cable_class__in=ccm_cable_classes).delete()
-
-
-def _release_replaced_column_policy_rows(profile, mapping_rows, transform_rows):
-    """Remove rows that leave or change target ownership before validating their replacements."""
-    if mapping_rows is not None:
-        retained_mappings = {(row["source_column"], row["target_field"]) for row in mapping_rows}
-        stale_mapping_ids = [
-            mapping.pk
-            for mapping in profile.column_mappings.only("pk", "source_column", "target_field")
-            if (mapping.source_column, mapping.target_field) not in retained_mappings
-        ]
-        ColumnMapping.objects.filter(pk__in=stale_mapping_ids).delete()
-
-    if transform_rows is None:
-        return
-    desired_by_source = {row["source_column"]: row for row in transform_rows}
-    stale_transform_ids = []
-    for rule in profile.column_transform_rules.only(
-        "pk", "source_column", "pattern", "group_1_target", "group_2_target"
-    ):
-        desired = desired_by_source.get(rule.source_column)
-        if desired is None or any(
-            getattr(rule, field) != desired.get(field, getattr(rule, field))
-            for field in ("pattern", "group_1_target", "group_2_target")
-        ):
-            stale_transform_ids.append(rule.pk)
-    profile.column_transform_rules.filter(pk__in=stale_transform_ids).delete()
-
-
-def _apply_profile_yaml_data(data):
-    """Create or update an ImportProfile and all its nested mappings from parsed YAML data.
-
-    ``data`` must be a dict with a top-level ``profile`` key (the format
-    produced by :class:`ExportProfileYamlView`).
-
-    Returns ``(profile, stats)`` where *stats* is a ``{section: count}`` dict.
-    Raises ``TypeError`` or ``ValueError`` with a descriptive message on invalid input.
-    """
-    from django.db import transaction
-
-    from .models import ColumnTransformRule
-
-    if not isinstance(data, dict) or "profile" not in data:
-        raise ValueError("YAML must contain a top-level 'profile' key.")
-
-    pdata = data["profile"]
-    if not isinstance(pdata, dict):
-        raise TypeError("The 'profile' value must be a mapping (dict), not a scalar or list.")
-    if not pdata.get("name"):
-        raise ValueError("Profile YAML must include a 'name' field.")
-
-    mapping_rows = (
-        list(_iter_yaml_section(data, "column_mappings", ("target_field", "source_column")))
-        if "column_mappings" in data
-        else None
-    )
-    transform_rows = (
-        list(_iter_yaml_section(data, "column_transform_rules", ("source_column", "pattern")))
-        if "column_transform_rules" in data
-        else None
-    )
-
-    with transaction.atomic():
-        # Only include fields that are explicitly present in the YAML so that a
-        # partial reimport (e.g. just trimming child sections) does not silently
-        # reset unrelated profile settings back to hard-coded defaults.
-        profile_defaults = _profile_defaults_from_yaml(pdata)
-        profile = _get_or_init(ImportProfile, name=pdata["name"])
-        for field, value in profile_defaults.items():
-            setattr(profile, field, value)
-        _validate_model_instance(profile, "profile")
-        profile = _save_or_refetch(profile, ImportProfile, name=pdata["name"])
-
-        stats = {}
-        _release_replaced_column_policy_rows(profile, mapping_rows, transform_rows)
-
-        cm_ids = []
-        for cm in mapping_rows or ():
-            mapping_key = {
-                "profile": profile,
-                "source_column": cm["source_column"],
-                "target_field": cm["target_field"],
-            }
-            instance = _get_or_init(ColumnMapping, **mapping_key)
-            _validate_model_instance(instance, f"column_mappings[{cm['source_column']}->{cm['target_field']}]")
-            instance = _save_or_refetch(instance, ColumnMapping, **mapping_key)
-            cm_ids.append(instance.pk)
-            stats["column_mappings"] = stats.get("column_mappings", 0) + 1
-        if "column_mappings" in data:
-            ColumnMapping.objects.filter(profile=profile).exclude(pk__in=cm_ids).delete()
-
-        _import_class_role_mappings(data, profile, stats)
-        _import_cable_class_mappings(data, profile, stats)
-
-        dtm_keys = []
-        for m in _iter_yaml_section(
-            data,
-            "device_type_mappings",
-            ("source_make", "source_model", "netbox_manufacturer_slug", "netbox_device_type_slug"),
-        ):
-            instance = _get_or_init(
-                DeviceTypeMapping, profile=profile, source_make=m["source_make"], source_model=m["source_model"]
-            )
-            instance.netbox_manufacturer_slug = m["netbox_manufacturer_slug"]
-            instance.netbox_device_type_slug = m["netbox_device_type_slug"]
-            _validate_model_instance(instance, f"device_type_mappings[{m['source_make']}/{m['source_model']}]")
-            _save_or_refetch(
-                instance,
-                DeviceTypeMapping,
-                profile=profile,
-                source_make=m["source_make"],
-                source_model=m["source_model"],
-            )
-            dtm_keys.append((m["source_make"], m["source_model"]))
-            stats["device_type_mappings"] = stats.get("device_type_mappings", 0) + 1
-        if "device_type_mappings" in data:
-            _delete_stale_device_type_mappings(profile, dtm_keys)
-
-        mm_source_makes = []
-        for m in _iter_yaml_section(data, "manufacturer_mappings", ("source_make", "netbox_manufacturer_slug")):
-            instance = _get_or_init(ManufacturerMapping, profile=profile, source_make=m["source_make"])
-            instance.netbox_manufacturer_slug = m["netbox_manufacturer_slug"]
-            _validate_model_instance(instance, f"manufacturer_mappings[{m['source_make']}]")
-            _save_or_refetch(instance, ManufacturerMapping, profile=profile, source_make=m["source_make"])
-            mm_source_makes.append(m["source_make"])
-            stats["manufacturer_mappings"] = stats.get("manufacturer_mappings", 0) + 1
-        if "manufacturer_mappings" in data:
-            ManufacturerMapping.objects.filter(profile=profile).exclude(source_make__in=mm_source_makes).delete()
-
-        ctr_source_columns = []
-        for r in transform_rows or ():
-            instance = _get_or_init(ColumnTransformRule, profile=profile, source_column=r["source_column"])
-            instance.pattern = r["pattern"]
-            _set_if_present(instance, r, ("group_1_target", "group_2_target"))
-            _validate_model_instance(instance, f"column_transform_rules[{r['source_column']}]")
-            _save_or_refetch(instance, ColumnTransformRule, profile=profile, source_column=r["source_column"])
-            ctr_source_columns.append(r["source_column"])
-            stats["column_transform_rules"] = stats.get("column_transform_rules", 0) + 1
-        if "column_transform_rules" in data:
-            ColumnTransformRule.objects.filter(profile=profile).exclude(source_column__in=ctr_source_columns).delete()
-
-    return profile, stats
 
 
 class ImportProfileBulkImportView(generic.BulkImportView):
@@ -919,7 +647,10 @@ class ImportProfileBulkImportView(generic.BulkImportView):
             return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
 
         try:
-            data = yaml.safe_load(raw)
+            data = load_yaml_document(raw)
+        except DuplicateYamlKeyError as exc:
+            messages.error(request, f"Failed to parse YAML: {exc}")
+            return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
         except yaml.YAMLError:
             # Input failed YAML parsing — let NetBox's BulkImportView handle it
             # (covers CSV and flat formats with YAML-invalid characters).
@@ -930,7 +661,9 @@ class ImportProfileBulkImportView(generic.BulkImportView):
         # Hierarchical format: delegate to shared helper.
         if isinstance(data, dict) and "profile" in data:
             try:
-                profile, stats = _apply_profile_yaml_data(data)
+                profile, stats = apply_profile_document(data, request.user)
+            except ObjectPermissionDenied as exc:
+                raise PermissionDenied from exc
             except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
                 messages.error(request, str(exc))
                 return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
@@ -1160,6 +893,14 @@ class DeviceTypeMappingDeleteView(_ProfileChildDeleteView):
 # Import Wizard — Phase 2 (setup + preview)
 # ---------------------------------------------------------------------------
 
+
+def _review_workspace_url(profile):
+    """Return the review surface declared for one profile's complete output set."""
+    if profile.output_kinds == frozenset({OutputKind.SOURCE_TRACE}):
+        return reverse("plugins:netbox_data_import:trace_workspace")
+    return reverse("plugins:netbox_data_import:import_preview")
+
+
 # These views intentionally use raw django.views.View rather than a NetBox
 # generic view base.  The wizard is a three-step, session-backed state machine
 # (setup → preview → run → results) that does not correspond to any single
@@ -1224,14 +965,18 @@ class ImportSetupView(PermissionRequiredMixin, View):
         request.session["import_rows"] = workspace.source_rows
         request.session["import_context"] = context_data
         request.session["import_preview_pending"] = True
-        request.session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        review_url = _review_workspace_url(profile)
+        if review_url == reverse("plugins:netbox_data_import:import_preview"):
+            request.session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        else:
+            request.session.pop(PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY, None)
         request.session.pop("import_preview_source_job_id", None)
         _clear_restored_import_job(request)
         request.session["import_unused_columns"] = {
             column["name"]: {"count": column["count"], "samples": column["samples"]}
             for column in workspace.unused_columns
         }
-        return redirect(reverse("plugins:netbox_data_import:import_preview"))
+        return redirect(review_url)
 
 
 _DEVICE_CONFLICT_ROW_LIST_KEYS = (
@@ -3509,7 +3254,7 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         try:
             import yaml
 
-            data = yaml.safe_load(yaml_file.read())
+            data = load_yaml_document(yaml_file.read())
         except yaml.YAMLError as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
             return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
@@ -3548,79 +3293,19 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
 class ExportProfileYamlView(PermissionRequiredMixin, View):
     """Download all profile configuration as a single YAML file."""
 
-    permission_required = "netbox_data_import.change_importprofile"
+    permission_required = "netbox_data_import.view_importprofile"
 
     def get(self, request, pk):
         """Serialize the profile and all its mappings to YAML and return as a file download."""
         import yaml
         from django.http import HttpResponse
 
-        profile = get_object_or_404(ImportProfile, pk=pk)
+        profile = get_object_or_404(ImportProfile.objects.restrict(request.user, "view"), pk=pk)
 
-        data = {
-            "profile": {
-                "name": profile.name,
-                "description": profile.description,
-                "source_adapter": profile.source_adapter,
-                "adapter_config": profile.adapter_config,
-            },
-            "column_mappings": [
-                {"source_column": cm.source_column, "target_field": cm.target_field}
-                for cm in profile.column_mappings.all()
-            ],
-            "class_role_mappings": [
-                {
-                    **{
-                        k: v
-                        for k, v in {
-                            "source_class": m.source_class,
-                            "creates_rack": m.creates_rack,
-                            "role_slug": m.role_slug,
-                            "ignore": m.ignore,
-                        }.items()
-                        if v != ""
-                    },
-                    "rack_type": m.rack_type.slug if m.rack_type_id else None,
-                }
-                for m in profile.class_role_mappings.select_related("rack_type").all()
-            ],
-            "device_type_mappings": [
-                {
-                    "source_make": m.source_make,
-                    "source_model": m.source_model,
-                    "netbox_manufacturer_slug": m.netbox_manufacturer_slug,
-                    "netbox_device_type_slug": m.netbox_device_type_slug,
-                }
-                for m in profile.device_type_mappings.all()
-            ],
-            "manufacturer_mappings": [
-                {
-                    "source_make": m.source_make,
-                    "netbox_manufacturer_slug": m.netbox_manufacturer_slug,
-                }
-                for m in profile.manufacturer_mappings.all()
-            ],
-            "column_transform_rules": [
-                {
-                    "source_column": r.source_column,
-                    "pattern": r.pattern,
-                    "group_1_target": r.group_1_target,
-                    "group_2_target": r.group_2_target,
-                }
-                for r in profile.column_transform_rules.all()
-            ],
-            # All four fields travel: "decided as none" and "not decided" are different answers.
-            "cable_class_mappings": [
-                {
-                    "cable_class": m.cable_class,
-                    "cable_type_resolved": m.cable_type_resolved,
-                    "cable_type": m.cable_type,
-                    "cable_profile_resolved": m.cable_profile_resolved,
-                    "cable_profile": m.cable_profile,
-                }
-                for m in profile.cable_class_mappings.all()
-            ],
-        }
+        try:
+            data = serialize_profile(profile, request.user)
+        except ObjectPermissionDenied as exc:
+            raise PermissionDenied from exc
 
         yaml_str = yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
         safe_name = profile.name.lower().replace(" ", "_").replace("/", "-")
@@ -3640,6 +3325,16 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
 
     permission_required = "netbox_data_import.change_importprofile"
 
+    def has_permission(self):
+        """Allow the page when the actor can create or update at least one profile."""
+        return any(
+            self.request.user.has_perm(permission)
+            for permission in (
+                "netbox_data_import.add_importprofile",
+                "netbox_data_import.change_importprofile",
+            )
+        )
+
     def get(self, request):
         """Render the profile YAML import form."""
         return render(request, "netbox_data_import/import_profile_yaml.html")
@@ -3654,13 +3349,15 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
         try:
-            data = yaml.safe_load(yaml_file.read())
+            data = load_yaml_document(yaml_file.read())
         except (yaml.YAMLError, UnicodeDecodeError, OSError) as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
         try:
-            profile, stats = _apply_profile_yaml_data(data)
+            profile, stats = apply_profile_document(data, request.user)
+        except ObjectPermissionDenied as exc:
+            raise PermissionDenied from exc
         except (TypeError, ValueError) as exc:  # The YAML helpers validate mapping types and required keys.
             messages.error(request, str(exc))
             return render(request, "netbox_data_import/import_profile_yaml.html")
@@ -3789,9 +3486,53 @@ def _with_blocked_sync(trace, reason: str):
     return replace(trace, actions=actions)
 
 
+def _with_device_resolution_permissions(profile, actor, questions):
+    """Add the permission state for each Device resolution action."""
+    from .models import TraceDeviceResolution, index_digest
+
+    results = []
+    for question in questions:
+        key = question["key"]
+        assessment = assess_permission_scoped_save_option(
+            actor,
+            TraceDeviceResolution,
+            {
+                "profile": profile,
+                "source_device_key": key,
+                "source_device_key_digest": index_digest(key),
+            },
+            {
+                "selected_device_id": 1,
+                "selected_display_name": "Pending Device selection",
+            },
+            unknown_fields={"selected_device_id", "selected_display_name"},
+        )
+        results.append(
+            {
+                **question,
+                "action_allowed": assessment.allowed,
+                "action_reason": (
+                    "" if assessment.allowed else "You do not have permission to save a Device resolution."
+                ),
+            }
+        )
+    return results
+
+
 def _workspace_field_keys(workspace) -> set:
     """Return every termination field key the reviewed preview actually asked about."""
     return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
+
+
+def _workspace_device_questions(workspace) -> dict[str, dict]:
+    """Return the active plan's Device questions, keyed by canonical source label."""
+    questions: dict[str, dict] = {}
+    for trace in workspace.traces:
+        for item in trace.devices:
+            key = source_device_key(item.get("key", ""))
+            if key:
+                questions.setdefault(key, item)
+    return questions
 
 
 def _object_type_label(obj) -> str:
@@ -3896,9 +3637,12 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         wanted = request.GET.get("trace", "")
         selected = next((trace for trace in traces if trace.identity == wanted), traces[0] if traces else None)
         summary = dict(workspace.trace_summary)
-        from .models import TerminationResolution
+        from .models import TerminationResolution, TraceDeviceResolution
 
-        summary["saved_decisions"] = TerminationResolution.objects.filter(profile=profile).count()
+        summary["saved_decisions"] = (
+            TerminationResolution.objects.restrict(request.user, "view").filter(profile=profile).count()
+            + TraceDeviceResolution.objects.restrict(request.user, "view").filter(profile=profile).count()
+        )
         summary["preview_state"] = self._preview_state(request, drift)
         from .proposal_presentation import ProposalPresentation, group_terminations
 
@@ -3923,6 +3667,13 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 ],
             )
         attention, settled = group_terminations(selected.terminations if selected else [])
+        selected_devices = _with_device_resolution_permissions(
+            profile,
+            request.user,
+            selected.devices if selected else [],
+        )
+        attention_devices = [device for device in selected_devices if device.get("selectable")]
+        settled_devices = [device for device in selected_devices if not device.get("selectable")]
         from .models import ProposalStatus, ResolutionProposal
 
         if proposal_display.view_reason:
@@ -3942,6 +3693,8 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "traces": traces,
                 "selected_trace": selected,
                 "proposal_fields": proposal_fields,
+                "attention_devices": attention_devices,
+                "settled_devices": settled_devices,
                 "attention_terminations": attention,
                 "settled_terminations": settled,
                 "summary": summary,
@@ -4045,6 +3798,16 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
             return redirect(next_url)
 
 
+def _candidate_page_limit(raw_limit) -> int:
+    """Return one valid picker page limit."""
+    if raw_limit is None:
+        return ELIGIBLE_TERMINATION_LIMIT
+    limit = int(raw_limit)
+    if not 1 <= limit <= ELIGIBLE_TERMINATION_LIMIT:
+        raise ValueError("Candidate limit is outside the supported range.")
+    return limit
+
+
 class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Serve one page of eligible terminations for the workspace picker."""
 
@@ -4058,11 +3821,15 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         profile, _document, _workspace, planning_context = loaded
         field_key = request.GET.get("field_key", "").strip()
         try:
-            requested = int(request.GET.get("limit", ELIGIBLE_TERMINATION_LIMIT))
+            limit = _candidate_page_limit(request.GET.get("limit"))
         except (TypeError, ValueError):
-            requested = ELIGIBLE_TERMINATION_LIMIT
-        # The limit becomes a QuerySet slice stop, which refuses a value below one.
-        limit = min(max(requested, 1), ELIGIBLE_TERMINATION_LIMIT)
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
+                },
+                status=400,
+            )
         try:
             found = self._eligible(request, profile, planning_context, field_key, request.GET.get("search", ""), limit)
         except (PlanningTargetUnavailable, ValueError):
@@ -4084,6 +3851,139 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         """Return the eligible page, inside the caller's own read scope."""
         reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
         return eligible_terminations(field_key, reader, profile=profile, search=search, limit=limit)
+
+
+class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+    """Serve one bounded page of visible Device candidates for a plan-authored question."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+    requires_preview_revision = True
+
+    def get(self, request):
+        """Return permission-scoped candidates and their source-evidence explanations."""
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            return JsonResponse({"ok": False, "error": "No current import preview matches this request."}, status=409)
+        _profile, _document, workspace, planning_context = loaded
+        device_key = source_device_key(request.GET.get("device_key", ""))
+        question = _workspace_device_questions(workspace).get(device_key)
+        if question is None:
+            return JsonResponse({"ok": False, "error": "This preview asked no question about that Device."}, status=400)
+        search = request.GET.get("search", "")
+        if len(search) > 200:
+            return JsonResponse({"ok": False, "error": "Device search must be 200 characters or fewer."}, status=400)
+        try:
+            limit = _candidate_page_limit(request.GET.get("limit"))
+        except (TypeError, ValueError):
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
+                },
+                status=400,
+            )
+        try:
+            reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
+            found = eligible_trace_devices(
+                reader=reader,
+                evidence=DeviceEvidence.from_dict(question),
+                search=search,
+                limit=limit,
+            )
+        except (PlanningTargetUnavailable, ValueError):
+            return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
+        return JsonResponse(
+            {
+                "ok": True,
+                "candidates": [
+                    {
+                        "id": candidate.device.pk,
+                        "name": candidate.device.name,
+                        "display": str(candidate.device),
+                        "matched_hints": candidate.matched_hints,
+                        "conflicting_hints": candidate.conflicting_hints,
+                    }
+                    for candidate in found.candidates
+                ],
+                "shown": len(found.candidates),
+                "total": found.total,
+            }
+        )
+
+
+class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
+    """Save one plan-authored source Device decision and replan the workspace."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Recheck the offered Device, save it under the profile policy lock, and replan."""
+        next_url = reverse("plugins:netbox_data_import:trace_workspace")
+        loaded = self.reviewed_preview(request)
+        if loaded is None:
+            messages.warning(request, "No import preview in progress. Start a new import.")
+            return redirect(reverse("plugins:netbox_data_import:import_setup"))
+        profile, document, workspace, planning_context = loaded
+        if stale_reason := _stale_preview_reason(request):
+            return _preview_action_error(request, next_url, stale_reason, status=409)
+        if retained_reason := _retained_sync_block_reason(request):
+            return _preview_action_error(request, next_url, retained_reason, status=409)
+        refusal = self.refuse_unregistered_adapter(request, profile)
+        if refusal is not None:
+            return refusal
+        device_key = source_device_key(request.POST.get("device_key", ""))
+        question = _workspace_device_questions(workspace).get(device_key)
+        if question is None:
+            return _preview_action_error(
+                request,
+                next_url,
+                "This preview asked no question about that Device.",
+                status=400,
+            )
+        search = request.POST.get("search", "")
+        if len(search) > 200:
+            return _preview_action_error(
+                request,
+                next_url,
+                "Device search must be 200 characters or fewer.",
+                status=400,
+            )
+        try:
+            device_id = int(request.POST.get("device_id", ""))
+            evidence = DeviceEvidence.from_dict(question)
+        except (TypeError, ValueError):
+            return _preview_action_error(
+                request,
+                next_url,
+                "That Device is not one of the eligible candidates.",
+                status=400,
+            )
+        try:
+            with transaction.atomic():
+                plan, chosen = save_trace_device_resolution_and_replan(
+                    profile=profile,
+                    source_document=document,
+                    actor=request.user,
+                    planning_context=planning_context,
+                    evidence=evidence,
+                    selected_device_id=device_id,
+                    search=search,
+                    limit=ELIGIBLE_TERMINATION_LIMIT,
+                )
+                record_recalculated_preview(request.session, plan, user=request.user)
+        except IneligibleDeviceSelection:
+            return _preview_action_error(
+                request,
+                next_url,
+                "That Device is not one of the eligible candidates.",
+                status=400,
+            )
+        except PlanningTargetUnavailable:
+            return self.discard_unavailable_target(request)
+        except PreviewLocked as exc:
+            return _preview_action_error(request, next_url, str(exc), status=409)
+        messages.success(request, f"Source Device resolved to '{chosen}'.")
+        return redirect(next_url)
 
 
 class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, PermissionRequiredMixin, View):
@@ -4147,22 +4047,22 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         from core.models import ObjectType
 
         try:
-            # One transaction: a target lost before the replan rolls the saved decision back with it.
-            plan = save_termination_resolution_and_replan(
-                profile=profile,
-                source_document=document,
-                actor=request.user,
-                planning_context=planning_context,
-                task_type=SELECT_TERMINATION_TASK,
-                field_key=field_key,
-                selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
-                selected_object_id=chosen.pk,
-                selected_display_name=str(chosen),
-            )
+            # One transaction: a failed replan or preview reservation rolls the saved decision back.
+            with transaction.atomic():
+                plan = save_termination_resolution_and_replan(
+                    profile=profile,
+                    source_document=document,
+                    actor=request.user,
+                    planning_context=planning_context,
+                    task_type=SELECT_TERMINATION_TASK,
+                    field_key=field_key,
+                    selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
+                    selected_object_id=chosen.pk,
+                    selected_display_name=str(chosen),
+                )
+                record_recalculated_preview(request.session, plan, user=request.user)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
-        try:
-            record_recalculated_preview(request.session, plan, user=request.user)
         except PreviewLocked as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
         messages.success(request, f"Termination resolved to '{chosen}'.")
@@ -4171,6 +4071,10 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
 
 class InvalidProposalId(ValueError):
     """A proposal action received no integer id."""
+
+
+class InvalidProposalTarget(Exception):
+    """A proposal action does not identify a termination in this preview."""
 
 
 INVALID_PROPOSAL_ID_ERROR = "Enter a valid proposal_id integer."
@@ -4199,7 +4103,7 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
         from .models import ResolutionProposal
         from .proposal_tasks import UnusableCandidateSet
         from .resolution_proposals import ActiveProposalExists
-        from .termination_proposal import UnsupportedProposalRole
+        from .termination_proposal import InvalidProposalCandidate, UnsupportedProposalRole
 
         try:
             return super().dispatch(request, *args, **kwargs)
@@ -4223,10 +4127,13 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
                 {"ok": False, "error": "Permission denied: this action is outside your NetBox object permissions."},
                 status=403,
             )
-        except ValueError as exc:
+        except (
+            InvalidProposalTarget,
+            InvalidProposalCandidate,
+            PlanningTargetUnavailable,
+            UnsupportedProposalRole,
+        ) as exc:
             logger.warning("%s: termination refused: %s", type(self).__name__, exc)
-            return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
-        except (PlanningTargetUnavailable, UnsupportedProposalRole):
             return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
         except ValidationError as exc:
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
@@ -4258,7 +4165,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             return JsonResponse({"ok": False, "error": reason}, status=409)
         field_key = request.POST.get("field_key", "").strip()
         if field_key not in _workspace_field_keys(workspace):
-            raise ValueError("This preview asked no question about that termination.")
+            raise InvalidProposalTarget("This preview asked no question about that termination.")
         task = proposal_task(SELECT_TERMINATION_TASK)
         with locked_profile_policy(profile.pk):
             live = ImportEngine.plan(profile, document, request.user, planning_context)
@@ -4272,7 +4179,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
                 None,
             )
             if field is None:
-                raise ValueError("This field is no longer in the preview.")
+                raise InvalidProposalTarget("This field is no longer in the preview.")
             if field["state"] != UNRESOLVED:
                 raise PreviewActionInvalid("This termination is already resolved.")
             inventory = task.inventory(
@@ -4367,7 +4274,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             task_type=SELECT_TERMINATION_TASK,
         )
         if proposal.field_key not in _workspace_field_keys(workspace):
-            raise ValueError("This preview asked no question about that termination.")
+            raise InvalidProposalTarget("This preview asked no question about that termination.")
         if not self.apply(proposal, request, reader):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
         proposal.refresh_from_db()
@@ -4390,7 +4297,11 @@ class TraceCancelProposalView(_TraceProposalActionView):
         from .resolution_proposals import cancel_proposal
 
         if (
-            proposal_task(proposal.task_type).resolved_device(field_key=proposal.field_key, netbox_reader=reader)
+            proposal_task(proposal.task_type).resolved_device(
+                profile=proposal.profile,
+                field_key=proposal.field_key,
+                netbox_reader=reader,
+            )
             is None
         ):
             raise ObjectPermissionDenied("dcim.view_device")

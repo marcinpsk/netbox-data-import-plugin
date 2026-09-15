@@ -7,6 +7,8 @@ from netbox.api.routers import NetBoxRouter
 
 from .views import (
     ImportProfileViewSet,
+    CableClassMappingViewSet,
+    CableImportSourceViewSet,
     ColumnMappingViewSet,
     ClassRoleMappingViewSet,
     DeviceTypeMappingViewSet,
@@ -21,6 +23,8 @@ from .views import (
 
 router = NetBoxRouter()
 router.register("profiles", ImportProfileViewSet)
+router.register("cable-class-mappings", CableClassMappingViewSet)
+router.register("cable-provenance", CableImportSourceViewSet)
 router.register("column-mappings", ColumnMappingViewSet)
 router.register("class-role-mappings", ClassRoleMappingViewSet)
 router.register("device-type-mappings", DeviceTypeMappingViewSet)

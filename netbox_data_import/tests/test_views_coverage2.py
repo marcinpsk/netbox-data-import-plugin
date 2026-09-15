@@ -8,7 +8,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.test import Client, TestCase, TransactionTestCase
+from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 
 from netbox_data_import.models import (
@@ -19,7 +19,7 @@ from netbox_data_import.models import (
     SourceResolution,
 )
 from netbox_data_import.tests.helpers import set_import_source, workbook_bytes
-from netbox_data_import.views import _save_or_refetch, _validate_model_instance
+from netbox_data_import.views import _validate_model_instance
 
 User = get_user_model()
 
@@ -55,18 +55,6 @@ class ValidateModelInstanceNonDictTest(TestCase):
             _validate_model_instance(instance, "test_label")
         self.assertIn("plain error message", str(cm.exception))
         self.assertIn("test_label", str(cm.exception))
-
-
-class SaveOrRefetchIntegrityErrorTest(TestCase):
-    """Tests for _save_or_refetch — lines 243-244: IntegrityError causes refetch."""
-
-    def test_integrity_error_returns_pre_existing_instance(self):
-        """On IntegrityError, _save_or_refetch returns the pre-existing object — lines 243-244."""
-        profile = _make_profile("SORFCov2")
-        existing = ClassRoleMapping.objects.create(profile=profile, source_class="IntegErrClass", creates_rack=False)
-        duplicate = ClassRoleMapping(profile=profile, source_class="IntegErrClass", creates_rack=False)
-        result = _save_or_refetch(duplicate, ClassRoleMapping, profile=profile, source_class="IntegErrClass")
-        self.assertEqual(result.pk, existing.pk)
 
 
 class ApplyProfileYamlRackTypeNullTest(TestCase):
@@ -554,7 +542,7 @@ class BulkYamlImportKeyErrorTest(TestCase):
 
 
 class BulkYamlImportNonListAndOSErrorTest(TestCase):
-    """Tests for BulkYamlImportView.post — lines 1300-1307: non-list YAML and OSError paths."""
+    """Test invalid top-level YAML and uploaded-file read failures."""
 
     def setUp(self):
         self.user = _make_superuser("vcov2_byamlnl_user")
@@ -567,7 +555,7 @@ class BulkYamlImportNonListAndOSErrorTest(TestCase):
         )
 
     def test_yaml_dict_instead_of_list_returns_error(self):
-        """YAML root object is a dict → 'YAML must be a list' error — lines 1305-1307."""
+        """A mapping at the YAML root shows the list requirement."""
         yaml_content = b"key: value\nanother: item\n"
         yaml_file = BytesIO(yaml_content)
         yaml_file.name = "dict.yaml"
@@ -575,13 +563,16 @@ class BulkYamlImportNonListAndOSErrorTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b"list", resp.content.lower())
 
+    @override_settings(FILE_UPLOAD_MAX_MEMORY_SIZE=0)
     def test_oserror_reading_file_shows_error_message(self):
-        """OSError while reading uploaded file shows error message — lines 1300-1303."""
-        import yaml
-
+        """A file-read failure shows an error message."""
         yaml_file = BytesIO(b"- source_class: Test\n")
         yaml_file.name = "oserr.yaml"
-        with patch.object(yaml, "safe_load", side_effect=OSError("disk error")):
+        with patch(
+            "django.core.files.uploadedfile.TemporaryUploadedFile.read",
+            autospec=True,
+            side_effect=OSError("disk error"),
+        ):
             resp = self.client.post(self.url, {"yaml_file": yaml_file, "mapping_type": "class_role"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn(b"read", resp.content.lower())

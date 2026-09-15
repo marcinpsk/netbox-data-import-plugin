@@ -55,6 +55,17 @@ class ProposalErrorEnvelopeTest(SimpleTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(json.loads(response.content), {"ok": False, "error": "Enter a valid proposal_id integer."})
 
+    def test_unexpected_value_errors_escape_the_proposal_envelope(self):
+        """A programming failure is not invalid operator input."""
+        from netbox_data_import.views import _TraceProposalMixin
+
+        class ProgrammingFailureView(_TraceProposalMixin, View):
+            def get(self, _request):
+                raise ValueError("programming failure")
+
+        with self.assertRaisesMessage(ValueError, "programming failure"):
+            ProgrammingFailureView.as_view()(RequestFactory().get("/proposal"))
+
 
 class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCase):
     @classmethod
@@ -227,7 +238,13 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             """Rename both Devices after the one-name query has read the original row."""
             result = execute(sql, params, many, context)
             device_table = connection.ops.quote_name(Device._meta.db_table)
-            if f"FROM {device_table}" in sql and "UPPER" in sql and " OR " not in sql:
+            query_values = tuple(params or ())
+            if (
+                f"FROM {device_table}" in sql
+                and "UPPER" in sql
+                and "DEV-A" in query_values
+                and "DEV-B" not in query_values
+            ):
                 resolution_reads.append(True)
                 if len(resolution_reads) == 1:
                     Device.objects.filter(pk=self.device_a.pk).update(name="DEV-A-previous")
@@ -1321,7 +1338,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertRegex(attention, r">\s*DEV-A absent-port\s*<span")
         self.assertNotIn("DEV-B eth1", attention)
         self.assertLess(html.index("Proposed physical topology"), html.index("data-trace-terminations"))
-        self.assertRegex(html, r'</div>\s*</div>\s*<section class="mt-3" data-trace-terminations>')
+        self.assertLess(html.index("data-trace-devices"), html.index("data-trace-terminations"))
 
     def test_automatic_match_with_history_stays_in_attention(self):
         proposal = self.completed(no_match=True)

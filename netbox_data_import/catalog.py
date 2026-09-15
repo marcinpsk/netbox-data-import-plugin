@@ -259,6 +259,7 @@ POLICY_SECTIONS: tuple[PolicySection, ...] = (
     PolicySection("source_resolutions", "Source Resolutions", _DEVICE_ONLY),
     PolicySection("device_existing_matches", "Device Existing Matches", _DEVICE_ONLY),
     PolicySection("ignored_field_differences", "Ignored Field Differences", _DEVICE_ONLY),
+    PolicySection("trace_device_resolutions", "Trace Device Resolutions", _TRACE_ONLY),
     PolicySection("termination_resolutions", "Termination Resolutions", _TRACE_ONLY),
     PolicySection("cable_class_mappings", "CableClass Mappings", _TRACE_ONLY),
 )
