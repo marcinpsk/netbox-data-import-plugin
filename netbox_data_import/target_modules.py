@@ -488,6 +488,7 @@ class RackModule:
         if payload["serial"]:
             rack.serial = payload["serial"]
         rack.rack_type_id = payload["rack_type_id"]
+        rack.copy_racktype_attrs()
         if payload["location_id"] is not None:
             rack.location_id = payload["location_id"]
         if payload["tenant_id"] is not None:

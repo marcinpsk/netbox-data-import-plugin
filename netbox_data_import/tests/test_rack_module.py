@@ -266,6 +266,32 @@ class RackModuleApplyTest(RackModuleRowMixin, TestCase):
 
         self.assertEqual(rack.rack_type, rack_type)
 
+    def test_a_rack_type_controls_height_during_planning_and_execution(self):
+        """Planning and execution validate the same Rack Type-controlled height."""
+        from dcim.models import Manufacturer, RackType
+
+        manufacturer = Manufacturer.objects.create(name="Typed Rack Vendor", slug="typed-rack-vendor")
+        rack_type = RackType.objects.create(
+            manufacturer=manufacturer,
+            model="Typed Height",
+            slug="typed-height",
+            u_height=20,
+        )
+        mapping = self.profile.class_role_mappings.get(source_class="Cabinet")
+        mapping.rack_type = rack_type
+        mapping.save(update_fields=["rack_type"])
+
+        unit = RackModule().plan(
+            self._batch(self._row(2, "RACK-TYPED-HEIGHT", "typed-height-cab", u_height=1000)),
+            self.profile,
+            CATALOG,
+            self.reader,
+        )[0]
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        rack = RackModule().apply(unit.changes[0], self.context)
+        self.assertEqual(rack.u_height, rack_type.u_height)
+
     def test_a_precondition_that_no_longer_holds_is_refused(self):
         """Section 4.6: the module rechecks its preconditions inside the transaction."""
         from dcim.models import Rack
