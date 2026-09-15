@@ -60,6 +60,24 @@ def _qualified_name(node: ast.expr) -> str | None:
     return None
 
 
+def _assignment_engine_qualifiers(tree: ast.AST, initial: set[str]) -> set[str]:
+    """Return the fixed point of names assigned from known engine qualifiers."""
+    qualifiers = set(initial)
+    while True:
+        assignment_aliases: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            if _qualified_name(node.value) not in qualifiers:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+            assignment_aliases.update(target.id for target in targets if isinstance(target, ast.Name))
+        expanded = qualifiers | assignment_aliases
+        if expanded == qualifiers:
+            return qualifiers
+        qualifiers = expanded
+
+
 def _private_engine_references(path: pathlib.Path) -> set[str]:
     """Return private coordinator attributes and imports referenced by one test."""
     tree = ast.parse(path.read_text())
@@ -80,7 +98,8 @@ def _private_engine_references(path: pathlib.Path) -> set[str]:
             engine_names.update(name.asname or name.name for name in node.names if name.name == "ImportEngine")
         elif isinstance(node, ast.ImportFrom) and node.module in {None, "netbox_data_import"}:
             engine_module_names.update(name.asname or name.name for name in node.names if name.name == "import_engine")
-    engine_qualifiers = engine_names | {f"{name}.ImportEngine" for name in engine_module_names}
+    imported_qualifiers = engine_names | {f"{name}.ImportEngine" for name in engine_module_names}
+    engine_qualifiers = _assignment_engine_qualifiers(tree, imported_qualifiers)
     references = {
         node.attr
         for node in ast.walk(tree)
@@ -199,6 +218,18 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             path = pathlib.Path(directory) / "caller.py"
             path.write_text(
                 "from netbox_data_import.import_engine import ImportEngine as Engine\n"
+                "callback = Engine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_assignment_alias_references_are_detected(self):
+        """An assignment alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine\n"
+                "Engine = ImportEngine\n"
                 "callback = Engine._private_helper\n"
             )
 

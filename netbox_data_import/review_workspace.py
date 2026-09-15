@@ -25,6 +25,10 @@ from .values import (
 )
 
 
+class IneligibleDeviceSelection(Exception):
+    """The selected Device is absent from the candidates offered for this request."""
+
+
 def save_termination_resolution_and_replan(
     *,
     profile,
@@ -92,7 +96,7 @@ def save_trace_device_resolution_and_replan(
             None,
         )
         if chosen is None:
-            raise ValueError("That Device is not one of the eligible candidates.")
+            raise IneligibleDeviceSelection("That Device is not one of the eligible candidates.")
         lookup = {
             "profile": locked_profile,
             "source_device_key": evidence.key,

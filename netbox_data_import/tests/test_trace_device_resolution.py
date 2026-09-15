@@ -381,6 +381,50 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         )
         self.assertContains(saved, "manually resolved")
 
+    def test_an_unoffered_device_choice_is_rejected_as_request_input(self):
+        response = self.start_alias_preview()
+
+        saved = self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_b.pk,
+                "search": "DEV-A",
+                "preview_revision": response.context["preview_revision"],
+            },
+            headers={"accept": "application/json"},
+        )
+
+        self.assertEqual(saved.status_code, 400)
+        self.assertIn("not one of the eligible candidates", saved.json()["error"])
+        self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
+
+    def test_an_internal_device_resolution_value_error_is_not_request_input(self):
+        response = self.start_alias_preview()
+        failed_writes = []
+
+        def fail_resolution_insert(execute, sql, params, many, context):
+            if "netbox_data_import_tracedeviceresolution" in sql.lower() and sql.lstrip().upper().startswith("INSERT"):
+                failed_writes.append(sql)
+                raise ValueError("internal resolution write failure")
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(fail_resolution_insert):
+            with self.assertRaisesMessage(ValueError, "internal resolution write failure"):
+                self.client.post(
+                    reverse("plugins:netbox_data_import:trace_resolve_device"),
+                    {
+                        "device_key": "source alias",
+                        "device_id": self.device_a.pk,
+                        "search": "DEV-A",
+                        "preview_revision": response.context["preview_revision"],
+                    },
+                    headers={"accept": "application/json"},
+                )
+
+        self.assertTrue(failed_writes)
+        self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
+
     def test_a_preview_lock_rolls_back_the_device_resolution(self):
         import uuid
 

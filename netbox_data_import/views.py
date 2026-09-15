@@ -121,6 +121,7 @@ from .field_keys import SELECT_TERMINATION_TASK
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, fingerprint_of
 from .review_workspace import (
+    IneligibleDeviceSelection,
     ReviewWorkspace,
     save_termination_resolution_and_replan,
     save_trace_device_resolution_and_replan,
@@ -3948,20 +3949,29 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
                 status=400,
             )
         try:
+            device_id = int(request.POST.get("device_id", ""))
+            evidence = DeviceEvidence.from_dict(question)
+        except (TypeError, ValueError):
+            return _preview_action_error(
+                request,
+                next_url,
+                "That Device is not one of the eligible candidates.",
+                status=400,
+            )
+        try:
             with transaction.atomic():
-                device_id = int(request.POST.get("device_id", ""))
                 plan, chosen = save_trace_device_resolution_and_replan(
                     profile=profile,
                     source_document=document,
                     actor=request.user,
                     planning_context=planning_context,
-                    evidence=DeviceEvidence.from_dict(question),
+                    evidence=evidence,
                     selected_device_id=device_id,
                     search=search,
                     limit=ELIGIBLE_TERMINATION_LIMIT,
                 )
                 record_recalculated_preview(request.session, plan, user=request.user)
-        except (TypeError, ValueError):
+        except IneligibleDeviceSelection:
             return _preview_action_error(
                 request,
                 next_url,

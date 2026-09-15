@@ -281,16 +281,17 @@ class RackModuleApplyTest(RackModuleRowMixin, TestCase):
         mapping.rack_type = rack_type
         mapping.save(update_fields=["rack_type"])
 
-        unit = RackModule().plan(
-            self._batch(self._row(2, "RACK-TYPED-HEIGHT", "typed-height-cab", u_height=1000)),
-            self.profile,
-            CATALOG,
-            self.reader,
-        )[0]
+        batch = self._batch(self._row(2, "RACK-TYPED-HEIGHT", "typed-height-cab", u_height=1000))
+        unit = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0]
 
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
         rack = RackModule().apply(unit.changes[0], self.context)
         self.assertEqual(rack.u_height, rack_type.u_height)
+
+        replanned = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(replanned.disposition, Disposition.NO_OP, replanned.diagnostics)
+        self.assertEqual(replanned.changes, ())
 
     def test_a_precondition_that_no_longer_holds_is_refused(self):
         """Section 4.6: the module rechecks its preconditions inside the transaction."""

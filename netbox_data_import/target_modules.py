@@ -18,7 +18,7 @@ import re
 from copy import copy
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from django.core.exceptions import ValidationError
 
@@ -48,6 +48,16 @@ from .values import (
 )
 
 DEFAULT_RACK_HEIGHT = 42
+
+
+class _RackComparison(Protocol):
+    """The Rack state that planning compares before it schedules a write."""
+
+    u_height: int
+    serial: str
+    rack_type_id: int | None
+    location_id: int | None
+    tenant_id: int | None
 
 
 def _candidate_save_is_allowed(actor, candidate, prospective_relations=None) -> bool:
@@ -319,7 +329,17 @@ class RackModule:
         """Return the identity that survives replanning, which is never the row number."""
         return rack_unit_identity(row)
 
-    def _unit(self, row, profile, mapping, netbox_reader, ignored, duplicate_names, duplicate_source_ids, existing):
+    def _unit(
+        self,
+        row,
+        profile,
+        mapping,
+        netbox_reader,
+        ignored,
+        duplicate_names,
+        duplicate_source_ids,
+        existing,
+    ) -> SynchronizationUnit:
         """Return the one unit this row produces."""
         identity = self.unit_identity(row)
         name = rack_row_name(row)
@@ -397,7 +417,6 @@ class RackModule:
                 display=unit_display,
             )
 
-        tenant_id = netbox_reader.tenant.pk if netbox_reader.tenant is not None else None
         existing_display = {
             **unit_display,
             "netbox_url": rack.get_absolute_url(),
@@ -407,14 +426,8 @@ class RackModule:
             },
         }
         update_existing = profile.adapter_settings.update_existing
-        if not update_existing or not self._differs(
-            rack, height, serial, rack_type_id, netbox_reader.location, tenant_id
-        ):
-            if update_existing:
-                existing_display["extra_data"]["writes_nothing"] = True
-                existing_display["detail"] = f"Rack '{name}' already exists and this row changes nothing"
-            else:
-                existing_display["detail"] = f"Rack '{name}' already exists (update_existing=False)"
+        if not update_existing:
+            existing_display["detail"] = f"Rack '{name}' already exists (update_existing=False)"
             return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP, display=existing_display)
         candidate, validation = self._validated_candidate(
             rack,
@@ -426,6 +439,10 @@ class RackModule:
             profile.adapter_settings.custom_field_name,
             source_id=_source_text(row.get("source_id")),
         )
+        if not self._differs(rack, candidate):
+            existing_display["extra_data"]["writes_nothing"] = True
+            existing_display["detail"] = f"Rack '{name}' already exists and this row changes nothing"
+            return SynchronizationUnit(identity=identity, disposition=Disposition.NO_OP, display=existing_display)
         if validation is not None:
             return _refused(identity, "rack.validation_failed", {**existing_display, "message": validation})
         if netbox_reader.actor is not None and not _candidate_save_is_allowed(netbox_reader.actor, candidate):
@@ -503,18 +520,17 @@ class RackModule:
         return rack
 
     @staticmethod
-    def _differs(rack, height: int, serial: str, rack_type_id, location, tenant_id=None) -> bool:
-        """Return whether the stored rack already matches what the row asks for."""
-        if normalize_for_compare(rack.u_height) != normalize_for_compare(height):
+    def _differs(rack: _RackComparison, candidate: _RackComparison) -> bool:
+        """Return whether the stored Rack differs from the state the write will leave."""
+        if normalize_for_compare(rack.u_height) != normalize_for_compare(candidate.u_height):
             return True
-        if rack.rack_type_id != rack_type_id:
+        if rack.rack_type_id != candidate.rack_type_id:
             return True
-        if location is not None and rack.location_id != location.pk:
+        if rack.location_id != candidate.location_id:
             return True
-        # The write assigns the target tenant whenever the import names one.
-        if tenant_id is not None and rack.tenant_id != tenant_id:
+        if rack.tenant_id != candidate.tenant_id:
             return True
-        return bool(serial) and _text(rack.serial) != serial
+        return _text(rack.serial) != _text(candidate.serial)
 
     @staticmethod
     def _change(
@@ -1173,11 +1189,7 @@ class _DeviceBatch:
             height = _coerce_rack_height(row.get("u_height"))
             serial = _source_text(row.get("serial"))
             rack_type_id = mapping.rack_type_id
-            tenant_id = self.reader.tenant.pk if self.reader.tenant is not None else None
-            if rack is not None and (
-                not profile.adapter_settings.update_existing
-                or not RackModule._differs(rack, height, serial, rack_type_id, self.reader.location, tenant_id)
-            ):
+            if rack is not None and not profile.adapter_settings.update_existing:
                 continue
             candidate, validation = RackModule._validated_candidate(
                 rack,
@@ -1189,6 +1201,8 @@ class _DeviceBatch:
                 profile.adapter_settings.custom_field_name,
                 _source_text(row.get("source_id")),
             )
+            if rack is not None and not RackModule._differs(rack, candidate):
+                continue
             actor = self.reader.actor
             executable = validation is None and (actor is None or _candidate_save_is_allowed(actor, candidate))
             planned[name_key] = _PlannedRack(

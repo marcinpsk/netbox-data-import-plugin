@@ -82,7 +82,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
 
     def test_rack_and_device_difference_checks_use_persisted_target_rows(self):
         """Each writable relation and scalar can independently make an update actionable."""
-        from dcim.models import Device, Location, RackType
+        from dcim.models import Device, Location, Rack, RackType
 
         location = Location.objects.create(name="Target Edge Room", slug="target-edge-room", site=self.site)
         rack_type = RackType.objects.create(
@@ -91,8 +91,10 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             slug="target-edge-rack-type",
             u_height=42,
         )
-        self.assertTrue(RackModule._differs(self.rack, 42, "", rack_type.pk, None))
-        self.assertTrue(RackModule._differs(self.rack, 42, "", None, location))
+        typed_candidate = Rack(site=self.site, u_height=42, rack_type=rack_type)
+        located_candidate = Rack(site=self.site, location=location, u_height=42)
+        self.assertTrue(RackModule._differs(self.rack, typed_candidate))
+        self.assertTrue(RackModule._differs(self.rack, located_candidate))
 
         device = Device.objects.create(
             name="target-edge-difference-device",
@@ -662,6 +664,47 @@ class TargetModuleDatabaseEdgeTest(TestCase):
 
         self.assertEqual(final_unit.disposition, Disposition.ACTIONABLE, final_unit.diagnostics)
         self.assertIn(rack_unit.changes[0].identity, final_unit.changes[-1].dependencies)
+
+    def test_device_create_does_not_depend_on_a_converged_typed_rack(self):
+        """A Rack Type-normalized Rack has no update for a Device create to depend on."""
+        from dcim.models import RackType
+
+        rack_type = RackType.objects.create(
+            manufacturer=self.manufacturer,
+            model="Converged Rack Type",
+            slug="converged-rack-type",
+            u_height=20,
+        )
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Cabinet").update(rack_type=rack_type)
+        self.rack.rack_type = rack_type
+        self.rack.copy_racktype_attrs()
+        self.rack.save()
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "CONVERGED-TYPED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": self.rack.name,
+                    "u_height": 1000,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="DEVICE-IN-CONVERGED-TYPED-RACK",
+                    device_name="device-in-converged-typed-rack",
+                ),
+            ),
+        )
+
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE, device_unit.diagnostics)
+        self.assertNotIn(
+            "rack:source:CONVERGED-TYPED-RACK:update",
+            device_unit.changes[-1].dependencies,
+        )
 
     def test_device_placement_uses_an_existing_racks_planned_final_height(self):
         """A Device cannot use a unit that the preceding Rack update removes."""
