@@ -4063,6 +4063,10 @@ class InvalidProposalId(ValueError):
     """A proposal action received no integer id."""
 
 
+class InvalidProposalTarget(Exception):
+    """A proposal action does not identify a termination in this preview."""
+
+
 INVALID_PROPOSAL_ID_ERROR = "Enter a valid proposal_id integer."
 
 
@@ -4089,7 +4093,7 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
         from .models import ResolutionProposal
         from .proposal_tasks import UnusableCandidateSet
         from .resolution_proposals import ActiveProposalExists
-        from .termination_proposal import UnsupportedProposalRole
+        from .termination_proposal import InvalidProposalCandidate, UnsupportedProposalRole
 
         try:
             return super().dispatch(request, *args, **kwargs)
@@ -4113,10 +4117,13 @@ class _TraceProposalMixin(_TraceWorkspaceMixin):
                 {"ok": False, "error": "Permission denied: this action is outside your NetBox object permissions."},
                 status=403,
             )
-        except ValueError as exc:
+        except (
+            InvalidProposalTarget,
+            InvalidProposalCandidate,
+            PlanningTargetUnavailable,
+            UnsupportedProposalRole,
+        ) as exc:
             logger.warning("%s: termination refused: %s", type(self).__name__, exc)
-            return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
-        except (PlanningTargetUnavailable, UnsupportedProposalRole):
             return JsonResponse({"ok": False, "error": "That termination cannot be resolved here."}, status=400)
         except ValidationError as exc:
             return JsonResponse({"ok": False, "error": "; ".join(exc.messages)}, status=400)
@@ -4148,7 +4155,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             return JsonResponse({"ok": False, "error": reason}, status=409)
         field_key = request.POST.get("field_key", "").strip()
         if field_key not in _workspace_field_keys(workspace):
-            raise ValueError("This preview asked no question about that termination.")
+            raise InvalidProposalTarget("This preview asked no question about that termination.")
         task = proposal_task(SELECT_TERMINATION_TASK)
         with locked_profile_policy(profile.pk):
             live = ImportEngine.plan(profile, document, request.user, planning_context)
@@ -4162,7 +4169,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
                 None,
             )
             if field is None:
-                raise ValueError("This field is no longer in the preview.")
+                raise InvalidProposalTarget("This field is no longer in the preview.")
             if field["state"] != UNRESOLVED:
                 raise PreviewActionInvalid("This termination is already resolved.")
             inventory = task.inventory(
@@ -4257,7 +4264,7 @@ class _TraceProposalActionView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             task_type=SELECT_TERMINATION_TASK,
         )
         if proposal.field_key not in _workspace_field_keys(workspace):
-            raise ValueError("This preview asked no question about that termination.")
+            raise InvalidProposalTarget("This preview asked no question about that termination.")
         if not self.apply(proposal, request, reader):
             raise PreviewActionInvalid("This proposal no longer permits that action. Re-read it before continuing.")
         proposal.refresh_from_db()

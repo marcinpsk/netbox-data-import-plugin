@@ -161,6 +161,17 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
     def test_the_legacy_engine_is_deleted(self):
         self.assertFalse((PACKAGE / "engine.py").exists())
 
+    def test_proposal_protocol_and_persistence_share_one_contract(self):
+        """Response validation, prompting, and storage cannot drift independently."""
+        from netbox_data_import import proposal_contract, proposal_jobs, proposal_response
+        from netbox_data_import.models import ProposalOutcome
+
+        self.assertIs(ProposalOutcome.CHOICES, proposal_contract.OUTCOME_CHOICES)
+        self.assertIs(proposal_response.OUTCOMES, proposal_contract.OUTCOMES)
+        self.assertIs(proposal_response.RESPONSE_MEMBERS, proposal_contract.RESPONSE_MEMBERS)
+        for member in proposal_contract.RESPONSE_MEMBER_NAMES:
+            self.assertIn(member, proposal_jobs.SYSTEM_INSTRUCTION)
+
     def test_the_architecture_guidance_names_the_public_coordinator(self):
         guidance = PACKAGE.parent / "AGENTS.md"
         architecture = guidance.read_text().partition("## Architecture")[2].partition("## Development environment")[0]

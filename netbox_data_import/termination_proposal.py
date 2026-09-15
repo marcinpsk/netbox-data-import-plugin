@@ -21,6 +21,7 @@ from .proposal_tasks import (
 
 __all__ = [
     "DecisionReceipt",
+    "InvalidProposalCandidate",
     "SelectTerminationTask",
     "UnsupportedProposalRole",
 ]
@@ -28,6 +29,10 @@ __all__ = [
 
 class UnsupportedProposalRole(Exception):
     """Proposals are requested for the termination role in this delivery (section 7.1)."""
+
+
+class InvalidProposalCandidate(Exception):
+    """A stored proposal candidate cannot identify its target model."""
 
 
 @dataclass(frozen=True)
@@ -134,8 +139,11 @@ class SelectTerminationTask:
 
         from .models import TerminationResolution
 
-        app_label, model = entry.object_type.split(".", 1)
-        object_type = ObjectType.objects.get(app_label=app_label, model=model)
+        try:
+            app_label, model = entry.object_type.split(".", 1)
+            object_type = ObjectType.objects.get(app_label=app_label, model=model)
+        except (AttributeError, TypeError, ValueError, ObjectType.DoesNotExist) as exc:
+            raise InvalidProposalCandidate("The stored proposal candidate has an invalid object type.") from exc
         candidate = TerminationResolution(
             profile=profile,
             task_type=self.task_type,

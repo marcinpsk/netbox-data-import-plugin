@@ -26,6 +26,7 @@ from . import plan
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from . import inference_settings as _inference_settings
+from .proposal_contract import OUTCOME_CANDIDATE, OUTCOME_CHOICES, OUTCOME_NO_MATCH
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
 from .values import identity_text
 
@@ -1289,10 +1290,10 @@ class ProposalStatus:
 class ProposalOutcome:
     """What a completed Resolution Proposal concluded (section 7.8)."""
 
-    CANDIDATE = "candidate"
-    NO_MATCH = "no_match"
+    CANDIDATE = OUTCOME_CANDIDATE
+    NO_MATCH = OUTCOME_NO_MATCH
 
-    CHOICES = ((CANDIDATE, "Candidate"), (NO_MATCH, "No match"))
+    CHOICES = OUTCOME_CHOICES
 
 
 class ProposalDecision:

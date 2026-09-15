@@ -10,15 +10,14 @@ import json
 
 from dataclasses import dataclass
 
-RESPONSE_SCHEMA_VERSION = 2
-EXPLANATION_MAX_LENGTH = 2000
-
-#: Section 7.8 fixes the response object exactly, so an unexpected member is a response we do not know.
-RESPONSE_MEMBERS = frozenset({"schema_version", "outcome", "candidate_id", "candidate_display_name", "explanation"})
-
-OUTCOME_CANDIDATE = "candidate"
-OUTCOME_NO_MATCH = "no_match"
-OUTCOMES = (OUTCOME_CANDIDATE, OUTCOME_NO_MATCH)
+from .proposal_contract import (
+    EXPLANATION_MAX_LENGTH,
+    OUTCOMES,
+    OUTCOME_CANDIDATE,
+    OUTCOME_NO_MATCH,
+    RESPONSE_MEMBERS,
+    RESPONSE_SCHEMA_VERSION,
+)
 
 __all__ = [
     "EXPLANATION_MAX_LENGTH",

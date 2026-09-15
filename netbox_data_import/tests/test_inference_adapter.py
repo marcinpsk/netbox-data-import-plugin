@@ -38,7 +38,11 @@ from netbox_data_import.inference_adapter import (
     TransportFailure,
     TRANSIENT_STATUSES,
 )
-from netbox_data_import.inference_transport import WallClockDeadline, request_to_resolved_address
+from netbox_data_import.inference_transport import (
+    WallClockDeadline,
+    WallClockDeadlineExceeded,
+    request_to_resolved_address,
+)
 from netbox_data_import.tests.inference_http import (
     issue_server_certificate,
     local_dns,
@@ -1251,6 +1255,37 @@ class AddressPinnedSessionTest(SimpleTestCase):
 
             self.assertTrue(all(future.result(timeout=2) for future in futures))
 
+    def test_timed_out_deadlines_retain_a_bounded_number_of_workers(self):
+        """Repeated blocked resolvers must not leave one worker behind per request."""
+        operation_count = 40
+        begin = threading.Event()
+        release = threading.Event()
+        state_lock = threading.Lock()
+        started = 0
+
+        def blocking_operation():
+            nonlocal started
+            with state_lock:
+                started += 1
+            release.wait(timeout=5)
+
+        def run_until_timeout():
+            begin.wait(timeout=2)
+            try:
+                WallClockDeadline.after(2).run(blocking_operation)
+            except WallClockDeadlineExceeded:
+                return True
+            return False
+
+        with ThreadPoolExecutor(max_workers=operation_count) as callers:
+            futures = [callers.submit(run_until_timeout) for _ in range(operation_count)]
+            begin.set()
+            try:
+                self.assertTrue(all(future.result(timeout=4) for future in futures))
+                self.assertLess(started, operation_count)
+            finally:
+                release.set()
+
     def test_deadline_transport_accepts_requests_timeout_shapes(self):
         """A deadline caps missing and scalar timeouts without changing Requests input rules."""
         with serving() as (root, _seen, _allowlist):
@@ -1266,6 +1301,14 @@ class AddressPinnedSessionTest(SimpleTestCase):
                     )
 
                     self.assertEqual(response.status_code, 200)
+
+    def test_deadline_caps_each_requests_timeout_shape(self):
+        for supplied in (None, 10, (10, 20)):
+            with self.subTest(supplied=supplied):
+                timeout = WallClockDeadline.after(1).request_timeout(supplied)
+
+                self.assertLessEqual(timeout.connect_timeout, 1)
+                self.assertLessEqual(timeout.read_timeout, 1)
 
     def test_deadline_transport_rejects_an_invalid_timeout_as_value_error(self):
         with serving() as (root, _seen, _allowlist):

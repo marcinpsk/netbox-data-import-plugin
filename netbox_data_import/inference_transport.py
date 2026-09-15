@@ -25,6 +25,7 @@ from urllib3.util import Timeout as Urllib3Timeout
 
 _SESSION_LOCKS: WeakKeyDictionary[requests.Session, RLock] = WeakKeyDictionary()
 _SESSION_LOCKS_GUARD = Lock()
+_DEADLINE_WORKERS = ThreadPoolExecutor(thread_name_prefix="inference-deadline")
 _Result = TypeVar("_Result")
 
 
@@ -73,16 +74,12 @@ class WallClockDeadline:
 
     def run(self, operation: Callable[..., _Result], *args: Any, **kwargs: Any) -> _Result:
         """Run a blocking operation without letting it hold the caller past the deadline."""
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inference-deadline")
+        future = _DEADLINE_WORKERS.submit(operation, *args, **kwargs)
         try:
-            future = executor.submit(operation, *args, **kwargs)
-            try:
-                return future.result(timeout=self.remaining())
-            except FutureTimeoutError:
-                future.cancel()
-                raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            return future.result(timeout=self.remaining())
+        except FutureTimeoutError:
+            future.cancel()
+            raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
 
 
 def _run_connection_until_deadline(

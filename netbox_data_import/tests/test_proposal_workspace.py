@@ -55,6 +55,17 @@ class ProposalErrorEnvelopeTest(SimpleTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(json.loads(response.content), {"ok": False, "error": "Enter a valid proposal_id integer."})
 
+    def test_unexpected_value_errors_escape_the_proposal_envelope(self):
+        """A programming failure is not invalid operator input."""
+        from netbox_data_import.views import _TraceProposalMixin
+
+        class ProgrammingFailureView(_TraceProposalMixin, View):
+            def get(self, _request):
+                raise ValueError("programming failure")
+
+        with self.assertRaisesMessage(ValueError, "programming failure"):
+            ProgrammingFailureView.as_view()(RequestFactory().get("/proposal"))
+
 
 class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCase):
     @classmethod
