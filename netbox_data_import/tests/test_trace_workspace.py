@@ -1332,16 +1332,16 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(payload["shown"], 3)
         self.assertEqual(payload["total"], 7)
 
-    def test_the_picker_clamps_a_limit_below_one(self):
-        """The limit is a QuerySet slice stop, so a value under one has to be clamped, not passed on."""
+    def test_the_picker_rejects_invalid_limits(self):
+        """A malformed or out-of-range limit is an invalid request."""
         field_key = self.open_blocked_workspace()
         Interface.objects.create(device=self.device_a, name="eth5", type="1000base-t")
 
-        payload = self.candidates(field_key, limit=-1).json()
+        for limit in ("not-an-integer", "0", str(ELIGIBLE_TERMINATION_LIMIT + 1)):
+            with self.subTest(limit=limit):
+                response = self.candidates(field_key, limit=limit)
 
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["shown"], 1)
-        self.assertEqual(payload["total"], 2)
+                self.assertEqual(response.status_code, 400)
 
     def test_the_picker_searches_by_name(self):
         """A searchable picker narrows the same eligible set, and never widens it."""
@@ -1495,17 +1495,41 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
     def test_a_preview_lock_rolls_back_the_termination_resolution(self):
         """The saved decision and the replacement preview form one database outcome."""
-        from unittest.mock import patch
+        import uuid
 
-        from netbox_data_import.preview_row_actions import PreviewLocked
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        from netbox_data_import.jobs import ImportJobRunner
 
         field_key = self.open_blocked_workspace()
+        import_context = self.client.session["import_context"]
+        retained = []
+        decision_writes = []
 
-        with patch(
-            "netbox_data_import.views.record_recalculated_preview",
-            autospec=True,
-            side_effect=PreviewLocked("A trace synchronization is still running."),
-        ):
+        def retain_preview_after_initial_guard(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if "netbox_data_import_terminationresolution" in sql.lower() and sql.lstrip().upper().startswith(
+                ("INSERT", "UPDATE")
+            ):
+                decision_writes.append(sql)
+            if not retained and 'FROM "core_job"' in sql:
+                retained.append(sql)
+                Job.objects.create(
+                    name=ImportJobRunner.name,
+                    user=self.actor,
+                    job_id=uuid.uuid4(),
+                    status=JobStatusChoices.STATUS_PENDING,
+                    data={
+                        "job_type": ImportJobRunner.job_type,
+                        "keeps_preview": True,
+                        "profile_id": self.profile.pk,
+                        "source_document_id": import_context["source_document_id"],
+                    },
+                )
+            return result
+
+        with connection.execute_wrapper(retain_preview_after_initial_guard):
             response = self.client.post(
                 reverse("plugins:netbox_data_import:trace_resolve_termination"),
                 {
@@ -1517,6 +1541,8 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
                 headers={"accept": "application/json"},
             )
 
+        self.assertTrue(retained)
+        self.assertTrue(decision_writes)
         self.assertEqual(response.status_code, 409)
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 

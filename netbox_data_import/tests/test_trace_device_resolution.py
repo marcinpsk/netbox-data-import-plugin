@@ -10,6 +10,7 @@ from django.db import connection
 from django.test import TestCase
 from django.urls import reverse
 
+from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
 from netbox_data_import.models import ImportProfile, SourceDocument, TerminationResolution, TraceDeviceResolution
 from netbox_data_import.netbox_reader import NetBoxReader
@@ -301,6 +302,28 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
         self.assertEqual(len(locked_queries), 1)
         self.assertRegex(locked_queries[0], r'ORDER BY "dcim_device"\."id" ASC FOR UPDATE')
 
+    def test_a_device_that_stops_matching_search_before_lock_is_not_returned(self):
+        renamed = []
+
+        def rename_after_ranked_ids_are_read(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if not renamed and 'FROM "dcim_device"' in sql and "LIMIT" in sql and "FOR UPDATE" not in sql:
+                renamed.append(sql)
+                Device.objects.filter(pk=self.hinted.pk).update(name="No Longer Eligible")
+            return result
+
+        with connection.execute_wrapper(rename_after_ranked_ids_are_read):
+            page = eligible_trace_devices(
+                reader=self.reader(),
+                evidence=self.evidence,
+                search="Candidate Z",
+                limit=20,
+                lock_rows=True,
+            )
+
+        self.assertTrue(renamed)
+        self.assertEqual(page.candidates, ())
+
 
 class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
     @classmethod
@@ -359,18 +382,42 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertContains(saved, "manually resolved")
 
     def test_a_preview_lock_rolls_back_the_device_resolution(self):
-        from unittest.mock import patch
+        import uuid
 
-        from netbox_data_import.preview_row_actions import PreviewLocked
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        from netbox_data_import.jobs import ImportJobRunner
 
         response = self.start_alias_preview()
         revision = response.context["preview_revision"]
+        import_context = self.client.session["import_context"]
+        retained = []
+        decision_writes = []
 
-        with patch(
-            "netbox_data_import.views.record_recalculated_preview",
-            autospec=True,
-            side_effect=PreviewLocked("A trace synchronization is still running."),
-        ):
+        def retain_preview_after_initial_guard(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if "netbox_data_import_tracedeviceresolution" in sql.lower() and sql.lstrip().upper().startswith(
+                ("INSERT", "UPDATE")
+            ):
+                decision_writes.append(sql)
+            if not retained and 'FROM "core_job"' in sql:
+                retained.append(sql)
+                Job.objects.create(
+                    name=ImportJobRunner.name,
+                    user=self.actor,
+                    job_id=uuid.uuid4(),
+                    status=JobStatusChoices.STATUS_PENDING,
+                    data={
+                        "job_type": ImportJobRunner.job_type,
+                        "keeps_preview": True,
+                        "profile_id": self.profile.pk,
+                        "source_document_id": import_context["source_document_id"],
+                    },
+                )
+            return result
+
+        with connection.execute_wrapper(retain_preview_after_initial_guard):
             saved = self.client.post(
                 reverse("plugins:netbox_data_import:trace_resolve_device"),
                 {
@@ -382,8 +429,26 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 headers={"accept": "application/json"},
             )
 
+        self.assertTrue(retained)
+        self.assertTrue(decision_writes)
         self.assertEqual(saved.status_code, 409)
         self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
+
+    def test_the_candidate_endpoint_rejects_invalid_limits(self):
+        response = self.start_alias_preview()
+
+        for limit in ("not-an-integer", "0", str(ELIGIBLE_TERMINATION_LIMIT + 1)):
+            with self.subTest(limit=limit):
+                candidates = self.client.get(
+                    reverse("plugins:netbox_data_import:trace_device_candidates"),
+                    {
+                        "device_key": "source alias",
+                        "limit": limit,
+                        "preview_revision": response.context["preview_revision"],
+                    },
+                )
+
+                self.assertEqual(candidates.status_code, 400)
 
     def test_the_summary_counts_only_saved_decisions_the_actor_can_view(self):
         from core.models import ObjectType

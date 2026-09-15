@@ -3797,6 +3797,16 @@ class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
             return redirect(next_url)
 
 
+def _candidate_page_limit(raw_limit) -> int:
+    """Return one valid picker page limit."""
+    if raw_limit is None:
+        return ELIGIBLE_TERMINATION_LIMIT
+    limit = int(raw_limit)
+    if not 1 <= limit <= ELIGIBLE_TERMINATION_LIMIT:
+        raise ValueError("Candidate limit is outside the supported range.")
+    return limit
+
+
 class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Serve one page of eligible terminations for the workspace picker."""
 
@@ -3810,11 +3820,15 @@ class TraceTerminationCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMix
         profile, _document, _workspace, planning_context = loaded
         field_key = request.GET.get("field_key", "").strip()
         try:
-            requested = int(request.GET.get("limit", ELIGIBLE_TERMINATION_LIMIT))
+            limit = _candidate_page_limit(request.GET.get("limit"))
         except (TypeError, ValueError):
-            requested = ELIGIBLE_TERMINATION_LIMIT
-        # The limit becomes a QuerySet slice stop, which refuses a value below one.
-        limit = min(max(requested, 1), ELIGIBLE_TERMINATION_LIMIT)
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
+                },
+                status=400,
+            )
         try:
             found = self._eligible(request, profile, planning_context, field_key, request.GET.get("search", ""), limit)
         except (PlanningTargetUnavailable, ValueError):
@@ -3858,10 +3872,15 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
         if len(search) > 200:
             return JsonResponse({"ok": False, "error": "Device search must be 200 characters or fewer."}, status=400)
         try:
-            requested = int(request.GET.get("limit", ELIGIBLE_TERMINATION_LIMIT))
+            limit = _candidate_page_limit(request.GET.get("limit"))
         except (TypeError, ValueError):
-            requested = ELIGIBLE_TERMINATION_LIMIT
-        limit = min(max(requested, 1), ELIGIBLE_TERMINATION_LIMIT)
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
+                },
+                status=400,
+            )
         try:
             reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
             found = eligible_trace_devices(

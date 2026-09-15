@@ -398,6 +398,7 @@ def eligible_trace_devices(
     devices = _target_devices(reader)
     if search:
         devices = devices.filter(name__icontains=search)
+    eligible_devices = devices
     exact_values = tuple(source_text(value) for value in evidence.labels if source_text(value)) or (evidence.key,)
     rack_values = tuple(source_text(value) for value in evidence.racks if source_text(value))
     location_values = tuple(source_text(value) for value in evidence.locations if source_text(value))
@@ -434,7 +435,7 @@ def eligible_trace_devices(
         ranked_ids = tuple(devices.values_list("pk", flat=True)[:limit])
         locked = {
             device.pk: device
-            for device in _with_database_identity(_target_devices(reader))
+            for device in _with_database_identity(eligible_devices)
             .filter(pk__in=ranked_ids)
             .order_by("pk")
             .select_for_update(of=("self",))
