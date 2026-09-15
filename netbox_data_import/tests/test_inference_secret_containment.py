@@ -285,7 +285,14 @@ class SecretContainmentTest(TestCase):
                             },
                         )
                         self.assertEqual(edit_response.status_code, 302, edit_response.content)
-                        self.client.post(url)
+                        response = self.client.post(url)
+                        self.assertRedirects(response, self.row.get_absolute_url(), fetch_redirect_response=False)
+                        self.assertTrue(
+                            any(
+                                "Connection test succeeded" in str(message)
+                                for message in get_messages(response.wsgi_request)
+                            )
+                        )
                         state = {
                             **persisted_state(),
                             "session": dict(self.client.session),

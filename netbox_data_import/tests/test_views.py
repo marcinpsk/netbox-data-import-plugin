@@ -1573,7 +1573,6 @@ manufacturer_mappings:
         """A key the profile block does not define is an error, never ignored."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        # `sheet_name` is no longer a stray key: it is one of the pre-1.6 scalars #108 translates.
         with self.assertRaisesMessage(ValueError, "stray_key"):
             apply_profile_document({"profile": {"name": "Stray Key", "stray_key": "Data"}})
 

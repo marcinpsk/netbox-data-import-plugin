@@ -369,6 +369,8 @@ class RackModule:
                 profile.adapter_settings.custom_field_name,
                 source_id=_source_text(row.get("source_id")),
             )
+            if validation is not None:
+                return _refused(identity, "rack.validation_failed", {**unit_display, "message": validation})
             if actor is not None and not _candidate_save_is_allowed(actor, candidate):
                 return _refused(
                     identity,
@@ -376,8 +378,6 @@ class RackModule:
                     unit_display,
                     disposition=Disposition.BLOCKED,
                 )
-            if validation is not None:
-                return _refused(identity, "rack.validation_failed", {**unit_display, "message": validation})
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.ACTIONABLE,

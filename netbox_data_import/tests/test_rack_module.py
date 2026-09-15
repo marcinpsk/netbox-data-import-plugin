@@ -174,6 +174,31 @@ class RackModulePlanTest(RackModulePlanTestBase):
         self.assertEqual(units[0].disposition, Disposition.BLOCKED)
         self.assertEqual(units[0].diagnostics[0].code, "rack.add_permission")
 
+    def test_an_invalid_new_rack_reports_validation_before_add_permission(self):
+        """An invalid candidate needs configuration repair, not a wider add grant."""
+        from dcim.models import Rack
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        actor = user_with_object_permission(
+            "rack-module-invalid-actor",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "permitted-rack"}),
+            ],
+        )
+        scoped = NetBoxReader.for_actor(actor)
+
+        units = RackModule().plan(
+            self._batch(self._row(2, "INVALID-RACK", "outside-rack-scope")),
+            self.profile,
+            CATALOG,
+            scoped,
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "rack.validation_failed")
+
 
 class RackModuleApplyTest(RackModuleRowMixin, TestCase):
     """Applying one Planned Change writes exactly what the plan said, or refuses."""
