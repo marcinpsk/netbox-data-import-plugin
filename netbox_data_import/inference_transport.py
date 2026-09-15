@@ -25,7 +25,6 @@ from urllib3.util import Timeout as Urllib3Timeout
 
 _SESSION_LOCKS: WeakKeyDictionary[requests.Session, RLock] = WeakKeyDictionary()
 _SESSION_LOCKS_GUARD = Lock()
-_DEADLINE_WORKERS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="inference-deadline")
 _Result = TypeVar("_Result")
 
 
@@ -53,23 +52,37 @@ class WallClockDeadline:
             raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.")
         return remaining
 
-    def request_timeout(self, timeout: tuple[float, float]) -> Urllib3Timeout:
+    def request_timeout(self, timeout: float | tuple[float | None, float | None] | None) -> Urllib3Timeout:
         """Cap one Requests connect and initial read to the remaining shared budget."""
         remaining = self.remaining()
-        return Urllib3Timeout(
-            total=remaining,
-            connect=min(timeout[0], remaining),
-            read=min(timeout[1], remaining),
-        )
+        if isinstance(timeout, tuple):
+            try:
+                connect, read = timeout
+            except ValueError as exc:
+                raise ValueError("A request timeout tuple must contain connect and read values.") from exc
+        else:
+            connect = read = timeout
+        try:
+            return Urllib3Timeout(
+                total=remaining,
+                connect=remaining if connect is None else min(connect, remaining),
+                read=remaining if read is None else min(read, remaining),
+            )
+        except TypeError as exc:
+            raise ValueError("A request timeout must be a number, None, or a two-value tuple.") from exc
 
     def run(self, operation: Callable[..., _Result], *args: Any, **kwargs: Any) -> _Result:
         """Run a blocking operation without letting it hold the caller past the deadline."""
-        future = _DEADLINE_WORKERS.submit(operation, *args, **kwargs)
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inference-deadline")
         try:
-            return future.result(timeout=self.remaining())
-        except FutureTimeoutError:
-            future.cancel()
-            raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
+            future = executor.submit(operation, *args, **kwargs)
+            try:
+                return future.result(timeout=self.remaining())
+            except FutureTimeoutError:
+                future.cancel()
+                raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _run_connection_until_deadline(
@@ -282,7 +295,7 @@ def request_to_resolved_address(
         try:
             try:
                 if deadline is not None:
-                    kwargs["timeout"] = deadline.request_timeout(kwargs["timeout"])
+                    kwargs["timeout"] = deadline.request_timeout(kwargs.get("timeout"))
                 response = session.request(method, url, hooks=hooks, **kwargs)
                 if response_body_limit is not None or deadline is not None:
                     _consume_response(response, response_body_limit, deadline)

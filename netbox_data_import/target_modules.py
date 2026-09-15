@@ -1720,8 +1720,14 @@ class DeviceModule:
                 )
 
         placement = None
+        placement_rack = None
         if dependencies is not None and dependencies.missing is None:
-            placement = batch.placement(row, dependencies.device_type, dependencies.rack, dependencies.rack_identity)
+            placement_rack = (
+                dependencies.planned_rack
+                if dependencies.planned_rack is not None and dependencies.rack is not None
+                else dependencies.rack
+            )
+            placement = batch.placement(row, dependencies.device_type, placement_rack, dependencies.rack_identity)
             if placement.refused is not None:
                 code, placement_display = placement.refused
                 problem(Disposition.INVALID, code, placement_display)
@@ -1797,7 +1803,7 @@ class DeviceModule:
                 )
                 return _with_issues(identity, issues)
             claim = batch.prepare_claim(
-                dependencies.rack,
+                placement_rack,
                 dependencies.rack_identity,
                 placement,
                 dependencies.device_type,
@@ -1870,7 +1876,7 @@ class DeviceModule:
                 payload["face"] = ""
             if zero_u_conflicts:
                 problem(Disposition.INVALID, "device.zero_u_review_conflict", {"fields": zero_u_conflicts})
-        effective_rack = dependencies.rack
+        effective_rack = placement_rack
         effective_rack_identity = dependencies.rack_identity
         if payload["rack_name"] is None:
             effective_rack_identity = None

@@ -38,7 +38,7 @@ from netbox_data_import.inference_adapter import (
     TransportFailure,
     TRANSIENT_STATUSES,
 )
-from netbox_data_import.inference_transport import request_to_resolved_address
+from netbox_data_import.inference_transport import WallClockDeadline, request_to_resolved_address
 from netbox_data_import.tests.inference_http import (
     issue_server_certificate,
     local_dns,
@@ -1222,6 +1222,62 @@ class InterruptedAndMalformedTransportTest(SimpleTestCase):
 
 class AddressPinnedSessionTest(SimpleTestCase):
     """A shared injected session must not expose one temporary adapter to another call."""
+
+    def test_concurrent_deadlines_start_independent_blocking_operations(self):
+        """One slow resolver must not consume another foreground operation's budget."""
+        all_started = threading.Event()
+        release = threading.Event()
+        state_lock = threading.Lock()
+        started = 0
+
+        def blocking_operation():
+            nonlocal started
+            with state_lock:
+                started += 1
+                if started == 5:
+                    all_started.set()
+            release.wait(timeout=5)
+            return True
+
+        def run_with_deadline():
+            return WallClockDeadline.after(5).run(blocking_operation)
+
+        with ThreadPoolExecutor(max_workers=5) as callers:
+            futures = [callers.submit(run_with_deadline) for _ in range(5)]
+            try:
+                self.assertTrue(all_started.wait(timeout=1))
+            finally:
+                release.set()
+
+            self.assertTrue(all(future.result(timeout=2) for future in futures))
+
+    def test_deadline_transport_accepts_requests_timeout_shapes(self):
+        """A deadline caps missing and scalar timeouts without changing Requests input rules."""
+        with serving() as (root, _seen, _allowlist):
+            for kwargs in ({}, {"timeout": 1}):
+                with self.subTest(kwargs=kwargs):
+                    response = request_to_resolved_address(
+                        requests.Session(),
+                        "GET",
+                        f"{root}/models",
+                        "127.0.0.1",
+                        deadline=WallClockDeadline.after(2),
+                        **kwargs,
+                    )
+
+                    self.assertEqual(response.status_code, 200)
+
+    def test_deadline_transport_rejects_an_invalid_timeout_as_value_error(self):
+        with serving() as (root, _seen, _allowlist):
+            with self.assertRaises(ValueError):
+                request_to_resolved_address(
+                    requests.Session(),
+                    "GET",
+                    f"{root}/models",
+                    "127.0.0.1",
+                    deadline=WallClockDeadline.after(2),
+                    timeout=(1,),
+                )
 
     def test_requests_through_one_session_are_serialized(self):
         session = requests.Session()
