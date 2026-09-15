@@ -15,7 +15,6 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import BytesIO
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -39,6 +38,8 @@ from netbox_data_import.inference_adapter import (
     TRANSIENT_STATUSES,
 )
 from netbox_data_import.inference_transport import (
+    ResponseBodyTooLarge,
+    ResponseProcessingFailure,
     WallClockDeadline,
     WallClockDeadlineExceeded,
     request_to_resolved_address,
@@ -355,31 +356,6 @@ class ModelDiscoveryTest(SimpleTestCase):
                 adapter_for(root, allowlist).discover_models(API_KEY)
 
         self.assertIn("too large", str(caught.exception))
-
-    def test_an_oversized_model_response_is_closed(self):
-        class TrackingResponse(requests.Response):
-            was_closed = False
-
-            def close(self):
-                self.was_closed = True
-                super().close()
-
-        response = TrackingResponse()
-        response.status_code = 200
-        response.raw = BytesIO(b"x" * 65_537)
-        session = requests.Session()
-
-        def request(_method, _url, **kwargs):
-            for hook in kwargs["hooks"]["response"]:
-                hook(response)
-            return response
-
-        session.request = request
-
-        with self.assertRaises(MalformedEnvelope):
-            adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"], session=session).discover_models(API_KEY)
-
-        self.assertTrue(response.was_closed)
 
     def test_unusable_model_ids_are_not_offered(self):
         payload = {"data": [{"id": " valid "}, {"id": "line\nbreak"}, {"id": "x" * 201}, {"id": "valid"}]}
@@ -1226,6 +1202,35 @@ class InterruptedAndMalformedTransportTest(SimpleTestCase):
 
 class AddressPinnedSessionTest(SimpleTestCase):
     """A shared injected session must not expose one temporary adapter to another call."""
+
+    def test_response_limit_runs_before_a_hook_can_replace_the_response(self):
+        """A response hook cannot read and replace an oversized backend response."""
+        hook_bodies = []
+        payload = {"data": [{"id": "oversized-model-name"}]}
+
+        def replace_response(response, *_args, **_kwargs):
+            hook_bodies.append(response.content)
+            replacement = requests.Response()
+            replacement.status_code = 200
+            replacement._content = b"{}"
+            replacement._content_consumed = True
+            replacement.url = response.url
+            return replacement
+
+        with serving(models_payload=payload) as (root, _seen, _allowlist):
+            with self.assertRaises(ResponseProcessingFailure) as caught:
+                request_to_resolved_address(
+                    requests.Session(),
+                    "GET",
+                    f"{root}/models",
+                    "127.0.0.1",
+                    response_body_limit=len(json.dumps(payload).encode()) - 1,
+                    hooks={"response": replace_response},
+                )
+
+        self.assertIsInstance(caught.exception.cause, ResponseBodyTooLarge)
+        self.assertTrue(caught.exception.response.raw.closed)
+        self.assertEqual(hook_bodies, [])
 
     def test_concurrent_deadlines_start_independent_blocking_operations(self):
         """One slow resolver must not consume another foreground operation's budget."""

@@ -1315,7 +1315,7 @@ class _DeviceBatch:
 
     def prepare_claim(self, rack, rack_identity, placement, device_type, matched) -> _PlacementClaim:
         """Return the available units this row can claim without reserving them yet."""
-        rack_key = rack.pk if rack is not None else rack_identity
+        rack_key = rack.pk if rack is not None and rack.pk is not None else rack_identity
         if rack_key is None or placement.position is None or device_type.u_height == 0:
             return _PlacementClaim()
         rack_face = None if device_type.is_full_depth else placement.face
@@ -1336,12 +1336,16 @@ class _DeviceBatch:
                 )
 
         if rack is not None:
-            available = rack.get_available_units(
-                u_height=device_type.u_height,
-                rack_face=rack_face,
-                exclude=[matched.pk] if matched is not None else [],
-            )
-            if placement.position not in available:
+            if rack.pk is None:
+                position_available = set(_occupied_units(placement.position, device_type.u_height)).issubset(rack.units)
+            else:
+                available = rack.get_available_units(
+                    u_height=device_type.u_height,
+                    rack_face=rack_face,
+                    exclude=[matched.pk] if matched is not None else [],
+                )
+                position_available = placement.position in available
+            if not position_available:
                 return _PlacementClaim(
                     refused=(
                         "device.rack_position_occupied",
@@ -1722,11 +1726,7 @@ class DeviceModule:
         placement = None
         placement_rack = None
         if dependencies is not None and dependencies.missing is None:
-            placement_rack = (
-                dependencies.planned_rack
-                if dependencies.planned_rack is not None and dependencies.rack is not None
-                else dependencies.rack
-            )
+            placement_rack = dependencies.planned_rack if dependencies.planned_rack is not None else dependencies.rack
             placement = batch.placement(row, dependencies.device_type, placement_rack, dependencies.rack_identity)
             if placement.refused is not None:
                 code, placement_display = placement.refused

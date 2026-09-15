@@ -210,6 +210,7 @@ class _AddressPinnedAdapter(requests.adapters.HTTPAdapter):
         origin_url: str,
         resolved_address: str,
         deadline: WallClockDeadline | None = None,
+        response_body_limit: int | None = None,
     ):
         super().__init__()
         parts = urlsplit(origin_url)
@@ -217,6 +218,7 @@ class _AddressPinnedAdapter(requests.adapters.HTTPAdapter):
         address = ipaddress.ip_address(resolved_address)
         self._address = f"[{address}]" if address.version == 6 else str(address)
         self._deadline = deadline
+        self._response_body_limit = response_body_limit
         if deadline is not None:
             self.poolmanager.pool_classes_by_scheme = _deadline_pool_classes(deadline)
 
@@ -248,6 +250,12 @@ class _AddressPinnedAdapter(requests.adapters.HTTPAdapter):
                     self._deadline.remaining()
                 raise
             response.url = original_url
+            if self._response_body_limit is not None or self._deadline is not None:
+                try:
+                    _consume_response(response, self._response_body_limit, self._deadline)
+                except (ValueError, requests.RequestException) as exc:
+                    response.close()
+                    raise ResponseProcessingFailure(exc, response) from exc
             return response
         finally:
             request.url = original_url
@@ -273,7 +281,7 @@ def request_to_resolved_address(
         kwargs["stream"] = True
     with _session_lock(session):
         previous_adapters = OrderedDict(session.adapters)
-        adapter = _AddressPinnedAdapter(url, resolved_address, deadline)
+        adapter = _AddressPinnedAdapter(url, resolved_address, deadline, response_body_limit)
         captured_response = None
 
         def capture_response(response, *_args, **_kwargs):
@@ -294,8 +302,6 @@ def request_to_resolved_address(
                 if deadline is not None:
                     kwargs["timeout"] = deadline.request_timeout(kwargs.get("timeout"))
                 response = session.request(method, url, hooks=hooks, **kwargs)
-                if response_body_limit is not None or deadline is not None:
-                    _consume_response(response, response_body_limit, deadline)
             except (ValueError, requests.RequestException) as exc:
                 if captured_response is not None:
                     captured_response.close()
