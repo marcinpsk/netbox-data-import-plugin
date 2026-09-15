@@ -11,7 +11,7 @@ from django.urls import reverse
 
 from netbox_data_import.models import ImportProfile, SourceDocument, TraceDeviceResolution
 from netbox_data_import.netbox_reader import NetBoxReader
-from netbox_data_import.object_permissions import ObjectPermissionDenied
+from netbox_data_import.object_permissions import ObjectPermissionDenied, clear_user_permission_caches
 from netbox_data_import.plan import Disposition
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.review_workspace import save_trace_device_resolution_and_replan
@@ -23,6 +23,46 @@ from netbox_data_import.trace_device_resolution import (
 )
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
 from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
+
+
+class DeviceEvidenceSerializationTest(TestCase):
+    evidence = {
+        "key": "source device",
+        "labels": ["Source Device"],
+        "locations": [],
+        "racks": [],
+        "u_positions": [],
+    }
+
+    def test_serialized_evidence_rejects_a_non_mapping(self):
+        with self.assertRaisesMessage(TypeError, "Device evidence must be an object"):
+            DeviceEvidence.from_dict(["source device"])
+
+    def test_serialized_evidence_rejects_a_non_string_key(self):
+        with self.assertRaisesMessage(TypeError, "Device evidence key must be a string"):
+            DeviceEvidence.from_dict({**self.evidence, "key": 17})
+
+    def test_serialized_evidence_requires_every_field(self):
+        damaged = {key: value for key, value in self.evidence.items() if key != "locations"}
+
+        with self.assertRaisesMessage(ValueError, "Device evidence is missing fields: locations"):
+            DeviceEvidence.from_dict(damaged)
+
+    def test_serialized_evidence_rejects_unknown_fields(self):
+        with self.assertRaisesMessage(ValueError, "Device evidence has unknown fields: typo"):
+            DeviceEvidence.from_dict({**self.evidence, "typo": []})
+
+    def test_serialized_evidence_rejects_invalid_fact_collections(self):
+        cases = (
+            ("labels", "Source Device"),
+            ("locations", [17]),
+            ("racks", {"Rack A"}),
+            ("u_positions", None),
+        )
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesMessage(TypeError, f"Device evidence {field} must be a list or tuple of strings"):
+                    DeviceEvidence.from_dict({**self.evidence, field: value})
 
 
 class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
@@ -118,6 +158,15 @@ class TraceDeviceResolutionPlanningTest(CableTopologyMixin, TestCase):
         self.device_a.save(update_fields=("name",))
 
         unit = self.unit(self.alias_path("Source Alias"))
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertNotIn("trace.device_unresolved", self.codes(unit))
+
+    def test_a_canonical_name_match_uses_the_database_case_rules(self):
+        self.device_a.name = "İdentity  Name"
+        self.device_a.save(update_fields=("name",))
+
+        unit = self.unit(self.alias_path("İdentity Name"))
 
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
         self.assertNotIn("trace.device_unresolved", self.codes(unit))
@@ -513,3 +562,17 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
         self.assertContains(response, "You do not have permission to save a Device resolution.")
         self.assertContains(response, 'data-trace-device-picker="source alias" disabled')
         self.assertContains(response, 'data-trace-device-picker="dev-b" disabled')
+
+        scoped_permission = ObjectPermission.objects.create(
+            name="Another source Device resolution only",
+            actions=["add"],
+            constraints={"source_device_key": "another device"},
+        )
+        scoped_permission.object_types.add(trace_resolution_type)
+        scoped_permission.users.add(self.actor)
+        clear_user_permission_caches(self.actor)
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-trace-device-picker="source alias" disabled')

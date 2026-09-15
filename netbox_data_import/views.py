@@ -85,6 +85,7 @@ from .contact_resolution import PrimaryContactResolver, contact_identity, sugges
 from .device_field_review import DeviceFieldReviewer
 from .object_permissions import (
     ObjectPermissionDenied,
+    assess_permission_scoped_save_option,
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
@@ -3485,30 +3486,30 @@ def _with_device_resolution_permissions(profile, actor, questions):
     """Add the permission state for each Device resolution action."""
     from .models import TraceDeviceResolution, index_digest
 
-    keys = [question["key"] for question in questions]
-    existing = {
-        row.source_device_key: row
-        for row in TraceDeviceResolution.objects.filter(
-            profile=profile,
-            source_device_key_digest__in=[index_digest(key) for key in keys],
-        )
-    }
-    add_permission = get_permission_for_model(TraceDeviceResolution, "add")
-    change_permission = get_permission_for_model(TraceDeviceResolution, "change")
     results = []
     for question in questions:
-        current = existing.get(question["key"])
-        if actor is None or actor.is_superuser:
-            allowed = True
-        elif current is None:
-            allowed = actor.has_perm(add_permission)
-        else:
-            allowed = actor.has_perm(change_permission) and actor.has_perm(change_permission, current)
+        key = question["key"]
+        assessment = assess_permission_scoped_save_option(
+            actor,
+            TraceDeviceResolution,
+            {
+                "profile": profile,
+                "source_device_key": key,
+                "source_device_key_digest": index_digest(key),
+            },
+            {
+                "selected_device_id": 1,
+                "selected_display_name": "Pending Device selection",
+            },
+            unknown_fields={"selected_device_id", "selected_display_name"},
+        )
         results.append(
             {
                 **question,
-                "action_allowed": allowed,
-                "action_reason": "" if allowed else "You do not have permission to save a Device resolution.",
+                "action_allowed": assessment.allowed,
+                "action_reason": (
+                    "" if assessment.allowed else "You do not have permission to save a Device resolution."
+                ),
             }
         )
     return results

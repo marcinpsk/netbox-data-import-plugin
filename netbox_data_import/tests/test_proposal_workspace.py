@@ -227,7 +227,13 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
             """Rename both Devices after the one-name query has read the original row."""
             result = execute(sql, params, many, context)
             device_table = connection.ops.quote_name(Device._meta.db_table)
-            if f"FROM {device_table}" in sql and "UPPER" in sql and " OR " not in sql:
+            query_values = tuple(params or ())
+            if (
+                f"FROM {device_table}" in sql
+                and "UPPER" in sql
+                and "DEV-A" in query_values
+                and "DEV-B" not in query_values
+            ):
                 resolution_reads.append(True)
                 if len(resolution_reads) == 1:
                     Device.objects.filter(pk=self.device_a.pk).update(name="DEV-A-previous")

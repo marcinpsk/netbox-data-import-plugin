@@ -440,6 +440,7 @@ def _assess_permission_scoped_save(
     on_existing: Literal["update", "keep", "reject"],
     current,
     prospective_relations: Mapping[str, models.Model | ProspectiveRelation] | None = None,
+    unknown_fields: frozenset[str] = frozenset(),
 ) -> PermissionScopedSaveAssessment:
     """Assess one known current row without locking or writing it."""
     if current is not None and on_existing == "reject":
@@ -461,6 +462,16 @@ def _assess_permission_scoped_save(
                 setattr(prospective, field_name, value)
         world = _prepare_prospective_world(prospective, prospective_relations)
         constraints = getattr(user, "_object_perm_cache", {}).get(permission, ())
+        if unknown_fields:
+            fields = {name: field for field in model._meta.concrete_fields for name in (field.name, field.attname)}
+            try:
+                unknown_roots = {root for name in unknown_fields for root in (fields[name].name, fields[name].attname)}
+            except KeyError as exc:
+                raise TypeError(f"{model._meta.label} has no concrete field named {exc.args[0]}.") from exc
+            constraints = tuple(
+                {key: value for key, value in constraint.items() if key.split("__", maxsplit=1)[0] not in unknown_roots}
+                for constraint in constraints
+            )
         allowed = any(
             not constraint or _prospective_row_matches(user, model, constraint, world) for constraint in constraints
         )
@@ -489,6 +500,34 @@ def assess_permission_scoped_save(
         on_existing=on_existing,
         current=current,
         prospective_relations=prospective_relations,
+    )
+
+
+def assess_permission_scoped_save_option(
+    user,
+    model,
+    lookup: dict,
+    values: dict,
+    *,
+    unknown_fields: set[str] | frozenset[str],
+    on_existing: Literal["update", "keep", "reject"] = "update",
+    prospective_relations: Mapping[str, models.Model | ProspectiveRelation] | None = None,
+) -> PermissionScopedSaveAssessment:
+    """Assess whether known values permit a UI option that supplies the remaining values.
+
+    This check ignores permission predicates rooted at ``unknown_fields``. It controls whether the
+    UI offers a choice. It does not authorize the later save, which must assess every final value.
+    """
+    current = model.objects.filter(**lookup).first()
+    return _assess_permission_scoped_save(
+        user,
+        model,
+        lookup,
+        values,
+        on_existing=on_existing,
+        current=current,
+        prospective_relations=prospective_relations,
+        unknown_fields=frozenset(unknown_fields),
     )
 
 

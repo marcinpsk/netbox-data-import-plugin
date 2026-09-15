@@ -30,6 +30,7 @@ from netbox_data_import.object_permissions import (
     _prepare_prospective_world,
     _prospective_row_matches,
     assess_permission_scoped_save,
+    assess_permission_scoped_save_option,
     delete_permission_scoped_objects,
     enforce_saved_object_permission,
     save_permission_scoped_object,
@@ -192,6 +193,40 @@ class AssessPermissionScopedSaveTest(TestCase):
 
         self.assertTrue(inside.allowed)
         self.assertEqual(inside.permission, "netbox_data_import.add_devicetypemapping")
+        self.assertFalse(outside.allowed)
+        self.assertFalse(DeviceTypeMapping.objects.exists())
+
+    def test_a_save_option_applies_known_constraints_and_defers_the_chosen_value(self):
+        user = user_with_object_permission(
+            "assess-option",
+            [
+                (
+                    DeviceTypeMapping,
+                    ["add"],
+                    {
+                        "profile_id": self.profile.pk,
+                        "netbox_manufacturer_slug": "chosen-later",
+                    },
+                )
+            ],
+        )
+
+        inside = assess_permission_scoped_save_option(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values("not-chosen-yet"),
+            unknown_fields={"netbox_manufacturer_slug"},
+        )
+        outside = assess_permission_scoped_save_option(
+            user,
+            DeviceTypeMapping,
+            self._lookup(profile=self.other),
+            self._values("not-chosen-yet"),
+            unknown_fields={"netbox_manufacturer_slug"},
+        )
+
+        self.assertTrue(inside.allowed)
         self.assertFalse(outside.allowed)
         self.assertFalse(DeviceTypeMapping.objects.exists())
 
