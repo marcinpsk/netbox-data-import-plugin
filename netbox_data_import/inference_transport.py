@@ -105,14 +105,6 @@ def _run_connection_until_deadline(
     finally:
         timer.cancel()
 
-    def connect(self) -> None:
-        """Bound TCP and TLS connection work to the shared deadline."""
-        self._run_until_deadline(self._connect_without_deadline)
-
-    def getresponse(self) -> HTTPResponse:
-        """Bound the status line and response headers to the shared deadline."""
-        return self._run_until_deadline(self._getresponse_without_deadline)
-
 
 def _deadline_pool_classes(deadline: WallClockDeadline):
     """Return urllib3 pools whose connections enforce one operation deadline."""
