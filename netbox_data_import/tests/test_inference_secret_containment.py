@@ -18,6 +18,7 @@ from tempfile import TemporaryDirectory
 
 from core.models import Job, ObjectChange
 from django.apps import apps
+from django.contrib.messages import get_messages
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
@@ -156,8 +157,12 @@ class SecretContainmentTest(TestCase):
         url = reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk])
 
         with self.configured_connection():
-            self.client.post(url)
+            response = self.client.post(url)
 
+        self.assertRedirects(response, self.row.get_absolute_url(), fetch_redirect_response=False)
+        self.assertTrue(
+            any("Connection test succeeded" in str(message) for message in get_messages(response.wsgi_request))
+        )
         self.assertFalse(Job.objects.exists())
 
     def test_no_session_holds_the_secret(self):
