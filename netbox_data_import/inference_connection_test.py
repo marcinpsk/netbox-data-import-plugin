@@ -85,6 +85,14 @@ def run_connection_test(pk: int, backend_key: str) -> ConnectionTestResult:
             if models and exc.diagnostic.status_code == 400:
                 detail += " Select one of the available models below, save the backend, and run the test again."
             return ConnectionTestResult(exc.category, detail, backend_key, backend.source, models)
+        if completion.is_refusal or not (completion.content_text or "").strip():
+            return ConnectionTestResult(
+                "invalid_response",
+                "The backend completed the test but did not return an answer.",
+                backend_key,
+                backend.source,
+                models,
+            )
         if completion.diagnostic.redacted:
             return ConnectionTestResult(
                 "invalid_response",

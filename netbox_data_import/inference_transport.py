@@ -28,6 +28,10 @@ class ResponseProcessingFailure(requests.RequestException):
         self.cause = cause
 
 
+class ResponseBodyTooLarge(requests.RequestException):
+    """The peer sent more response bytes than this request permits."""
+
+
 def is_preconnect_failure(exc: requests.RequestException) -> bool:
     """Return whether another address can be tried without replaying a sent request."""
     if isinstance(exc, requests.ConnectTimeout):
@@ -93,9 +97,14 @@ def request_to_resolved_address(
     method: str,
     url: str,
     resolved_address: str,
+    response_body_limit: int | None = None,
     **kwargs: Any,
 ) -> requests.Response:
     """Send one request to a resolved address without changing its HTTP or TLS hostname."""
+    if response_body_limit is not None:
+        if response_body_limit < 1:
+            raise ValueError("A response body limit must be positive.")
+        kwargs["stream"] = True
     with _session_lock(session):
         previous_adapters = OrderedDict(session.adapters)
         adapter = _AddressPinnedAdapter(url, resolved_address)
@@ -116,15 +125,37 @@ def request_to_resolved_address(
         session.mount(url, adapter)
         try:
             try:
-                return session.request(method, url, hooks=hooks, **kwargs)
+                response = session.request(method, url, hooks=hooks, **kwargs)
+                if response_body_limit is not None:
+                    chunks = []
+                    received = 0
+                    for chunk in response.iter_content(chunk_size=min(response_body_limit + 1, 65_536)):
+                        if not chunk:
+                            continue
+                        received += len(chunk)
+                        if received > response_body_limit:
+                            response.close()
+                            raise ResponseBodyTooLarge(
+                                f"The response body exceeded {response_body_limit} bytes.", response=response
+                            )
+                        chunks.append(chunk)
+                    response._content = b"".join(chunks)
+                    response._content_consumed = True
             except (ValueError, requests.RequestException) as exc:
                 if captured_response is not None:
                     raise ResponseProcessingFailure(exc, captured_response) from exc
                 raise
+            else:
+                return response
         finally:
             adapter.close()
             session.adapters.clear()
             session.adapters.update(previous_adapters)
 
 
-__all__ = ("ResponseProcessingFailure", "is_preconnect_failure", "request_to_resolved_address")
+__all__ = (
+    "ResponseBodyTooLarge",
+    "ResponseProcessingFailure",
+    "is_preconnect_failure",
+    "request_to_resolved_address",
+)

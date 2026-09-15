@@ -3481,6 +3481,39 @@ def _with_blocked_sync(trace, reason: str):
     return replace(trace, actions=actions)
 
 
+def _with_device_resolution_permissions(profile, actor, questions):
+    """Add the permission state for each Device resolution action."""
+    from .models import TraceDeviceResolution, index_digest
+
+    keys = [question["key"] for question in questions]
+    existing = {
+        row.source_device_key: row
+        for row in TraceDeviceResolution.objects.filter(
+            profile=profile,
+            source_device_key_digest__in=[index_digest(key) for key in keys],
+        )
+    }
+    add_permission = get_permission_for_model(TraceDeviceResolution, "add")
+    change_permission = get_permission_for_model(TraceDeviceResolution, "change")
+    results = []
+    for question in questions:
+        current = existing.get(question["key"])
+        if actor is None or actor.is_superuser:
+            allowed = True
+        elif current is None:
+            allowed = actor.has_perm(add_permission)
+        else:
+            allowed = actor.has_perm(change_permission) and actor.has_perm(change_permission, current)
+        results.append(
+            {
+                **question,
+                "action_allowed": allowed,
+                "action_reason": "" if allowed else "You do not have permission to save a Device resolution.",
+            }
+        )
+    return results
+
+
 def _workspace_field_keys(workspace) -> set:
     """Return every termination field key the reviewed preview actually asked about."""
     return {item["field_key"] for trace in workspace.traces for item in trace.terminations}
@@ -3629,7 +3662,11 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 ],
             )
         attention, settled = group_terminations(selected.terminations if selected else [])
-        selected_devices = selected.devices if selected else []
+        selected_devices = _with_device_resolution_permissions(
+            profile,
+            request.user,
+            selected.devices if selected else [],
+        )
         attention_devices = [device for device in selected_devices if device.get("selectable")]
         settled_devices = [device for device in selected_devices if not device.get("selectable")]
         from .models import ProposalStatus, ResolutionProposal

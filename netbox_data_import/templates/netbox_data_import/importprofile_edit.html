@@ -22,7 +22,13 @@
         }
         adapter.addEventListener('change', () => {
           const url = new URL(window.location.href);
-          url.search = '';
+          const preserved = new URLSearchParams();
+          for (const key of ['return_url', 'name', 'description', 'tags']) {
+            for (const value of url.searchParams.getAll(key)) {
+              preserved.append(key, value);
+            }
+          }
+          url.search = preserved.toString();
           url.searchParams.set('source_adapter', adapter.value);
           window.location.assign(url);
         });

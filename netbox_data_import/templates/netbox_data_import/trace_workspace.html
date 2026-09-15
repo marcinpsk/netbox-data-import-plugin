@@ -246,9 +246,15 @@
                 </div>
               {% endif %}
               <div class="ndi-trace-actions mt-2">
-                <button type="button" class="btn btn-sm btn-outline-secondary"
-                        data-trace-device-picker="{{ device.key }}"
-                        data-trace-device-label="{{ device.label }}">Choose Device</button>
+                <div class="ndi-trace-action">
+                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                          data-trace-device-picker="{{ device.key }}" {% if not device.action_allowed %}disabled{% endif %}
+                          data-trace-device-label="{{ device.label }}"
+                          {% if not device.action_allowed %}aria-describedby="deviceReasonAttention{{ forloop.counter }}"{% endif %}>Choose Device</button>
+                  {% if not device.action_allowed %}
+                    <div class="ndi-trace-reason" id="deviceReasonAttention{{ forloop.counter }}">{{ device.action_reason }}</div>
+                  {% endif %}
+                </div>
               </div>
               {% if device.reason %}<div class="ndi-trace-reason">{{ device.reason }}</div>{% endif %}
             </li>
@@ -273,9 +279,15 @@
                       <td>{{ device.selected }}</td>
                       <td><span class="badge ndi-trace-state-{{ device.state_style }}">{{ device.state }}</span></td>
                       <td class="text-end">
-                        <button type="button" class="btn btn-sm btn-outline-secondary"
-                                data-trace-device-picker="{{ device.key }}"
-                                data-trace-device-label="{{ device.label }}">Change Device</button>
+                        <div class="ndi-trace-action">
+                          <button type="button" class="btn btn-sm btn-outline-secondary"
+                                  data-trace-device-picker="{{ device.key }}" {% if not device.action_allowed %}disabled{% endif %}
+                                  data-trace-device-label="{{ device.label }}"
+                                  {% if not device.action_allowed %}aria-describedby="deviceReasonSettled{{ forloop.counter }}"{% endif %}>Change Device</button>
+                          {% if not device.action_allowed %}
+                            <div class="ndi-trace-reason" id="deviceReasonSettled{{ forloop.counter }}">{{ device.action_reason }}</div>
+                          {% endif %}
+                        </div>
                       </td>
                     </tr>
                   {% endfor %}

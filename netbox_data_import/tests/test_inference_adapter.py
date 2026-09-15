@@ -15,6 +15,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -335,6 +336,39 @@ class ModelDiscoveryTest(SimpleTestCase):
 
         self.assertEqual(len(models), MODEL_DISCOVERY_LIMIT)
         self.assertEqual(models[-1], f"model-{MODEL_DISCOVERY_LIMIT - 1:03}")
+
+    def test_an_oversized_model_response_is_rejected(self):
+        payload = {"data": [{"id": "model-a"}], "padding": "x" * 65_536}
+        with serving(models_payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertIn("too large", str(caught.exception))
+
+    def test_an_oversized_model_response_is_closed(self):
+        class TrackingResponse(requests.Response):
+            was_closed = False
+
+            def close(self):
+                self.was_closed = True
+                super().close()
+
+        response = TrackingResponse()
+        response.status_code = 200
+        response.raw = BytesIO(b"x" * 65_537)
+        session = requests.Session()
+
+        def request(_method, _url, **kwargs):
+            for hook in kwargs["hooks"]["response"]:
+                hook(response)
+            return response
+
+        session.request = request
+
+        with self.assertRaises(MalformedEnvelope):
+            adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"], session=session).discover_models(API_KEY)
+
+        self.assertTrue(response.was_closed)
 
     def test_unusable_model_ids_are_not_offered(self):
         payload = {"data": [{"id": " valid "}, {"id": "line\nbreak"}, {"id": "x" * 201}, {"id": "valid"}]}

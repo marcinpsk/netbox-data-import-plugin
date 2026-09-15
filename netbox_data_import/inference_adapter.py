@@ -19,7 +19,12 @@ from contextlib import suppress
 import requests
 from urllib3.exceptions import ReadTimeoutError
 
-from .inference_transport import ResponseProcessingFailure, is_preconnect_failure, request_to_resolved_address
+from .inference_transport import (
+    ResponseBodyTooLarge,
+    ResponseProcessingFailure,
+    is_preconnect_failure,
+    request_to_resolved_address,
+)
 from .inference_settings import MODEL_MAX_LENGTH
 from .inference_trust import (
     InvalidInferenceConfiguration,
@@ -31,6 +36,7 @@ from .inference_trust import (
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 MODELS_PATH = "/models"
 MODEL_DISCOVERY_LIMIT = 100
+MODEL_DISCOVERY_RESPONSE_LIMIT = 65_536
 DIAGNOSTIC_TEXT_LIMIT = 4096
 
 # Section 8.4 rejects every other terminal reason: only a completed answer is a completion.
@@ -285,6 +291,14 @@ class OpenAICompatibleAdapter:
                     **kwargs,
                 )
             except ResponseProcessingFailure as exc:
+                if isinstance(exc.cause, ResponseBodyTooLarge):
+                    raise MalformedEnvelope(
+                        "The backend response is too large.",
+                        diagnostic=ResponseDiagnostic(
+                            receipt=BODY_INTERRUPTED,
+                            status_code=exc.response.status_code,
+                        ),
+                    ) from None
                 if isinstance(exc.cause, ValueError):
                     raise InvalidBackendConfiguration(
                         f"The backend answered with a location this delivery cannot use ({type(exc.cause).__name__}).",
@@ -366,7 +380,12 @@ class OpenAICompatibleAdapter:
 
     def discover_models(self, api_key: str) -> tuple[str, ...]:
         """Return bounded model-id suggestions from a compatible optional models endpoint."""
-        response = self._send("GET", MODELS_PATH, api_key)
+        response = self._send(
+            "GET",
+            MODELS_PATH,
+            api_key,
+            response_body_limit=MODEL_DISCOVERY_RESPONSE_LIMIT,
+        )
         diagnostic = self._raise_for_status(response, api_key)
         if diagnostic.redacted:
             raise MalformedEnvelope("The backend model list contained credential material.", diagnostic=diagnostic)

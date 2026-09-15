@@ -177,6 +177,23 @@ class ConnectionTestResultTest(TestCase):
         self.assertEqual(result.category, "invalid_response")
         self.assertNotIn(SECRET, json.dumps(asdict(result)))
 
+    def test_a_refused_or_empty_completion_does_not_pass_the_connection_test(self):
+        payloads = (
+            completion(content=None, message={"refusal": "cannot answer"}),
+            completion(content="  "),
+        )
+        for index, payload in enumerate(payloads):
+            with self.subTest(index=index):
+                with serving_backend(payload=payload) as (root, _seen, allowlist):
+                    backend_key = f"primary-{index}"
+                    row = make_row(api_root=root, backend_key=backend_key, enabled=index == 0)
+                    with vault() as vault_settings:
+                        with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                            result = run_connection_test(row.pk, backend_key)
+
+                self.assertEqual(result.category, "invalid_response")
+                self.assertIn("did not return an answer", result.detail)
+
     def test_a_denied_read_reports_credential_denied(self):
         row = make_row()
         with vault(status=403, payload={"errors": ["denied"]}) as vault_settings:

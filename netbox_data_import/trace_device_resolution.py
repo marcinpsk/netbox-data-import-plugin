@@ -161,6 +161,14 @@ def _target_devices(reader):
     return devices
 
 
+def _canonical_name_ids(queryset, values: Iterable[Any]) -> set[int]:
+    """Return IDs whose names match one canonical identity value."""
+    wanted = {identity_text(value) for value in values}
+    if not wanted:
+        return set()
+    return {pk for pk, name in queryset.values_list("pk", "name").iterator() if identity_text(name) in wanted}
+
+
 def resolve_trace_devices(
     *,
     profile,
@@ -184,11 +192,10 @@ def resolve_trace_devices(
             raise ValueError("A Trace Device Resolution digest does not match its source Device key.")
         stored[row.source_device_key] = row
 
-    lookup = Q(pk__in=[row.selected_device_id for row in stored.values()])
-    for key in keys:
-        if key not in stored:
-            lookup |= Q(name__iexact=key)
-    devices = _target_devices(reader).filter(lookup)
+    target_devices = _target_devices(reader)
+    device_ids = {row.selected_device_id for row in stored.values()}
+    device_ids.update(_canonical_name_ids(target_devices, (key for key in keys if key not in stored)))
+    devices = target_devices.filter(pk__in=device_ids)
     if lock_rows:
         devices = devices.order_by("pk").select_for_update(of=("self",))
     by_id = {}
@@ -269,18 +276,8 @@ def _matching_placement_ids(reader, evidence: DeviceEvidence):
     if reader.site is not None:
         racks = racks.filter(site=reader.site)
         locations = locations.filter(site=reader.site)
-    wanted_racks = [identity_text(value) for value in evidence.racks]
-    wanted_locations = [identity_text(value) for value in evidence.locations]
-    rack_match = Q()
-    for value in wanted_racks:
-        rack_match |= Q(name__iexact=value)
-    location_match = Q()
-    for value in wanted_locations:
-        location_match |= Q(name__iexact=value)
-    matching_racks = set(racks.filter(rack_match).values_list("pk", flat=True)) if wanted_racks else set()
-    matching_locations = (
-        set(locations.filter(location_match).values_list("pk", flat=True)) if wanted_locations else set()
-    )
+    matching_racks = _canonical_name_ids(racks, evidence.racks)
+    matching_locations = _canonical_name_ids(locations, evidence.locations)
     racks_in_matching_locations = set(racks.filter(location_id__in=matching_locations).values_list("pk", flat=True))
     return matching_racks, matching_locations, racks_in_matching_locations
 
@@ -325,9 +322,10 @@ def eligible_trace_devices(
     if search:
         devices = devices.filter(name__icontains=search)
     matching_racks, matching_locations, racks_in_matching_locations = _matching_placement_ids(reader, evidence)
+    exact_ids = _canonical_name_ids(devices, (evidence.key,))
     positions = [source_position(value) for value in evidence.u_positions]
     positions = [Decimal(str(value)) for value in positions if value is not None]
-    exact = Case(When(name__iexact=evidence.key, then=Value(1)), default=Value(0), output_field=IntegerField())
+    exact = Case(When(pk__in=exact_ids, then=Value(1)), default=Value(0), output_field=IntegerField())
     rack_score = Case(When(rack_id__in=matching_racks, then=Value(1)), default=Value(0), output_field=IntegerField())
     location_score = Case(
         When(Q(location_id__in=matching_locations) | Q(rack_id__in=racks_in_matching_locations), then=Value(1)),

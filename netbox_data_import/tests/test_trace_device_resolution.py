@@ -113,6 +113,15 @@ class TraceDeviceResolutionPlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
         self.assertNotIn("trace.device_unresolved", self.codes(unit))
 
+    def test_a_canonical_name_match_collapses_device_name_whitespace(self):
+        self.device_a.name = "Source  Alias"
+        self.device_a.save(update_fields=("name",))
+
+        unit = self.unit(self.alias_path("Source Alias"))
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertNotIn("trace.device_unresolved", self.codes(unit))
+
     def test_a_stale_saved_choice_does_not_fall_back_to_a_new_exact_name_match(self):
         self.save_alias()
         self.device_a.delete()
@@ -181,6 +190,32 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
         self.assertEqual(page.candidates[0].matched_hints, ("location", "rack", "U position"))
         self.assertEqual(outcome.state, UNRESOLVED)
         self.assertIsNone(outcome.device)
+
+    def test_canonical_device_name_matching_has_priority_in_candidate_ranking(self):
+        exact = self.make_device("Source  Alias")
+
+        page = eligible_trace_devices(reader=self.reader(), evidence=self.evidence, limit=20)
+
+        self.assertEqual(page.candidates[0].device, exact)
+        self.assertIn("name", page.candidates[0].matched_hints)
+
+    def test_canonical_placement_names_contribute_to_candidate_ranking(self):
+        self.location.name = "Trace  Room"
+        self.location.save(update_fields=("name",))
+        self.rack.name = "Trace  Rack"
+        self.rack.save(update_fields=("name",))
+        evidence = DeviceEvidence(
+            key="source alias",
+            labels=("Source Alias",),
+            locations=("Trace Room",),
+            racks=("Trace Rack",),
+            u_positions=(),
+        )
+
+        page = eligible_trace_devices(reader=self.reader(), evidence=evidence, limit=20)
+
+        self.assertEqual(page.candidates[0].device, self.hinted)
+        self.assertEqual(page.candidates[0].matched_hints, ("location", "rack"))
 
     def test_hidden_rack_and_location_do_not_affect_candidate_explanations(self):
         actor = user_with_object_permission(
@@ -439,3 +474,42 @@ class TraceDeviceResolutionPermissionTest(CableTopologyMixin, TestCase):
 
         existing.refresh_from_db()
         self.assertEqual(existing.selected_device_id, self.device_a.pk)
+
+    def test_the_workspace_disables_device_actions_without_resolution_write_permission(self):
+        from django.contrib.contenttypes.models import ContentType
+        from users.models import ObjectPermission
+
+        TraceDeviceResolution.objects.create(
+            profile=self.profile,
+            source_device_key="dev-b",
+            selected_device_id=self.device_b.pk,
+            selected_display_name=str(self.device_b),
+        )
+        self.client.force_login(self.actor)
+        block = direct_path(
+            from_end=trace_termination("Source Alias", "", "eth0", "Port"),
+            to_end=trace_termination("DEV-B", "", "eth1", "Port"),
+        )
+        upload = BytesIO(trace_workbook_bytes(path_blocks=(block,)))
+        upload.name = "trace-permissions.xlsx"
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+        )
+        self.actor.is_superuser = False
+        self.actor.save(update_fields=("is_superuser",))
+        broad_permission = ObjectPermission.objects.create(
+            name="Trace workspace except Device resolution writes",
+            actions=["view", "add", "change", "delete"],
+            constraints={},
+        )
+        trace_resolution_type = ContentType.objects.get_for_model(TraceDeviceResolution)
+        broad_permission.object_types.add(*ContentType.objects.exclude(pk=trace_resolution_type.pk))
+        broad_permission.users.add(self.actor)
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "You do not have permission to save a Device resolution.")
+        self.assertContains(response, 'data-trace-device-picker="source alias" disabled')
+        self.assertContains(response, 'data-trace-device-picker="dev-b" disabled')
