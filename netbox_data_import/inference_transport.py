@@ -3,19 +3,68 @@
 """Address-pinned HTTP transport for inference and credential requests."""
 
 import ipaddress
+import time
 
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from dataclasses import dataclass
 from threading import Lock, RLock
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
 import requests
 from urllib3.exceptions import MaxRetryError, NewConnectionError
+from urllib3.util import Timeout as Urllib3Timeout
 
 
 _SESSION_LOCKS: WeakKeyDictionary[requests.Session, RLock] = WeakKeyDictionary()
 _SESSION_LOCKS_GUARD = Lock()
+_DEADLINE_WORKERS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="inference-deadline")
+_Result = TypeVar("_Result")
+
+
+class WallClockDeadlineExceeded(requests.Timeout):
+    """One foreground operation exhausted its shared wall-clock budget."""
+
+
+@dataclass(frozen=True)
+class WallClockDeadline:
+    """Share one time budget across DNS and every HTTP request in an operation."""
+
+    expires_at: float
+
+    @classmethod
+    def after(cls, seconds: float) -> "WallClockDeadline":
+        """Return a deadline that expires after the supplied positive interval."""
+        if seconds <= 0:
+            raise ValueError("A wall-clock deadline must be positive.")
+        return cls(time.monotonic() + seconds)
+
+    def remaining(self) -> float:
+        """Return the remaining seconds, or fail when the shared budget is exhausted."""
+        remaining = self.expires_at - time.monotonic()
+        if remaining <= 0:
+            raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.")
+        return remaining
+
+    def request_timeout(self, timeout: tuple[float, float]) -> Urllib3Timeout:
+        """Cap one Requests connect and initial read to the remaining shared budget."""
+        remaining = self.remaining()
+        return Urllib3Timeout(
+            total=remaining,
+            connect=min(timeout[0], remaining),
+            read=min(timeout[1], remaining),
+        )
+
+    def run(self, operation: Callable[..., _Result], *args: Any, **kwargs: Any) -> _Result:
+        """Run a blocking operation without letting it hold the caller past the deadline."""
+        future = _DEADLINE_WORKERS.submit(operation, *args, **kwargs)
+        try:
+            return future.result(timeout=self.remaining())
+        except FutureTimeoutError:
+            future.cancel()
+            raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
 
 
 class ResponseProcessingFailure(requests.RequestException):
@@ -47,7 +96,35 @@ def _session_lock(session: requests.Session) -> RLock:
         if lock is None:
             lock = RLock()
             _SESSION_LOCKS[session] = lock
-        return lock
+    return lock
+
+
+def _consume_response(response, response_body_limit, deadline: WallClockDeadline | None) -> None:
+    """Read one response under its size and wall-clock limits."""
+    chunks = bytearray()
+    chunk_size = 1 if deadline is not None else min(response_body_limit + 1, 65_536)
+    iterator = response.iter_content(chunk_size=chunk_size)
+    while True:
+        if deadline is not None:
+            remaining = deadline.remaining()
+            connection = getattr(response.raw, "connection", None)
+            sock = getattr(connection, "sock", None)
+            if sock is not None:
+                sock.settimeout(remaining)
+        try:
+            chunk = next(iterator)
+        except StopIteration:
+            break
+        if not chunk:
+            continue
+        chunks.extend(chunk)
+        if response_body_limit is not None and len(chunks) > response_body_limit:
+            response.close()
+            raise ResponseBodyTooLarge(f"The response body exceeded {response_body_limit} bytes.", response=response)
+    if deadline is not None:
+        deadline.remaining()
+    response._content = bytes(chunks)
+    response._content_consumed = True
 
 
 class _AddressPinnedAdapter(requests.adapters.HTTPAdapter):
@@ -98,12 +175,13 @@ def request_to_resolved_address(
     url: str,
     resolved_address: str,
     response_body_limit: int | None = None,
+    deadline: WallClockDeadline | None = None,
     **kwargs: Any,
 ) -> requests.Response:
     """Send one request to a resolved address without changing its HTTP or TLS hostname."""
-    if response_body_limit is not None:
-        if response_body_limit < 1:
-            raise ValueError("A response body limit must be positive.")
+    if response_body_limit is not None and response_body_limit < 1:
+        raise ValueError("A response body limit must be positive.")
+    if response_body_limit is not None or deadline is not None:
         kwargs["stream"] = True
     with _session_lock(session):
         previous_adapters = OrderedDict(session.adapters)
@@ -125,24 +203,14 @@ def request_to_resolved_address(
         session.mount(url, adapter)
         try:
             try:
+                if deadline is not None:
+                    kwargs["timeout"] = deadline.request_timeout(kwargs["timeout"])
                 response = session.request(method, url, hooks=hooks, **kwargs)
-                if response_body_limit is not None:
-                    chunks = []
-                    received = 0
-                    for chunk in response.iter_content(chunk_size=min(response_body_limit + 1, 65_536)):
-                        if not chunk:
-                            continue
-                        received += len(chunk)
-                        if received > response_body_limit:
-                            response.close()
-                            raise ResponseBodyTooLarge(
-                                f"The response body exceeded {response_body_limit} bytes.", response=response
-                            )
-                        chunks.append(chunk)
-                    response._content = b"".join(chunks)
-                    response._content_consumed = True
+                if response_body_limit is not None or deadline is not None:
+                    _consume_response(response, response_body_limit, deadline)
             except (ValueError, requests.RequestException) as exc:
                 if captured_response is not None:
+                    captured_response.close()
                     raise ResponseProcessingFailure(exc, captured_response) from exc
                 raise
             else:
@@ -156,6 +224,8 @@ def request_to_resolved_address(
 __all__ = (
     "ResponseBodyTooLarge",
     "ResponseProcessingFailure",
+    "WallClockDeadline",
+    "WallClockDeadlineExceeded",
     "is_preconnect_failure",
     "request_to_resolved_address",
 )

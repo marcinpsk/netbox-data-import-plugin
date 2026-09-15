@@ -459,6 +459,53 @@ class TargetModuleDatabaseEdgeTest(TestCase):
         self.assertEqual(blocked.disposition, Disposition.BLOCKED)
         self.assertEqual(blocked.diagnostics[0].code, "device.add_permission")
 
+    def test_device_validation_precedes_create_and_update_permission_diagnostics(self):
+        """An invalid Device needs data repair, not a wider add or change grant."""
+        from dcim.models import Device, Rack
+
+        actor = user_with_object_permission(
+            "device-edge-invalid-writer",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add", "change"], {"serial": "permitted"}),
+            ],
+        )
+        invalid_serial = "x" * 101
+
+        create = self._plan_device(
+            actor,
+            self._device_row(
+                source_id="INVALID-DEVICE-CREATE", device_name="invalid-device-create", serial=invalid_serial
+            ),
+        )
+
+        stored = Device.objects.create(
+            name="invalid-device-update",
+            site=self.site,
+            rack=self.rack,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="INVALID-DEVICE-UPDATE",
+            netbox_device_id=stored.pk,
+            device_name=stored.name,
+        )
+        update = self._plan_device(
+            actor,
+            self._device_row(
+                source_id="INVALID-DEVICE-UPDATE",
+                device_name=stored.name,
+                serial=invalid_serial,
+            ),
+        )
+
+        for unit in (create, update):
+            self.assertEqual(unit.disposition, Disposition.INVALID)
+            self.assertEqual(unit.diagnostics[0].code, "device.validation_failed")
+
     def test_device_create_permission_is_checked_with_planned_relations(self):
         """Device permission checks see the exact planned Rack and Device Role."""
         from dcim.models import Device, DeviceRole, Rack

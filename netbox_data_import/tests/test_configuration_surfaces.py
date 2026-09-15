@@ -1175,6 +1175,43 @@ class ProfileYamlPermissionTest(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(mapping.role_slug, "old-role")
 
+    def test_import_cannot_resolve_a_hidden_policy_natural_key(self):
+        """A hidden Rack Type behaves like a missing slug and cannot become a mapping relation."""
+        from dcim.models import RackType
+
+        _site, manufacturer, _device_type, _role = make_dcim_objects("YAMLHiddenNaturalKey")
+        rack_type = RackType.objects.create(
+            manufacturer=manufacturer,
+            model="Hidden Rack",
+            slug="hidden-rack",
+            u_height=42,
+        )
+        actor = user_with_object_permission(
+            "profile-yaml-hidden-natural-key",
+            [
+                (ImportProfile, ["change"], {"pk": self.allowed.pk}),
+                (ClassRoleMapping, ["add"], {}),
+            ],
+        )
+
+        response = self._post_document(
+            actor,
+            {
+                "profile": {"name": self.allowed.name, "adapter_config": {}},
+                "class_role_mappings": [
+                    {
+                        "source_class": "Cabinet",
+                        "creates_rack": True,
+                        "rack_type": rack_type.slug,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Rack Type with slug &#x27;hidden-rack&#x27; not found")
+        self.assertFalse(ClassRoleMapping.objects.filter(profile=self.allowed, source_class="Cabinet").exists())
+
     def test_import_updates_a_released_policy_row_with_standard_change_permission(self):
         """An internal release and reinsert remains one logical change permission operation."""
         rule = ColumnTransformRule.objects.create(

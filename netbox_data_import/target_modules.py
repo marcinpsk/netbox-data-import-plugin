@@ -1810,14 +1810,14 @@ class DeviceModule:
             candidate, validation = self._validated_candidate(None, payload, batch.profile)
             prospective_relations = _planned_device_relations(payload, dependencies)
             prospective_relations.update(_prospective_ip_relations(candidate, payload["ip_fields"]))
+            if validation:
+                problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
             if actor is not None and not _candidate_save_is_allowed(
                 actor,
                 candidate,
                 prospective_relations,
             ):
                 problem(Disposition.BLOCKED, "device.add_permission")
-            if validation:
-                problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
             if issues:
                 return _with_issues(identity, issues)
             batch.commit_claim(row, claim)
@@ -1934,10 +1934,10 @@ class DeviceModule:
         candidate, validation = self._validated_candidate(match.device, payload, batch.profile)
         prospective_relations = _planned_device_relations(payload, dependencies)
         prospective_relations.update(_prospective_ip_relations(candidate, payload["ip_fields"]))
-        if actor is not None and not _candidate_save_is_allowed(actor, candidate, prospective_relations):
-            problem(Disposition.BLOCKED, "device.change_permission")
         if validation:
             problem(Disposition.INVALID, "device.validation_failed", {"message": validation})
+        if actor is not None and not _candidate_save_is_allowed(actor, candidate, prospective_relations):
+            problem(Disposition.BLOCKED, "device.change_permission")
         if issues:
             return _with_issues(identity, issues)
         batch.commit_claim(row, claim)

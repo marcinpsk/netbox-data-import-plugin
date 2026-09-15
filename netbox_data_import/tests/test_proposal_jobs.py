@@ -324,6 +324,23 @@ class ProposalWorkerTest(WorkerFixture, ProposalFixture):
                 self.assert_failure(proposal, reason, seen, 1, status, "rejected")
                 proposal.delete()
 
+    def test_a_300_completion_cannot_complete_a_proposal(self):
+        """Only a successful HTTP status can produce a persisted proposal answer."""
+        proposal = self.frozen_proposal()
+        payload = completion(answer())
+
+        with serving(status=300, payload=payload) as (root, seen, allowed), self.configured(root, allowed):
+            run_proposal(proposal.pk)
+
+        self.assert_failure(
+            proposal,
+            ProposalFailureReason.INVALID_CONFIGURATION,
+            seen,
+            1,
+            300,
+            json.dumps(payload),
+        )
+
     def test_cancelled_claim_sends_no_request(self):
         proposal = self.frozen_proposal()
         self.assertTrue(cancel_proposal(proposal.pk))

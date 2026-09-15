@@ -1112,6 +1112,9 @@ result: `ok`, `credential_unavailable`, `credential_denied`, `invalid_credential
 a secret value, a Vault response body, or Inference Backend response text, and it creates no native
 NetBox Job.
 
+The backend connect timeout plus its read timeout forms one wall-clock deadline for the foreground
+test. Credential resolution, model discovery, completion, DNS, and response reads share this deadline.
+
 A compatible `GET {api_root}/models` response can provide at most 100 unique model ids of at most the
 stored model field length. These ids are one-use edit suggestions. The picker opens the normal edit
 form with the selected value, so standard validation, permissions, change logging, and explicit save

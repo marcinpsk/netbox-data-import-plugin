@@ -22,6 +22,8 @@ from urllib3.exceptions import ReadTimeoutError
 from .inference_transport import (
     ResponseBodyTooLarge,
     ResponseProcessingFailure,
+    WallClockDeadline,
+    WallClockDeadlineExceeded,
     is_preconnect_failure,
     request_to_resolved_address,
 )
@@ -220,6 +222,7 @@ class OpenAICompatibleAdapter:
         connect_timeout: int = 5,
         read_timeout: int = 60,
         session: "requests.Session | None" = None,
+        deadline: WallClockDeadline | None = None,
     ):
         # Verbatim: normalizing here would pass the request-time recheck a value the form refuses.
         self.api_root = api_root
@@ -230,6 +233,7 @@ class OpenAICompatibleAdapter:
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
         self._session = session or requests.Session()
+        self._deadline = deadline
 
     def _check_response_mode(self, request: InferenceRequest) -> None:
         """Reject a request for a mode this backend is not configured to serve."""
@@ -262,8 +266,14 @@ class OpenAICompatibleAdapter:
         """Return all approved addresses, rechecking the destination at request time."""
         try:
             validate_api_root(self.api_root, self.allowlist, self.authentication)
-            addresses = resolve_addresses(self.api_root)
+            addresses = (
+                resolve_addresses(self.api_root)
+                if self._deadline is None
+                else self._deadline.run(resolve_addresses, self.api_root)
+            )
             assert_resolved_address_allowed(self.api_root, self.allowlist, addresses)
+        except WallClockDeadlineExceeded:
+            raise BackendTimeout("The connection test exceeded its overall time limit.") from None
         except InvalidInferenceConfiguration as exc:
             raise InvalidBackendConfiguration(str(exc)) from None
         return addresses
@@ -286,6 +296,7 @@ class OpenAICompatibleAdapter:
                     resolved_address,
                     headers=headers,
                     timeout=(self.connect_timeout, self.read_timeout),
+                    deadline=self._deadline,
                     # A redirect is a different destination, so it is refused rather than followed.
                     allow_redirects=False,
                     **kwargs,
@@ -353,7 +364,7 @@ class OpenAICompatibleAdapter:
         """Return a safe diagnostic for success, or raise the typed HTTP failure."""
         diagnostic = _diagnostic(response, api_key)
         status = response.status_code
-        if status in (301, 302, 303, 307, 308):
+        if 300 <= status < 400:
             raise InvalidBackendConfiguration(
                 f"The backend redirected the call (HTTP {status}), which is not followed.", diagnostic=diagnostic
             )

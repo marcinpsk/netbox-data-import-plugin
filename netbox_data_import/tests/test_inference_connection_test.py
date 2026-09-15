@@ -5,10 +5,12 @@
 import json
 import pathlib
 import socket
+import threading
+import time
 
 from contextlib import contextmanager
 from dataclasses import asdict
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from tempfile import TemporaryDirectory
 
 from django.contrib.auth import get_user_model
@@ -22,7 +24,11 @@ from netbox_data_import.inference_connection_test import (
 from netbox_data_import.models import InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.inference_http import issue_server_certificate, serving_tls
-from netbox_data_import.tests.test_inference_adapter import completion, serving as serving_backend
+from netbox_data_import.tests.test_inference_adapter import (
+    RecordingBackend,
+    completion,
+    serving as serving_backend,
+)
 
 SECRET = "sk-connection-test-secret"
 REFERENCE = {"backend": "vault_kv_v2", "mount": "secret", "path": "inference/backend", "field": "api_key"}
@@ -37,6 +43,7 @@ class Vault(BaseHTTPRequestHandler):
 
     status = 200
     payload: object = {"data": {"data": {"api_key": SECRET}}}
+    byte_delay = 0.0
 
     def do_GET(self):
         SEEN_PATHS.append(self.path)
@@ -46,14 +53,23 @@ class Vault(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        if not self.byte_delay:
+            self.wfile.write(encoded)
+            return
+        for byte in encoded:
+            try:
+                self.wfile.write(bytes((byte,)))
+                self.wfile.flush()
+            except OSError:
+                break
+            time.sleep(self.byte_delay)
 
     def log_message(self, *args):
         """Keep the test output quiet."""
 
 
 @contextmanager
-def vault(status=200, payload=None):
+def vault(status=200, payload=None, *, byte_delay=0.0):
     """Run a Vault stand-in on loopback and yield the vault settings that reach it."""
 
     class Handler(Vault):
@@ -61,6 +77,7 @@ def vault(status=200, payload=None):
 
     Handler.status = status
     Handler.payload = {"data": {"data": {"api_key": SECRET}}} if payload is None else payload
+    Handler.byte_delay = byte_delay
     SEEN_PATHS.clear()
     with TemporaryDirectory() as temporary:
         ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
@@ -72,6 +89,43 @@ def vault(status=200, payload=None):
                 "connect_timeout": 2,
                 "read_timeout": 2,
             }
+
+
+@contextmanager
+def slow_drip_backend():
+    """Send a valid completion one byte at a time without triggering an inactivity timeout."""
+
+    class Handler(RecordingBackend):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            encoded = json.dumps(completion()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            for byte in encoded:
+                try:
+                    self.wfile.write(bytes((byte,)))
+                    self.wfile.flush()
+                except OSError:
+                    break
+                time.sleep(0.1)
+
+    Handler.models_status = 404
+    Handler.models_payload = {"detail": "not found"}
+    Handler.seen = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        root = f"http://127.0.0.1:{port}"
+        yield root, [root]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def make_row(**overrides):
@@ -217,6 +271,15 @@ class ConnectionTestResultTest(TestCase):
                 result = run_connection_test(row.pk, "primary")
 
             self.assertEqual(result.category, "credential_unavailable")
+
+    def test_a_vault_response_that_exceeds_the_shared_deadline_reports_timeout(self):
+        row = make_row(connect_timeout=1, read_timeout=1)
+
+        with vault(byte_delay=0.1) as vault_settings:
+            with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "timeout")
 
     def test_a_missing_ca_bundle_reports_invalid_configuration(self):
         row = make_row()
@@ -516,3 +579,25 @@ class BackendDetailPageTest(TestCase):
         self.assertContains(response, "Connection test failed (credential denied)")
         self.assertContains(response, "The credential store refused the read (HTTP 403)")
         self.assertFalse(Job.objects.exists())
+
+    def test_the_foreground_connection_test_has_one_wall_clock_deadline(self):
+        """A backend that keeps bytes moving cannot hold the request past one call budget."""
+        self.row.connect_timeout = 1
+        self.row.read_timeout = 1
+        self.row.save(update_fields=("connect_timeout", "read_timeout"))
+
+        with slow_drip_backend() as (root, allowlist):
+            self.row.api_root = root
+            self.row.save(update_fields=("api_root",))
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    started = time.monotonic()
+                    response = self.client.post(
+                        reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk]),
+                        follow=True,
+                    )
+                    elapsed = time.monotonic() - started
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Connection test failed (timeout)")
+        self.assertLess(elapsed, 6)

@@ -93,7 +93,7 @@ class ResolvedInferenceBackend:
         }
 
 
-def adapter_for_backend(backend: ResolvedInferenceBackend):
+def adapter_for_backend(backend: ResolvedInferenceBackend, *, deadline=None):
     """Build the adapter that both proposal jobs and foreground tests use for this backend."""
     if backend.adapter_type != "openai_compatible":
         raise InvalidInferenceConfiguration(f"Unsupported Inference Backend adapter '{backend.adapter_type}'.")
@@ -107,6 +107,7 @@ def adapter_for_backend(backend: ResolvedInferenceBackend):
         response_mode=backend.response_mode,
         connect_timeout=backend.connect_timeout,
         read_timeout=backend.read_timeout,
+        deadline=deadline,
     )
 
 

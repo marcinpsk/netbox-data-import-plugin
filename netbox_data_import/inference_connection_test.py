@@ -14,6 +14,7 @@ from .inference_adapter import InferenceBackendError, InferenceRequest
 from .inference_backend import NoActiveInferenceBackend, adapter_for_backend, resolve_backend_by_id
 from .inference_credentials import CredentialFailure, credential_backend_for
 from .inference_settings import VAULT_SETTING, InvalidInferenceConfiguration
+from .inference_transport import WallClockDeadline, WallClockDeadlineExceeded
 
 CONNECTION_TEST_CATEGORIES = (
     "ok",
@@ -55,7 +56,9 @@ def run_connection_test(pk: int, backend_key: str) -> ConnectionTestResult:
     """Resolve the authorized row's credential and report with its display key."""
     try:
         backend = resolve_backend_by_id(pk)
-        adapter = adapter_for_backend(backend)
+        # Model discovery is optional, so the whole foreground test gets one normal-call budget.
+        deadline = WallClockDeadline.after(backend.connect_timeout + backend.read_timeout)
+        adapter = adapter_for_backend(backend, deadline=deadline)
     except NoActiveInferenceBackend:
         return ConnectionTestResult(
             "invalid_configuration", f"Inference Backend '{backend_key}' no longer exists.", backend_key
@@ -68,8 +71,19 @@ def run_connection_test(pk: int, backend_key: str) -> ConnectionTestResult:
     from .inference_backend import plugin_settings
 
     try:
-        with credential_backend_for(backend.credential_reference, plugin_settings().get(VAULT_SETTING, {})) as store:
+        with credential_backend_for(
+            backend.credential_reference,
+            plugin_settings().get(VAULT_SETTING, {}),
+            deadline=deadline,
+        ) as store:
             api_key = store.resolve(backend.credential_reference)
+    except WallClockDeadlineExceeded:
+        return ConnectionTestResult(
+            "timeout",
+            "The connection test exceeded its overall time limit.",
+            backend_key,
+            backend.source,
+        )
     except CredentialFailure as exc:
         return ConnectionTestResult(exc.category, str(exc), backend_key, backend.source)
 

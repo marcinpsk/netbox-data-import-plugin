@@ -255,7 +255,7 @@ def apply_profile_document(data: Any, actor=None) -> tuple[ImportProfile, dict[s
             prepared_rows = {}
             for key, rows in section_rows.items():
                 schema = _SCHEMAS_BY_KEY[key]
-                prepared = [_prepare_policy_row(schema, row, index) for index, row in enumerate(rows, 1)]
+                prepared = [_prepare_policy_row(schema, row, index, actor) for index, row in enumerate(rows, 1)]
                 _validate_distinct_policy_identities(schema, prepared)
                 prepared_rows[key] = prepared
             released_updates = {}
@@ -343,7 +343,7 @@ def _validate_section_applicability(profile: ImportProfile, sections: dict[str, 
             raise ValueError(f"Policy section '{key}' does not apply to source adapter '{profile.source_adapter}'.")
 
 
-def _prepare_policy_row(schema: PolicyDocumentSchema, row: dict[str, Any], index: int) -> dict[str, Any]:
+def _prepare_policy_row(schema: PolicyDocumentSchema, row: dict[str, Any], index: int, actor=None) -> dict[str, Any]:
     """Validate one row's keys and resolve its stable related-object references."""
     missing = [field for field in schema.required_fields if field not in row]
     if missing:
@@ -358,9 +358,10 @@ def _prepare_policy_row(schema: PolicyDocumentSchema, row: dict[str, Any], index
             continue
         model_field = schema.model._meta.get_field(natural_key.name)
         related_model = model_field.remote_field.model
+        visible = related_model.objects if actor is None else related_model.objects.restrict(actor, "view")
         value = prepared[natural_key.name]
         try:
-            prepared[natural_key.name] = related_model.objects.get(**{natural_key.lookup: value})
+            prepared[natural_key.name] = visible.get(**{natural_key.lookup: value})
         except related_model.DoesNotExist as exc:
             raise ValueError(
                 f"{schema.key}[{index}]: {related_model._meta.verbose_name.title()} with "

@@ -121,6 +121,9 @@ detail page shows up to 100 model ids. Select one to open the normal edit form w
 the value and save the form. Model discovery is optional. If the endpoint does not support it, enter
 the exact model id manually.
 
+The foreground test has one overall time limit. The limit is the backend connect timeout plus its read
+timeout. Credential resolution, model discovery, and the completion request share this time.
+
 ## Native primary contacts
 
 Map the source contact column to the `primary_contact` target field. Then configure these fields on the Import Profile:
