@@ -436,7 +436,8 @@ class _CableBatch:
         self._occupied: dict[tuple[str, int], _ExistingCable] = {}
         self._mapping_rows: dict[str, Any] | None = None
         self._stored = self._stored_resolutions()
-        self._device_evidence = collect_trace_device_evidence(traces)
+        active_traces = (analysis.trace for analysis in self.analyses if not analysis.stopped)
+        self._device_evidence = collect_trace_device_evidence(active_traces)
         self._device_resolutions = resolve_trace_devices(
             profile=self.profile,
             reader=self.reader,

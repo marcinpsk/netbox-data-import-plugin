@@ -6,6 +6,7 @@ import json
 import secrets
 import uuid
 from contextlib import suppress
+from dataclasses import replace
 from io import BytesIO
 
 from core.models import ObjectType
@@ -26,6 +27,7 @@ from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from extras.models import Tag
 
+from netbox_data_import.adapters import SourceBatch, TraceWorkbookAdapter
 from netbox_data_import.cable_target import CableModule, eligible_terminations
 from netbox_data_import.field_keys import (
     MAPPED_PEER_ROLE,
@@ -697,6 +699,39 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
         self.assertIn("trace.device_unresolved", self.codes(unit))
+
+    def test_an_invalid_trace_does_not_supply_device_evidence_to_a_valid_trace(self):
+        """The Source Batch excludes invalid adapter evidence before Cable planning resolves it."""
+        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        trace = parsed.rows[0]
+        summary = trace.endpoint_summary
+        valid = replace(
+            trace,
+            endpoint_summary=replace(
+                summary,
+                from_termination=replace(summary.from_termination, rack="Valid Rack"),
+            ),
+        )
+        invalid = replace(
+            trace,
+            identity="invalid-trace",
+            endpoint_summary=replace(
+                summary,
+                from_termination=replace(summary.from_termination, rack="Invalid Rack"),
+                to_termination=replace(summary.to_termination, device=""),
+            ),
+            segments=(),
+        )
+        batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(valid, invalid))
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+
+        valid_unit, invalid_unit = CableModule().plan(batch, self.profile, None, reader)
+        device_evidence = next(item for item in valid_unit.display["trace"]["devices"] if item["key"] == "dev-a")
+
+        self.assertEqual(valid_unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(device_evidence["racks"], ("Valid Rack",))
+        self.assertEqual(invalid_unit.disposition, Disposition.INVALID)
+        self.assertIn("trace.device_required", self.codes(invalid_unit))
 
     def test_endpoint_evidence_only_blocks_when_no_direct_cable_exists(self):
         """A Trace List block states endpoints alone, so nothing proves the physical path."""

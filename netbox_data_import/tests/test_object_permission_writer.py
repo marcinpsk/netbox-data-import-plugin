@@ -27,8 +27,6 @@ from netbox_data_import.models import (
 from netbox_data_import.object_permissions import (
     ObjectPermissionDenied,
     ProspectiveRelation,
-    _prepare_prospective_world,
-    _prospective_row_matches,
     assess_permission_scoped_save,
     assess_permission_scoped_save_option,
     delete_permission_scoped_objects,
@@ -120,36 +118,46 @@ class ProspectiveForeignKeyTargetTest(TransactionTestCase):
             schema_editor.create_model(ProspectiveRootTestModel)
         try:
             saved_target = ProspectiveTargetTestModel.objects.create(code="saved-target")
-            saved_world = _prepare_prospective_world(ProspectiveRootTestModel(), {"target": saved_target})
             planned_target = ProspectiveTargetTestModel(code="planned-target")
-            planned_world = _prepare_prospective_world(ProspectiveRootTestModel(), {"target": planned_target})
+            saved_user = user_with_object_permission(
+                "prospective-saved-target",
+                [(ProspectiveRootTestModel, ["add"], {"target__code": saved_target.code})],
+            )
+            planned_user = user_with_object_permission(
+                "prospective-planned-target",
+                [(ProspectiveRootTestModel, ["add"], {"target_id": planned_target.code})],
+            )
+            generated_key_user = user_with_object_permission(
+                "prospective-generated-key",
+                [(ProspectiveRootTestModel, ["add"], {"target__pk": -1})],
+            )
 
-            self.assertEqual(saved_world.root.target_id, saved_target.code)
-            self.assertTrue(
-                _prospective_row_matches(
-                    None,
-                    ProspectiveRootTestModel,
-                    {"target__code": saved_target.code},
-                    saved_world,
-                )
+            saved_assessment = assess_permission_scoped_save(
+                saved_user,
+                ProspectiveRootTestModel,
+                {},
+                {},
+                prospective_relations={"target": saved_target},
             )
-            self.assertEqual(planned_world.root.target_id, planned_target.code)
-            self.assertTrue(
-                _prospective_row_matches(
-                    None,
-                    ProspectiveRootTestModel,
-                    {"target_id": planned_target.code},
-                    planned_world,
-                )
+            planned_assessment = assess_permission_scoped_save(
+                planned_user,
+                ProspectiveRootTestModel,
+                {},
+                {},
+                prospective_relations={"target": planned_target},
             )
-            self.assertFalse(
-                _prospective_row_matches(
-                    None,
-                    ProspectiveRootTestModel,
-                    {"target__pk": -1},
-                    planned_world,
-                )
+            generated_key_assessment = assess_permission_scoped_save(
+                generated_key_user,
+                ProspectiveRootTestModel,
+                {},
+                {},
+                prospective_relations={"target": planned_target},
             )
+
+            self.assertTrue(saved_assessment.allowed)
+            self.assertTrue(planned_assessment.allowed)
+            self.assertFalse(generated_key_assessment.allowed)
+            self.assertFalse(ProspectiveRootTestModel.objects.exists())
         finally:
             with connection.schema_editor() as schema_editor:
                 schema_editor.delete_model(ProspectiveRootTestModel)
