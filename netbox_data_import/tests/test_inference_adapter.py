@@ -324,6 +324,13 @@ class ModelDiscoveryTest(SimpleTestCase):
             with self.assertRaises(MalformedEnvelope):
                 adapter_for(root, allowlist).discover_models(API_KEY)
 
+    def test_a_models_body_that_is_not_json_is_typed(self):
+        with serving(models_payload="not json") as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).discover_models(API_KEY)
+
+        self.assertIn("not JSON", str(caught.exception))
+
     def test_a_credential_echo_is_never_returned_as_a_model_id(self):
         with serving(models_payload={"data": [{"id": API_KEY}]}) as (root, _seen, allowlist):
             with self.assertRaises(MalformedEnvelope):
@@ -475,6 +482,15 @@ class CompletionParsingTest(SimpleTestCase):
         with self.assertRaises(MalformedEnvelope):
             self.complete(envelope)
 
+    def test_unreadable_choice_members_raise_typed_errors(self):
+        envelopes = (
+            {"choices": ["not an object"]},
+            {"choices": [{"finish_reason": "stop", "message": "not an object"}]},
+        )
+        for envelope in envelopes:
+            with self.subTest(envelope=envelope), self.assertRaises(MalformedEnvelope):
+                self.complete(envelope)
+
 
 class FailureClassificationTest(SimpleTestCase):
     """Each documented backend condition maps to its typed failure class."""
@@ -504,6 +520,11 @@ class FailureClassificationTest(SimpleTestCase):
 
         self.assertEqual(failure.retry_after, 17)
 
+    def test_a_429_ignores_an_invalid_retry_after(self):
+        failure = self.failure(429, headers_out={"Retry-After": "later"})
+
+        self.assertIsNone(failure.retry_after)
+
     def test_a_500_is_a_transport_failure(self):
         self.assertIsInstance(self.failure(500), TransportFailure)
 
@@ -511,6 +532,32 @@ class FailureClassificationTest(SimpleTestCase):
         adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"])
 
         with self.assertRaises(TransportFailure):
+            adapter.complete(REQUEST, api_key=API_KEY)
+
+    def test_a_request_library_failure_is_a_transport_failure(self):
+        session = requests.Session()
+
+        def fail_request(_method, _url, **_kwargs):
+            raise requests.RequestException("request failed")
+
+        session.request = fail_request
+        adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"], session=session)
+
+        with self.assertRaises(TransportFailure) as caught:
+            adapter.complete(REQUEST, api_key=API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_ABSENT)
+
+    def test_connect_timeouts_from_every_address_are_a_backend_timeout(self):
+        session = requests.Session()
+
+        def time_out(_method, _url, **_kwargs):
+            raise requests.ConnectTimeout("connect timed out")
+
+        session.request = time_out
+        adapter = adapter_for("http://127.0.0.1:1", ["http://127.0.0.1:1"], session=session)
+
+        with self.assertRaises(BackendTimeout):
             adapter.complete(REQUEST, api_key=API_KEY)
 
     def test_a_slow_backend_times_out(self):
@@ -815,6 +862,21 @@ class ResponseDiagnosticTest(SimpleTestCase):
         self.assertIsNone(caught.exception.diagnostic.text)
         self.assertTrue(caught.exception.diagnostic.withheld)
         self.assertFalse(caught.exception.diagnostic.truncated)
+
+    def test_an_undecodable_response_body_is_reported_as_interrupted(self):
+        class UndecodableResponse(requests.Response):
+            @property
+            def text(self):
+                raise UnicodeError("cannot decode response")
+
+        response = UndecodableResponse()
+        response.status_code = 500
+
+        with self.assertRaises(TransportFailure) as caught:
+            OpenAICompatibleAdapter._raise_for_status(response, API_KEY)
+
+        self.assertEqual(caught.exception.diagnostic.receipt, BODY_INTERRUPTED)
+        self.assertEqual(caught.exception.diagnostic.status_code, 500)
 
     def test_an_authenticated_body_within_the_prior_budget_is_withheld(self):
         for size in (DIAGNOSTIC_TEXT_LIMIT - 1, DIAGNOSTIC_TEXT_LIMIT):
@@ -1199,6 +1261,16 @@ class AddressPinnedSessionTest(SimpleTestCase):
         self.assertTrue(first_entered.is_set())
         self.assertEqual([response.status_code for response in responses], [200, 200])
         self.assertEqual(maximum_active, 1)
+
+    def test_a_response_body_limit_must_be_positive(self):
+        with self.assertRaisesMessage(ValueError, "response body limit must be positive"):
+            request_to_resolved_address(
+                requests.Session(),
+                "GET",
+                "http://backend.example.invalid/models",
+                "198.18.0.1",
+                response_body_limit=0,
+            )
 
 
 def test_tls_server_context_requires_tls_1_2():
