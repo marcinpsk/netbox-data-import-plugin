@@ -1641,6 +1641,24 @@ manufacturer_mappings:
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Failed to parse YAML:")
 
+    def test_post_rejects_a_duplicate_profile_field(self):
+        yaml_file = BytesIO(
+            b"""profile:
+  name: FirstProfileName
+  name: SecondProfileName
+"""
+        )
+        yaml_file.name = "duplicate-profile-field.yaml"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"),
+            {"yaml_file": yaml_file},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "duplicate mapping key")
+        self.assertFalse(ImportProfile.objects.filter(name__in=("FirstProfileName", "SecondProfileName")).exists())
+
     @override_settings(FILE_UPLOAD_HANDLERS=["netbox_data_import.tests.test_views.UnreadableUploadHandler"])
     def test_yaml_upload_unexpected_read_failure_propagates(self):
         upload = BytesIO(b"profile: {}")
@@ -3655,6 +3673,21 @@ column_mappings:
         resp = self.client.post(self._url(), {"data": ": {{ invalid yaml", "format": "auto"})
         self.assertIn(resp.status_code, [200, 302])
         self.assertNotEqual(resp.status_code, 500)
+
+    def test_duplicate_policy_row_field_is_reported_without_flat_import_fallback(self):
+        duplicate = """profile:
+  name: DuplicatePolicyField
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+    target_field: rack_name
+"""
+
+        response = self.client.post(self._url(), {"data": duplicate}, follow=True)
+
+        self.assertRedirects(response, self._url())
+        self.assertContains(response, "duplicate mapping key")
+        self.assertFalse(ImportProfile.objects.filter(name="DuplicatePolicyField").exists())
 
     def test_post_non_dict_profile_value_shows_error(self):
         """POST with profile: scalar (not a dict) shows error."""

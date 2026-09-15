@@ -1020,9 +1020,10 @@ SecretID, or a TLS verification override.
 **Validation split.** Configuration shape validates at application startup and fails fast: the setting
 names, the field set of `inference_backend`, the `api_root` trust boundary (section 8.3), the
 allowlist entry format, and the permitted `vault.auth_method` values. Credential resolution and
-network liveness never run at startup; they fail at request time in the worker, with the typed reasons
-in section 13.3. A malformed `inference_backend` mapping is an `invalid_configuration` failure, never
-a silent fallback to a different backend.
+network liveness never run at startup. They fail at request time in the process that sends the
+outbound request: the proposal worker or the foreground connection-test web process. Section 13.3
+defines the typed reasons. A malformed `inference_backend` mapping is an `invalid_configuration`
+failure, never a silent fallback to a different backend.
 
 ### 8.3 `api_root` trust boundary
 
@@ -1077,10 +1078,11 @@ Vault Proxy auto-auth is the recommended deployment baseline. The web and worker
 Vault API through the Proxy without possessing the token. Direct Vault access is a valid deployment
 variant, but this delivery does not implement direct AppRole login.
 
-Resolution happens in the inference worker, once per outbound inference attempt. The plugin caches no
-API-key value. Key rotation takes effect on the next resolution. An already running HTTP request
-continues with the value it received. The system never silently replays a possibly accepted inference
-request.
+Resolution happens in the process that sends the request, once per outbound inference attempt. A
+proposal resolves in its worker. A foreground connection test resolves in its web process. The plugin
+caches no API-key value. Key rotation takes effect on the next resolution. An already running HTTP
+request continues with the value it received. The system never silently replays a possibly accepted
+inference request.
 
 ### 8.6 Secrets never persist
 

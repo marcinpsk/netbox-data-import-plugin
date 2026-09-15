@@ -6,7 +6,7 @@ NetBox baseline: v4.6.6
 ## Conclusion
 
 Store only a **credential reference** in provider configuration. Resolve its current value in
-the background worker immediately before an inference request. Do not put the value in a model,
+the NetBox process that is about to send an inference request. Do not put the value in a model,
 form, serializer, profile export, session, job argument, proposal, result, or log.
 
 Use a small credential-provider seam between inference configuration and the HTTP adapter. The
@@ -177,7 +177,7 @@ the inference API key.
 
 ## Rotation and caching
 
-- Resolve the latest KV v2 value in the worker at inference-request time.
+- Resolve the latest KV v2 value in the requesting process at inference-request time.
 - Do not cache API-key values in plugin code for the first implementation.
 - Resolve once per outbound inference attempt, not once per row preview.
 - Do not persist the resolved version or value in a Resolution Proposal.
@@ -194,7 +194,7 @@ idempotency policy.
 
 ## Permissions and audit
 
-Give the NetBox worker identity only `read` capability on the exact KV v2 data path or a narrow
+Give each NetBox process identity only `read` capability on the exact KV v2 data path or a narrow
 provider path prefix. Do not grant `list`, `create`, `update`, `delete`, metadata administration,
 or access to unrelated secrets. Vault policies deny access by default. [Vault policies][vault-policies]
 
@@ -248,16 +248,17 @@ reports only success or a redacted failure category.
   and field syntax. Do not offer a general Vault browser or arbitrary URL fetch.
 - **Excess privilege:** Use one read-only policy for the smallest useful provider path. Do not use
   a root or administrator token.
-- **Worker compromise:** A compromised inference worker can use its live service identity to read
-  allowed secrets. Separate the inference queue and process identity later if the deployment
-  needs a smaller blast radius.
+- **Process compromise:** A compromised NetBox process that resolves inference credentials can use
+  its live service identity to read allowed secrets. Separate the inference queue and process
+  identities later if the deployment needs a smaller blast radius.
 - **Stale fallback:** Never use a previously resolved value, a raw file value, or an environment
   API key when Vault fails unless the operator explicitly selects a different credential backend.
 - **TLS interception:** Trust an explicit CA bundle. Do not disable certificate verification.
 
 ## Unresolved operator decisions
 
-1. Can each NetBox worker deployment run a local Vault Proxy, or must the plugin connect directly?
+1. Can each NetBox process group that resolves inference credentials run a local Vault Proxy, or
+   must the plugin connect directly?
 2. Which platform auth method is available to Vault Proxy? If none is available, how will an
    AppRole SecretID be delivered and rotated?
 3. Which Vault namespace, KV v2 mount, path convention, and field name will operators use?

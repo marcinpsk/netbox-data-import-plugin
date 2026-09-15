@@ -6,10 +6,12 @@ from io import BytesIO
 
 from dcim.models import Device, Interface, Location, Rack
 from django.core.exceptions import ValidationError
+from django.db import connection
 from django.test import TestCase
 from django.urls import reverse
 
-from netbox_data_import.models import ImportProfile, SourceDocument, TraceDeviceResolution
+from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from netbox_data_import.models import ImportProfile, SourceDocument, TerminationResolution, TraceDeviceResolution
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.object_permissions import ObjectPermissionDenied, clear_user_permission_caches
 from netbox_data_import.plan import Disposition
@@ -283,6 +285,22 @@ class TraceDeviceCandidateTest(CableTopologyMixin, TestCase):
         self.assertNotIn("rack", candidate.conflicting_hints)
         self.assertNotIn("location", candidate.conflicting_hints)
 
+    def test_candidate_rows_lock_in_primary_key_order_but_keep_rank_order(self):
+        locked_queries = []
+
+        def capture_locked_query(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if "FOR UPDATE" in sql:
+                locked_queries.append(sql)
+            return result
+
+        with connection.execute_wrapper(capture_locked_query):
+            page = eligible_trace_devices(reader=self.reader(), evidence=self.evidence, limit=20, lock_rows=True)
+
+        self.assertEqual(page.candidates[0].device, self.hinted)
+        self.assertEqual(len(locked_queries), 1)
+        self.assertRegex(locked_queries[0], r'ORDER BY "dcim_device"\."id" ASC FOR UPDATE')
+
 
 class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
     @classmethod
@@ -339,6 +357,79 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             self.device_a.pk,
         )
         self.assertContains(saved, "manually resolved")
+
+    def test_a_preview_lock_rolls_back_the_device_resolution(self):
+        from unittest.mock import patch
+
+        from netbox_data_import.preview_row_actions import PreviewLocked
+
+        response = self.start_alias_preview()
+        revision = response.context["preview_revision"]
+
+        with patch(
+            "netbox_data_import.views.record_recalculated_preview",
+            autospec=True,
+            side_effect=PreviewLocked("A trace synchronization is still running."),
+        ):
+            saved = self.client.post(
+                reverse("plugins:netbox_data_import:trace_resolve_device"),
+                {
+                    "device_key": "source alias",
+                    "device_id": self.device_a.pk,
+                    "search": "DEV-A",
+                    "preview_revision": revision,
+                },
+                headers={"accept": "application/json"},
+            )
+
+        self.assertEqual(saved.status_code, 409)
+        self.assertFalse(TraceDeviceResolution.objects.filter(profile=self.profile).exists())
+
+    def test_the_summary_counts_only_saved_decisions_the_actor_can_view(self):
+        from core.models import ObjectType
+        from dcim.models import Site
+
+        self.start_alias_preview()
+        preview_session = {key: value for key, value in self.client.session.items() if key.startswith("import_")}
+        object_type = ObjectType.objects.get_for_model(Interface)
+        visible_field_key = termination_field_key(device="DEV-A", cards="", port="eth0", kind="interface")
+        hidden_field_key = termination_field_key(device="DEV-B", cards="", port="eth1", kind="interface")
+        for field_key, selected in ((visible_field_key, self.eth0), (hidden_field_key, self.eth1)):
+            TerminationResolution.objects.create(
+                profile=self.profile,
+                task_type=SELECT_TERMINATION_TASK,
+                field_key=field_key,
+                selected_object_type=object_type,
+                selected_object_id=selected.pk,
+                selected_display_name=str(selected),
+            )
+        for key, selected in (("visible device", self.device_a), ("hidden device", self.device_b)):
+            TraceDeviceResolution.objects.create(
+                profile=self.profile,
+                source_device_key=key,
+                selected_device_id=selected.pk,
+                selected_display_name=str(selected),
+            )
+        actor = user_with_object_permission(
+            "trace-summary-scope",
+            [
+                (ImportProfile, ("view", "change"), {"pk": self.profile.pk}),
+                (Site, ("view",), {"pk": self.site.pk}),
+                (Device, ("view",), {"site_id": self.site.pk}),
+                (Interface, ("view",), {}),
+                (TerminationResolution, ("view",), {"field_key": visible_field_key}),
+                (TraceDeviceResolution, ("view",), {"source_device_key": "visible device"}),
+            ],
+        )
+        self.client.force_login(actor)
+        session = self.client.session
+        session.update(preview_session)
+        session.save()
+
+        workspace = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        self.assertEqual(workspace.status_code, 200)
+        self.assertEqual(workspace.context["summary"]["saved_decisions"], 2)
 
     def test_saving_a_device_choice_refuses_an_adapter_this_release_dropped(self):
         """The POST discards an unusable preview before it writes the Device decision."""

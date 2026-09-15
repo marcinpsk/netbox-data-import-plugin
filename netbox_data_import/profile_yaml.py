@@ -5,8 +5,11 @@
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from yaml.constructor import ConstructorError
+from yaml.resolver import BaseResolver
 
 from .catalog import POLICY_SECTIONS, policy_section
 from .models import (
@@ -117,6 +120,52 @@ _POLICY_DOCUMENT_SCHEMAS = (
 
 _SCHEMAS_BY_KEY = {schema.key: schema for schema in _POLICY_DOCUMENT_SCHEMAS}
 _PROFILE_FIELDS = ("description", "source_adapter")
+
+
+class DuplicateYamlKeyError(ConstructorError):
+    """A YAML mapping repeats a key whose first value would otherwise be discarded."""
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Load the safe YAML subset and reject duplicate mapping keys at every depth."""
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    """Construct one mapping without PyYAML's last-value-wins behavior."""
+    loader.flatten_mapping(node)
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable mapping key",
+                key_node.start_mark,
+            ) from exc
+        if duplicate:
+            raise DuplicateYamlKeyError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate mapping key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+
+def load_yaml_document(stream) -> Any:
+    """Load untrusted YAML through the shared duplicate-key-rejecting safe loader."""
+    loader = _UniqueKeySafeLoader(stream)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
 
 
 def serialize_profile(profile: ImportProfile, actor=None) -> dict[str, Any]:
@@ -405,4 +454,4 @@ def _validate_instance(instance, label: str) -> None:
         raise ValueError(f"Validation error in {label}: {message}") from exc
 
 
-__all__ = ("apply_profile_document", "serialize_profile")
+__all__ = ("DuplicateYamlKeyError", "apply_profile_document", "load_yaml_document", "serialize_profile")

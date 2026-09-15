@@ -89,7 +89,7 @@ from .object_permissions import (
     delete_permission_scoped_objects,
     save_permission_scoped_object,
 )
-from .profile_yaml import apply_profile_document, serialize_profile
+from .profile_yaml import DuplicateYamlKeyError, apply_profile_document, load_yaml_document, serialize_profile
 from .preview_row_actions import (
     PREVIEW_DIRTY_SESSION_KEY,
     PREVIEW_PLAN_SESSION_KEY,
@@ -646,7 +646,10 @@ class ImportProfileBulkImportView(generic.BulkImportView):
             return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
 
         try:
-            data = yaml.safe_load(raw)
+            data = load_yaml_document(raw)
+        except DuplicateYamlKeyError as exc:
+            messages.error(request, f"Failed to parse YAML: {exc}")
+            return redirect(reverse("plugins:netbox_data_import:importprofile_bulk_import"))
         except yaml.YAMLError:
             # Input failed YAML parsing — let NetBox's BulkImportView handle it
             # (covers CSV and flat formats with YAML-invalid characters).
@@ -3250,7 +3253,7 @@ class BulkYamlImportView(PermissionRequiredMixin, View):
         try:
             import yaml
 
-            data = yaml.safe_load(yaml_file.read())
+            data = load_yaml_document(yaml_file.read())
         except yaml.YAMLError as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
             return render(request, "netbox_data_import/bulk_yaml_import.html", {"profile": profile})
@@ -3345,7 +3348,7 @@ class ImportProfileYamlView(PermissionRequiredMixin, View):
             return render(request, "netbox_data_import/import_profile_yaml.html")
 
         try:
-            data = yaml.safe_load(yaml_file.read())
+            data = load_yaml_document(yaml_file.read())
         except (yaml.YAMLError, UnicodeDecodeError, OSError) as exc:
             messages.error(request, f"Failed to parse YAML: {exc}")
             return render(request, "netbox_data_import/import_profile_yaml.html")
@@ -3636,8 +3639,8 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         from .models import TerminationResolution, TraceDeviceResolution
 
         summary["saved_decisions"] = (
-            TerminationResolution.objects.filter(profile=profile).count()
-            + TraceDeviceResolution.objects.filter(profile=profile).count()
+            TerminationResolution.objects.restrict(request.user, "view").filter(profile=profile).count()
+            + TraceDeviceResolution.objects.restrict(request.user, "view").filter(profile=profile).count()
         )
         summary["preview_state"] = self._preview_state(request, drift)
         from .proposal_presentation import ProposalPresentation, group_terminations
@@ -3926,17 +3929,19 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
                 status=400,
             )
         try:
-            device_id = int(request.POST.get("device_id", ""))
-            plan, chosen = save_trace_device_resolution_and_replan(
-                profile=profile,
-                source_document=document,
-                actor=request.user,
-                planning_context=planning_context,
-                evidence=DeviceEvidence.from_dict(question),
-                selected_device_id=device_id,
-                search=search,
-                limit=ELIGIBLE_TERMINATION_LIMIT,
-            )
+            with transaction.atomic():
+                device_id = int(request.POST.get("device_id", ""))
+                plan, chosen = save_trace_device_resolution_and_replan(
+                    profile=profile,
+                    source_document=document,
+                    actor=request.user,
+                    planning_context=planning_context,
+                    evidence=DeviceEvidence.from_dict(question),
+                    selected_device_id=device_id,
+                    search=search,
+                    limit=ELIGIBLE_TERMINATION_LIMIT,
+                )
+                record_recalculated_preview(request.session, plan, user=request.user)
         except (TypeError, ValueError):
             return _preview_action_error(
                 request,
@@ -3946,8 +3951,6 @@ class TraceResolveDeviceView(_TraceWorkspaceMixin, _PermissionScopedWriteMixin, 
             )
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
-        try:
-            record_recalculated_preview(request.session, plan, user=request.user)
         except PreviewLocked as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
         messages.success(request, f"Source Device resolved to '{chosen}'.")
@@ -4015,22 +4018,22 @@ class TraceResolveTerminationView(_TraceWorkspaceMixin, _PermissionScopedWriteMi
         from core.models import ObjectType
 
         try:
-            # One transaction: a target lost before the replan rolls the saved decision back with it.
-            plan = save_termination_resolution_and_replan(
-                profile=profile,
-                source_document=document,
-                actor=request.user,
-                planning_context=planning_context,
-                task_type=SELECT_TERMINATION_TASK,
-                field_key=field_key,
-                selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
-                selected_object_id=chosen.pk,
-                selected_display_name=str(chosen),
-            )
+            # One transaction: a failed replan or preview reservation rolls the saved decision back.
+            with transaction.atomic():
+                plan = save_termination_resolution_and_replan(
+                    profile=profile,
+                    source_document=document,
+                    actor=request.user,
+                    planning_context=planning_context,
+                    task_type=SELECT_TERMINATION_TASK,
+                    field_key=field_key,
+                    selected_object_type=ObjectType.objects.get_for_model(type(chosen)),
+                    selected_object_id=chosen.pk,
+                    selected_display_name=str(chosen),
+                )
+                record_recalculated_preview(request.session, plan, user=request.user)
         except PlanningTargetUnavailable:
             return self.discard_unavailable_target(request)
-        try:
-            record_recalculated_preview(request.session, plan, user=request.user)
         except PreviewLocked as exc:
             return _preview_action_error(request, next_url, str(exc), status=409)
         messages.success(request, f"Termination resolved to '{chosen}'.")

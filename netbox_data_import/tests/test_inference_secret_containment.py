@@ -150,6 +150,7 @@ class SecretContainmentTest(TestCase):
         self.assertEqual(set(self.row.credential_reference), {"backend", "mount", "path", "field"})
 
     def test_the_foreground_connection_test_creates_no_job_payload(self):
+        """The web request resolves directly and never serializes its credential for a worker."""
         user = user_with_object_permission("tester", [(InferenceBackend, ["change"], {})])
         self.client.force_login(user)
         url = reverse("plugins:netbox_data_import:inferencebackend_connection_test", args=[self.row.pk])

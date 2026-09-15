@@ -384,6 +384,10 @@ class ModelDiscoveryTest(SimpleTestCase):
 
         self.assertEqual(models, ("valid",))
 
+
+class ChatCompletionPayloadTest(SimpleTestCase):
+    """The adapter sends only the supported Chat Completions request shape."""
+
     def test_streaming_is_never_requested(self):
         """Section 8.4 rejects streaming."""
         with serving() as (root, seen, allowlist):

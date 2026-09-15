@@ -431,8 +431,17 @@ def eligible_trace_devices(
     ).order_by("-_ndi_exact_name", "-_ndi_hint_score", "name", "pk")
     total = devices.count()
     if lock_rows:
-        devices = devices.select_for_update(of=("self",))
-    selected = tuple(devices[:limit])
+        ranked_ids = tuple(devices.values_list("pk", flat=True)[:limit])
+        locked = {
+            device.pk: device
+            for device in _with_database_identity(_target_devices(reader))
+            .filter(pk__in=ranked_ids)
+            .order_by("pk")
+            .select_for_update(of=("self",))
+        }
+        selected = tuple(locked[pk] for pk in ranked_ids if pk in locked)
+    else:
+        selected = tuple(devices[:limit])
     rack_facts, location_names = _visible_placement(reader, selected)
     candidates = []
     for device in selected:

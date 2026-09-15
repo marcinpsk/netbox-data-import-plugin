@@ -1493,6 +1493,33 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertIn("eligible", response.json()["error"])
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
+    def test_a_preview_lock_rolls_back_the_termination_resolution(self):
+        """The saved decision and the replacement preview form one database outcome."""
+        from unittest.mock import patch
+
+        from netbox_data_import.preview_row_actions import PreviewLocked
+
+        field_key = self.open_blocked_workspace()
+
+        with patch(
+            "netbox_data_import.views.record_recalculated_preview",
+            autospec=True,
+            side_effect=PreviewLocked("A trace synchronization is still running."),
+        ):
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:trace_resolve_termination"),
+                {
+                    "field_key": field_key,
+                    "object_type": "dcim.interface",
+                    "object_id": self.eth0.pk,
+                    "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                },
+                headers={"accept": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
 
 class TraceSyncSelectionTest(CableTopologyMixin, TestCase):
     """`Sync with dependencies` selects the trace and every unit whose change it needs."""
