@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Every form the private-coordinator rules must catch, and the forms they must not."""
+"""Every call shape the rules must catch, and the shapes they must not."""
 
 from netbox_data_import.import_engine import ImportEngine
+from netbox_data_import.inference_transport import request_to_resolved_address
 from netbox_data_import import import_engine as ie
 from netbox_data_import.import_engine import ImportEngine as Coordinator
 
@@ -134,3 +135,18 @@ def missed_module_getattr():
 def module_public_getattr_is_fine():
     # ok: nbdi-tests-use-public-coordinator-direct
     return getattr(ie, "plan")
+
+
+def missed_unbounded_read(session, url, address):
+    # ruleid: nbdi-bounded-response-body
+    return request_to_resolved_address(session, "GET", url, address)
+
+
+def missed_unbounded_read_with_other_keywords(session, url, address, deadline):
+    # ruleid: nbdi-bounded-response-body
+    return request_to_resolved_address(session, "GET", url, address, deadline=deadline, allow_redirects=False)
+
+
+def bounded_read_is_fine(session, url, address):
+    # ok: nbdi-bounded-response-body
+    return request_to_resolved_address(session, "GET", url, address, response_body_limit=1024)

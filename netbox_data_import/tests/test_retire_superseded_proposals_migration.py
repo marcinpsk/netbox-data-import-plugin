@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""A proposal queued under the previous request contract is retired by the upgrade, not by a worker."""
+"""A proposal queued under the previous request contract is retired by the upgrade, not by a worker.
+
+Release 2.3.0 shipped `prompt_version` 1 and `response_schema_version` 1. Raising either one without
+retiring the stored requests below it leaves a queued proposal that no worker can answer, so each
+bump owes a migration that retires them.
+"""
+
+import ast
+import pathlib
 
 from importlib import import_module
 
@@ -9,9 +17,12 @@ from django.db.migrations import RunPython
 from django.db.migrations.executor import MigrationExecutor
 from django.test import SimpleTestCase, TransactionTestCase
 
+from netbox_data_import.proposal_contract import RESPONSE_SCHEMA_VERSION
+from netbox_data_import.proposal_jobs import PROMPT_VERSION
 from netbox_data_import.tests.helpers import restore_plugin_migrations
 
 APP = "netbox_data_import"
+MIGRATIONS = pathlib.Path(__file__).resolve().parents[1] / "migrations"
 BEFORE = "0034_tracedeviceresolution"
 RETIRE_SUPERSEDED_PROPOSALS = "0035_retire_superseded_proposals"
 
@@ -127,3 +138,34 @@ class RetireSupersededProposalsMigrationTest(TransactionTestCase):
         )
 
         self.assertEqual(Migrated.objects.filter(field_key="queued-v1", status="queued").count(), 1)
+
+
+CONTRACT_CONSTANTS = ("PROMPT_VERSION", "RESPONSE_SCHEMA_VERSION")
+
+
+def _declared_contract(path):
+    """Return the contract pair one migration retires up to, or None when it retires none."""
+    declared = {}
+    for node in ast.parse(path.read_text()).body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id in CONTRACT_CONSTANTS:
+                declared[target.id] = node.value.value
+    if len(declared) != len(CONTRACT_CONSTANTS):
+        return None
+    return tuple(declared[name] for name in CONTRACT_CONSTANTS)
+
+
+class ProposalContractRetirementTest(SimpleTestCase):
+    """Every shipped contract version has a migration that retires the requests below it."""
+
+    def test_the_retirement_migrations_reach_the_current_contract(self):
+        retired = [pair for pair in map(_declared_contract, sorted(MIGRATIONS.glob("0*.py"))) if pair is not None]
+
+        self.assertTrue(retired, "no migration retires superseded proposals")
+        self.assertEqual(
+            max(retired),
+            (PROMPT_VERSION, RESPONSE_SCHEMA_VERSION),
+            "a contract bump needs a migration retiring the proposals queued under the previous contract",
+        )
