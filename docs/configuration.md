@@ -177,6 +177,113 @@ profile is dropped, and the migration logs how many.
 
 The per-profile custom field (**Custom field name** in the Import Profile's adapter configuration,
 for example `cans_id`) is separate. The plugin still writes the source ID to it and never deletes it.
+See [Linking to the source system](#linking-to-the-source-system) to turn that ID into a button on
+the object page.
+
+## Linking to the source system
+
+NetBox's native **Custom Links** turn the source ID into a button on the object page. The plugin
+needs no setting for this.
+
+### Link from the per-profile custom field
+
+Set **Custom field name** in the Import Profile's adapter configuration, for example `cans_id`. The
+plugin writes the source ID of each imported row into that custom field, on Devices and on Racks.
+Assign the custom field to both object types.
+
+Add the link under **Customization > Custom Links**:
+
+| Field | Value |
+| --- | --- |
+| Object types | `DCIM > device`, `DCIM > rack` |
+| Link text | `{% if object.cf.cans_id %}Locate in CANS{% endif %}` |
+| Link URL | `https://cans.example.invalid/assets?search={{ object.cf.cans_id }}` |
+
+To find the URL, search for one ID in the source system and replace the search value with
+`{{ object.cf.cans_id }}`.
+
+An empty link text hides the button, so an object that no import touched shows nothing.
+
+NetBox renders both templates in a sandbox. It refuses a URL scheme that `ALLOWED_URL_SCHEMES` does
+not list.
+
+### Create the link for every object type the field covers
+
+The script below reads which object types the custom field covers, then creates one Custom Link for
+all of them. It skips an object type that supports custom fields but not custom links. Four NetBox
+types are in that group: `circuits.circuitgroupassignment`, `extras.eventrule`, `extras.webhook`,
+and `tenancy.contactassignment`.
+
+The API token needs `extras.view_customfield`, `core.view_objecttype`, and `extras.add_customlink`.
+
+```python
+import requests
+
+NETBOX = "https://netbox.example.invalid"
+TOKEN = "0123456789abcdef0123456789abcdef01234567"
+CUSTOM_FIELD = "cans_id"
+LINK_NAME = "Locate in CANS"
+SEARCH_URL = "https://cans.example.invalid/assets?search="
+
+session = requests.Session()
+session.headers.update({"Authorization": f"Token {TOKEN}", "Accept": "application/json"})
+
+
+def get(path, **params):
+    """Return the result list of one API endpoint."""
+    response = session.get(f"{NETBOX}/api/{path}", params=params, timeout=30)
+    response.raise_for_status()
+    return response.json()["results"]
+
+
+fields = get("extras/custom-fields/", name=CUSTOM_FIELD)
+if not fields:
+    raise SystemExit(f"NetBox has no custom field named {CUSTOM_FIELD}")
+covered = set(fields[0]["object_types"])
+
+linkable = {
+    f"{entry['app_label']}.{entry['model']}"
+    for entry in get("core/object-types/", limit=0)
+    if "custom_links" in entry["features"]
+}
+targets = sorted(covered & linkable)
+for skipped in sorted(covered - linkable):
+    print(f"Skipping {skipped}: it supports custom fields but not custom links")
+
+response = session.post(
+    f"{NETBOX}/api/extras/custom-links/",
+    json={
+        "name": LINK_NAME,
+        "object_types": targets,
+        "enabled": True,
+        "link_text": "{% if object.cf." + CUSTOM_FIELD + " %}" + LINK_NAME + "{% endif %}",
+        "link_url": SEARCH_URL + "{{ object.cf." + CUSTOM_FIELD + " }}",
+        "new_window": True,
+    },
+    timeout=30,
+)
+response.raise_for_status()
+print(f"Created custom link {response.json()['id']} for {', '.join(targets)}")
+```
+
+The script creates the link. To change an existing link, send `PATCH` to
+`/api/extras/custom-links/{id}/` with the same body.
+
+### Link without a custom field
+
+A profile that names no custom field still records the source ID in the Device import record. A
+Custom Link can read that record. The plugin keeps no equivalent record for a Rack, so this variant
+covers Devices only.
+
+| Field | Value |
+| --- | --- |
+| Object types | `DCIM > device` |
+| Link text | `{% if object.data_import_source and object.data_import_source.source_id %}Locate in CANS{% endif %}` |
+| Link URL | `https://cans.example.invalid/assets?search={{ object.data_import_source.source_id }}` |
+
+Keep both tests in the link text. A Device that the plugin never imported has no
+`data_import_source`. A link text that reads `object.data_import_source.source_id` without the first
+test raises, and NetBox then shows a disabled warning button on every such Device.
 
 ## Source Adapter
 
