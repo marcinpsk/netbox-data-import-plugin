@@ -83,6 +83,32 @@ describe("trace Device picker", () => {
     expect(node("traceDeviceSubmit").disabled).toBe(false);
   });
 
+  it("drops an in-flight search when the operator types again", async () => {
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      await held;
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          candidates: [{ id: 9, display: "stale-device", matched_hints: [], conflicting_hints: [] }],
+          shown: 1,
+          total: 1,
+        }),
+      };
+    }));
+
+    node("openPicker").click();
+    const search = node("traceDeviceSearch");
+    search.value = "new search";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(Array.from(node("traceDeviceCandidates").children)).toEqual([]);
+  });
+
   it("clears an old offer as soon as the search changes", async () => {
     const candidates = await openPicker();
     candidates[0].click();

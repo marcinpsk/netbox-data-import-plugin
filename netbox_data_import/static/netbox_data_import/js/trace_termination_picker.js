@@ -139,8 +139,9 @@
 
   document.addEventListener('input', function (event) {
     if (event.target.id !== 'traceTerminationSearch') return;
-    // The debounce leaves a window in which the old selection could still be submitted.
+    // The debounce leaves a window in which the old selection or an in-flight answer could still land.
     clearSelection();
+    pending += 1;
     window.clearTimeout(searchTimer);
     searchTimer = window.setTimeout(load, 200);
   });

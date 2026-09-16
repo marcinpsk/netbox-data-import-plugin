@@ -142,6 +142,7 @@
   document.addEventListener('input', function (event) {
     if (event.target.id !== 'traceDeviceSearch') return;
     clearSelection();
+    pending += 1;
     window.clearTimeout(searchTimer);
     searchTimer = window.setTimeout(load, 200);
   });
