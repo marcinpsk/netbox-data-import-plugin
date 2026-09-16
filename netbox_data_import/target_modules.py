@@ -2024,10 +2024,17 @@ class DeviceModule:
                 **candidate.custom_field_data,
                 custom_field: source_id,
             }
-        if payload["role_id"] is None or payload["rack_name"] is not None:
-            return candidate, ""
+        unresolved = set()
+        if payload["role_id"] is None:
+            unresolved.add("role")
+        if payload["rack_name"] is not None and payload["rack_id"] is None:
+            unresolved.update(("rack", "position", "face"))
         try:
-            candidate.full_clean()
+            if unresolved:
+                # Model validation reads the unresolved relations, so only the row's own fields can run.
+                candidate.clean_fields(exclude=unresolved)
+            else:
+                candidate.full_clean()
         except ValidationError as exc:
             if hasattr(exc, "message_dict"):
                 return candidate, "; ".join(

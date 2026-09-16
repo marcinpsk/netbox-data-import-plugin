@@ -438,6 +438,17 @@ class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):
         self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
         self.assertEqual(units[0].diagnostics[0].code, "device.duplicate_serial")
 
+    def test_an_overlong_scalar_is_invalid_even_when_the_rack_is_planned(self):
+        """A rack planned by the same batch defers the relation, not the row's own field values."""
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_row = self._row(3, "D-1", "srv-01", rack_name="batch-rack", serial="S" * 51)
+
+        unit = self._plan(rack_row, device_row)[0]
+
+        self.assertEqual(unit.disposition, Disposition.INVALID)
+        self.assertEqual(unit.diagnostics[0].code, "device.validation_failed")
+        self.assertIn("serial", unit.diagnostics[0].display["message"].lower())
+
     def test_a_duplicate_asset_tag_in_one_file_is_invalid(self):
         units = self._plan(
             self._row(2, "D-1", "srv-01", asset_tag="AT-1"),
