@@ -214,7 +214,9 @@ all of them. It skips an object type that supports custom fields but not custom 
 types are in that group: `circuits.circuitgroupassignment`, `extras.eventrule`, `extras.webhook`,
 and `tenancy.contactassignment`.
 
-The API token needs `extras.view_customfield`, `core.view_objecttype`, and `extras.add_customlink`.
+The API token needs `extras.view_customfield`, `core.view_objecttype`, and
+`extras.add_customlink`. The `PATCH` below also needs `extras.change_customlink`, because
+NetBox maps `PATCH` to the change action.
 
 ```python
 import requests
@@ -249,6 +251,8 @@ linkable = {
 targets = sorted(covered & linkable)
 for skipped in sorted(covered - linkable):
     print(f"Skipping {skipped}: it supports custom fields but not custom links")
+if not targets:
+    raise SystemExit("No object type that the custom field covers supports custom links")
 
 response = session.post(
     f"{NETBOX}/api/extras/custom-links/",
