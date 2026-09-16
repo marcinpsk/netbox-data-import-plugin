@@ -16,6 +16,22 @@ const fixture = `
     <option value="trace_workbook">Trace workbook</option>
   </select>
 `;
+const formFixture = `
+  <form>
+    <input name="return_url" value="/plugins/data-import/import-profiles/">
+    <input name="name" value="Initial profile">
+    <textarea name="description">Initial description</textarea>
+    <select name="tags" multiple>
+      <option value="1" selected>One</option>
+      <option value="2">Two</option>
+      <option value="3">Three</option>
+    </select>
+    <select id="id_source_adapter" name="source_adapter">
+      <option value="flat_workbook">Flat workbook</option>
+      <option value="trace_workbook">Trace workbook</option>
+    </select>
+  </form>
+`;
 
 test("adapter reload keeps stable profile values and drops adapter settings", async ({ page }) => {
   await page.route("http://profile.test/**", async (route) => {
@@ -39,4 +55,28 @@ test("adapter reload keeps stable profile values and drops adapter settings", as
   expect(url.searchParams.getAll("tags")).toEqual(["1", "2"]);
   expect(url.searchParams.has("sheet_name")).toBe(false);
   expect(url.searchParams.has("update_existing")).toBe(false);
+});
+
+test("adapter reload keeps values entered in the add form", async ({ page }) => {
+  await page.route("http://profile.test/**", async (route) => {
+    await route.fulfill({ contentType: "text/html", body: formFixture });
+  });
+  await page.goto(
+    "http://profile.test/add/?return_url=%2Fold%2F&name=Old+name&description=Old+description&tags=1",
+  );
+  await page.addScriptTag({ content: controllerSource });
+  await page.locator('[name="name"]').fill("Typed profile");
+  await page.locator('[name="description"]').fill("Typed description");
+  await page.locator('[name="tags"]').selectOption(["2", "3"]);
+
+  await Promise.all([
+    page.waitForURL((url) => url.searchParams.get("source_adapter") === "trace_workbook"),
+    page.locator("#id_source_adapter").selectOption("trace_workbook"),
+  ]);
+
+  const url = new URL(page.url());
+  expect(url.searchParams.get("return_url")).toBe("/plugins/data-import/import-profiles/");
+  expect(url.searchParams.get("name")).toBe("Typed profile");
+  expect(url.searchParams.get("description")).toBe("Typed description");
+  expect(url.searchParams.getAll("tags")).toEqual(["2", "3"]);
 });

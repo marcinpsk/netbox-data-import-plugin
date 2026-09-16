@@ -211,8 +211,8 @@ class ConnectionTestResultTest(TestCase):
 
         self.assertEqual(result.category, "ok")
         self.assertEqual(result.models, ("model-a", "model-b"))
-        self.assertEqual([request["path"] for request in seen], ["/models", "/chat/completions"])
-        self.assertEqual(json.loads(seen[1]["body"])["model"], "model-a")
+        self.assertEqual([request["path"] for request in seen], ["/chat/completions", "/models"])
+        self.assertEqual(json.loads(seen[0]["body"])["model"], "model-a")
 
     def test_unsupported_model_discovery_does_not_fail_a_working_completion(self):
         with serving_backend(models_status=404, models_payload={"detail": "not found"}) as (root, seen, allowlist):
@@ -223,7 +223,18 @@ class ConnectionTestResultTest(TestCase):
 
         self.assertEqual(result.category, "ok")
         self.assertEqual(result.models, ())
-        self.assertEqual([request["path"] for request in seen], ["/models", "/chat/completions"])
+        self.assertEqual([request["path"] for request in seen], ["/chat/completions", "/models"])
+
+    def test_slow_model_discovery_does_not_consume_the_completion_budget(self):
+        with serving_backend(models_byte_delay=0.2) as (root, seen, allowlist):
+            row = make_row(api_root=root, connect_timeout=1, read_timeout=1)
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)):
+                    result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "ok")
+        self.assertEqual(result.models, ())
+        self.assertEqual([request["path"] for request in seen], ["/chat/completions", "/models"])
 
     def test_a_completion_failure_stays_typed_and_keeps_discovered_models(self):
         models_payload = {"data": [{"id": "working-model"}]}
@@ -602,7 +613,7 @@ class BackendDetailPageTest(TestCase):
         self.assertContains(response, "Connection test succeeded")
         self.assertContains(response, "Available models")
         self.assertContains(response, '<option value="model-b">model-b</option>', html=True)
-        self.assertEqual([request["path"] for request in seen], ["/models", "/chat/completions"])
+        self.assertEqual([request["path"] for request in seen], ["/chat/completions", "/models"])
         self.assertFalse(Job.objects.exists())
         self.assertNotContains(response, SECRET)
 

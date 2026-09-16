@@ -37,6 +37,7 @@ from .inference_trust import (
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"
 MODELS_PATH = "/models"
+CHAT_COMPLETION_RESPONSE_LIMIT = 65_536
 MODEL_DISCOVERY_LIMIT = 100
 MODEL_DISCOVERY_RESPONSE_LIMIT = 65_536
 DIAGNOSTIC_TEXT_LIMIT = 4096
@@ -278,7 +279,15 @@ class OpenAICompatibleAdapter:
             raise InvalidBackendConfiguration(str(exc)) from None
         return addresses
 
-    def _send(self, method: str, path: str, api_key: str, **kwargs) -> requests.Response:
+    def _send(
+        self,
+        method: str,
+        path: str,
+        api_key: str,
+        *,
+        response_body_limit: int,
+        **kwargs,
+    ) -> requests.Response:
         """Send one authenticated request through the checked and pinned destination boundary."""
         resolved_addresses = self._resolved_destinations()
         headers = {"Accept": "application/json"}
@@ -297,6 +306,7 @@ class OpenAICompatibleAdapter:
                     headers=headers,
                     timeout=(self.connect_timeout, self.read_timeout),
                     deadline=self._deadline,
+                    response_body_limit=response_body_limit,
                     # A redirect is a different destination, so it is refused rather than followed.
                     allow_redirects=False,
                     **kwargs,
@@ -386,7 +396,13 @@ class OpenAICompatibleAdapter:
     def complete(self, request: InferenceRequest, api_key: str) -> InferenceCompletion:
         """Return one completion, or raise the typed error the backend condition maps to."""
         self._check_response_mode(request)
-        response = self._send("POST", CHAT_COMPLETIONS_PATH, api_key, json=self._body(request))
+        response = self._send(
+            "POST",
+            CHAT_COMPLETIONS_PATH,
+            api_key,
+            response_body_limit=CHAT_COMPLETION_RESPONSE_LIMIT,
+            json=self._body(request),
+        )
         return self._read(response, api_key)
 
     def discover_models(self, api_key: str) -> tuple[str, ...]:

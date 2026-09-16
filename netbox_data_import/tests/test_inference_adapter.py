@@ -19,6 +19,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
+from urllib3.response import HTTPResponse
 
 from netbox_data_import.inference_adapter import (
     BODY_ABSENT,
@@ -76,6 +77,7 @@ class RecordingBackend(BaseHTTPRequestHandler):
     payload: object = {}
     models_status = 200
     models_payload: object = {"data": []}
+    models_byte_delay = 0.0
     headers_out: dict = {}
     seen: list = []
     delay = 0.0
@@ -116,7 +118,16 @@ class RecordingBackend(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            if self.models_byte_delay:
+                for byte in encoded:
+                    self.wfile.write(bytes((byte,)))
+                    self.wfile.flush()
+                    time.sleep(self.models_byte_delay)
+            else:
+                self.wfile.write(encoded)
+        except OSError:
+            pass
 
     def log_message(self, *args):
         """Keep the test output quiet."""
@@ -142,7 +153,15 @@ class DisconnectingFirstBackend(RecordingBackend):
 
 
 @contextmanager
-def serving(status=200, payload=None, headers_out=None, delay=0.0, models_status=200, models_payload=None):
+def serving(
+    status=200,
+    payload=None,
+    headers_out=None,
+    delay=0.0,
+    models_status=200,
+    models_payload=None,
+    models_byte_delay=0.0,
+):
     """Run a Chat Completions stand-in on loopback and yield its api_root and request log."""
 
     class Handler(RecordingBackend):
@@ -152,6 +171,7 @@ def serving(status=200, payload=None, headers_out=None, delay=0.0, models_status
     Handler.payload = completion() if payload is None else payload
     Handler.models_status = models_status
     Handler.models_payload = {"data": []} if models_payload is None else models_payload
+    Handler.models_byte_delay = models_byte_delay
     Handler.headers_out = headers_out or {}
     Handler.seen = []
     Handler.delay = delay
@@ -310,6 +330,14 @@ class ChatCompletionRequestTest(SimpleTestCase):
             adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
 
         self.assertEqual(seen[0]["headers"]["authorization"], f"Bearer {API_KEY}")
+
+    def test_an_oversized_completion_response_is_rejected(self):
+        payload = completion(content="x" * 65_536)
+        with serving(payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(MalformedEnvelope) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertIn("too large", str(caught.exception))
 
 
 class ModelDiscoveryTest(SimpleTestCase):
@@ -1257,6 +1285,29 @@ class AddressPinnedSessionTest(SimpleTestCase):
 
         self.assertIs(response, replacement)
         self.assertEqual(hook_bodies, [json.dumps(payload).encode()])
+
+    def test_a_deadline_reads_a_bounded_response_in_chunks_larger_than_one_byte(self):
+        observed_chunk_sizes = []
+        original_stream = HTTPResponse.stream
+
+        def recording_stream(response, amt=65_536, decode_content=None):
+            observed_chunk_sizes.append(amt)
+            yield from original_stream(response, amt, decode_content)
+
+        with serving(models_payload={"data": [{"id": "model-a"}]}) as (root, _seen, _allowlist):
+            with patch.object(HTTPResponse, "stream", recording_stream):
+                response = request_to_resolved_address(
+                    requests.Session(),
+                    "GET",
+                    f"{root}/models",
+                    "127.0.0.1",
+                    response_body_limit=65_536,
+                    deadline=WallClockDeadline.after(2),
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(observed_chunk_sizes)
+        self.assertTrue(all(chunk_size > 1 for chunk_size in observed_chunk_sizes))
 
     def test_concurrent_deadlines_start_independent_blocking_operations(self):
         """One slow resolver must not consume another foreground operation's budget."""

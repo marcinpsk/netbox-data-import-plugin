@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from contextlib import suppress
 from dataclasses import dataclass
 from threading import Event, Lock, RLock, Timer
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, TypeVar, cast
 from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
@@ -92,7 +92,7 @@ def _run_connection_until_deadline(
 
     def abort_socket() -> None:
         expired.set()
-        connected_socket = connection.sock
+        connected_socket = connection.sock or getattr(connection, "_deadline_response_socket", None)
         if connected_socket is None:
             return
         with suppress(OSError):
@@ -120,17 +120,23 @@ def _deadline_pool_classes(deadline: WallClockDeadline):
     """Return urllib3 pools whose connections enforce one operation deadline."""
 
     class DeadlineHTTPConnection(HTTPConnection):
+        _deadline_response_socket: socket.socket | None = None
+
         def connect(self) -> None:
             _run_connection_until_deadline(self, deadline, super().connect)
 
         def getresponse(self) -> HTTPResponse:  # type: ignore[override]
+            self._deadline_response_socket = self.sock
             return _run_connection_until_deadline(self, deadline, super().getresponse)
 
     class DeadlineHTTPSConnection(HTTPSConnection):
+        _deadline_response_socket: socket.socket | None = None
+
         def connect(self) -> None:
             _run_connection_until_deadline(self, deadline, super().connect)
 
         def getresponse(self) -> HTTPResponse:  # type: ignore[override]
+            self._deadline_response_socket = self.sock
             return _run_connection_until_deadline(self, deadline, super().getresponse)
 
     class DeadlineHTTPConnectionPool(HTTPConnectionPool):
@@ -177,17 +183,20 @@ def _session_lock(session: requests.Session) -> RLock:
 def _consume_response(response, response_body_limit, deadline: WallClockDeadline | None) -> None:
     """Read one response under its size and wall-clock limits."""
     chunks = bytearray()
-    chunk_size = 1 if deadline is not None else min(response_body_limit + 1, 65_536)
+    chunk_size = min(response_body_limit + 1, 65_536) if response_body_limit is not None else 65_536
     iterator = response.iter_content(chunk_size=chunk_size)
+    connection = cast(HTTPConnection | None, getattr(response.raw, "connection", None))
+
+    def next_chunk():
+        if deadline is None:
+            return next(iterator)
+        if connection is None:
+            raise requests.ConnectionError("The streamed response has no active connection.")
+        return _run_connection_until_deadline(connection, deadline, lambda: next(iterator))
+
     while True:
-        if deadline is not None:
-            remaining = deadline.remaining()
-            connection = getattr(response.raw, "connection", None)
-            sock = getattr(connection, "sock", None)
-            if sock is not None:
-                sock.settimeout(remaining)
         try:
-            chunk = next(iterator)
+            chunk = next_chunk()
         except StopIteration:
             break
         if not chunk:

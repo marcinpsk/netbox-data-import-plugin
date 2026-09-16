@@ -23,9 +23,16 @@
         adapter.addEventListener('change', () => {
           const url = new URL(window.location.href);
           const preserved = new URLSearchParams();
+          const form = adapter.form;
+          const formData = form ? new FormData(form) : null;
           for (const key of ['return_url', 'name', 'description', 'tags']) {
-            for (const value of url.searchParams.getAll(key)) {
-              preserved.append(key, value);
+            const values = form && form.elements.namedItem(key) !== null
+              ? formData.getAll(key)
+              : url.searchParams.getAll(key);
+            for (const value of values) {
+              if (typeof value === 'string') {
+                preserved.append(key, value);
+              }
             }
           }
           url.search = preserved.toString();

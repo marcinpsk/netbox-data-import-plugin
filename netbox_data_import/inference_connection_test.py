@@ -89,16 +89,21 @@ def run_connection_test(pk: int, backend_key: str) -> ConnectionTestResult:
 
     models: tuple[str, ...] = ()
     try:
-        with suppress(InferenceBackendError):
-            models = adapter.discover_models(api_key)
         # Model discovery is optional. The real completion call decides connection success.
+        completion_error: InferenceBackendError | None
         try:
             completion = adapter.complete(_connection_request(backend.response_mode), api_key)
-        except InferenceBackendError as exc:
-            detail = str(exc)
-            if models and exc.diagnostic.status_code == 400:
+        except InferenceBackendError as completion_exc:
+            completion_error = completion_exc
+        else:
+            completion_error = None
+        with suppress(InferenceBackendError):
+            models = adapter.discover_models(api_key)
+        if completion_error is not None:
+            detail = str(completion_error)
+            if models and completion_error.diagnostic.status_code == 400:
                 detail += " Select one of the available models below, save the backend, and run the test again."
-            return ConnectionTestResult(exc.category, detail, backend_key, backend.source, models)
+            return ConnectionTestResult(completion_error.category, detail, backend_key, backend.source, models)
         if completion.is_refusal or not (completion.content_text or "").strip():
             return ConnectionTestResult(
                 "invalid_response",
