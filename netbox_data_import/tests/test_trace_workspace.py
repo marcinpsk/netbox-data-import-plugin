@@ -1337,11 +1337,16 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         field_key = self.open_blocked_workspace()
         Interface.objects.create(device=self.device_a, name="eth5", type="1000base-t")
 
-        for limit in ("not-an-integer", "0", str(ELIGIBLE_TERMINATION_LIMIT + 1)):
+        for limit in ("not-an-integer", "-1", "0", str(ELIGIBLE_TERMINATION_LIMIT + 1)):
             with self.subTest(limit=limit):
                 response = self.candidates(field_key, limit=limit)
 
                 self.assertEqual(response.status_code, 400)
+                # A bare 400 would still pass if a later regression refused the request elsewhere.
+                self.assertEqual(
+                    response.json()["error"],
+                    f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
+                )
 
     def test_the_picker_searches_by_name(self):
         """A searchable picker narrows the same eligible set, and never widens it."""

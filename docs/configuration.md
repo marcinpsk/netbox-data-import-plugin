@@ -49,7 +49,7 @@ auto_auth {
     config = {
       role_id_file_path = "/run/secrets/vault-role-id"
       secret_id_file_path = "/run/secrets/vault-secret-id"
-      remove_secret_id_file_after_reading = false
+      remove_secret_id_file_after_reading = true
     }
   }
 }
@@ -65,6 +65,18 @@ api_proxy {
   use_auto_auth_token = "force"
 }
 ```
+
+A SecretID stays usable until it expires, and the RoleID sits beside it, so a reader of the Proxy
+filesystem can mint new Vault tokens from the pair. `remove_secret_id_file_after_reading` deletes
+the file after auto-auth reads it, but it only works on a path the Proxy can write. The Compose
+secrets below mount `/run/secrets` read-only: Vault logs the failed removal and keeps
+authenticating, so the SecretID stays readable for the life of the container.
+
+Pick one of two delivery models. Either accept the retained file and limit it: short SecretID TTL,
+regular rotation, and no other reader of the Proxy container. Or make the removal real: write the
+SecretID to a path the Proxy owns, such as a tmpfs file, or set
+`secret_id_response_wrapping_path` so the file holds a single-use wrapping token instead of the
+SecretID itself.
 
 The TCP example lets a sibling container reach the Proxy. Keep both containers on an isolated
 container network. Do not publish the listener outside the isolated container network. The

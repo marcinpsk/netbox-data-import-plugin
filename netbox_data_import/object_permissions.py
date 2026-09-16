@@ -468,8 +468,11 @@ def _assess_permission_scoped_save(
                 unknown_roots = {root for name in unknown_fields for root in (fields[name].name, fields[name].attname)}
             except KeyError as exc:
                 raise TypeError(f"{model._meta.label} has no concrete field named {exc.args[0]}.") from exc
+            # A null or empty constraint is an unconstrained grant, which has no field to strip.
             constraints = tuple(
                 {key: value for key, value in constraint.items() if key.split("__", maxsplit=1)[0] not in unknown_roots}
+                if constraint
+                else constraint
                 for constraint in constraints
             )
         allowed = any(

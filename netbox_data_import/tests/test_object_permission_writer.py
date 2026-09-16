@@ -238,6 +238,20 @@ class AssessPermissionScopedSaveTest(TestCase):
         self.assertFalse(outside.allowed)
         self.assertFalse(DeviceTypeMapping.objects.exists())
 
+    def test_an_unconstrained_grant_survives_stripping_unknown_fields(self):
+        """A grant with no constraints means every object, so the option stays offered."""
+        user = user_with_object_permission("assess-unconstrained", [(DeviceTypeMapping, ["add"], None)])
+
+        assessment = assess_permission_scoped_save_option(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values("not-chosen-yet"),
+            unknown_fields={"netbox_manufacturer_slug"},
+        )
+
+        self.assertTrue(assessment.allowed)
+
     def test_a_json_value_is_prepared_for_the_prospective_database_row(self):
         user = user_with_object_permission(
             "assess-json",

@@ -22,6 +22,12 @@ class VaultTransportGuidanceTest(SimpleTestCase):
         self.assertIn("tls_cert_file", vault_guide)
         self.assertIn("tls_key_file", vault_guide)
         self.assertNotIn("tls_disable = true", vault_guide)
+        # A retained AppRole SecretID lets any filesystem reader mint new Vault tokens.
+        self.assertNotIn("remove_secret_id_file_after_reading = false", vault_guide)
+        # The documented Compose secrets are a read-only mount, so removal cannot be promised.
+        self.assertIn("mount `/run/secrets` read-only", vault_guide)
+        self.assertIn("logs the failed removal", vault_guide)
+        self.assertIn("secret_id_response_wrapping_path", vault_guide)
         self.assertIn("NBDI_VAULT_PROXY_ADDRESS=https://", vault_guide)
         self.assertIn("both `proxy` and `token`", vault_guide)
         self.assertIn("NetBox-to-Proxy connection must remain encrypted", vault_guide)

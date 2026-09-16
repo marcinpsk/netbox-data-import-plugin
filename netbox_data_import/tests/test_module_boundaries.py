@@ -68,7 +68,9 @@ def _assignment_engine_qualifiers(tree: ast.AST, initial: set[str]) -> set[str]:
         for node in ast.walk(tree):
             if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
                 continue
-            if _qualified_name(node.value) not in qualifiers:
+            # An instance binds the qualifier too: `engine = ImportEngine()` is an ast.Call.
+            value = node.value.func if isinstance(node.value, ast.Call) else node.value
+            if _qualified_name(value) not in qualifiers:
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
             assignment_aliases.update(target.id for target in targets if isinstance(target, ast.Name))
@@ -231,6 +233,18 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
                 "from netbox_data_import.import_engine import ImportEngine\n"
                 "Engine = ImportEngine\n"
                 "callback = Engine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_instance_alias_references_are_detected(self):
+        """An instance bound from a constructor call cannot bypass the boundary either."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine\n"
+                "engine = ImportEngine()\n"
+                "callback = engine._private_helper\n"
             )
 
             self.assertEqual(_private_engine_references(path), {"_private_helper"})

@@ -186,6 +186,18 @@ class TraceDeviceResolutionPlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
         self.assertIn("trace.device_resolution_stale", self.codes(unit))
 
+    def test_a_stale_saved_choice_reports_the_new_exact_name_match_count(self):
+        """The operator re-choosing needs to see that an exact-name Device now exists."""
+        self.save_alias()
+        self.device_a.delete()
+        replacement = self.make_device("Source Alias")
+        Interface.objects.create(device=replacement, name="eth9", type="1000base-t")
+
+        unit = self.unit(self.alias_path())
+
+        stale = next(item for item in unit.diagnostics if item.code == "trace.device_resolution_stale")
+        self.assertEqual(stale.display["matches"], 1)
+
     def test_an_unresolved_device_is_one_plan_question_for_all_of_its_ports(self):
         second_port = Interface.objects.create(device=self.device_b, name="eth2", type="1000base-t")
         first = self.alias_path()

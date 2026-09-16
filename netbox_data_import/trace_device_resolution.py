@@ -248,10 +248,10 @@ def resolve_trace_devices(
             raise ValueError("A Trace Device Resolution digest does not match its source Device key.")
         stored[row.source_device_key] = row
 
+    # A stored key needs its name lookup too, so a stale choice can report the matches it now has.
     source_labels = {
         key: tuple(source_text(label) for label in facts.labels if source_text(label)) or (key,)
         for key, facts in evidence.items()
-        if key not in stored
     }
     database_values = _database_identity_values(label for labels in source_labels.values() for label in labels)
     source_keys_by_database_name: dict[str, set[str]] = {}
