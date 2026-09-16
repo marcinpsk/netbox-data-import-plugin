@@ -143,6 +143,54 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
         self.assertEqual(body.count("</i> Ignore row"), 2, "both rows in the collision need the ignore action")
         self.assertIn(reverse("plugins:netbox_data_import:ignore_position"), body)
 
+    def _ignore_position(self, **overrides):
+        """Post one Ignore position action with the active preview revision."""
+        payload = {
+            "profile_id": self.profile.pk,
+            "source_id": "S-2",
+            "row_number": 3,
+            "preview_revision": self.client.session.get(PREVIEW_REVISION_SESSION_KEY),
+            "next": reverse("plugins:netbox_data_import:import_preview"),
+        }
+        payload.update(overrides)
+        return self.client.post(reverse("plugins:netbox_data_import:ignore_position"), payload)
+
+    def test_a_position_action_naming_another_profile_is_refused(self):
+        """The shared preview gate settles the profile before the action writes anything."""
+        self._upload(self._colliding_rows())
+        other = ImportProfile.objects.create(name="Other Profile", adapter_config={"sheet_name": "Data"})
+
+        self._ignore_position(profile_id=other.pk)
+
+        self.assertFalse(SourceResolution.objects.filter(profile=other).exists())
+        self.assertFalse(SourceResolution.objects.filter(profile=self.profile).exists())
+
+    def test_a_row_outside_any_position_conflict_is_refused(self):
+        """The write is tied to a collision the current preview reports, not to any row."""
+        self._upload(
+            [
+                ["S-1", "Server", "srv-01", "rack-a", "Example", "Model", "5", "Front"],
+                ["S-2", "Server", "srv-02", "rack-a", "Example", "Model", "9", "Front"],
+            ]
+        )
+
+        self._ignore_position()
+
+        self.assertFalse(SourceResolution.objects.exists())
+
+    def test_a_row_whose_stored_source_lost_its_position_is_refused(self):
+        """The stored rows and the plan can disagree, and an empty position writes nothing."""
+        self._upload(self._colliding_rows())
+        session = self.client.session
+        for row in session["import_rows"]:
+            if row.get("_row_number") == 3:
+                row["u_position"] = ""
+        session.save()
+
+        self._ignore_position()
+
+        self.assertFalse(SourceResolution.objects.exists())
+
     def test_ignoring_the_row_removes_it_from_the_import(self):
         """The operator can drop the colliding row outright instead of only its position."""
         from netbox_data_import.models import IgnoredDevice

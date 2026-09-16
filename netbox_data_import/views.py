@@ -3057,25 +3057,18 @@ class IgnorePositionView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
 
         try:
-            # Serialize against an executing import, which holds the same profile row.
-            with locked_profile_policy(profile.pk):
-                save_permission_scoped_object(
-                    request.user,
-                    SourceResolution,
-                    {"profile": profile, "source_id": source_id, "source_column": "u_position"},
-                    {"original_value": original_position, "resolved_fields": {"u_position": None}},
-                )
-        except ImportProfile.DoesNotExist:
-            messages.error(request, "The import profile is no longer available.")
-            return _name_resolution_response(request, next_url)
+            # The saver locks this profile itself, because a Source Resolution is a policy row.
+            save_permission_scoped_object(
+                request.user,
+                SourceResolution,
+                {"profile": profile, "source_id": source_id, "source_column": "u_position"},
+                {"original_value": original_position, "resolved_fields": {"u_position": None}},
+            )
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved rack position.")
             return _name_resolution_response(request, next_url)
         except ValidationError as exc:
             messages.error(request, "; ".join(exc.messages))
-            return _name_resolution_response(request, next_url)
-        except IntegrityError:
-            messages.error(request, "The saved rack position changed while this request was processed. Try again.")
             return _name_resolution_response(request, next_url)
 
         messages.success(
