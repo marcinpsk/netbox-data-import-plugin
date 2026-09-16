@@ -451,6 +451,7 @@
 
 {{ proposal_fields|json_script:"traceProposalFields" }}
 <script src="{% static 'netbox_data_import/js/trace_proposals.js' %}?v={{ plugin_version }}"></script>
+<script src="{% static 'netbox_data_import/js/trace_picker_search.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_device_picker.js' %}?v={{ plugin_version }}"></script>
 <script src="{% static 'netbox_data_import/js/trace_termination_picker.js' %}?v={{ plugin_version }}"></script>
 {% endblock %}

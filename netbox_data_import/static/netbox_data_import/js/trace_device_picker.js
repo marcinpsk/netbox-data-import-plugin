@@ -6,8 +6,6 @@
   if (window.ndiTraceDevicePicker) return;
   window.ndiTraceDevicePicker = true;
 
-  var pending = 0;
-  var searchTimer = null;
 
   function node(id) {
     return document.getElementById(id);
@@ -86,35 +84,20 @@
     show(error, true);
   }
 
-  function load() {
-    var form = node('traceDeviceForm');
-    var search = node('traceDeviceSearch');
-    if (!form || !search) return;
-    var request = ++pending;
-    var asked = search.value;
-    var url = form.dataset.candidatesUrl + '?device_key=' + encodeURIComponent(node('traceDeviceKey').value)
-      + '&search=' + encodeURIComponent(asked)
-      + '&preview_revision=' + encodeURIComponent(form.elements.namedItem('preview_revision').value);
-    fetch(url, {headers: {Accept: 'application/json'}, credentials: 'same-origin'})
-      .then(function (response) {
-        return response.json().then(function (payload) {
-          return {ok: response.ok, payload: payload};
-        });
-      })
-      .then(function (result) {
-        if (request !== pending || node('traceDeviceForm') !== form) return;
-        if (!result.ok || !result.payload.ok) {
-          reportFailure(result.payload.error || 'The candidates could not be read.');
-          return;
-        }
-        show(node('traceDeviceError'), false);
-        renderCandidates(result.payload, asked);
-      })
-      .catch(function () {
-        if (request !== pending || node('traceDeviceForm') !== form) return;
-        reportFailure('The candidates could not be read.');
-      });
-  }
+  var candidates = window.ndiPickerSearch({
+    form: function () { return node('traceDeviceForm'); },
+    search: function () { return node('traceDeviceSearch'); },
+    url: function (form, asked) {
+      return form.dataset.candidatesUrl + '?device_key=' + encodeURIComponent(node('traceDeviceKey').value)
+        + '&search=' + encodeURIComponent(asked)
+        + '&preview_revision=' + encodeURIComponent(form.elements.namedItem('preview_revision').value);
+    },
+    onResult: function (payload, asked) {
+      show(node('traceDeviceError'), false);
+      renderCandidates(payload, asked);
+    },
+    onError: reportFailure
+  });
 
   document.addEventListener('click', function (event) {
     var trigger = event.target.closest('[data-trace-device-picker]');
@@ -130,7 +113,7 @@
     clearSelection();
     node('traceDeviceCandidates').replaceChildren();
     show(node('traceDeviceCount'), false);
-    load();
+    candidates.load();
     modal.addEventListener('hidden.bs.modal', function () { trigger.focus(); }, {once: true});
     ModalClass.getOrCreateInstance(modal).show(trigger);
   });
@@ -142,8 +125,6 @@
   document.addEventListener('input', function (event) {
     if (event.target.id !== 'traceDeviceSearch') return;
     clearSelection();
-    pending += 1;
-    window.clearTimeout(searchTimer);
-    searchTimer = window.setTimeout(load, 200);
+    candidates.reschedule(200);
   });
 })();

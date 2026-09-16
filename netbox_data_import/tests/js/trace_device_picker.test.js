@@ -6,6 +6,10 @@ import { resolve } from "node:path";
 import { Modal } from "bootstrap";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const searchSource = readFileSync(resolve(
+  process.cwd(),
+  "netbox_data_import/static/netbox_data_import/js/trace_picker_search.js",
+), "utf8");
 const controllerSource = readFileSync(resolve(
   process.cwd(),
   "netbox_data_import/static/netbox_data_import/js/trace_device_picker.js",
@@ -55,6 +59,7 @@ beforeEach(() => {
       </div></div>
     </div>
   `;
+  window.eval(searchSource);
   window.eval(controllerSource);
 });
 

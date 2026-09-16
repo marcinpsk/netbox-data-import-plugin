@@ -1,37 +1,43 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com> */
 
-/* A debounced search must invalidate the request in flight, not only the one it replaces. */
+/* The debounced candidate search has one owner, and scheduling it retires the request in flight.
+ * Both pickers once held their own copy, and both let an answer to a superseded query render. */
 
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SCRIPT_DIRECTORY = resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js");
+const OWNER = "trace_picker_search.js";
 
-function inputListenerBody(source) {
-  const start = source.indexOf("addEventListener('input'");
-  if (start < 0) return null;
-  const end = source.indexOf("\n  });", start);
-  return end < 0 ? null : source.slice(start, end);
+const scripts = readdirSync(SCRIPT_DIRECTORY)
+  .filter(name => name.endsWith(".js"))
+  .map(name => ({ name, source: readFileSync(resolve(SCRIPT_DIRECTORY, name), "utf8") }));
+
+function owner() {
+  return scripts.find(file => file.name === OWNER).source;
 }
 
-const guarded = readdirSync(SCRIPT_DIRECTORY)
-  .filter(name => name.endsWith(".js"))
-  .map(name => ({ name, source: readFileSync(resolve(SCRIPT_DIRECTORY, name), "utf8") }))
-  .filter(file => file.source.includes("request !== pending"));
-
 describe("debounced search freshness", () => {
-  it("covers every script that ranks answers by a pending counter", () => {
-    expect(guarded.map(file => file.name).sort()).toEqual(
-      ["trace_device_picker.js", "trace_termination_picker.js"],
-    );
+  it("keeps the request-freshness mechanism in one file", () => {
+    // The counter, not the word: other scripts use `pending` for a proposal's status.
+    const holders = scripts.filter(file => /\+\+pending|pending\s*\+=\s*1/.test(file.source)).map(file => file.name);
+
+    expect(holders).toEqual([OWNER]);
   });
 
-  it.each(guarded)("$name invalidates the request in flight when the search changes", ({ source }) => {
-    const body = inputListenerBody(source);
+  it("retires the request in flight whenever a search is rescheduled", () => {
+    const reschedule = owner().slice(owner().indexOf("reschedule:"));
 
-    expect(body).not.toBeNull();
-    expect(body).toMatch(/pending\s*\+=\s*1|\+\+pending/);
+    expect(reschedule).toMatch(/pending\s*\+=\s*1[\s\S]*setTimeout/);
+  });
+
+  it("gives no caller a way to schedule a search without retiring the one in flight", () => {
+    const callers = scripts.filter(file => file.name !== OWNER);
+
+    for (const file of callers) {
+      expect(file.source, `${file.name} schedules its own search`).not.toMatch(/setTimeout\(\s*load/);
+    }
   });
 });

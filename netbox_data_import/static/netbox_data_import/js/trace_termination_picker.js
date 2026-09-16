@@ -12,8 +12,6 @@
 
   var kindLabels = {interface: 'dcim.interface', front_port: 'dcim.frontport', rear_port: 'dcim.rearport'};
   var activeKind = '';
-  var pending = 0;
-  var searchTimer = null;
 
   // A swap replaces every node this picker reads, so each one is read at the time it is used.
   function node(id) {
@@ -79,38 +77,20 @@
     show(error, true);
   }
 
-  function load() {
-    var form = node('traceTerminationForm');
-    var search = node('traceTerminationSearch');
-    // A boost can land on a page with no picker while a debounce is still pending.
-    if (!form || !search) return;
-    var request = ++pending;
-    var asked = search.value;
-    var url = form.dataset.candidatesUrl + '?field_key=' + encodeURIComponent(node('traceTerminationFieldKey').value)
-      + '&search=' + encodeURIComponent(search.value)
-      + '&preview_revision=' + encodeURIComponent(form.elements.namedItem('preview_revision').value);
-    fetch(url, {headers: {Accept: 'application/json'}, credentials: 'same-origin'})
-      .then(function (response) {
-        return response.json().then(function (payload) {
-          return {ok: response.ok, payload: payload};
-        });
-      })
-      .then(function (result) {
-        // A slower earlier search must not overwrite the answer to a later one, and an answer to
-        // the page a boost replaced must not be shown on the page that replaced it.
-        if (request !== pending || node('traceTerminationForm') !== form) return;
-        if (!result.ok || !result.payload.ok) {
-          reportFailure(result.payload.error || 'The candidates could not be read.');
-          return;
-        }
-        show(node('traceTerminationError'), false);
-        renderCandidates(result.payload, asked);
-      })
-      .catch(function () {
-        if (request !== pending || node('traceTerminationForm') !== form) return;
-        reportFailure('The candidates could not be read.');
-      });
-  }
+  var candidates = window.ndiPickerSearch({
+    form: function () { return node('traceTerminationForm'); },
+    search: function () { return node('traceTerminationSearch'); },
+    url: function (form, asked) {
+      return form.dataset.candidatesUrl + '?field_key=' + encodeURIComponent(node('traceTerminationFieldKey').value)
+        + '&search=' + encodeURIComponent(asked)
+        + '&preview_revision=' + encodeURIComponent(form.elements.namedItem('preview_revision').value);
+    },
+    onResult: function (payload, asked) {
+      show(node('traceTerminationError'), false);
+      renderCandidates(payload, asked);
+    },
+    onError: reportFailure
+  });
 
   document.addEventListener('click', function (event) {
     var trigger = event.target.closest('[data-trace-picker]');
@@ -128,7 +108,7 @@
     clearSelection();
     node('traceTerminationCandidates').replaceChildren();
     show(node('traceTerminationCount'), false);
-    load();
+    candidates.load();
     modal.addEventListener('hidden.bs.modal', function () { trigger.focus(); }, {once: true});
     ModalClass.getOrCreateInstance(modal).show(trigger);
   });
@@ -139,10 +119,8 @@
 
   document.addEventListener('input', function (event) {
     if (event.target.id !== 'traceTerminationSearch') return;
-    // The debounce leaves a window in which the old selection or an in-flight answer could still land.
+    // The debounce leaves a window in which the old selection could still be submitted.
     clearSelection();
-    pending += 1;
-    window.clearTimeout(searchTimer);
-    searchTimer = window.setTimeout(load, 200);
+    candidates.reschedule(200);
   });
 })();
