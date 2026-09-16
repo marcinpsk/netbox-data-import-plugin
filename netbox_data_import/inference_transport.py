@@ -10,7 +10,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from dataclasses import dataclass
-from threading import Event, Lock, RLock, Timer
+from threading import BoundedSemaphore, Event, Lock, RLock, Timer
 from typing import Any, Callable, TypeVar, cast
 from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
@@ -25,12 +25,20 @@ from urllib3.util import Timeout as Urllib3Timeout
 
 _SESSION_LOCKS: WeakKeyDictionary[requests.Session, RLock] = WeakKeyDictionary()
 _SESSION_LOCKS_GUARD = Lock()
-_DEADLINE_WORKERS = ThreadPoolExecutor(thread_name_prefix="inference-deadline")
+#: Worker ceiling for operations no caller can interrupt, chiefly name resolution.
+DEADLINE_WORKER_LIMIT = 32
+_DEADLINE_WORKERS = ThreadPoolExecutor(max_workers=DEADLINE_WORKER_LIMIT, thread_name_prefix="inference-deadline")
+# A worker holds its permit until its operation really ends, not until its caller gives up on it.
+_DEADLINE_CAPACITY = BoundedSemaphore(DEADLINE_WORKER_LIMIT)
 _Result = TypeVar("_Result")
 
 
 class WallClockDeadlineExceeded(requests.Timeout):
     """One foreground operation exhausted its shared wall-clock budget."""
+
+
+class DeadlineCapacityExhausted(WallClockDeadlineExceeded):
+    """Every deadline worker is still held by an operation that has not returned."""
 
 
 @dataclass(frozen=True)
@@ -74,9 +82,14 @@ class WallClockDeadline:
 
     def run(self, operation: Callable[..., _Result], *args: Any, **kwargs: Any) -> _Result:
         """Run a blocking operation without letting it hold the caller past the deadline."""
+        remaining = self.remaining()
+        if not _DEADLINE_CAPACITY.acquire(blocking=False):
+            # Queueing here would spend the whole budget without the operation ever starting.
+            raise DeadlineCapacityExhausted("No capacity is free to start the operation. Try again shortly.")
         future = _DEADLINE_WORKERS.submit(operation, *args, **kwargs)
+        future.add_done_callback(lambda _future: _DEADLINE_CAPACITY.release())
         try:
-            return future.result(timeout=self.remaining())
+            return future.result(timeout=remaining)
         except FutureTimeoutError:
             future.cancel()
             raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
@@ -325,6 +338,8 @@ def request_to_resolved_address(
 
 
 __all__ = (
+    "DEADLINE_WORKER_LIMIT",
+    "DeadlineCapacityExhausted",
     "ResponseBodyTooLarge",
     "ResponseProcessingFailure",
     "WallClockDeadline",

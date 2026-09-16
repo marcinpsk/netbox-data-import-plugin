@@ -39,6 +39,8 @@ from netbox_data_import.inference_adapter import (
     TRANSIENT_STATUSES,
 )
 from netbox_data_import.inference_transport import (
+    DEADLINE_WORKER_LIMIT,
+    DeadlineCapacityExhausted,
     ResponseBodyTooLarge,
     ResponseProcessingFailure,
     WallClockDeadline,
@@ -1396,6 +1398,53 @@ class AddressPinnedSessionTest(SimpleTestCase):
                 self.assertLess(started, operation_count)
             finally:
                 release.set()
+
+    def test_a_saturated_pool_refuses_instead_of_starving_a_later_operation(self):
+        """An abandoned operation holds its worker, so the next caller is told, not left queued."""
+        release = threading.Event()
+        occupied = threading.Semaphore(0)
+
+        def never_returns():
+            occupied.release()
+            release.wait(timeout=30)
+
+        def abandon_one():
+            try:
+                WallClockDeadline.after(0.25).run(never_returns)
+            except WallClockDeadlineExceeded:
+                return True
+            return False
+
+        with ThreadPoolExecutor(max_workers=DEADLINE_WORKER_LIMIT) as callers:
+            abandoned = [callers.submit(abandon_one) for _ in range(DEADLINE_WORKER_LIMIT)]
+            try:
+                for _ in range(DEADLINE_WORKER_LIMIT):
+                    self.assertTrue(occupied.acquire(timeout=5), "the pool never filled")
+                self.assertTrue(all(future.result(timeout=5) for future in abandoned))
+
+                # Every worker is still held by an operation that has not returned.
+                started = time.monotonic()
+                with self.assertRaises(DeadlineCapacityExhausted) as caught:
+                    WallClockDeadline.after(10).run(lambda: True)
+
+                self.assertLess(time.monotonic() - started, 5, "the caller waited for its whole deadline")
+                self.assertIn("capacity", str(caught.exception))
+            finally:
+                release.set()
+
+        # Recovery: once the blocked operations end, the next operation runs normally.
+        for _ in range(50):
+            try:
+                self.assertTrue(WallClockDeadline.after(5).run(lambda: True))
+                break
+            except DeadlineCapacityExhausted:
+                time.sleep(0.1)
+        else:
+            self.fail("capacity never returned after the blocked operations ended")
+
+    def test_capacity_exhaustion_is_a_deadline_failure_callers_already_answer(self):
+        """Every caller maps WallClockDeadlineExceeded already, so refusal must not be a new shape."""
+        self.assertTrue(issubclass(DeadlineCapacityExhausted, WallClockDeadlineExceeded))
 
     def test_deadline_transport_accepts_requests_timeout_shapes(self):
         """A deadline caps missing and scalar timeouts without changing Requests input rules."""
