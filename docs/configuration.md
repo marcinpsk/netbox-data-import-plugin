@@ -191,16 +191,28 @@ Set **Custom field name** in the Import Profile's adapter configuration, for exa
 `external_id`. The plugin writes the source ID of each imported row into that custom field, on
 Devices and on Racks. Assign the custom field to both object types.
 
-Add the link under **Customization > Custom Links**:
+Add the link under **Customization > Custom Links**. Set **Object types** to `DCIM > device`
+and `DCIM > rack`.
 
-| Field | Value |
-| --- | --- |
-| Object types | `DCIM > device`, `DCIM > rack` |
-| Link text | `{% if object.cf.external_id %}Locate asset in the source system{% endif %}` |
-| Link URL | `https://assets.example.invalid/search?q={{ object.cf.external_id }}` |
+**Link text**:
+
+```jinja
+{% if object.cf.external_id %}Locate asset in the source system{% endif %}
+```
+
+**Link URL**:
+
+```jinja
+https://assets.example.invalid/search?q={{ object.cf.external_id | urlencode }}
+```
 
 To find the URL, search for one ID in the source system and replace the search value with
-`{{ object.cf.external_id }}`.
+`{{ object.cf.external_id | urlencode }}`.
+
+Keep the `urlencode` filter. NetBox leaves `&` and `#` unchanged when it sanitizes a rendered Custom
+Link, so a source ID that holds one of them starts a second query parameter or a fragment. Many
+source systems also read a `+` in a query value as a space. The filter escapes all three and keeps
+the ID one value.
 
 An empty link text hides the button, so an object that no import touched shows nothing.
 
@@ -261,7 +273,7 @@ response = session.post(
         "object_types": targets,
         "enabled": True,
         "link_text": "{% if object.cf." + CUSTOM_FIELD + " %}" + LINK_NAME + "{% endif %}",
-        "link_url": SEARCH_URL + "{{ object.cf." + CUSTOM_FIELD + " }}",
+        "link_url": SEARCH_URL + "{{ object.cf." + CUSTOM_FIELD + " | urlencode }}",
         "new_window": True,
     },
     timeout=30,
@@ -279,11 +291,19 @@ A profile that names no custom field still records the source ID in the Device i
 Custom Link can read that record. The plugin keeps no equivalent record for a Rack, so this variant
 covers Devices only.
 
-| Field | Value |
-| --- | --- |
-| Object types | `DCIM > device` |
-| Link text | `{% if object.data_import_source and object.data_import_source.source_id %}Locate asset in the source system{% endif %}` |
-| Link URL | `https://assets.example.invalid/search?q={{ object.data_import_source.source_id }}` |
+Set **Object types** to `DCIM > device`.
+
+**Link text**:
+
+```jinja
+{% if object.data_import_source and object.data_import_source.source_id %}Locate asset in the source system{% endif %}
+```
+
+**Link URL**:
+
+```jinja
+https://assets.example.invalid/search?q={{ object.data_import_source.source_id | urlencode }}
+```
 
 Keep both tests in the link text. A Device that the plugin never imported has no
 `data_import_source`. A link text that reads `object.data_import_source.source_id` without the first
