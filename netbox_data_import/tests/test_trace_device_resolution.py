@@ -520,6 +520,28 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertEqual(candidates.status_code, 400)
         self.assertEqual(candidates.json()["error"], "That Device cannot be resolved here.")
 
+    def test_an_internal_candidate_type_error_is_not_request_input(self):
+        response = self.start_alias_preview()
+        failed_reads = []
+
+        def fail_candidate_read(execute, sql, params, many, context):
+            if 'FROM "dcim_device"' in sql:
+                failed_reads.append(sql)
+                raise TypeError("internal candidate read failure")
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(fail_candidate_read):
+            with self.assertRaisesMessage(TypeError, "internal candidate read failure"):
+                self.client.get(
+                    reverse("plugins:netbox_data_import:trace_device_candidates"),
+                    {
+                        "device_key": "source alias",
+                        "preview_revision": response.context["preview_revision"],
+                    },
+                )
+
+        self.assertTrue(failed_reads)
+
     def test_the_summary_counts_only_saved_decisions_the_actor_can_view(self):
         from core.models import ObjectType
         from dcim.models import Site

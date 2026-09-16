@@ -3883,14 +3883,13 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
                 status=400,
             )
         try:
+            evidence = DeviceEvidence.from_dict(question)
+        except (TypeError, ValueError):
+            return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
+        try:
             reader = NetBoxReader.for_actor(request.user).for_planning_context(planning_context)
-            found = eligible_trace_devices(
-                reader=reader,
-                evidence=DeviceEvidence.from_dict(question),
-                search=search,
-                limit=limit,
-            )
-        except (PlanningTargetUnavailable, TypeError, ValueError):
+            found = eligible_trace_devices(reader=reader, evidence=evidence, search=search, limit=limit)
+        except PlanningTargetUnavailable:
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
         return JsonResponse(
             {
