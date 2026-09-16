@@ -205,6 +205,46 @@ def _retry_after(response) -> int | None:
         return None
 
 
+def _status_failure(status: int, diagnostic, retry_after: int | None) -> InferenceBackendError | None:
+    """Return the typed failure one HTTP status maps to, or None when the status carries none."""
+    if 300 <= status < 400:
+        return InvalidBackendConfiguration(
+            f"The backend redirected the call (HTTP {status}), which is not followed.", diagnostic=diagnostic
+        )
+    if status in (401, 403):
+        return AuthenticationFailure(f"The backend refused the credential (HTTP {status}).", diagnostic=diagnostic)
+    if status == 429:
+        return RateLimited("The backend rate limited the call.", retry_after=retry_after, diagnostic=diagnostic)
+    if status in TRANSIENT_STATUSES:
+        return TransportFailure(f"The backend answered HTTP {status}.", diagnostic=diagnostic)
+    if status >= 400:
+        return InvalidBackendConfiguration(
+            f"The backend rejected the request (HTTP {status}), which repeating cannot fix.",
+            diagnostic=diagnostic,
+        )
+    return None
+
+
+def _processing_failure(exc: ResponseProcessingFailure, api_key: str) -> InferenceBackendError:
+    """Return the typed failure one interrupted or refused response body maps to."""
+    diagnostic = ResponseDiagnostic(receipt=BODY_INTERRUPTED, status_code=exc.response.status_code)
+    if isinstance(exc.cause, ResponseBodyTooLarge):
+        # The body is refused unread, so the status is the only classification left.
+        return _status_failure(exc.response.status_code, diagnostic, _retry_after(exc.response)) or MalformedEnvelope(
+            "The backend response is too large.", diagnostic=diagnostic
+        )
+    if isinstance(exc.cause, ValueError):
+        return InvalidBackendConfiguration(
+            f"The backend answered with a location this delivery cannot use ({type(exc.cause).__name__}).",
+            diagnostic=_diagnostic(exc.response, api_key),
+        )
+    if isinstance(exc.cause, requests.Timeout) or _is_response_read_timeout(exc.cause):
+        return BackendTimeout(
+            "The backend did not finish its answer inside the configured limits.", diagnostic=diagnostic
+        )
+    return TransportFailure(f"The backend answer was interrupted ({type(exc.cause).__name__}).", diagnostic=diagnostic)
+
+
 def _is_response_read_timeout(exc: Exception) -> bool:
     """Return whether Requests timed out after it had received response headers."""
     return isinstance(exc, requests.ConnectionError) and bool(exc.args) and isinstance(exc.args[0], ReadTimeoutError)
@@ -312,29 +352,7 @@ class OpenAICompatibleAdapter:
                     **kwargs,
                 )
             except ResponseProcessingFailure as exc:
-                if isinstance(exc.cause, ResponseBodyTooLarge):
-                    raise MalformedEnvelope(
-                        "The backend response is too large.",
-                        diagnostic=ResponseDiagnostic(
-                            receipt=BODY_INTERRUPTED,
-                            status_code=exc.response.status_code,
-                        ),
-                    ) from None
-                if isinstance(exc.cause, ValueError):
-                    raise InvalidBackendConfiguration(
-                        f"The backend answered with a location this delivery cannot use ({type(exc.cause).__name__}).",
-                        diagnostic=_diagnostic(exc.response, api_key),
-                    ) from None
-                diagnostic = ResponseDiagnostic(receipt=BODY_INTERRUPTED, status_code=exc.response.status_code)
-                if isinstance(exc.cause, requests.Timeout) or _is_response_read_timeout(exc.cause):
-                    raise BackendTimeout(
-                        "The backend did not finish its answer inside the configured limits.",
-                        diagnostic=diagnostic,
-                    ) from None
-                raise TransportFailure(
-                    f"The backend answer was interrupted ({type(exc.cause).__name__}).",
-                    diagnostic=diagnostic,
-                ) from None
+                raise _processing_failure(exc, api_key) from None
             except requests.ConnectTimeout as exc:
                 connection_failure = exc
                 continue
@@ -373,24 +391,9 @@ class OpenAICompatibleAdapter:
     def _raise_for_status(response: requests.Response, api_key: str) -> ResponseDiagnostic:
         """Return a safe diagnostic for success, or raise the typed HTTP failure."""
         diagnostic = _diagnostic(response, api_key)
-        status = response.status_code
-        if 300 <= status < 400:
-            raise InvalidBackendConfiguration(
-                f"The backend redirected the call (HTTP {status}), which is not followed.", diagnostic=diagnostic
-            )
-        if status in (401, 403):
-            raise AuthenticationFailure(f"The backend refused the credential (HTTP {status}).", diagnostic=diagnostic)
-        if status == 429:
-            raise RateLimited(
-                "The backend rate limited the call.", retry_after=_retry_after(response), diagnostic=diagnostic
-            )
-        if status in TRANSIENT_STATUSES:
-            raise TransportFailure(f"The backend answered HTTP {status}.", diagnostic=diagnostic)
-        if status >= 400:
-            raise InvalidBackendConfiguration(
-                f"The backend rejected the request (HTTP {status}), which repeating cannot fix.",
-                diagnostic=diagnostic,
-            )
+        failure = _status_failure(response.status_code, diagnostic, _retry_after(response))
+        if failure is not None:
+            raise failure
         return diagnostic
 
     def complete(self, request: InferenceRequest, api_key: str) -> InferenceCompletion:

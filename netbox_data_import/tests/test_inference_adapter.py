@@ -339,6 +339,35 @@ class ChatCompletionRequestTest(SimpleTestCase):
 
         self.assertIn("too large", str(caught.exception))
 
+    def test_an_oversized_rate_limited_response_stays_retryable(self):
+        """An oversized body must not turn a retryable status into a permanent envelope failure."""
+        payload = completion(content="x" * 65_536)
+        with serving(status=429, payload=payload, headers_out={"Retry-After": "7"}) as (root, _seen, allowlist):
+            with self.assertRaises(RateLimited) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(caught.exception.retry_after, 7)
+        self.assertEqual(caught.exception.diagnostic.status_code, 429)
+
+    def test_an_oversized_transient_failure_stays_retryable(self):
+        payload = completion(content="x" * 65_536)
+        with serving(status=503, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(TransportFailure) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(caught.exception.diagnostic.status_code, 503)
+
+    def test_an_oversized_client_error_is_not_retried(self):
+        """A status with no retry meaning keeps the permanent classification."""
+        payload = completion(content="x" * 65_536)
+        with serving(status=400, payload=payload) as (root, _seen, allowlist):
+            with self.assertRaises(InvalidBackendConfiguration) as caught:
+                adapter_for(root, allowlist).complete(REQUEST, api_key=API_KEY)
+
+        self.assertFalse(caught.exception.retryable)
+
 
 class ModelDiscoveryTest(SimpleTestCase):
     """Model discovery uses the same authenticated, destination-pinned adapter boundary."""

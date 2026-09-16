@@ -26,6 +26,7 @@ rules exist to check exactly that tree.
 | --- | --- |
 | `nbdi-tests-use-public-coordinator` | a private attribute read, plain or through `getattr`, on `ImportEngine` or on any value bound from it |
 | `nbdi-tests-use-public-coordinator-direct` | the same read off a fresh instance, or off the `import_engine` module itself |
+| `nbdi-bounded-response-body` | a `request_to_resolved_address` call outside the tests that sets no `response_body_limit` |
 
 Taint mode carries the first rule through any binding form, so an alias, a tuple target, a walrus,
 an attribute target, and an `as` import are all covered without enumerating them. Its sink accepts

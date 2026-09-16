@@ -20,6 +20,7 @@ import requests
 from django.test import SimpleTestCase
 
 from netbox_data_import.inference_credentials import (
+    VAULT_RESPONSE_LIMIT,
     CredentialDenied,
     CredentialFailure,
     CredentialReference,
@@ -284,6 +285,22 @@ class VaultReadTest(SimpleTestCase):
                     self.assertEqual(status, 200)
 
                 self.assertTrue(owned.closed)
+
+    def test_an_oversized_vault_body_is_refused_instead_of_consumed(self):
+        """An approved endpoint that floods the reader must not be read to EOF."""
+        payload = {"data": {"data": {"api_key": SECRET}}, "padding": "x" * VAULT_RESPONSE_LIMIT}
+        with serving(payload=payload) as (settings, _seen):
+            with self.assertRaises(CredentialUnavailable) as caught:
+                self.resolve(settings)
+
+        self.assertNotIn(SECRET, str(caught.exception))
+
+    def test_an_oversized_refusal_keeps_its_status_classification(self):
+        """A refused read stays a refusal, so it is never retried as a transient failure."""
+        payload = {"errors": ["permission denied"], "padding": "x" * VAULT_RESPONSE_LIMIT}
+        with serving(status=403, payload=payload) as (settings, _seen):
+            with self.assertRaises(CredentialDenied):
+                self.resolve(settings)
 
     def test_the_configured_field_is_returned(self):
         with serving() as (settings, seen):

@@ -27,6 +27,7 @@ from .inference_settings import (
     validate_vault_settings,
 )
 from .inference_transport import (
+    ResponseBodyTooLarge,
     ResponseProcessingFailure,
     WallClockDeadline,
     WallClockDeadlineExceeded,
@@ -71,6 +72,8 @@ def _quiet_transport_logging():
 
 DEFAULT_CONNECT_TIMEOUT = 5
 DEFAULT_READ_TIMEOUT = 60
+# A KV v2 envelope holding one secret is small; anything past this is refused unread.
+VAULT_RESPONSE_LIMIT = 65_536
 
 
 class CredentialFailure(Exception):
@@ -154,6 +157,22 @@ class CredentialBackend(Protocol):
     def resolve(self, reference: CredentialReference) -> str:
         """Return the secret the reference names."""
         ...
+
+
+def _status_failure(status: int) -> CredentialFailure | None:
+    """Return the typed credential failure one Vault status maps to, or None for a usable answer."""
+    # Every 3xx, not a list of them: a 300 or 305 body shaped like KV would read as the secret.
+    if 300 <= status < 400:
+        return InvalidCredentialConfiguration(
+            f"The credential store redirected the read (HTTP {status}). Check the configured vault address."
+        )
+    if status in (401, 403):
+        return CredentialDenied(f"The credential store refused the read (HTTP {status}).")
+    if status == 404:
+        return InvalidCredentialReference("The credential store holds no secret for this Inference Backend.")
+    if status >= 400:
+        return CredentialUnavailable(f"The credential store answered HTTP {status}.")
+    return None
 
 
 class VaultKvV2CredentialBackend:
@@ -242,6 +261,7 @@ class VaultKvV2CredentialBackend:
                         headers=self._headers(),
                         timeout=timeout,
                         deadline=self._deadline,
+                        response_body_limit=VAULT_RESPONSE_LIMIT,
                         verify=self._settings.get("ca_bundle", True),
                         allow_redirects=False,
                     )
@@ -250,6 +270,14 @@ class VaultKvV2CredentialBackend:
             except requests.RequestException as exc:
                 if isinstance(exc, ResponseProcessingFailure) and isinstance(exc.cause, WallClockDeadlineExceeded):
                     raise exc.cause from None
+                if isinstance(exc, ResponseProcessingFailure) and isinstance(exc.cause, ResponseBodyTooLarge):
+                    # The body is refused unread, so the status is the only classification left.
+                    refusal = _status_failure(exc.response.status_code)
+                    if refusal is not None:
+                        raise refusal from None
+                    raise CredentialUnavailable(
+                        "The credential store answered with a body this read cannot accept."
+                    ) from None
                 if is_preconnect_failure(exc):
                     connection_failure = exc
                     continue
@@ -272,18 +300,9 @@ class VaultKvV2CredentialBackend:
         if reference.backend != self.name:
             raise InvalidCredentialReference(f"This backend resolves '{self.name}' references only.")
         response = self._read(reference)
-        # Every 3xx, not a list of them: a 300 or 305 body shaped like KV would read as the secret.
-        if 300 <= response.status_code < 400:
-            raise InvalidCredentialConfiguration(
-                f"The credential store redirected the read (HTTP {response.status_code}). "
-                f"Check the configured vault address."
-            )
-        if response.status_code in (401, 403):
-            raise CredentialDenied(f"The credential store refused the read (HTTP {response.status_code}).")
-        if response.status_code == 404:
-            raise InvalidCredentialReference("The credential store holds no secret for this Inference Backend.")
-        if response.status_code >= 400:
-            raise CredentialUnavailable(f"The credential store answered HTTP {response.status_code}.")
+        failure = _status_failure(response.status_code)
+        if failure is not None:
+            raise failure
         try:
             envelope = response.json()
             data = envelope["data"]["data"]
