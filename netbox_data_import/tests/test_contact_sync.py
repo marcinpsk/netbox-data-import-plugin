@@ -26,6 +26,7 @@ from netbox_data_import.contact_resolution import (
 )
 from netbox_data_import.models import ClassRoleMapping, ColumnMapping, ImportProfile, stored_import_source
 from netbox_data_import.object_permissions import ObjectPermissionDenied
+from netbox_data_import.tests.redaction import PRIVATE_HEADERS
 from netbox_data_import.tests.helpers import set_import_source, user_with_object_permission
 
 
@@ -108,48 +109,6 @@ class LocalExamplePrivacyTest(SimpleTestCase):
         import openpyxl
         import tomllib
 
-        private_headers = {
-            "Asset Tag",
-            "Asset_Tag",
-            "Asset_Tag_Archived",
-            "Audit Notes",
-            "CANS",
-            "City",
-            "Company",
-            "Contact",
-            "Contact Number",
-            "Country",
-            "Department",
-            "Department Director",
-            "Description",
-            "Dir. Department",
-            "Equipment Notes",
-            "Express Service Code",
-            "Hostname",
-            "IDRAC Default Password",
-            "IDRAC MAC Address",
-            "IP Address (IPv4)",
-            "Id",
-            "JIRA ID",
-            "Location",
-            "MAC Address",
-            "Management IP Address",
-            "Name",
-            "Owner",
-            "Primary Contact",
-            "Project",
-            "Purchase Order",
-            "Purchase Price",
-            "RACK",
-            "Rack",
-            "Room",
-            "Serial Number",
-            "Service Provider",
-            "Service Tag",
-            "SolarWinds ID",
-            "VP Department",
-            "Wave ID",
-        }
         repository_root = Path(__file__).resolve().parents[2]
         with (repository_root / "pyproject.toml").open("rb") as metadata_file:
             project_metadata = tomllib.load(metadata_file)["project"]
@@ -178,7 +137,7 @@ class LocalExamplePrivacyTest(SimpleTestCase):
                 if cell.value is None:
                     continue
                 header = headers.get(cell.column)
-                if header not in private_headers:
+                if header not in PRIVATE_HEADERS:
                     continue
                 value = str(cell.value).strip()
                 if len(value) < 4 or "\n" in value or value.casefold() in ignored_values:
