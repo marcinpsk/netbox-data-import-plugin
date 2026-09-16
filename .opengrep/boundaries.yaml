@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+rules:
+  - id: nbdi-tests-use-public-coordinator
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Use the public ImportEngine coordinator interface. This reads a private attribute on the
+      coordinator or on a value bound from it.
+    mode: taint
+    pattern-sources:
+      - pattern: netbox_data_import.import_engine.ImportEngine
+      - pattern: netbox_data_import.import_engine.ImportEngine(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: $X.$PRIV
+          - metavariable-regex:
+              metavariable: $PRIV
+              regex: '^_'
+
+  - id: nbdi-tests-use-public-coordinator-direct
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Use the public ImportEngine coordinator interface. This reads a private attribute directly
+      off the coordinator, a fresh instance, or the import_engine module.
+    patterns:
+      - pattern-either:
+          - pattern: netbox_data_import.import_engine.ImportEngine().$PRIV
+          - pattern: netbox_data_import.import_engine.$PRIV
+          - pattern: getattr(netbox_data_import.import_engine.ImportEngine, "$PRIV", ...)
+          - pattern: getattr(netbox_data_import.import_engine.ImportEngine(...), "$PRIV", ...)
+      - metavariable-regex:
+          metavariable: $PRIV
+          regex: '^_'

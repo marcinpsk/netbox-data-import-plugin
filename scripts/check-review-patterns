@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+#
+# Run the repository's OpenGrep ruleset over the package, or over its fixtures.
+# Pre-commit only: an OpenGrep step in CI disables CodeRabbit's own OpenGrep pass.
+set -euo pipefail
+
+RULES=".opengrep"
+TREE="netbox_data_import"
+
+resolve_opengrep() {
+  if command -v opengrep >/dev/null 2>&1; then
+    command -v opengrep
+    return
+  fi
+  if command -v mise >/dev/null 2>&1 && mise which opengrep >/dev/null 2>&1; then
+    mise which opengrep
+    return
+  fi
+  echo "opengrep is not installed; install it with 'mise use aqua:opengrep/opengrep'" >&2
+  exit 127
+}
+
+OPENGREP="$(resolve_opengrep)"
+
+case "${1:-scan}" in
+  scan)
+    # Explicit targets: OpenGrep's default ignore list drops `tests/`, and these rules exist to
+    # check exactly that tree.
+    mapfile -t targets < <(find "$TREE" -name '*.py' -not -path '*/migrations/*' | sort)
+    "$OPENGREP" scan --quiet --error --config "$RULES" "${targets[@]}"
+    ;;
+  test)
+    # `opengrep test` pairs <stem>.yaml with a same-stem fixture, so each pair is staged alone.
+    staged="$(mktemp -d)"
+    trap 'rm -rf "$staged"' EXIT
+    for fixture in "$RULES"/fixtures/*.py; do
+      stem="$(basename "$fixture" .py)"
+      cp "$RULES/$stem.yaml" "$staged/$stem.yaml"
+      cp "$fixture" "$staged/$stem.py"
+    done
+    "$OPENGREP" test "$staged"
+    ;;
+  *)
+    echo "usage: $0 [scan|test]" >&2
+    exit 2
+    ;;
+esac
