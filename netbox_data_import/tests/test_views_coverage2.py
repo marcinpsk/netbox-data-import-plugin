@@ -575,7 +575,7 @@ class BulkYamlImportNonListAndOSErrorTest(TestCase):
         ):
             resp = self.client.post(self.url, {"yaml_file": yaml_file, "mapping_type": "class_role"})
         self.assertEqual(resp.status_code, 200)
-        self.assertIn(b"read", resp.content.lower())
+        self.assertContains(resp, "Could not read the uploaded file.")
 
 
 class BulkYamlImportUnknownMappingTypeTest(TestCase):
