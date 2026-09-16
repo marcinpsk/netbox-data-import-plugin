@@ -194,9 +194,14 @@ idempotency policy.
 
 ## Permissions and audit
 
-Give each NetBox process identity only `read` capability on the exact KV v2 data path or a narrow
-provider path prefix. Do not grant `list`, `create`, `update`, `delete`, metadata administration,
-or access to unrelated secrets. Vault policies deny access by default. [Vault policies][vault-policies]
+Grant only `read` capability on the exact KV v2 data path or a narrow provider path prefix. Which
+identity carries that policy depends on the deployment mode. With a Vault Proxy that forces its
+auto-auth token, Vault sees the Proxy auto-auth identity for every call, and the NetBox processes
+hold no Vault identity of their own, so the policy attaches to the Proxy identity. With direct
+access, or a shared Proxy that does not force auto-auth, each NetBox process group authenticates as
+itself, so the policy attaches to each process identity. In both modes, do not grant `list`,
+`create`, `update`, `delete`, metadata administration, or access to unrelated secrets. Vault
+policies deny access by default. [Vault policies][vault-policies]
 
 The Ask AI action must enforce its own NetBox permission before it queues work. The Vault token
 represents the NetBox service, not the operator. A user must not be able to use the credential

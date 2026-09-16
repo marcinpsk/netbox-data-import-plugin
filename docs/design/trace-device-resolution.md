@@ -141,10 +141,11 @@ does not invalidate an explicit mapping.
 
 ### Workspace routing
 
-Derive the review destination from the selected profile's registered output kinds. A profile that
-emits `SourceTrace` opens the Trace Review Workspace even when the parsed workbook produces zero
-valid traces. This lets trace-specific parse and planning feedback stay in its own workspace. All
-other profiles keep the generic preview route.
+Derive the review destination from the selected profile's registered output kinds. A profile opens
+the Trace Review Workspace only when its output kinds equal exactly `{SOURCE_TRACE}`. It opens even
+when the parsed workbook produces zero valid traces. This lets trace-specific parse and planning
+feedback stay in its own workspace. A profile that emits `SourceTrace` together with any other
+output kind keeps the generic preview route, as do all profiles that emit no traces.
 
 Keep the route choice in one helper used after setup. Do not infer it from `workspace.has_traces`,
 because an empty or invalid trace workbook still has trace semantics.
