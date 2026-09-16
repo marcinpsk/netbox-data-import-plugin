@@ -494,7 +494,7 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
     def test_the_candidate_endpoint_rejects_invalid_limits(self):
         response = self.start_alias_preview()
 
-        for limit in ("not-an-integer", "0", str(ELIGIBLE_TERMINATION_LIMIT + 1)):
+        for limit in ("not-an-integer", "-1", "0", str(ELIGIBLE_TERMINATION_LIMIT + 1)):
             with self.subTest(limit=limit):
                 candidates = self.client.get(
                     reverse("plugins:netbox_data_import:trace_device_candidates"),
@@ -506,6 +506,11 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 )
 
                 self.assertEqual(candidates.status_code, 400)
+                # A bare 400 would still pass if a later regression refused the request elsewhere.
+                self.assertEqual(
+                    candidates.json()["error"],
+                    f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
+                )
 
     def test_the_candidate_endpoint_rejects_malformed_device_evidence(self):
         response = self.start_alias_preview()
