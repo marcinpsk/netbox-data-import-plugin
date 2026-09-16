@@ -85,6 +85,18 @@ def _referenced_names(path: pathlib.Path) -> set[str]:
     return names
 
 
+def _constraint_offenders(root: pathlib.Path) -> dict[str, list[str]]:
+    """Return every module under `root` except its own owner that reads NetBox constraint state."""
+    owner = root / "object_permissions.py"
+    return {
+        str(path.relative_to(root)): sorted(names)
+        for path in root.rglob("*.py")
+        if "tests" not in path.relative_to(root).parts
+        and path != owner
+        and (names := _referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS)
+    }
+
+
 def _imports_target_modules(path: pathlib.Path) -> bool:
     """Return whether a caller bypasses the coordinator for a Target Module."""
     tree = ast.parse(path.read_text())
@@ -210,15 +222,24 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
     def test_permission_constraint_parsing_has_one_owner(self):
         """Only the object permission module interprets NetBox constraint state."""
-        offenders = {
-            str(path.relative_to(PACKAGE)): sorted(names)
-            for path in PACKAGE.rglob("*.py")
-            if "tests" not in path.relative_to(PACKAGE).parts
-            and path.name != "object_permissions.py"
-            and (names := _referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS)
-        }
+        self.assertEqual(_constraint_offenders(PACKAGE), {})
 
-        self.assertEqual(offenders, {})
+    def test_the_owner_exemption_covers_one_module_only(self):
+        """A nested module cannot take the exemption by reusing the owner's file name."""
+        with TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "object_permissions.py").write_text(
+                "from utilities.permissions import qs_filter_from_constraints\n"
+            )
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "object_permissions.py").write_text(
+                "from utilities.permissions import qs_filter_from_constraints\n"
+            )
+
+            self.assertEqual(
+                _constraint_offenders(root), {"nested/object_permissions.py": ["qs_filter_from_constraints"]}
+            )
 
     def test_permission_constraint_owner_guard_reads_imports_and_attributes(self):
         """The ownership guard detects both supported access forms."""
