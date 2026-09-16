@@ -23,6 +23,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # Reversing restores nothing: the request the row carried cannot be sent under either contract.
-        migrations.RunPython(retire_superseded_proposals, migrations.RunPython.noop),
+        # No reverse callable: the request the row carried cannot be sent under either contract.
+        migrations.RunPython(retire_superseded_proposals),
     ]

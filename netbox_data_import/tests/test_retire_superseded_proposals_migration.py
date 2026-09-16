@@ -44,12 +44,14 @@ def _migrate(target, *, fake=False):
 class RetireSupersededProposalsStructureTest(SimpleTestCase):
     """The authored data migration is ordered and refuses a lossy rollback."""
 
-    def test_the_retirement_reverses_without_requeueing_the_row(self):
+    def test_the_retirement_refuses_to_reverse(self):
         operation = _migration(RETIRE_SUPERSEDED_PROPOSALS).operations[0]
 
         self.assertIsInstance(operation, RunPython)
         self.assertEqual(operation.code.__name__, "retire_superseded_proposals")
-        self.assertIs(operation.reverse_code, RunPython.noop)
+        # A noop reverse would report a successful rollback while every row stayed failed.
+        self.assertIsNone(operation.reverse_code)
+        self.assertFalse(operation.reversible)
         self.assertIn((APP, BEFORE), _migration(RETIRE_SUPERSEDED_PROPOSALS).dependencies)
 
 
