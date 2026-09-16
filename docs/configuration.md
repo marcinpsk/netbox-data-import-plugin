@@ -1,5 +1,129 @@
 # Configuration
 
+## Inference backend credentials
+
+Configure the Vault connection before you add an Inference Backend. The recommended setup uses a
+Vault Proxy. The Proxy authenticates to Vault and renews its token. The NetBox web and worker
+processes call the Proxy without holding a Vault credential.
+
+```python
+PLUGINS_CONFIG = {
+    "netbox_data_import": {
+        "vault": {
+            "address": "https://vault-proxy.example.invalid:8100",
+            "auth_method": "proxy",
+            "ca_bundle": "/etc/ssl/certs/vault-proxy-ca.pem",
+            "connect_timeout": 5,
+            "read_timeout": 10,
+        },
+    },
+}
+```
+
+Configure `vault.address` with HTTPS for both `proxy` and `token` authentication. The connection
+carries either a Vault token or a resolved inference API key. TLS can terminate at the Proxy, but
+the NetBox-to-Proxy connection must remain encrypted through the Proxy's HTTPS listener.
+
+The example uses a private CA. Mount that CA bundle in the NetBox web and worker processes. Set
+`ca_bundle` to its path. This adds the private CA to certificate verification. It does not disable
+verification. The Inference Backend `api_root` is separate: it can use HTTP only for an exact local
+endpoint in `inference_backend_origin_allowlist`.
+
+If Vault Proxy uses AppRole, give the RoleID and SecretID to the Proxy deployment. For local
+development, its gitignored `.env` file can supply them. For production, use the deployment's
+secret store. Do not give these values to the NetBox process, and do not put them in
+`PLUGINS_CONFIG`.
+
+The Proxy needs an AppRole auto-auth method, a listener, and API proxying. This is the essential
+Vault Proxy configuration:
+
+```hcl
+vault {
+  address = "https://vault.example.invalid:8200"
+}
+
+auto_auth {
+  method {
+    type = "approle"
+
+    config = {
+      role_id_file_path = "/run/secrets/vault-role-id"
+      secret_id_file_path = "/run/secrets/vault-secret-id"
+      remove_secret_id_file_after_reading = false
+    }
+  }
+}
+
+listener "tcp" {
+  address = "0.0.0.0:8100"
+  tls_cert_file = "/run/secrets/vault-proxy-cert.pem"
+  tls_key_file = "/run/secrets/vault-proxy-key.pem"
+  require_request_header = true
+}
+
+api_proxy {
+  use_auto_auth_token = "force"
+}
+```
+
+The TCP example lets a sibling container reach the Proxy. Keep both containers on an isolated
+container network. Do not publish the listener outside the isolated container network. The
+`X-Vault-Request` header is SSRF protection, not client authentication. If NetBox connects to a
+separate Proxy, restrict network ingress and authenticate each client, for example with mTLS.
+
+Mount the RoleID, SecretID, Proxy certificate, and Proxy key at the configured file paths. Mount the
+CA that signed the Proxy certificate in the NetBox web and worker processes. A local Docker Compose
+deployment can source the AppRole values from its gitignored `.env` file and expose them only to the
+Proxy as Compose secrets:
+
+```dotenv
+NBDI_VAULT_PROXY_ADDRESS=https://vault-proxy.example.invalid:8100
+NBDI_VAULT_ADDRESS=https://vault.example.invalid:8200
+NBDI_VAULT_NAMESPACE=
+NBDI_VAULT_ROLE_ID=replace-with-vault-role-id
+NBDI_VAULT_SECRET_ID=replace-with-vault-secret-id
+```
+
+Give the AppRole only `read` access to the required KV v2 data paths. Set `token_num_uses` to `0`,
+because Vault auto-auth does not support limited-use tokens. See HashiCorp's
+[AppRole auto-auth documentation](https://developer.hashicorp.com/vault/docs/agent-and-proxy/autoauth/methods/approle)
+and [Vault Proxy API documentation](https://developer.hashicorp.com/vault/docs/agent-and-proxy/proxy/apiproxy).
+The plugin sends `X-Vault-Request: true`, so the Proxy listener can require this header as shown.
+
+The plugin does not perform an AppRole login directly. It supports `auth_method: "proxy"` as shown
+above. It also supports `auth_method: "token"`, which reads a token from each NetBox process that
+resolves credentials. Set `VAULT_TOKEN` in both the web and worker process environments. Direct
+token authentication uses the same HTTPS and CA-bundle requirements.
+
+The **Credential reference** field on an Inference Backend tells the plugin which value to read
+from Vault KV v2. It has this JSON shape:
+
+```json
+{
+  "backend": "vault_kv_v2",
+  "mount": "secret",
+  "path": "inference/backend",
+  "field": "api_key"
+}
+```
+
+`mount` is the KV v2 mount. `path` is the secret path in that mount. `field` is the key that holds
+the inference API key. This reference contains no Vault address, Vault credential, or inference API
+key.
+
+Save the AI backend, then open its detail page and select **Run connection test**. The foreground
+test resolves the credential and sends a small request to the configured
+`{api_root}/chat/completions` endpoint. This request can consume provider tokens and can have a
+provider cost.
+
+The test also tries `GET {api_root}/models`. If the endpoint returns a compatible model list, the
+detail page shows up to 100 model ids. Select one to open the normal edit form with that value. Review
+the value and save the form. Model discovery is optional. If the endpoint does not support it, enter
+the exact model id manually.
+
+The foreground test has one overall time limit. The limit is the backend connect timeout plus its read
+timeout. Credential resolution, model discovery, and the completion request share this time.
+
 ## Native primary contacts
 
 Map the source contact column to the `primary_contact` target field. Then configure these fields on the Import Profile:
@@ -51,10 +175,25 @@ belongs to that format. A different source format needs a new Import Profile.
 The selected adapter declares the profile's remaining settings, which the profile stores together as
 its adapter configuration. The flat workbook adapter declares the sheet name, the source ID column,
 the custom field name, the update and create switches, the extra-data switch, the primary contact
-role and lookup field, and the preview view mode. The trace workbook adapter declares no settings.
+role and lookup field, and the preview view mode. The trace workbook adapter currently declares no
+settings. It reads the fixed `Trace From To` and optional `Trace List` workbook sheets.
 
-Only the flat workbook adapter is selectable today. An adapter becomes selectable when a Target
-Module that consumes its output ships, so the plugin never offers a source format it cannot import.
+The flat workbook and trace workbook adapters are selectable. An adapter becomes selectable when a
+Target Module that consumes its output ships, so the plugin never offers a source format it cannot
+import.
+
+A trace import opens the **Trace Review Workspace** directly. If a source Device label does not
+match exactly one visible NetBox Device in the selected Site, select **Choose Device**. The Import
+Profile stores that choice. A later trace file reuses it when the source Device label has the same
+letters after case and whitespace normalization. The choice applies to all ports on that source
+Device.
+
+Rack, Location, and U position are search hints. They can change the candidate order, but they never
+select a Device. A Rack or Location hint is used only when you can view that NetBox object.
+
+The trace workbook layout is not configurable in this release. A later adapter setting can map other
+sheet names and columns to the same Source Trace values. Device choices do not depend on Excel column
+names, so they remain reusable across that change.
 
 An object reference inside the adapter configuration uses a natural key, never a database id. The
 primary contact role is referenced by its name, so a profile exported as YAML imports into a

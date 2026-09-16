@@ -11,7 +11,6 @@ from typing import Any
 
 from .inference_trust import (
     InvalidInferenceConfiguration,
-    is_local_endpoint,
     split_url as _split_url,
     validate_api_root,
     validate_origin,
@@ -139,10 +138,10 @@ def _validate_vault_address(value: Any) -> None:
             )
     # Unquoted: the message is persisted, and an address can carry a token in its userinfo.
     parts = _split_url(value, f"{VAULT_SETTING}.address", quote_value=False)
-    # The read sends a token to this address, so it follows the api_root rule for a bearer token.
-    if parts.scheme.lower() != "https" and not is_local_endpoint(value):
+    # Every read carries a Vault token or a resolved secret, including reads through a local Proxy.
+    if parts.scheme.lower() != "https":
         raise InvalidInferenceConfiguration(
-            f"{label} must use https, unless it names a local endpoint, because the read sends a token to it."
+            f"{label} must use https because the connection carries a Vault token or a resolved secret."
         )
 
 

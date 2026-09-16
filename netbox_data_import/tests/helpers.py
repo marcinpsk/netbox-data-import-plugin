@@ -409,20 +409,32 @@ def client_with_object_permission(username, model, *, granted, actions=("view",)
     return client
 
 
-def wait_until_a_lock_is_blocked(test, timeout=10):
-    """Block until another backend is waiting for a lock this connection holds."""
+def wait_until_a_lock_is_blocked(test, timeout=10, *, minimum=1):
+    """Block until enough other backends wait for a lock this connection holds."""
     from django.db import connection
 
     # pg_stat_activity is cached for the whole transaction; pg_locks reads live lock-manager state.
-    query = "SELECT count(*) FROM pg_locks WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))"
+    query = """
+        WITH RECURSIVE blocked(pid) AS (
+            SELECT pid
+            FROM pg_locks
+            WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))
+            UNION
+            SELECT waiting.pid
+            FROM pg_locks AS waiting
+            JOIN blocked AS blocker ON blocker.pid = ANY(pg_blocking_pids(waiting.pid))
+            WHERE NOT waiting.granted
+        )
+        SELECT count(DISTINCT pid) FROM blocked
+    """
     deadline = monotonic() + timeout
     while monotonic() < deadline:
         with connection.cursor() as cursor:
             cursor.execute(query)
-            if cursor.fetchone()[0]:
+            if cursor.fetchone()[0] >= minimum:
                 return
         sleep(0.05)
-    test.fail("No other backend started waiting for a lock this connection holds.")
+    test.fail(f"Fewer than {minimum} other backends waited for a lock this connection holds.")
 
 
 def action_link_tag(html: str, href: str) -> str:

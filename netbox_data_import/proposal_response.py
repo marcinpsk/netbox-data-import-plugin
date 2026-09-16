@@ -10,15 +10,14 @@ import json
 
 from dataclasses import dataclass
 
-RESPONSE_SCHEMA_VERSION = 1
-EXPLANATION_MAX_LENGTH = 2000
-
-#: Section 7.8 fixes the response object exactly, so an unexpected member is a response we do not know.
-RESPONSE_MEMBERS = frozenset({"schema_version", "outcome", "candidate_id", "explanation"})
-
-OUTCOME_CANDIDATE = "candidate"
-OUTCOME_NO_MATCH = "no_match"
-OUTCOMES = (OUTCOME_CANDIDATE, OUTCOME_NO_MATCH)
+from .proposal_contract import (
+    EXPLANATION_MAX_LENGTH,
+    OUTCOMES,
+    OUTCOME_CANDIDATE,
+    OUTCOME_NO_MATCH,
+    RESPONSE_MEMBERS,
+    RESPONSE_SCHEMA_VERSION,
+)
 
 __all__ = [
     "EXPLANATION_MAX_LENGTH",
@@ -40,10 +39,11 @@ class InvalidProposalResponse(Exception):
 
 @dataclass(frozen=True)
 class ProposalAnswer:
-    """What one valid response concluded. `candidate_id` is None exactly when the outcome is no_match."""
+    """What one valid response concluded. Candidate fields are None exactly for no_match."""
 
     outcome: str
     candidate_id: str | None
+    candidate_display_name: str | None
     explanation: str
 
 
@@ -94,7 +94,9 @@ def _explanation(value):
     return value
 
 
-def validate_response(content_text, *, candidate_ids, schema_version=RESPONSE_SCHEMA_VERSION) -> ProposalAnswer:
+def validate_response(
+    content_text, *, candidate_display_names, schema_version=RESPONSE_SCHEMA_VERSION
+) -> ProposalAnswer:
     """Return the answer one response states, or raise if it is not exactly one valid answer.
 
     Identifiers are compared as exact opaque strings: an invented, missing or reshaped one is an
@@ -108,7 +110,7 @@ def validate_response(content_text, *, candidate_ids, schema_version=RESPONSE_SC
     if missing:
         raise InvalidProposalResponse(f"The response is missing: {', '.join(sorted(missing))}.")
 
-    # `True` is numerically 1, so a bool would otherwise pass as schema_version 1.
+    # A bool is an int subclass. Keep schema versions restricted to integers supplied as integers.
     version = decoded["schema_version"]
     if isinstance(version, bool) or not isinstance(version, int) or version != schema_version:
         raise InvalidProposalResponse(f"The response declares schema_version {version!r}, not {schema_version}.")
@@ -119,11 +121,29 @@ def validate_response(content_text, *, candidate_ids, schema_version=RESPONSE_SC
 
     explanation = _explanation(decoded["explanation"])
     candidate_id = decoded["candidate_id"]
+    candidate_display_name = decoded["candidate_display_name"]
     if outcome == OUTCOME_NO_MATCH:
         if candidate_id is not None:
             raise InvalidProposalResponse("A no_match response carries a candidate_id.")
-        return ProposalAnswer(outcome=OUTCOME_NO_MATCH, candidate_id=None, explanation=explanation)
+        if candidate_display_name is not None:
+            raise InvalidProposalResponse("A no_match response carries a candidate_display_name.")
+        return ProposalAnswer(
+            outcome=OUTCOME_NO_MATCH,
+            candidate_id=None,
+            candidate_display_name=None,
+            explanation=explanation,
+        )
 
-    if not isinstance(candidate_id, str) or candidate_id not in validate_candidate_ids(candidate_ids):
+    candidate_ids = validate_candidate_ids(candidate_display_names)
+    if not isinstance(candidate_id, str) or candidate_id not in candidate_ids:
         raise InvalidProposalResponse("The response selects a candidate that this request did not offer.")
-    return ProposalAnswer(outcome=OUTCOME_CANDIDATE, candidate_id=candidate_id, explanation=explanation)
+    if not isinstance(candidate_display_name, str) or not candidate_display_name:
+        raise InvalidProposalResponse("A candidate response carries no candidate_display_name.")
+    if candidate_display_name != candidate_display_names[candidate_id]:
+        raise InvalidProposalResponse("The candidate_id and candidate_display_name select different candidates.")
+    return ProposalAnswer(
+        outcome=OUTCOME_CANDIDATE,
+        candidate_id=candidate_id,
+        candidate_display_name=candidate_display_name,
+        explanation=explanation,
+    )

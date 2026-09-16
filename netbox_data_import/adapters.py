@@ -13,13 +13,14 @@ the NetBox boundary.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .catalog import OutputKind, has_implemented_module
+from .values import identity_text
 
 if TYPE_CHECKING:
-    from .trace_workbook import SourceTrace
+    from .source_trace import SourceTrace
 
 
 class UnknownSourceAdapter(Exception):
@@ -47,6 +48,35 @@ class SourceBatch:
     rows: tuple[dict | SourceTrace, ...] = ()
     diagnostics: tuple[SourceDiagnostic, ...] = ()
     unused_columns: dict[str, dict] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Mark Source Traces with empty Device references as invalid adapter output."""
+        if OutputKind.SOURCE_TRACE not in self.output_kinds:
+            return
+        from .source_trace import SourceTrace
+
+        rows = []
+        diagnostics = list(self.diagnostics)
+        for row in self.rows:
+            if not isinstance(row, SourceTrace):
+                rows.append(row)
+                continue
+            summary = row.endpoint_summary
+            references = [summary.from_termination, summary.to_termination, *row.corroboration]
+            for segment in row.segments:
+                references.extend((segment.left, segment.right))
+            if all(identity_text(reference.device) for reference in references):
+                rows.append(row)
+                continue
+            diagnostic = SourceDiagnostic(
+                code="trace.device_required",
+                message="A Source Trace Termination Reference must name a Device.",
+                row_number=row.provenance[0].row_start if row.provenance else None,
+            )
+            diagnostics.append(diagnostic)
+            rows.append(replace(row, errors=(*row.errors, diagnostic)))
+        object.__setattr__(self, "rows", tuple(rows))
+        object.__setattr__(self, "diagnostics", tuple(diagnostics))
 
 
 class SourceAdapter:

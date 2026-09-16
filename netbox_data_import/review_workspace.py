@@ -11,7 +11,7 @@ from typing import Any
 
 from .cable_target import UNRESOLVED
 from .import_engine import ImportEngine
-from .models import ImportProfile, TerminationResolution, locked_profile_policy
+from .models import ImportProfile, TerminationResolution, TraceDeviceResolution, index_digest, locked_profile_policy
 from .object_permissions import save_permission_scoped_object
 from .plan import Disposition, ImportPlan, Severity, SynchronizationUnit
 from .values import (
@@ -23,6 +23,10 @@ from .values import (
     source_text,
     translation_maps,
 )
+
+
+class IneligibleDeviceSelection(Exception):
+    """The selected Device is absent from the candidates offered for this request."""
 
 
 def save_termination_resolution_and_replan(
@@ -60,6 +64,59 @@ def save_termination_resolution_and_replan(
         )
         # atomic-exit-safe: decision-saved-and-replanned
         return ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+
+
+def save_trace_device_resolution_and_replan(
+    *,
+    profile,
+    source_document,
+    actor,
+    planning_context,
+    evidence,
+    selected_device_id,
+    search,
+    limit,
+):
+    """Persist one offered Device selection, then request a fresh Import Plan."""
+    from .netbox_reader import NetBoxReader
+    from .trace_device_resolution import eligible_trace_devices
+
+    with locked_profile_policy(profile.pk):
+        locked_profile = ImportProfile.objects.get(pk=profile.pk)
+        reader = NetBoxReader.for_actor(actor).for_planning_context(planning_context)
+        offered = eligible_trace_devices(
+            reader=reader,
+            evidence=evidence,
+            search=search,
+            limit=limit,
+            lock_rows=True,
+        )
+        chosen = next(
+            (candidate.device for candidate in offered.candidates if candidate.device.pk == selected_device_id),
+            None,
+        )
+        if chosen is None:
+            raise IneligibleDeviceSelection("That Device is not one of the eligible candidates.")
+        lookup = {
+            "profile": locked_profile,
+            "source_device_key": evidence.key,
+            "source_device_key_digest": index_digest(evidence.key),
+        }
+        values = {
+            "selected_device_id": chosen.pk,
+            "selected_display_name": str(chosen),
+        }
+        candidate = TraceDeviceResolution(**lookup, **values)
+        candidate.full_clean(validate_unique=False, validate_constraints=False)
+        save_permission_scoped_object(
+            actor,
+            TraceDeviceResolution,
+            lookup,
+            values,
+        )
+        plan = ImportEngine.plan(locked_profile, source_document, actor, planning_context)
+        # atomic-exit-safe: device-decision-saved-and-replanned
+        return plan, chosen
 
 
 _DIAGNOSTIC_MESSAGES = {
@@ -145,7 +202,10 @@ _DIAGNOSTIC_MESSAGES = {
     "rack.missing_name": "Missing rack name",
     "rack.ambiguous_name": "Multiple racks have this name at the import target.",
     "rack.validation_failed": "The planned rack does not pass NetBox validation.",
-    "trace.device_unresolved": "No single Device matches this name. Correct the source, or add the Device in NetBox.",
+    "trace.device_unresolved": "No single Device matches this name. Choose the Device.",
+    "trace.device_resolution_stale": (
+        "The saved Device is no longer available at this import target. Choose the Device again."
+    ),
     "trace.endpoint_evidence_only": (
         "This trace states its two endpoints and no physical path, and no Cable joins them. "
         "Add the Segment Evidence rows the path needs."
@@ -458,7 +518,9 @@ class TraceWorkspaceUnit:
     segments: list[dict[str, Any]]
     logical_cable: dict[str, Any] | None
     deletes_logical_cable: bool
+    resolution_started: bool
     topology_known: bool
+    devices: list[dict[str, Any]]
     terminations: list[dict[str, Any]]
     findings: list[dict[str, str]]
     actions: tuple[TraceAction, ...]
@@ -483,7 +545,9 @@ class TraceWorkspaceUnit:
             segments=[dict(segment) for segment in workspace.get("segments") or ()],
             logical_cable=workspace.get("logical_cable"),
             deletes_logical_cable=bool(workspace.get("deletes_logical_cable")),
+            resolution_started=bool(workspace.get("resolution_started")),
             topology_known=bool(workspace.get("topology_known")),
+            devices=[dict(item) for item in workspace.get("devices") or ()],
             terminations=[dict(item) for item in workspace.get("terminations") or ()],
             findings=findings,
             actions=cls._actions(unit, findings, str(display.get("detail") or "")),

@@ -10,8 +10,11 @@ from rest_framework import serializers
 
 from ..adapters import DEFAULT_ADAPTER_KEY, get_adapter, selectable_adapter_choices
 from ..catalog import CATALOG
+from ..forms import InferenceBackendForm
 from ..models import (
     ImportProfile,
+    CableClassMapping,
+    CableImportSource,
     ColumnMapping,
     ClassRoleMapping,
     DeviceTypeMapping,
@@ -62,6 +65,17 @@ class PolicySectionSerializer(PolicySectionApplicabilityMixin, ValidatedModelSer
 
     def validate_policy_row(self, attrs):
         """Check the fields this model resolves through the catalog. Subclasses override."""
+
+    def model_cleaned_values(self):
+        """Return request values after applying the model's canonical normalization."""
+        values = dict(self.validated_data)
+        if self.instance is None:
+            instance = self.Meta.model(**values)
+            instance.full_clean(validate_unique=False)
+        else:
+            # ValidatedModelSerializer.validate() applies request values and full_clean() to this instance.
+            instance = self.instance
+        return {name: getattr(instance, name) for name in values}
 
 
 def _validate_target_keys(instance, attrs, names, *, allow_candidates=True, required=False):
@@ -143,6 +157,24 @@ class ColumnMappingSerializer(PolicySectionSerializer):
     def validate_policy_row(self, attrs):
         """Resolve the target field through the catalog."""
         _validate_target_keys(self.instance, attrs, ("target_field",), required=True)
+
+
+class CableClassMappingSerializer(PolicySectionSerializer):
+    """Serializer for CableClassMapping policy decisions."""
+
+    class Meta:
+        model = CableClassMapping
+        fields = [
+            "id",
+            "url",
+            "display",
+            "profile",
+            "cable_class",
+            "cable_type_resolved",
+            "cable_type",
+            "cable_profile_resolved",
+            "cable_profile",
+        ]
 
 
 class _RackTypeSlugField(serializers.SlugRelatedField):
@@ -282,6 +314,30 @@ class ImportExecutionSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class CableImportSourceSerializer(serializers.ModelSerializer):
+    """Read-only serializer for one Cable provenance record."""
+
+    class Meta:
+        model = CableImportSource
+        fields = [
+            "id",
+            "cable",
+            "profile",
+            "trace_identity",
+            "segment_index",
+            "from_text",
+            "to_text",
+            "direction",
+            "workbook_fingerprint",
+            "sheet",
+            "block_ordinal",
+            "row_start",
+            "row_end",
+            "export_timestamp",
+        ]
+        read_only_fields = fields
+
+
 class ResolutionProposalSerializer(serializers.ModelSerializer):
     """Read-only serializer for the Resolution Proposal audit record."""
 
@@ -328,10 +384,12 @@ class ResolutionProposalHistorySerializer(serializers.ModelSerializer):
 
 
 class InferenceBackendSerializer(NetBoxModelSerializer):
-    """Serialize one Inference Backend row, without its credential reference.
+    """Serialize one Inference Backend row with a write-only credential reference.
 
     NetBox resolves this class by model name to freeze a delete event payload.
     """
+
+    credential_reference = serializers.JSONField(write_only=True)
 
     class Meta:
         model = InferenceBackend
@@ -339,17 +397,7 @@ class InferenceBackendSerializer(NetBoxModelSerializer):
             "id",
             "url",
             "display",
-            "backend_key",
-            "display_name",
-            "adapter_type",
-            "api_root",
-            "model",
-            "authentication",
-            "response_mode",
-            "connect_timeout",
-            "read_timeout",
-            "enabled",
-            "tags",
+            *InferenceBackendForm.Meta.fields,
             "custom_fields",
             "created",
             "last_updated",

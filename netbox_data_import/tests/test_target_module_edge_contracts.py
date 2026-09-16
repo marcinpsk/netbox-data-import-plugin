@@ -82,7 +82,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
 
     def test_rack_and_device_difference_checks_use_persisted_target_rows(self):
         """Each writable relation and scalar can independently make an update actionable."""
-        from dcim.models import Device, Location, RackType
+        from dcim.models import Device, Location, Rack, RackType
 
         location = Location.objects.create(name="Target Edge Room", slug="target-edge-room", site=self.site)
         rack_type = RackType.objects.create(
@@ -91,8 +91,10 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             slug="target-edge-rack-type",
             u_height=42,
         )
-        self.assertTrue(RackModule._differs(self.rack, 42, "", rack_type.pk, None))
-        self.assertTrue(RackModule._differs(self.rack, 42, "", None, location))
+        typed_candidate = Rack(site=self.site, u_height=42, rack_type=rack_type)
+        located_candidate = Rack(site=self.site, location=location, u_height=42)
+        self.assertTrue(RackModule._differs(self.rack, typed_candidate))
+        self.assertTrue(RackModule._differs(self.rack, located_candidate))
 
         device = Device.objects.create(
             name="target-edge-difference-device",
@@ -315,7 +317,78 @@ class TargetModuleDatabaseEdgeTest(TestCase):
 
         unit = RackModule().plan(batch, self.profile, CATALOG, scoped)[0]
 
-        self.assertEqual(unit.disposition, Disposition.INVALID)
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.diagnostics[0].code, "rack.change_permission")
+
+    def test_rack_create_permission_is_checked_against_the_candidate(self):
+        """A constrained add grant must cover the Rack the plan would create."""
+        from dcim.models import Rack
+
+        actor = user_with_object_permission(
+            "rack-edge-creator",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "permitted-rack"}),
+            ],
+        )
+        scoped = NetBoxReader.for_actor(actor).for_target(site=self.site)
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PERMITTED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": "permitted-rack",
+                    "u_height": 42,
+                    "serial": "",
+                },
+                {
+                    "_row_number": 3,
+                    "source_id": "SCOPED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": "outside-rack-scope",
+                    "u_height": 42,
+                    "serial": "",
+                },
+            ),
+        )
+
+        permitted, blocked = RackModule().plan(batch, self.profile, CATALOG, scoped)
+
+        self.assertEqual(permitted.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(blocked.disposition, Disposition.BLOCKED)
+        self.assertEqual(blocked.diagnostics[0].code, "rack.add_permission")
+
+    def test_rack_update_permission_is_checked_against_the_candidate(self):
+        """A constrained change grant must cover the Rack state the plan would write."""
+        from dcim.models import Rack
+
+        actor = user_with_object_permission(
+            "rack-edge-editor",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["change"], {"u_height": self.rack.u_height}),
+            ],
+        )
+        scoped = NetBoxReader.for_actor(actor).for_target(site=self.site)
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "SCOPED-RACK-UPDATE",
+                    "device_class": "Cabinet",
+                    "rack_name": self.rack.name,
+                    "u_height": 20,
+                    "serial": "",
+                },
+            ),
+        )
+
+        unit = RackModule().plan(batch, self.profile, CATALOG, scoped)[0]
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
         self.assertEqual(unit.diagnostics[0].code, "rack.change_permission")
 
     def test_missing_device_type_and_role_dependencies_are_explicit_diagnostics(self):
@@ -347,6 +420,7 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             [(Rack, ["view"], None), (Device, ["view"], None)],
         )
         create = self._plan_device(viewer, self._device_row())
+        self.assertEqual(create.disposition, Disposition.BLOCKED)
         self.assertEqual(create.diagnostics[0].code, "device.add_permission")
 
         stored = Device.objects.create(
@@ -364,7 +438,521 @@ class TargetModuleDatabaseEdgeTest(TestCase):
             device_name=stored.name,
         )
         update = self._plan_device(viewer, self._device_row(serial="NEW"))
+        self.assertEqual(update.disposition, Disposition.BLOCKED)
         self.assertEqual(update.diagnostics[0].code, "device.change_permission")
+
+    def test_device_create_permission_is_checked_against_the_candidate(self):
+        """A constrained add grant must cover the Device the plan would create."""
+        from dcim.models import Device, Rack
+
+        actor = user_with_object_permission(
+            "device-edge-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"name": "permitted-device"}),
+            ],
+        )
+
+        permitted = self._plan_device(actor, self._device_row(device_name="permitted-device"))
+        blocked = self._plan_device(actor, self._device_row(device_name="outside-device-scope"))
+
+        self.assertEqual(permitted.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(blocked.disposition, Disposition.BLOCKED)
+        self.assertEqual(blocked.diagnostics[0].code, "device.add_permission")
+
+    def test_device_validation_precedes_create_and_update_permission_diagnostics(self):
+        """An invalid Device needs data repair, not a wider add or change grant."""
+        from dcim.models import Device, Rack
+
+        actor = user_with_object_permission(
+            "device-edge-invalid-writer",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add", "change"], {"serial": "permitted"}),
+            ],
+        )
+        invalid_serial = "x" * 101
+
+        create = self._plan_device(
+            actor,
+            self._device_row(
+                source_id="INVALID-DEVICE-CREATE", device_name="invalid-device-create", serial=invalid_serial
+            ),
+        )
+
+        stored = Device.objects.create(
+            name="invalid-device-update",
+            site=self.site,
+            rack=self.rack,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="INVALID-DEVICE-UPDATE",
+            netbox_device_id=stored.pk,
+            device_name=stored.name,
+        )
+        update = self._plan_device(
+            actor,
+            self._device_row(
+                source_id="INVALID-DEVICE-UPDATE",
+                device_name=stored.name,
+                serial=invalid_serial,
+            ),
+        )
+
+        for unit in (create, update):
+            self.assertEqual(unit.disposition, Disposition.INVALID)
+            self.assertEqual(unit.diagnostics[0].code, "device.validation_failed")
+
+    def test_device_create_permission_is_checked_with_planned_relations(self):
+        """Device permission checks see the exact planned Rack and Device Role."""
+        from dcim.models import Device, DeviceRole, Rack
+
+        rack_actor = user_with_object_permission(
+            "planned-rack-device-creator",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "planned-rack"}),
+                (Device, ["view"], None),
+                (Device, ["add"], {"rack__name": "planned-rack"}),
+            ],
+        )
+        rack_batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PLANNED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": "planned-rack",
+                    "u_height": 42,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="PLANNED-RACK-DEVICE",
+                    device_name="planned-rack-device",
+                    rack_name="planned-rack",
+                ),
+            ),
+        )
+        rack_reader = NetBoxReader.for_actor(rack_actor).for_target(site=self.site)
+
+        rack_unit = DeviceModule().plan(rack_batch, self.profile, CATALOG, rack_reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+
+        null_rack_actor = user_with_object_permission(
+            "null-rack-device-creator",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "planned-rack"}),
+                (Device, ["view"], None),
+                (Device, ["add"], {"rack__isnull": True}),
+            ],
+        )
+        null_rack_reader = NetBoxReader.for_actor(null_rack_actor).for_target(site=self.site)
+
+        null_rack_unit = DeviceModule().plan(rack_batch, self.profile, CATALOG, null_rack_reader)[0]
+
+        self.assertEqual(null_rack_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(null_rack_unit.diagnostics[0].code, "device.add_permission")
+
+        ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="Planned Role",
+            role_slug="planned-role",
+        )
+        role_actor = user_with_object_permission(
+            "planned-role-device-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"role__slug": "planned-role"}),
+                (DeviceRole, ["add"], {"slug": "planned-role"}),
+            ],
+        )
+
+        role_unit = self._plan_device(
+            role_actor,
+            self._device_row(
+                source_id="PLANNED-ROLE-DEVICE",
+                device_class="Planned Role",
+                device_name="planned-role-device",
+            ),
+        )
+
+        self.assertEqual(role_unit.disposition, Disposition.ACTIONABLE, role_unit.diagnostics)
+
+        null_role_actor = user_with_object_permission(
+            "null-role-device-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"role__isnull": True}),
+                (DeviceRole, ["add"], {"slug": "planned-role"}),
+            ],
+        )
+
+        null_role_unit = self._plan_device(
+            null_role_actor,
+            self._device_row(
+                source_id="NULL-ROLE-DEVICE",
+                device_class="Planned Role",
+                device_name="null-role-device",
+            ),
+        )
+
+        self.assertEqual(null_role_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(null_role_unit.diagnostics[0].code, "device.add_permission")
+
+    def test_device_permission_uses_an_existing_racks_planned_final_state(self):
+        """A Device constraint sees the Rack update that its batch will apply first."""
+        from dcim.models import Device, Rack
+
+        actor = user_with_object_permission(
+            "planned-rack-update-device-creator",
+            [
+                (Rack, ["view", "change"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"rack__u_height": self.rack.u_height}),
+            ],
+        )
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PLANNED-RACK-UPDATE",
+                    "device_class": "Cabinet",
+                    "rack_name": self.rack.name,
+                    "u_height": 20,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="PLANNED-RACK-UPDATE-DEVICE",
+                    device_name="planned-rack-update-device",
+                    rack_name=self.rack.name,
+                ),
+            ),
+        )
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+
+        rack_unit = RackModule().plan(batch, self.profile, CATALOG, reader)[0]
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+        self.assertEqual(device_unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.add_permission")
+
+        final_actor = user_with_object_permission(
+            "planned-final-rack-device-creator",
+            [
+                (Rack, ["view", "change"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"rack__u_height": 20}),
+            ],
+        )
+        final_reader = NetBoxReader.for_actor(final_actor).for_target(site=self.site)
+
+        final_unit = DeviceModule().plan(batch, self.profile, CATALOG, final_reader)[0]
+
+        self.assertEqual(final_unit.disposition, Disposition.ACTIONABLE, final_unit.diagnostics)
+        self.assertIn(rack_unit.changes[0].identity, final_unit.changes[-1].dependencies)
+
+    def test_device_create_does_not_depend_on_a_converged_typed_rack(self):
+        """A Rack Type-normalized Rack has no update for a Device create to depend on."""
+        from dcim.models import RackType
+
+        rack_type = RackType.objects.create(
+            manufacturer=self.manufacturer,
+            model="Converged Rack Type",
+            slug="converged-rack-type",
+            u_height=20,
+        )
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Cabinet").update(rack_type=rack_type)
+        self.rack.rack_type = rack_type
+        self.rack.copy_racktype_attrs()
+        self.rack.save()
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "CONVERGED-TYPED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": self.rack.name,
+                    "u_height": 1000,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="DEVICE-IN-CONVERGED-TYPED-RACK",
+                    device_name="device-in-converged-typed-rack",
+                ),
+            ),
+        )
+
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE, device_unit.diagnostics)
+        self.assertNotIn(
+            "rack:source:CONVERGED-TYPED-RACK:update",
+            device_unit.changes[-1].dependencies,
+        )
+
+    def test_device_placement_uses_an_existing_racks_planned_final_height(self):
+        """A Device cannot use a unit that the preceding Rack update removes."""
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PLANNED-RACK-HEIGHT",
+                    "device_class": "Cabinet",
+                    "rack_name": self.rack.name,
+                    "u_height": 20,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="DEVICE-ABOVE-PLANNED-RACK",
+                    device_name="device-above-planned-rack",
+                    u_position="30",
+                    face="Front",
+                ),
+            ),
+        )
+
+        rack_unit = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+        self.assertEqual(device_unit.disposition, Disposition.INVALID)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.rack_position_occupied")
+
+    def test_device_placement_uses_a_new_racks_planned_height(self):
+        """A Device cannot use a unit above a Rack that the same batch creates."""
+        rack_name = "planned-new-rack-height"
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PLANNED-NEW-RACK-HEIGHT",
+                    "device_class": "Cabinet",
+                    "rack_name": rack_name,
+                    "u_height": 20,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="DEVICE-ABOVE-PLANNED-NEW-RACK",
+                    device_name="device-above-planned-new-rack",
+                    rack_name=rack_name,
+                    u_position="30",
+                    face="Front",
+                ),
+            ),
+        )
+
+        rack_unit = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+        self.assertEqual(device_unit.disposition, Disposition.INVALID)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.rack_position_occupied")
+
+    def test_device_placement_uses_a_new_rack_types_starting_unit(self):
+        """A Device cannot use a unit below a new Rack Type's starting unit."""
+        from dcim.models import RackType
+
+        rack_type = RackType.objects.create(
+            manufacturer=self.manufacturer,
+            model="Raised Starting Unit",
+            slug="raised-starting-unit",
+            u_height=20,
+            starting_unit=10,
+        )
+        ClassRoleMapping.objects.filter(profile=self.profile, source_class="Cabinet").update(rack_type=rack_type)
+        rack_name = "planned-new-typed-rack"
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PLANNED-NEW-TYPED-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": rack_name,
+                    "u_height": 20,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="DEVICE-BELOW-PLANNED-RACK-TYPE",
+                    device_name="device-below-planned-rack-type",
+                    rack_name=rack_name,
+                    u_position="5",
+                    face="Front",
+                ),
+            ),
+        )
+
+        rack_unit = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+        self.assertEqual(device_unit.disposition, Disposition.INVALID)
+        self.assertEqual(device_unit.diagnostics[0].code, "device.rack_position_occupied")
+
+    def test_planned_role_create_permission_is_checked_against_the_candidate(self):
+        """A constrained Device Role add grant must cover the role the plan creates."""
+        from dcim.models import Device, DeviceRole, Rack
+
+        ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="Excluded Role",
+            role_slug="excluded-role",
+        )
+        actor = user_with_object_permission(
+            "excluded-role-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view", "add"], None),
+                (DeviceRole, ["add"], {"slug": "permitted-role"}),
+            ],
+        )
+
+        unit = self._plan_device(
+            actor,
+            self._device_row(device_class="Excluded Role"),
+        )
+
+        self.assertEqual(unit.disposition, Disposition.BLOCKED)
+        self.assertEqual(unit.diagnostics[0].code, "device.role_permission")
+
+    def test_planned_relation_permissions_match_the_state_execution_writes(self):
+        """Matching Rack and Device Role constraints stay valid through execution."""
+        from dcim.models import Device, DeviceRole, Rack
+
+        ClassRoleMapping.objects.create(
+            profile=self.profile,
+            source_class="Execution Role",
+            role_slug="execution-role",
+        )
+        actor = user_with_object_permission(
+            "planned-relation-executor",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "execution-rack"}),
+                (Device, ["view"], None),
+                (
+                    Device,
+                    ["add"],
+                    {"rack__name": "execution-rack", "role__slug": "execution-role"},
+                ),
+                (DeviceRole, ["add"], {"slug": "execution-role"}),
+            ],
+        )
+        batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW, OutputKind.DEVICE_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "EXECUTION-RACK",
+                    "device_class": "Cabinet",
+                    "rack_name": "execution-rack",
+                    "u_height": 42,
+                    "serial": "",
+                },
+                self._device_row(
+                    _row_number=3,
+                    source_id="EXECUTION-DEVICE",
+                    device_class="Execution Role",
+                    device_name="execution-device",
+                    rack_name="execution-rack",
+                ),
+            ),
+        )
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+        context = ExecutionContext(actor=actor, reader=reader, profile=self.profile)
+        rack_unit = RackModule().plan(batch, self.profile, CATALOG, reader)[0]
+        device_unit = DeviceModule().plan(batch, self.profile, CATALOG, reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+        self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE, device_unit.diagnostics)
+
+        RackModule().apply(rack_unit.changes[0], context)
+        for change in device_unit.changes:
+            DeviceModule().apply(change, context)
+
+        device = Device.objects.get(name="execution-device")
+        self.assertEqual(device.rack.name, "execution-rack")
+        self.assertEqual(device.role.slug, "execution-role")
+
+    def test_create_permissions_include_the_source_id_custom_field(self):
+        """Planning checks the same source ID custom field that execution writes."""
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Device, Rack
+        from extras.models import CustomField
+
+        custom_field = CustomField.objects.create(name="edge_source_id", type="text")
+        custom_field.object_types.add(
+            ContentType.objects.get_for_model(Device),
+            ContentType.objects.get_for_model(Rack),
+        )
+        self.profile.adapter_config = {
+            **self.profile.adapter_config,
+            "custom_field_name": custom_field.name,
+        }
+        self.profile.save(update_fields=["adapter_config"])
+
+        rack_actor = user_with_object_permission(
+            "source-field-rack-creator",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"custom_field_data__edge_source_id": "PERMITTED-RACK-ID"}),
+            ],
+        )
+        rack_reader = NetBoxReader.for_actor(rack_actor).for_target(site=self.site)
+        rack_batch = SourceBatch(
+            output_kinds=frozenset({OutputKind.RACK_SOURCE_ROW}),
+            rows=(
+                {
+                    "_row_number": 2,
+                    "source_id": "PERMITTED-RACK-ID",
+                    "device_class": "Cabinet",
+                    "rack_name": "source-field-rack",
+                    "u_height": 42,
+                    "serial": "",
+                },
+            ),
+        )
+
+        rack_unit = RackModule().plan(rack_batch, self.profile, CATALOG, rack_reader)[0]
+
+        self.assertEqual(rack_unit.disposition, Disposition.ACTIONABLE, rack_unit.diagnostics)
+
+        device_actor = user_with_object_permission(
+            "source-field-device-creator",
+            [
+                (Rack, ["view"], None),
+                (Device, ["view"], None),
+                (Device, ["add"], {"custom_field_data__edge_source_id": "PERMITTED-DEVICE-ID"}),
+            ],
+        )
+
+        device_unit = self._plan_device(
+            device_actor,
+            self._device_row(source_id="PERMITTED-DEVICE-ID", device_name="source-field-device"),
+        )
+
+        self.assertEqual(device_unit.disposition, Disposition.ACTIONABLE, device_unit.diagnostics)
 
     def test_a_device_type_slug_collision_is_not_treated_as_an_existing_target(self):
         """A derived slug owned by a different model blocks implicit reuse."""

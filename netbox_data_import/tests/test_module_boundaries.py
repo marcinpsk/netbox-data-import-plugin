@@ -38,6 +38,7 @@ FORBIDDEN_INTERPRETER_IMPORTS = frozenset(
         "views",
     }
 )
+PERMISSION_CONSTRAINT_INTERNALS = frozenset({"qs_filter_from_constraints", "_object_perm_cache"})
 
 
 def _import_engine_calls(path: pathlib.Path) -> set[str]:
@@ -47,6 +48,80 @@ def _import_engine_calls(path: pathlib.Path) -> set[str]:
         node.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "ImportEngine"
+    }
+
+
+def _qualified_name(node: ast.expr) -> str | None:
+    """Return the dotted name represented by one expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute) and (parent := _qualified_name(node.value)):
+        return f"{parent}.{node.attr}"
+    return None
+
+
+def _assignment_engine_qualifiers(tree: ast.AST, initial: set[str]) -> set[str]:
+    """Return the fixed point of names assigned from known engine qualifiers."""
+    qualifiers = set(initial)
+    while True:
+        assignment_aliases: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            if _qualified_name(node.value) not in qualifiers:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+            assignment_aliases.update(target.id for target in targets if isinstance(target, ast.Name))
+        expanded = qualifiers | assignment_aliases
+        if expanded == qualifiers:
+            return qualifiers
+        qualifiers = expanded
+
+
+def _private_engine_references(path: pathlib.Path) -> set[str]:
+    """Return private coordinator attributes and imports referenced by one test."""
+    tree = ast.parse(path.read_text())
+    engine_names = {"ImportEngine"}
+    engine_module_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                local_name = name.asname or name.name
+                if name.name == "netbox_data_import":
+                    engine_module_names.add(f"{local_name}.import_engine")
+                elif name.name in {"import_engine", "netbox_data_import.import_engine"}:
+                    engine_module_names.add(local_name)
+        elif isinstance(node, ast.ImportFrom) and node.module in {
+            "import_engine",
+            "netbox_data_import.import_engine",
+        }:
+            engine_names.update(name.asname or name.name for name in node.names if name.name == "ImportEngine")
+        elif isinstance(node, ast.ImportFrom) and node.module in {None, "netbox_data_import"}:
+            engine_module_names.update(name.asname or name.name for name in node.names if name.name == "import_engine")
+    imported_qualifiers = engine_names | {f"{name}.ImportEngine" for name in engine_module_names}
+    engine_qualifiers = _assignment_engine_qualifiers(tree, imported_qualifiers)
+    references = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and _qualified_name(node.value) in engine_qualifiers
+        and node.attr.startswith("_")
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module not in {"import_engine", "netbox_data_import.import_engine"}:
+            continue
+        references.update(name.name for name in node.names if name.name.startswith("_"))
+    return references
+
+
+def _private_engine_offenders(test_root: pathlib.Path) -> dict[str, list[str]]:
+    """Return private coordinator references in all test modules."""
+    return {
+        str(path.relative_to(test_root)): sorted(references)
+        for path in test_root.rglob("*.py")
+        if (references := _private_engine_references(path))
     }
 
 
@@ -105,6 +180,17 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
     def test_the_legacy_engine_is_deleted(self):
         self.assertFalse((PACKAGE / "engine.py").exists())
 
+    def test_proposal_protocol_and_persistence_share_one_contract(self):
+        """Response validation, prompting, and storage cannot drift independently."""
+        from netbox_data_import import proposal_contract, proposal_jobs, proposal_response
+        from netbox_data_import.models import ProposalOutcome
+
+        self.assertIs(ProposalOutcome.CHOICES, proposal_contract.OUTCOME_CHOICES)
+        self.assertIs(proposal_response.OUTCOMES, proposal_contract.OUTCOMES)
+        self.assertIs(proposal_response.RESPONSE_MEMBERS, proposal_contract.RESPONSE_MEMBERS)
+        for member in proposal_contract.RESPONSE_MEMBER_NAMES:
+            self.assertIn(member, proposal_jobs.SYSTEM_INSTRUCTION)
+
     def test_the_architecture_guidance_names_the_public_coordinator(self):
         guidance = PACKAGE.parent / "AGENTS.md"
         architecture = guidance.read_text().partition("## Architecture")[2].partition("## Development environment")[0]
@@ -125,6 +211,107 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
             path.write_text("ImportEngine.plan()\nImportEngine.execute()\ncallback = ImportEngine._private_helper\n")
 
             self.assertIn("_private_helper", _import_engine_calls(path))
+
+    def test_private_coordinator_alias_references_are_detected(self):
+        """An imported alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine as Engine\n"
+                "callback = Engine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_assignment_alias_references_are_detected(self):
+        """An assignment alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine\n"
+                "Engine = ImportEngine\n"
+                "callback = Engine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_module_alias_references_are_detected(self):
+        """A package-level module alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "from netbox_data_import import import_engine as engine\n"
+                "callback = engine.ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_import_alias_references_are_detected(self):
+        """A direct module alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "import netbox_data_import.import_engine as engine\ncallback = engine.ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_qualified_import_references_are_detected(self):
+        """A qualified module import cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "import netbox_data_import.import_engine\n"
+                "callback = netbox_data_import.import_engine.ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_package_alias_references_are_detected(self):
+        """A package alias cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "caller.py"
+            path.write_text(
+                "import netbox_data_import as ndi\ncallback = ndi.import_engine.ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(_private_engine_references(path), {"_private_helper"})
+
+    def test_private_coordinator_scan_includes_nested_test_modules(self):
+        """The test boundary scans test modules below subdirectories too."""
+        with TemporaryDirectory() as directory:
+            test_root = pathlib.Path(directory)
+            nested = test_root / "nested"
+            nested.mkdir()
+            path = nested / "test_private.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine\ncallback = ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(
+                _private_engine_offenders(test_root),
+                {"nested/test_private.py": ["_private_helper"]},
+            )
+
+    def test_private_coordinator_scan_includes_test_support_modules(self):
+        """A test helper cannot bypass the private coordinator boundary."""
+        with TemporaryDirectory() as directory:
+            test_root = pathlib.Path(directory)
+            path = test_root / "helpers.py"
+            path.write_text(
+                "from netbox_data_import.import_engine import ImportEngine\ncallback = ImportEngine._private_helper\n"
+            )
+
+            self.assertEqual(
+                _private_engine_offenders(test_root),
+                {"helpers.py": ["_private_helper"]},
+            )
+
+    def test_tests_use_only_the_public_coordinator_interface(self):
+        """Tests exercise planning and execution, not coordinator implementation details."""
+        offenders = _private_engine_offenders(PACKAGE / "tests")
+
+        self.assertEqual(offenders, {})
 
     def test_views_and_jobs_do_not_import_target_modules(self):
         self.assertEqual([name for name in CALLERS if _imports_target_modules(PACKAGE / name)], [])
@@ -195,6 +382,28 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         for name in TARGET_MODULES:
             with self.subTest(module=name):
                 self.assertEqual(_imported_roots(PACKAGE / name) & FORBIDDEN_TARGET_MODULE_IMPORTS, set())
+
+    def test_permission_constraint_parsing_has_one_owner(self):
+        """Only the object permission module interprets NetBox constraint state."""
+        offenders = {
+            str(path.relative_to(PACKAGE)): sorted(names)
+            for path in PACKAGE.rglob("*.py")
+            if "tests" not in path.relative_to(PACKAGE).parts
+            and path.name != "object_permissions.py"
+            and (names := _referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS)
+        }
+
+        self.assertEqual(offenders, {})
+
+    def test_permission_constraint_owner_guard_reads_imports_and_attributes(self):
+        """The ownership guard detects both supported access forms."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "permission_reader.py"
+            path.write_text(
+                "from utilities.permissions import qs_filter_from_constraints\nconstraints = actor._object_perm_cache\n"
+            )
+
+            self.assertEqual(_referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS, PERMISSION_CONSTRAINT_INTERNALS)
 
     def test_no_first_party_module_names_the_cable_path_model(self):
         """Section 6.4: the plugin writes Cables and NetBox derives every path from them."""

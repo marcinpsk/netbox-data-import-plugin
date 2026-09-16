@@ -171,8 +171,33 @@ class RackModulePlanTest(RackModulePlanTestBase):
 
         units = RackModule().plan(self._batch(self._row(2, "RACK-1", "cab-01")), self.profile, CATALOG, scoped)
 
-        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].disposition, Disposition.BLOCKED)
         self.assertEqual(units[0].diagnostics[0].code, "rack.add_permission")
+
+    def test_an_invalid_new_rack_reports_validation_before_add_permission(self):
+        """An invalid candidate needs configuration repair, not a wider add grant."""
+        from dcim.models import Rack
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        actor = user_with_object_permission(
+            "rack-module-invalid-actor",
+            [
+                (Rack, ["view"], None),
+                (Rack, ["add"], {"name": "permitted-rack"}),
+            ],
+        )
+        scoped = NetBoxReader.for_actor(actor)
+
+        units = RackModule().plan(
+            self._batch(self._row(2, "INVALID-RACK", "outside-rack-scope")),
+            self.profile,
+            CATALOG,
+            scoped,
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.INVALID)
+        self.assertEqual(units[0].diagnostics[0].code, "rack.validation_failed")
 
 
 class RackModuleApplyTest(RackModuleRowMixin, TestCase):
@@ -240,6 +265,33 @@ class RackModuleApplyTest(RackModuleRowMixin, TestCase):
         rack = RackModule().apply(self._only_change(self._row(2, "RACK-TYPE", "typed-cab")), self.context)
 
         self.assertEqual(rack.rack_type, rack_type)
+
+    def test_a_rack_type_controls_height_during_planning_and_execution(self):
+        """Planning and execution validate the same Rack Type-controlled height."""
+        from dcim.models import Manufacturer, RackType
+
+        manufacturer = Manufacturer.objects.create(name="Typed Rack Vendor", slug="typed-rack-vendor")
+        rack_type = RackType.objects.create(
+            manufacturer=manufacturer,
+            model="Typed Height",
+            slug="typed-height",
+            u_height=20,
+        )
+        mapping = self.profile.class_role_mappings.get(source_class="Cabinet")
+        mapping.rack_type = rack_type
+        mapping.save(update_fields=["rack_type"])
+
+        batch = self._batch(self._row(2, "RACK-TYPED-HEIGHT", "typed-height-cab", u_height=1000))
+        unit = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        rack = RackModule().apply(unit.changes[0], self.context)
+        self.assertEqual(rack.u_height, rack_type.u_height)
+
+        replanned = RackModule().plan(batch, self.profile, CATALOG, self.reader)[0]
+
+        self.assertEqual(replanned.disposition, Disposition.NO_OP, replanned.diagnostics)
+        self.assertEqual(replanned.changes, ())
 
     def test_a_precondition_that_no_longer_holds_is_refused(self):
         """Section 4.6: the module rechecks its preconditions inside the transaction."""

@@ -5,11 +5,13 @@
 
 import json
 
-from django.test import override_settings
+from django.test import Client, TestCase, override_settings
+from django.urls import reverse
 from utilities.testing import APIViewTestCases, ViewTestCases
 
 from netbox_data_import.adapter_forms import FlatWorkbookConfigForm
 from netbox_data_import.models import ImportProfile, InferenceBackend
+from netbox_data_import.tests.helpers import user_with_object_permission
 
 BASE_URL = "plugins:netbox_data_import:importprofile_{}"
 INFERENCE_BASE_URL = "plugins:netbox_data_import:inferencebackend_{}"
@@ -22,6 +24,26 @@ INFERENCE_REFERENCE = {
     "path": "inference/backend",
     "field": "api_key",
 }
+
+
+class InferenceBackendFormHelpTest(TestCase):
+    """Explain the credential-reference boundary on the rendered backend form."""
+
+    def test_the_add_form_shows_the_json_shape_and_vault_prerequisite(self):
+        actor = user_with_object_permission(
+            "inference-backend-form-reader",
+            [(InferenceBackend, ("add",), None)],
+        )
+        client = Client()
+        client.force_login(actor)
+
+        response = client.get(reverse("plugins:netbox_data_import:inferencebackend_add"))
+
+        self.assertContains(response, "data-credential-reference-help", status_code=200)
+        self.assertContains(response, "vault_kv_v2")
+        self.assertContains(response, "inference/backend")
+        self.assertContains(response, "PLUGINS_CONFIG")
+        self.assertContains(response, "vault")
 
 
 class ImportProfileViewTestCase(ViewTestCases.PrimaryObjectViewTestCase):
@@ -133,7 +155,7 @@ class InferenceBackendViewTestCase(
     """Exercise the UI detail, list, CRUD and changelog views for AI backends.
 
     The mixins are named one by one because `InferenceBackend` registers no bulk views. The REST
-    endpoint is read-only and covered by `test_inference_secret_containment`.
+    endpoint credential contract is covered by the configuration surface tests.
     """
 
     model = InferenceBackend
