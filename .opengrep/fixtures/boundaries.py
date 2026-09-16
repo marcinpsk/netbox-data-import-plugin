@@ -4,6 +4,7 @@
 
 from netbox_data_import.import_engine import ImportEngine
 from netbox_data_import import import_engine as ie
+from netbox_data_import.import_engine import ImportEngine as Coordinator
 
 
 def caught_today_class_attr():
@@ -75,3 +76,33 @@ def missed_getattr():
 def public_getattr_is_fine():
     # ok: nbdi-tests-use-public-coordinator-direct
     return getattr(ImportEngine, "plan")
+
+
+def missed_module_alias_private():
+    # ruleid: nbdi-tests-use-public-coordinator-direct
+    return ie._private_helper
+
+
+def missed_module_alias_class_private():
+    # ruleid: nbdi-tests-use-public-coordinator
+    return ie.ImportEngine._private_helper
+
+
+def missed_module_alias_getattr():
+    # ruleid: nbdi-tests-use-public-coordinator-direct
+    return getattr(ie.ImportEngine, "_private_helper")
+
+
+def missed_class_as_import():
+    # ruleid: nbdi-tests-use-public-coordinator
+    return Coordinator._private_helper
+
+
+def module_alias_public_is_fine():
+    # ok: nbdi-tests-use-public-coordinator-direct
+    return ie.ImportEngine.plan(None, None, None, None)
+
+
+def class_as_import_public_is_fine():
+    # ok: nbdi-tests-use-public-coordinator
+    return Coordinator.plan(None, None, None, None)
