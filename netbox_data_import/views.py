@@ -3890,7 +3890,7 @@ class TraceDeviceCandidatesView(_TraceWorkspaceMixin, PermissionRequiredMixin, V
                 search=search,
                 limit=limit,
             )
-        except (PlanningTargetUnavailable, ValueError):
+        except (PlanningTargetUnavailable, TypeError, ValueError):
             return JsonResponse({"ok": False, "error": "That Device cannot be resolved here."}, status=400)
         return JsonResponse(
             {

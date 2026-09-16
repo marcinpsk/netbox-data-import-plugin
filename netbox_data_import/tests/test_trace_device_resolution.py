@@ -16,6 +16,7 @@ from netbox_data_import.models import ImportProfile, SourceDocument, Termination
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.object_permissions import ObjectPermissionDenied, clear_user_permission_caches
 from netbox_data_import.plan import Disposition
+from netbox_data_import.preview_row_actions import PREVIEW_PLAN_SESSION_KEY
 from netbox_data_import.profile_yaml import serialize_profile
 from netbox_data_import.review_workspace import save_trace_device_resolution_and_replan
 from netbox_data_import.trace_device_resolution import (
@@ -493,6 +494,31 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
                 )
 
                 self.assertEqual(candidates.status_code, 400)
+
+    def test_the_candidate_endpoint_rejects_malformed_device_evidence(self):
+        response = self.start_alias_preview()
+        session = self.client.session
+        plan = session[PREVIEW_PLAN_SESSION_KEY]
+        question = next(
+            device
+            for unit in plan["units"]
+            for device in ((unit.get("display") or {}).get("trace") or {}).get("devices", ())
+            if device.get("key") == "source alias"
+        )
+        question["labels"] = "Source Alias"
+        session[PREVIEW_PLAN_SESSION_KEY] = plan
+        session.save()
+
+        candidates = self.client.get(
+            reverse("plugins:netbox_data_import:trace_device_candidates"),
+            {
+                "device_key": "source alias",
+                "preview_revision": response.context["preview_revision"],
+            },
+        )
+
+        self.assertEqual(candidates.status_code, 400)
+        self.assertEqual(candidates.json()["error"], "That Device cannot be resolved here.")
 
     def test_the_summary_counts_only_saved_decisions_the_actor_can_view(self):
         from core.models import ObjectType
