@@ -15,7 +15,12 @@ removing an outer lock removed the exception, which it did not, so this scanner 
 import ast
 import pathlib
 
-from django.test import SimpleTestCase
+from django.contrib.auth import get_user_model
+from django.test import Client, SimpleTestCase, TransactionTestCase
+from django.urls import reverse
+
+from netbox_data_import.models import ColumnMapping, ImportProfile, SourceResolution
+from netbox_data_import.tests.helpers import profile_deleted_at_the_policy_lock
 
 VIEWS = pathlib.Path(__file__).resolve().parents[1] / "views.py"
 #: A mixin whose `dispatch()` answers the exception for every view that inherits it.
@@ -89,3 +94,62 @@ class PolicyWriteRefusalTest(SimpleTestCase):
         unanswered = _unanswered_policy_writes(ast.parse(VIEWS.read_text()))
 
         self.assertEqual(unanswered, [], "these policy writes would return HTTP 500 for a deleted profile")
+
+
+class DeletedProfileIsNotFoundTest(TransactionTestCase):
+    """The scanner proves a handler exists; these prove what the HTTP 404 handlers render.
+
+    The two profile-child bases and the resolution delete view answer with `Http404`, which no other
+    test exercises. The `messages` and JSON renderings are covered by the preview and proposal
+    suites, so one real request per uncovered rendering is enough.
+    """
+
+    def setUp(self):
+        """Create the profile, the child rows the requests name, and the operator who posts them."""
+        self.profile = ImportProfile.objects.create(name="Vanishing Child Profile", adapter_config={})
+        self.mapping = ColumnMapping.objects.create(
+            profile=self.profile, source_column="Hostname", target_field="device_name"
+        )
+        self.resolution = SourceResolution.objects.create(
+            profile=self.profile,
+            source_id="RES-1",
+            source_column="device_name",
+            original_value="pristine",
+            resolved_fields={"device_name": "decided"},
+        )
+        self.user = get_user_model().objects.create_superuser("vanish-child", "v@example.invalid", "testpass")
+        self.client = Client()
+        self.client.force_login(self.user)
+
+    def _post_while_the_profile_vanishes(self, url, data):
+        """POST to *url*, deleting the profile the moment the policy lock statement runs."""
+        with profile_deleted_at_the_policy_lock(self.profile.pk) as deleted:
+            response = self.client.post(url, data)
+        self.assertEqual(deleted, [True], "the policy lock statement never ran, so no race was exercised")
+        return response
+
+    def test_editing_a_profile_child_reports_the_deleted_profile_as_not_found(self):
+        response = self._post_while_the_profile_vanishes(
+            reverse("plugins:netbox_data_import:columnmapping_edit", kwargs={"pk": self.mapping.pk}),
+            {"profile": self.profile.pk, "source_column": "Renamed", "target_field": "device_name"},
+        )
+
+        self.assertEqual(response.status_code, 404, response.content[:300])
+        # The delete cascades, so the edit had nothing left to rename either.
+        self.assertFalse(ColumnMapping.objects.filter(source_column="Renamed").exists())
+
+    def test_deleting_a_profile_child_reports_the_deleted_profile_as_not_found(self):
+        response = self._post_while_the_profile_vanishes(
+            reverse("plugins:netbox_data_import:columnmapping_delete", kwargs={"pk": self.mapping.pk}),
+            {"confirm": "true"},
+        )
+
+        self.assertEqual(response.status_code, 404, response.content[:300])
+
+    def test_deleting_a_resolution_reports_the_deleted_profile_as_not_found(self):
+        response = self._post_while_the_profile_vanishes(
+            reverse("plugins:netbox_data_import:source_resolution_delete", kwargs={"pk": self.resolution.pk}),
+            {"confirm": "true"},
+        )
+
+        self.assertEqual(response.status_code, 404, response.content[:300])

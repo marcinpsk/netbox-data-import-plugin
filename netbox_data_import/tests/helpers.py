@@ -282,6 +282,34 @@ def run_on_separate_connection(target):
             raise errors.get()
 
 
+@contextmanager
+def profile_deleted_at_the_policy_lock(profile_pk):
+    """Delete one Import Profile on another connection as this thread takes its policy lock.
+
+    Stands in for a profile deleted between a view's own lookup and its policy lock. Yields the
+    `deleted` list, which holds one entry once the lock statement has run.
+    """
+    from django.db import connection
+
+    from netbox_data_import.models import ImportProfile
+
+    deleted = []
+
+    def delete_when_the_lock_runs(execute, sql, params, many, context):
+        if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
+            deleted.append(True)
+
+            def delete_it():
+                ImportProfile.objects.filter(pk=profile_pk).delete()
+
+            with run_on_separate_connection(delete_it):
+                pass
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(delete_when_the_lock_runs):
+        yield deleted
+
+
 def user_with_object_permission(username, grants):
     """Create a user holding one real ObjectPermission per model grant."""
     from django.contrib.auth import get_user_model

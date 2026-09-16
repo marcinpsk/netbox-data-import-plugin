@@ -12,7 +12,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_data_import.models import ColumnMapping, ImportProfile, SourceResolution
-from netbox_data_import.tests.helpers import run_on_separate_connection
+from netbox_data_import.tests.helpers import profile_deleted_at_the_policy_lock, run_on_separate_connection
 
 
 def _build_profile(name):
@@ -405,23 +405,7 @@ class PreviewWriteVanishedProfileTest(TransactionTestCase):
 
     def _post_while_the_profile_vanishes(self, url_name, data):
         """POST *data*, deleting the profile the moment the policy lock statement runs."""
-        from django.db import connection
-
-        deleted = []
-
-        def delete_the_profile_when_the_lock_runs(execute, sql, params, many, context):
-            # Stand in for a profile deleted between the view's own lookup and its policy lock.
-            if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
-                deleted.append(True)
-
-                def delete_it():
-                    ImportProfile.objects.get(pk=self.profile.pk).delete()
-
-                with run_on_separate_connection(delete_it):
-                    pass
-            return execute(sql, params, many, context)
-
-        with connection.execute_wrapper(delete_the_profile_when_the_lock_runs):
+        with profile_deleted_at_the_policy_lock(self.profile.pk) as deleted:
             response = self.client.post(reverse(f"plugins:netbox_data_import:{url_name}"), data)
         self.assertEqual(deleted, [True], "the policy lock statement never ran")
         return response
