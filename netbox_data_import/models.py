@@ -1323,6 +1323,7 @@ class ProposalFailureReason:
     CREDENTIAL_UNAVAILABLE = "credential_unavailable"
     CREDENTIAL_DENIED = "credential_denied"
     CREDENTIAL_INVALID = "credential_invalid"
+    SUPERSEDED_REQUEST = "superseded_request"
 
     CHOICES = (
         (BACKEND_REFUSAL, "Backend refusal"),
@@ -1336,6 +1337,7 @@ class ProposalFailureReason:
         (CREDENTIAL_UNAVAILABLE, "Credential infrastructure unavailable"),
         (CREDENTIAL_DENIED, "Credential denied"),
         (CREDENTIAL_INVALID, "Invalid credential reference or secret"),
+        (SUPERSEDED_REQUEST, "Superseded by a newer request contract"),
     )
 
     #: Section 7.5: these retry at most twice inside the same proposal; every other reason fails at once.

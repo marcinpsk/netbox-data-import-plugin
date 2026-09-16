@@ -1517,6 +1517,7 @@ transaction.
 | Empty or wrongly typed secret value | Non-transient | Fail closed, never send an inference request |
 | Backend refusal: `finish_reason` `stop` with empty content or a refusal payload | Non-transient, typed reason `backend_refusal` | Set the row to `failed`, retain the response diagnostic without non-empty response text, never produce a candidate outcome, no automatic retry |
 | Invalid backend response: content is present but fails JSON parsing, schema validation, or candidate-id validation. A malformed envelope or a non-`stop` finish reason classifies here too | Non-transient, typed reason `invalid_response` | Set the row to `failed`, retain the response diagnostic without non-empty response text, never produce a candidate outcome, no automatic retry |
+| Stored request below the current prompt or response contract | Non-transient, typed reason `superseded_request` | Retire the queued or running row when the upgrade runs, so the operator asks again under the contract the release sends |
 
 The transient HTTP statuses are the four this table names. Every other status at or above 400 is
 non-transient, including any this table does not mention, so an unlisted status fails closed with its
