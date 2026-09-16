@@ -23,7 +23,7 @@ This plugin allows you to:
 - **Preview** the import before applying changes
 - **Run imports in the background**, track processed rows, and resume the progress page
 
-Currently supports importing from Excel (`.xlsx`) files in the CANS format, with the mapping configuration stored in NetBox so it can be reused and adapted for other source formats.
+Currently supports importing from Excel (`.xlsx`) workbooks with a flat, one-row-per-device layout. The mapping configuration is stored in NetBox, so it can be reused and adapted for other source formats.
 
 ## Requirements
 

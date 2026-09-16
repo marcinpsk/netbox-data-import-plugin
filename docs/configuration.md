@@ -175,10 +175,10 @@ upgrade migration copies every payload into the new table, clears the key from D
 and deletes the custom field. The migration does not reverse. A payload that names a deleted import
 profile is dropped, and the migration logs how many.
 
-The per-profile custom field (**Custom field name** in the Import Profile's adapter configuration,
-for example `cans_id`) is separate. The plugin still writes the source ID to it and never deletes it.
-See [Linking to the source system](#linking-to-the-source-system) to turn that ID into a button on
-the object page.
+The per-profile custom field (**Custom field name** in the Import Profile's adapter
+configuration, for example `external_id`) is separate. The plugin still writes the source ID to
+it and never deletes it. See [Linking to the source system](#linking-to-the-source-system) to
+turn that ID into a button on the object page.
 
 ## Linking to the source system
 
@@ -187,20 +187,20 @@ needs no setting for this.
 
 ### Link from the per-profile custom field
 
-Set **Custom field name** in the Import Profile's adapter configuration, for example `cans_id`. The
-plugin writes the source ID of each imported row into that custom field, on Devices and on Racks.
-Assign the custom field to both object types.
+Set **Custom field name** in the Import Profile's adapter configuration, for example
+`external_id`. The plugin writes the source ID of each imported row into that custom field, on
+Devices and on Racks. Assign the custom field to both object types.
 
 Add the link under **Customization > Custom Links**:
 
 | Field | Value |
 | --- | --- |
 | Object types | `DCIM > device`, `DCIM > rack` |
-| Link text | `{% if object.cf.cans_id %}Locate in CANS{% endif %}` |
-| Link URL | `https://cans.example.invalid/assets?search={{ object.cf.cans_id }}` |
+| Link text | `{% if object.cf.external_id %}Locate asset in the source system{% endif %}` |
+| Link URL | `https://assets.example.invalid/search?q={{ object.cf.external_id }}` |
 
 To find the URL, search for one ID in the source system and replace the search value with
-`{{ object.cf.cans_id }}`.
+`{{ object.cf.external_id }}`.
 
 An empty link text hides the button, so an object that no import touched shows nothing.
 
@@ -221,9 +221,9 @@ import requests
 
 NETBOX = "https://netbox.example.invalid"
 TOKEN = "0123456789abcdef0123456789abcdef01234567"
-CUSTOM_FIELD = "cans_id"
-LINK_NAME = "Locate in CANS"
-SEARCH_URL = "https://cans.example.invalid/assets?search="
+CUSTOM_FIELD = "external_id"
+LINK_NAME = "Locate asset in the source system"
+SEARCH_URL = "https://assets.example.invalid/search?q="
 
 session = requests.Session()
 session.headers.update({"Authorization": f"Token {TOKEN}", "Accept": "application/json"})
@@ -278,8 +278,8 @@ covers Devices only.
 | Field | Value |
 | --- | --- |
 | Object types | `DCIM > device` |
-| Link text | `{% if object.data_import_source and object.data_import_source.source_id %}Locate in CANS{% endif %}` |
-| Link URL | `https://cans.example.invalid/assets?search={{ object.data_import_source.source_id }}` |
+| Link text | `{% if object.data_import_source and object.data_import_source.source_id %}Locate asset in the source system{% endif %}` |
+| Link URL | `https://assets.example.invalid/search?q={{ object.data_import_source.source_id }}` |
 
 Keep both tests in the link text. A Device that the plugin never imported has no
 `data_import_source`. A link text that reads `object.data_import_source.source_id` without the first
