@@ -697,6 +697,55 @@ class AssessPermissionScopedSaveTest(TestCase):
         stored.refresh_from_db()
         self.assertIsNone(stored.assigned_object)
 
+    def test_a_saved_root_keeps_its_real_primary_key_when_a_relation_is_planned(self):
+        """An unsaved relation marks the root's foreign key generated, never its own primary key."""
+        from dcim.models import Device
+        from ipam.models import IPAddress
+
+        site, _manufacturer, device_type, role = make_dcim_objects("SavedRootPk")
+        device = Device.objects.create(
+            name="saved-root-pk-device",
+            site=site,
+            device_type=device_type,
+            role=role,
+        )
+        planned = IPAddress(address="198.18.0.20/32")
+        user = user_with_object_permission(
+            "assess-saved-root-pk",
+            [(Device, ["change"], {"id": device.pk})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": device.name},
+            {"site": site, "device_type": device_type, "role": role},
+            prospective_relations={"primary_ip4": planned},
+        )
+
+        self.assertTrue(assessment.allowed, "the root primary key is real, so the constraint on it is knowable")
+        self.assertIsNone(planned.pk)
+
+    def test_an_unsaved_root_still_refuses_a_predicate_on_its_invented_primary_key(self):
+        """Narrowing the guard to the primary key must not weaken the unsaved-root refusal."""
+        from dcim.models import Device
+
+        site, _manufacturer, device_type, role = make_dcim_objects("UnsavedRootPk")
+        # The world invents a negative primary key, so this predicate matches only the invention.
+        user = user_with_object_permission(
+            "assess-unsaved-root-pk",
+            [(Device, ["add"], {"pk__lt": 0})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": "unsaved-root-pk-device"},
+            {"site": site, "device_type": device_type, "role": role},
+        )
+
+        self.assertFalse(assessment.allowed, "an unallocated primary key cannot satisfy a predicate on it")
+
     def test_duplicate_saved_candidates_must_describe_one_final_state(self):
         """Identical saved candidates coalesce, while conflicting copies fail closed."""
         from dcim.models import Device, Interface

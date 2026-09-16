@@ -124,6 +124,11 @@ def _synthetic_primary_key(instance, occupied=None):
     return value, True
 
 
+def _generated_root_fields(world) -> set[str]:
+    """Return the root row's own field names whose values this world had to invent."""
+    return world.generated_values.get(world.root._meta.concrete_model, {}).get(world.root.pk, set())
+
+
 def _depends_on_generated_root_primary_key(constraint, instance) -> bool:
     """Return whether the root predicate needs an automatic primary key not yet allocated."""
     field = instance._meta.pk
@@ -399,7 +404,8 @@ def _prospective_row_matches(user, model, constraint, world) -> bool:
     if (
         _uses_root_reverse_relation(constraint, model)
         or (
-            world.root._meta.concrete_model in world.generated_values
+            # A planned relation marks the root's foreign key generated, never its primary key.
+            world.root._meta.pk.attname in _generated_root_fields(world)
             and _depends_on_generated_root_primary_key(constraint, world.root)
         )
         or _depends_on_generated_relation_value(constraint, world.relations)
