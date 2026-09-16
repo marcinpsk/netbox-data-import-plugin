@@ -150,3 +150,18 @@ def missed_unbounded_read_with_other_keywords(session, url, address, deadline):
 def bounded_read_is_fine(session, url, address):
     # ok: nbdi-bounded-response-body
     return request_to_resolved_address(session, "GET", url, address, response_body_limit=1024)
+
+
+def bounded_read_by_position_is_fine(session, url, address):
+    # ok: nbdi-bounded-response-body
+    return request_to_resolved_address(session, "GET", url, address, 1024)
+
+
+def missed_explicit_none_keyword(session, url, address):
+    # ruleid: nbdi-bounded-response-body
+    return request_to_resolved_address(session, "GET", url, address, response_body_limit=None)
+
+
+def missed_explicit_none_by_position(session, url, address):
+    # ruleid: nbdi-bounded-response-body
+    return request_to_resolved_address(session, "GET", url, address, None)
