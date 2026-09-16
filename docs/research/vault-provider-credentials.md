@@ -96,9 +96,15 @@ Keep the following deployment-owned values outside the database:
 - authentication mode
 
 Use end-to-end TLS and certificate verification for a remote Vault connection. HashiCorp says to
-always use TLS in production. A loopback or private Unix-socket-style trust boundary to a local
-Vault Proxy can be deployment-specific, but the remote Proxy-to-Vault connection still needs TLS.
+always use TLS in production. The remote Proxy-to-Vault connection always needs TLS.
 [Vault production hardening][vault-hardening]
+
+The NetBox-to-Proxy hop carries the resolved inference key, so it needs its own protection. Give
+the Proxy an HTTPS listener with certificate verification, and authenticate each client wherever
+that listener is reachable by anything else. Reject a plain HTTP listener and an unauthenticated
+one. The plugin admits nothing weaker: `inference_settings` refuses a Vault address whose scheme is
+not `https`, a local Proxy included, so a Unix socket is not a deployment option here. See
+[Configuration](../configuration.md#inference-backend-credentials) for the operator instructions.
 
 Do not add a `skip_tls_verify` provider option. A custom CA bundle is the safe solution for a
 private CA.
@@ -157,7 +163,8 @@ unavoidable, do not force auto-auth on it: give each client its own token and le
 it through.
 
 Enable the Proxy listener's `require_request_header` option and send `X-Vault-Request: true`.
-HashiCorp documents this as an additional protection against server-side request forgery.
+HashiCorp documents this as an additional protection against server-side request forgery. It is
+not transport security: it neither encrypts the response nor authenticates the caller.
 [Vault Proxy][vault-proxy]
 
 Let Vault Proxy renew the machine token. Do not authenticate to Vault for every inference

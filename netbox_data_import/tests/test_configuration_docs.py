@@ -8,6 +8,7 @@ from django.test import SimpleTestCase
 
 
 CONFIGURATION_GUIDE = Path(__file__).resolve().parents[2] / "docs" / "configuration.md"
+VAULT_RESEARCH = Path(__file__).resolve().parents[2] / "docs" / "research" / "vault-provider-credentials.md"
 
 
 class VaultTransportGuidanceTest(SimpleTestCase):
@@ -39,3 +40,16 @@ class VaultTransportGuidanceTest(SimpleTestCase):
         self.assertIn("GET {api_root}/models", vault_guide)
         self.assertIn("Model discovery is optional", vault_guide)
         self.assertIn("exact model id manually", vault_guide)
+
+    def test_the_research_note_requires_the_same_protected_proxy_hop(self):
+        """The research note informs the operator guide, so it must not offer a weaker hop."""
+        # The note is hard-wrapped, so each claim is matched against its unwrapped text.
+        research = " ".join(VAULT_RESEARCH.read_text().split())
+
+        self.assertIn("The NetBox-to-Proxy hop carries the resolved inference key", research)
+        self.assertIn("HTTPS listener with certificate verification", research)
+        self.assertIn("Reject a plain HTTP listener and an unauthenticated one", research)
+        self.assertIn("refuses a Vault address whose scheme is not `https`", research)
+        self.assertIn("a Unix socket is not a deployment option here", research)
+        self.assertIn("It is not transport security", research)
+        self.assertNotIn("can be deployment-specific", research)
