@@ -71,7 +71,7 @@ class SourceBatch:
             diagnostic = SourceDiagnostic(
                 code="trace.device_required",
                 message="A Source Trace Termination Reference must name a Device.",
-                row_number=row.provenance[0].row_start if row.provenance else None,
+                row_number=row.provenance[0].row_start,
             )
             diagnostics.append(diagnostic)
             rows.append(replace(row, errors=(*row.errors, diagnostic)))

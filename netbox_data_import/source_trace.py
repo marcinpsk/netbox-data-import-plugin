@@ -97,6 +97,11 @@ class SourceTrace:
     provenance: tuple[TraceProvenance, ...]
     errors: tuple[SourceDiagnostic, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Reject a trace that states no source position, which every consumer reads."""
+        if not self.provenance:
+            raise ValueError("A Source Trace must carry at least one TraceProvenance record.")
+
     @property
     def valid(self) -> bool:
         """Return whether source validation found no errors on this trace."""

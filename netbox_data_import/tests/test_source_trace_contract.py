@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The adapter-neutral Source Trace contract."""
 
+from dataclasses import replace
+
 from django.test import SimpleTestCase
 
 from netbox_data_import.adapters import SourceAdapter, SourceBatch
@@ -55,3 +57,10 @@ class SourceTraceContractTest(SimpleTestCase):
 
         self.assertIsInstance(batch.rows[0], SourceTrace)
         self.assertEqual(SourceTrace.__module__, "netbox_data_import.source_trace")
+
+    def test_a_trace_without_provenance_is_rejected_at_construction(self):
+        """`cable_target` reads `provenance[0]` for every trace, valid or not, so an empty tuple crashes."""
+        trace = IndependentTraceAdapter.interpret(b"", {}).rows[0]
+
+        with self.assertRaises(ValueError):
+            replace(trace, provenance=())
