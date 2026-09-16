@@ -72,7 +72,8 @@
     document.getElementById('syncRowName').textContent = btn.dataset.name || '—';
     document.getElementById('syncRowNumber').textContent = currentRowNumber || '—';
     document.getElementById('syncRowSourceId').textContent = btn.dataset.sourceId || '—';
-    document.getElementById('syncRowBadge').textContent = 'Create ' + (btn.dataset.objectType || '');
+    var verb = btn.dataset.action === 'update' ? 'Update' : 'Create';
+    document.getElementById('syncRowBadge').textContent = verb + ' ' + (btn.dataset.objectType || '');
 
     var resolutions = window.EXISTING_RESOLUTIONS || {};
     var rowRes = resolutions[btn.dataset.sourceId] || {};

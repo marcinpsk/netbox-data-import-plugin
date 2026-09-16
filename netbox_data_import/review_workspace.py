@@ -236,12 +236,13 @@ _IDENTITY_CONFLICTS = {
 }
 
 
-# One table: the action each identity conflict offers, and the extra_data keys that action runs on.
+# One table: the actions each identity conflict offers, and the extra_data keys each action runs on.
 _CONFLICT_ACTIONS = MappingProxyType(
     {
-        "duplicate_name": ("use_name", ("suggested_name",)),
-        "duplicate_serial": ("ignore_serial", ("duplicate_serial",)),
-        "name_placement_conflict": ("use_name", ("suggested_name",)),
+        "duplicate_name": (("use_name", ("suggested_name",)),),
+        "duplicate_serial": (("ignore_serial", ("duplicate_serial",)),),
+        "name_placement_conflict": (("use_name", ("suggested_name",)),),
+        "rack_position_occupied": (("ignore_position", ("u_position",)), ("ignore_row", ())),
     }
 )
 
@@ -252,12 +253,9 @@ def _offered_actions(extra_data, source_id) -> list[str]:
         return []
     offered: list[str] = []
     for conflict in extra_data.get("identity_conflicts") or ():
-        entry = _CONFLICT_ACTIONS.get(conflict)
-        if entry is None:
-            continue
-        action, required = entry
-        if action not in offered and all(extra_data.get(key) for key in required):
-            offered.append(action)
+        for action, required in _CONFLICT_ACTIONS.get(conflict, ()):
+            if action not in offered and all(extra_data.get(key) for key in required):
+                offered.append(action)
     return offered
 
 

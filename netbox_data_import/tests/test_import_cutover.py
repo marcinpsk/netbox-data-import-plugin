@@ -126,6 +126,14 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             payload.setdefault("preview_revision", revision)
         return self.client.post(reverse("plugins:netbox_data_import:sync_single_row"), payload)
 
+    def _preview_action(self, row_number):
+        """Return the action the current preview plans for one source row."""
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        workspace = ReviewWorkspace(ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]))
+        return next(unit.action for unit in workspace.units if unit.row_number == row_number)
+
     def _job(self, *, status="pending", data=None, user=True, queue_name="default"):
         """Create one native data-import Job owned by this actor by default."""
         return Job.objects.create(
@@ -789,6 +797,36 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self._upload()
         SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
+
+    def test_single_row_sync_executes_an_update_row(self):
+        """Per-row sync runs the same engine step 3 runs, for a row that updates a device."""
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
+
+        from dcim.models import Manufacturer
+
+        rack = Rack.objects.create(name="rack-a", site=self.site, u_height=42)
+        # The row names the Example/Model type, so a device of another type is a real update.
+        other_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.get(slug="example"), model="Other", slug="example-other", u_height=1
+        )
+        expected_type = DeviceType.objects.get(slug="example-model")
+        existing = Device.objects.create(
+            name="server-a",
+            site=self.site,
+            rack=rack,
+            device_type=other_type,
+            role=DeviceRole.objects.get(slug="server"),
+        )
+
+        self._upload()
+        self.assertEqual(self._preview_action(3), "update", "the fixture does not produce an update row")
+
+        response = self._sync_single_row({"row_number": 3})
+        self.assertEqual(response.status_code, 200, response.content[:400])
+        self.assertIn(b"updated in NetBox", response.content)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.device_type_id, expected_type.pk, "the update row did not reach NetBox")
 
     def test_single_row_sync_refuses_an_adapter_with_no_target_module(self):
         """A changed profile can require a Target Module that this release cannot run."""

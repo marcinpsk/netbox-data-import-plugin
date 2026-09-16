@@ -1002,7 +1002,26 @@ def _other_conflict_row_identities(row, source_object_types_by_number):
     return tuple(dict.fromkeys(identity for identity in identities if identity != (row.row_number, row.object_type)))
 
 
-def _conflict_comparison_row(row, source_rows_by_number, *, is_current):
+# A rack position collides between two rows, so either row of the group offers these.
+_GROUP_CONFLICT_ACTIONS = ("ignore_position", "ignore_row")
+
+# The Resolve column of the conflict comparison renders these, and nothing else.
+_RESOLVE_COLUMN_ACTIONS = ("ignore_serial", "ignore_position", "ignore_row")
+
+
+def _group_offered_actions(row, u_position, group_actions):
+    """Return the actions one member of a conflict group can run, its own first."""
+    offered = list(row.extra_data.get("offered_actions", []))
+    if not row.source_id:
+        return offered
+    for action in group_actions:
+        if action in offered or (action == "ignore_position" and not u_position):
+            continue
+        offered.append(action)
+    return offered
+
+
+def _conflict_comparison_row(row, source_rows_by_number, *, is_current, group_actions=()):
     """Return the source facts that the conflict comparison shows for one result row."""
     source_row = source_rows_by_number.get(row.row_number, {})
     extra_data = row.extra_data
@@ -1011,6 +1030,8 @@ def _conflict_comparison_row(row, source_rows_by_number, *, is_current):
     rack_name = row.rack_name or source_row.get("rack_name", "")
     if not rack_name and row.object_type == "rack":
         rack_name = row.name
+    u_position = extra_data.get("u_position", source_row.get("u_position"))
+    offered = _group_offered_actions(row, u_position, group_actions)
     return {
         "row_number": row.row_number,
         "name": row.name,
@@ -1018,12 +1039,14 @@ def _conflict_comparison_row(row, source_rows_by_number, *, is_current):
         "serial": serial,
         "asset_tag": asset_tag,
         "rack_name": rack_name,
-        "u_position": extra_data.get("u_position", source_row.get("u_position")),
+        "u_position": u_position,
         "face": extra_data.get("face", source_row.get("face", "")),
         "action": row.action,
         "detail": row.detail,
-        # The comparison offers the same action the row column does, so it reads the same list.
-        "offered_actions": extra_data.get("offered_actions", []),
+        # The row column's own actions, plus the ones any member of this conflict group can run.
+        "offered_actions": offered,
+        # One source of truth for whether the Resolve column has anything to draw.
+        "has_resolve_action": any(action in offered for action in _RESOLVE_COLUMN_ACTIONS),
         "duplicate_serial": extra_data.get("duplicate_serial", ""),
         "is_current": is_current,
     }
@@ -1051,9 +1074,17 @@ def _preview_rows_with_conflict_comparisons(workspace, source_rows, profile):
         other_rows = [other_row for other_row in other_rows if other_row is not None]
         if not other_rows:
             continue
+        group_actions = [
+            action for action in row.extra_data.get("offered_actions", ()) if action in _GROUP_CONFLICT_ACTIONS
+        ]
         conflict_rows_by_row[(row.row_number, row.object_type)] = [
-            _conflict_comparison_row(row, source_rows_by_number, is_current=True),
-            *(_conflict_comparison_row(other_row, source_rows_by_number, is_current=False) for other_row in other_rows),
+            _conflict_comparison_row(row, source_rows_by_number, is_current=True, group_actions=group_actions),
+            *(
+                _conflict_comparison_row(
+                    other_row, source_rows_by_number, is_current=False, group_actions=group_actions
+                )
+                for other_row in other_rows
+            ),
         ]
 
     preview_rows = []
@@ -2983,6 +3014,73 @@ class IgnoreDuplicateSerialView(PermissionRequiredMixin, View):
             return _name_resolution_response(request, next_url)
 
         messages.success(request, f"Source '{source_id}' will import without serial '{shown_serial}'.")
+        return _name_resolution_response(request, next_url)
+
+
+def _position_conflict_rows(units) -> set[int]:
+    """Return every row number a rack-position collision names in the current preview."""
+    involved: set[int] = set()
+    for unit in units:
+        if "rack_position_occupied" not in (unit.extra_data.get("identity_conflicts") or ()):
+            continue
+        involved.add(unit.row_number)
+        for key in ("claimed_by_row", "conflict_row_number"):
+            if (other := unit.extra_data.get(key)) is not None:
+                involved.add(other)
+    return involved
+
+
+class IgnorePositionView(PermissionRequiredMixin, View):
+    """Drop the rack position from one source row so the rows sharing the unit stop colliding."""
+
+    permission_required = "netbox_data_import.change_importprofile"
+
+    def post(self, request):
+        """Persist an empty rack position for the row the operator unplaces."""
+        decision, refused = _preview_row_decision(request)
+        if refused is not None:
+            return refused
+        profile = decision.profile
+        row_number = decision.row_number
+        source_id = decision.source_id
+        next_url = decision.next_url
+
+        preview = load_cached_preview(request)
+        # Either row of the collision may give its position up, so the whole group is eligible.
+        if preview is None or row_number not in _position_conflict_rows(preview[1].units):
+            messages.error(request, "This row is not part of a rack position conflict in the current preview.")
+            return _name_resolution_response(request, next_url)
+
+        original_position = source_text(decision.source_row.get("u_position"))
+        if not original_position:
+            messages.error(request, "This row carries no rack position to give up.")
+            return _name_resolution_response(request, next_url)
+
+        try:
+            # Serialize against an executing import, which holds the same profile row.
+            with locked_profile_policy(profile.pk):
+                save_permission_scoped_object(
+                    request.user,
+                    SourceResolution,
+                    {"profile": profile, "source_id": source_id, "source_column": "u_position"},
+                    {"original_value": original_position, "resolved_fields": {"u_position": None}},
+                )
+        except ImportProfile.DoesNotExist:
+            messages.error(request, "The import profile is no longer available.")
+            return _name_resolution_response(request, next_url)
+        except ObjectPermissionDenied:
+            messages.error(request, "Permission denied: cannot create or change this saved rack position.")
+            return _name_resolution_response(request, next_url)
+        except ValidationError as exc:
+            messages.error(request, "; ".join(exc.messages))
+            return _name_resolution_response(request, next_url)
+        except IntegrityError:
+            messages.error(request, "The saved rack position changed while this request was processed. Try again.")
+            return _name_resolution_response(request, next_url)
+
+        messages.success(
+            request, f"Source '{source_id}' will import into its rack without position U{original_position}."
+        )
         return _name_resolution_response(request, next_url)
 
 
@@ -5029,9 +5127,9 @@ class SyncSingleRowView(_AjaxPermissionView):
         )
         if preview_unit is None:
             return JsonResponse({"ok": False, "error": "Row not found in current preview data"}, status=400)
-        if preview_unit.action != "create":
+        if preview_unit.action not in {"create", "update"}:
             return JsonResponse(
-                {"ok": False, "error": "Only 'create' rows can be synced individually"},
+                {"ok": False, "error": "Only 'create' and 'update' rows can be synced individually"},
                 status=400,
             )
 
@@ -5070,7 +5168,8 @@ class SyncSingleRowView(_AjaxPermissionView):
             )
 
         mark_preview_dirty(request.session)
-        written = f"{preview_unit.object_type.capitalize()} '{preview_unit.name}' was created in NetBox."
+        verb = "created" if preview_unit.action == "create" else "updated"
+        written = f"{preview_unit.object_type.capitalize()} '{preview_unit.name}' was {verb} in NetBox."
         return JsonResponse(pending_preview_payload(row_number, "Synchronized.", written))
 
 

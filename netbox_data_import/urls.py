@@ -135,6 +135,7 @@ urlpatterns = [
         views.IgnoreDuplicateSerialView.as_view(),
         name="ignore_duplicate_serial",
     ),
+    path("ignore-position/", views.IgnorePositionView.as_view(), name="ignore_position"),
     # Source resolutions list (per profile)
     path(
         "profiles/<int:profile_pk>/resolutions/",

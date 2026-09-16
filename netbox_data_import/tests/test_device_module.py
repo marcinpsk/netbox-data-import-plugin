@@ -2273,24 +2273,30 @@ class PreviewActionContractTest(DeviceModulePlanTestBase):
         if conflict == "name_placement_conflict":
             self._device("srv-placed", rack=self.rack, position=10, face="front")
             return (self._row(2, "D-1", "srv-placed", rack_name="dm-rack", u_position="20", face="Front"),)
+        if conflict == "rack_position_occupied":
+            return (
+                self._row(2, "D-1", "srv-01", u_position="5", face="Front"),
+                self._row(3, "D-2", "srv-02", u_position="5", face="Front"),
+            )
         raise AssertionError(f"add a planned row that raises {conflict!r} before listing its action")
 
     def test_every_conflict_the_preview_acts_on_offers_its_action(self):
         """A conflict in the table without its payload is the defect this test exists to catch."""
-        for conflict, (action, required) in _CONFLICT_ACTIONS.items():
-            with self.subTest(conflict=conflict):
-                units = self._plan(*self._rows_for(conflict))
-                rows = [WorkspaceUnit.from_unit(unit) for unit in units]
-                carrying = [row for row in rows if conflict in row.extra_data.get("identity_conflicts", ())]
+        for conflict, entries in _CONFLICT_ACTIONS.items():
+            for action, required in entries:
+                with self.subTest(conflict=conflict, action=action):
+                    units = self._plan(*self._rows_for(conflict))
+                    rows = [WorkspaceUnit.from_unit(unit) for unit in units]
+                    carrying = [row for row in rows if conflict in row.extra_data.get("identity_conflicts", ())]
 
-                self.assertTrue(carrying, f"no planned row raised {conflict}")
-                for row in carrying:
-                    for key in required:
-                        self.assertTrue(
-                            row.extra_data.get(key),
-                            f"{conflict} offers {action}, which needs extra_data[{key!r}]",
-                        )
-                    self.assertIn(action, row.extra_data["offered_actions"])
+                    self.assertTrue(carrying, f"no planned row raised {conflict}")
+                    for row in carrying:
+                        for key in required:
+                            self.assertTrue(
+                                row.extra_data.get(key),
+                                f"{conflict} offers {action}, which needs extra_data[{key!r}]",
+                            )
+                        self.assertIn(action, row.extra_data["offered_actions"])
 
 
 class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):
