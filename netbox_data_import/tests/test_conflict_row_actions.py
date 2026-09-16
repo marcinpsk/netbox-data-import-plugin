@@ -213,3 +213,29 @@ class RackPositionConflictActionTest(IsolatedRQQueueTestMixin, TransactionTestCa
         rows = {row.row_number: row for row in self._preview_rows() if row.object_type == "device"}
         self.assertEqual(rows[3].action, "ignore", rows[3].detail)
         self.assertEqual(rows[2].action, "create", rows[2].detail)
+
+    def test_a_profile_deleted_inside_the_write_window_is_refused_not_a_crash(self):
+        """The preview gate and the saver's lock read the profile at two different moments."""
+        from django.contrib.messages import get_messages
+        from django.db.models.signals import post_init
+
+        from netbox_data_import.tests.helpers import competing_write_during
+
+        self._upload(self._colliding_rows())
+        profile_id = self.profile.pk
+
+        def delete_the_profile():
+            ImportProfile.objects.filter(pk=profile_id).delete()
+
+        # Skipping the gate's own read lands the delete after it and before the saver takes its lock.
+        with competing_write_during(post_init, ImportProfile, delete_the_profile, skip=1) as (observed, blocked):
+            response = self._ignore_position()
+
+        self.assertEqual(observed, [True], "the competing delete never ran, so no race was exercised")
+        self.assertEqual(blocked, [], "the competing delete waited for a lock instead of landing")
+        self.assertFalse(ImportProfile.objects.filter(pk=profile_id).exists())
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(SourceResolution.objects.exists())
+        # Without this the gate's own refusal satisfies every assertion above, saver never reached.
+        messages = [str(message) for message in get_messages(response.wsgi_request)]
+        self.assertEqual(messages, ["The import profile is no longer available."])

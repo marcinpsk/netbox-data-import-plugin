@@ -212,22 +212,29 @@ COMPETING_WRITE_LOCK_TIMEOUT = "750ms"
 
 
 @contextmanager
-def competing_write_during(signal, sender, competing_write):
-    """Attempt *competing_write* on a second connection at the first *signal* this thread sends.
+def competing_write_during(signal, sender, competing_write, *, skip=0):
+    """Attempt *competing_write* on a second connection at one *signal* this thread sends.
 
     Yields the ``observed`` and ``blocked`` lists. ``blocked`` holds one entry when the competing
     write waited for the lock the code under test holds, so an empty list means it landed.
+
+    *skip* passes that many earlier signals untouched, which places the write inside a window that
+    opens only after the code under test has already read the row once.
     """
     from threading import current_thread
 
     from django.db import OperationalError, connection
 
     calling_thread = current_thread()
+    seen: list[bool] = []
     observed: list[bool] = []
     blocked: list[bool] = []
 
     def contend_during_write(sender, instance, **kwargs):
         if observed or current_thread() is not calling_thread:
+            return
+        seen.append(True)
+        if len(seen) <= skip:
             return
         observed.append(True)
 

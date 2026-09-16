@@ -1527,7 +1527,33 @@ def _queue_accepted_plan(request, profile, document, ctx_data, plan_data, select
     return redirect(reverse("plugins:netbox_data_import:import_progress", kwargs={"pk": job.pk}))
 
 
-class ImportRunView(PermissionRequiredMixin, View):
+class _PermissionScopedWriteMixin:
+    """Mark preview writers and render the refusals their policy writes raise in one place."""
+
+    def dispatch(self, request, *args, **kwargs):
+        try:
+            return super().dispatch(request, *args, **kwargs)
+        except ObjectPermissionDenied as exc:
+            # The permission names an object the caller may not be allowed to know exists.
+            logger.warning("%s: write refused outside the caller's object scope: %s", type(self).__name__, exc)
+            return self._refusal(
+                request,
+                "Permission denied: this action is outside your NetBox object permissions.",
+                403,
+            )
+        except ImportProfile.DoesNotExist:
+            # Every policy write locks its profile, which can be deleted after the view looked it up.
+            return self._refusal(request, "The import profile is no longer available.", 404)
+
+    def _refusal(self, request, error, status):
+        """Render one refused write the way this caller asked for its answer."""
+        if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
+            return JsonResponse({"ok": False, "error": error}, status=status)
+        messages.error(request, error)
+        return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
+
+
+class ImportRunView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Step 3: queue the accepted Import Plan."""
 
     permission_required = "netbox_data_import.change_importprofile"
@@ -1720,32 +1746,6 @@ class ColumnTransformRuleDeleteView(_ProfileChildDeleteView):
 # endpoints that return JSON or an immediate redirect.  No NetBox generic base
 # class exists for this pattern; PermissionRequiredMixin + View is intentional.
 # ---------------------------------------------------------------------------
-
-
-class _PermissionScopedWriteMixin:
-    """Mark preview writers and render the refusals their policy writes raise in one place."""
-
-    def dispatch(self, request, *args, **kwargs):
-        try:
-            return super().dispatch(request, *args, **kwargs)
-        except ObjectPermissionDenied as exc:
-            # The permission names an object the caller may not be allowed to know exists.
-            logger.warning("%s: write refused outside the caller's object scope: %s", type(self).__name__, exc)
-            return self._refusal(
-                request,
-                "Permission denied: this action is outside your NetBox object permissions.",
-                403,
-            )
-        except ImportProfile.DoesNotExist:
-            # Every policy write locks its profile, which can be deleted after the view looked it up.
-            return self._refusal(request, "The import profile is no longer available.", 404)
-
-    def _refusal(self, request, error, status):
-        """Render one refused write the way this caller asked for its answer."""
-        if getattr(self, "permission_denied_response_format", "redirect") == "json" or _wants_json(request):
-            return JsonResponse({"ok": False, "error": error}, status=status)
-        messages.error(request, error)
-        return redirect(_safe_next_url(request, "plugins:netbox_data_import:import_preview"))
 
 
 class IgnoreDeviceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
@@ -2219,7 +2219,7 @@ class IgnoreFieldDifferenceView(_PermissionScopedWriteMixin, PermissionRequiredM
         return redirect(next_url)
 
 
-class UnignoreFieldDifferenceView(PermissionRequiredMixin, View):
+class UnignoreFieldDifferenceView(_PermissionScopedWriteMixin, PermissionRequiredMixin, View):
     """Remove one exact current field-difference review for a matched Device."""
 
     permission_required = "netbox_data_import.delete_ignoredfielddifference"
@@ -3067,6 +3067,10 @@ class IgnorePositionView(PermissionRequiredMixin, View):
         except ObjectPermissionDenied:
             messages.error(request, "Permission denied: cannot create or change this saved rack position.")
             return _name_resolution_response(request, next_url)
+        except ImportProfile.DoesNotExist:
+            # The saver takes the profile lock itself, so it still reports a profile deleted since the gate.
+            messages.error(request, "The import profile is no longer available.")
+            return _name_resolution_response(request, next_url)
         except ValidationError as exc:
             messages.error(request, "; ".join(exc.messages))
             return _name_resolution_response(request, next_url)
@@ -3077,7 +3081,7 @@ class IgnorePositionView(PermissionRequiredMixin, View):
         return _name_resolution_response(request, next_url)
 
 
-class SaveResolutionView(_AjaxPermissionView):
+class SaveResolutionView(_PermissionScopedWriteMixin, _AjaxPermissionView):
     """Save a manual field resolution for rerere replay."""
 
     permission_required = "netbox_data_import.change_importprofile"
@@ -3840,7 +3844,7 @@ class TraceWorkspaceRereadView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         return redirect(next_url)
 
 
-class TraceSyncView(_TraceWorkspaceMixin, PermissionRequiredMixin, View):
+class TraceSyncView(_PermissionScopedWriteMixin, _TraceWorkspaceMixin, PermissionRequiredMixin, View):
     """Synchronize one Source Trace together with the units its changes depend on."""
 
     permission_required = "netbox_data_import.change_importprofile"
