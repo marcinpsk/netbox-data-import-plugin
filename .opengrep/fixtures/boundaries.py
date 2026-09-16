@@ -69,12 +69,12 @@ def same_name_other_scope_is_fine():
 
 
 def missed_getattr():
-    # ruleid: nbdi-tests-use-public-coordinator-direct
+    # ruleid: nbdi-tests-use-public-coordinator
     return getattr(ImportEngine, "_private_helper")
 
 
 def public_getattr_is_fine():
-    # ok: nbdi-tests-use-public-coordinator-direct
+    # ok: nbdi-tests-use-public-coordinator
     return getattr(ImportEngine, "plan")
 
 
@@ -89,7 +89,7 @@ def missed_module_alias_class_private():
 
 
 def missed_module_alias_getattr():
-    # ruleid: nbdi-tests-use-public-coordinator-direct
+    # ruleid: nbdi-tests-use-public-coordinator
     return getattr(ie.ImportEngine, "_private_helper")
 
 
@@ -106,3 +106,31 @@ def module_alias_public_is_fine():
 def class_as_import_public_is_fine():
     # ok: nbdi-tests-use-public-coordinator
     return Coordinator.plan(None, None, None, None)
+
+
+def missed_bound_instance_getattr():
+    engine = ImportEngine()
+    # ruleid: nbdi-tests-use-public-coordinator
+    return getattr(engine, "_private_helper")
+
+
+def missed_bound_class_getattr():
+    Engine = ImportEngine
+    # ruleid: nbdi-tests-use-public-coordinator
+    return getattr(Engine, "_private_helper")
+
+
+def bound_public_getattr_is_fine():
+    engine = ImportEngine()
+    # ok: nbdi-tests-use-public-coordinator
+    return getattr(engine, "plan")
+
+
+def missed_module_getattr():
+    # ruleid: nbdi-tests-use-public-coordinator-direct
+    return getattr(ie, "_private_helper")
+
+
+def module_public_getattr_is_fine():
+    # ok: nbdi-tests-use-public-coordinator-direct
+    return getattr(ie, "plan")

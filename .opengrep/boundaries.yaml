@@ -13,7 +13,9 @@ rules:
       - pattern: netbox_data_import.import_engine.ImportEngine(...)
     pattern-sinks:
       - patterns:
-          - pattern: $X.$PRIV
+          - pattern-either:
+              - pattern: $X.$PRIV
+              - pattern: getattr($X, "$PRIV", ...)
           - metavariable-regex:
               metavariable: $PRIV
               regex: '^_'
@@ -22,14 +24,13 @@ rules:
     languages: [python]
     severity: ERROR
     message: >-
-      Use the public ImportEngine coordinator interface. This reads a private attribute directly
-      off the coordinator, a fresh instance, or the import_engine module.
+      Use the public ImportEngine coordinator interface. This reads a private attribute off a
+      fresh coordinator instance or off the import_engine module itself.
     patterns:
       - pattern-either:
           - pattern: netbox_data_import.import_engine.ImportEngine().$PRIV
           - pattern: netbox_data_import.import_engine.$PRIV
-          - pattern: getattr(netbox_data_import.import_engine.ImportEngine, "$PRIV", ...)
-          - pattern: getattr(netbox_data_import.import_engine.ImportEngine(...), "$PRIV", ...)
+          - pattern: getattr(netbox_data_import.import_engine, "$PRIV", ...)
       - metavariable-regex:
           metavariable: $PRIV
           regex: '^_'
