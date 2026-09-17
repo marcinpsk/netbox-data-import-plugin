@@ -364,6 +364,15 @@
             <option value="skip">Skip</option>
             <option value="ignore">Ignore</option>
           </select>
+          {% if rack_filter_options %}
+          <select id="previewRackFilter" class="form-select form-select-sm" style="width:240px;" multiple
+                  title="Filter by rack" aria-label="Filter by rack"
+                  data-no-rack-value="{{ no_rack_filter_value }}">
+            {% for rack in rack_filter_options %}
+            <option value="{{ rack.value }}">{{ rack.label }}</option>
+            {% endfor %}
+          </select>
+          {% endif %}
         </div>
       </div>
       <div class="table-responsive">
@@ -383,7 +392,8 @@
             {% for row in preview_rows %}
             {# Row numbers repeat across object types, so the id comes from the render order. #}
             <tr id="prow-{{ forloop.counter }}" data-action="{{ row.action }}"
-                data-object-type="{{ row.object_type }}" data-row-number="{{ row.row_number }}" class="
+                data-object-type="{{ row.object_type }}" data-row-number="{{ row.row_number }}"
+                data-rack-name="{{ row.rack_name|default:'' }}" class="
               {% if row.action == 'create' and row.object_type == 'device' %}table-success
               {% elif row.action == 'create' and row.object_type == 'rack' %}table-success
               {% elif row.action == 'create' %}table-warning

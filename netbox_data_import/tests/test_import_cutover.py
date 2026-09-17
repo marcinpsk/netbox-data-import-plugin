@@ -154,6 +154,42 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         # The name NetBox already holds is reported, not dropped, so the write is not read as total.
         self.assertEqual(entries["device_name"]["state"], "unchanged")
 
+    def test_the_preview_offers_the_racks_its_rows_name(self):
+        """The flat view filters by rack, so the page carries the racks and each row's own rack."""
+        self._upload()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["rack_filter_options"], [{"value": "rack-a", "label": "rack-a"}])
+        self.assertIn(b'data-rack-name="rack-a"', response.content)
+        self.assertIn(b'id="previewRackFilter"', response.content)
+
+    def test_a_rack_row_carries_its_own_name_as_its_rack(self):
+        """A Rack row filters with its own rack, so selecting that rack cannot hide it."""
+        upload = SimpleUploadedFile(
+            "named-rack.xlsx",
+            workbook_bytes(
+                ["Source ID", "Class", "Name", "Rack", "Make", "Model"],
+                # The rack names itself through the Name column and leaves Rack empty.
+                [["R-9", "Cabinet", "RACK-X", "", "", ""]],
+            ),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+        )
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        rack_row = next(row for row in response.context["preview_rows"] if row.object_type == "rack")
+        self.assertEqual(rack_row.name, "RACK-X")
+        self.assertEqual(rack_row.rack_name, "RACK-X")
+        self.assertEqual(response.context["rack_filter_options"], [{"value": "RACK-X", "label": "RACK-X"}])
+        self.assertIn(b'data-rack-name="RACK-X"', response.content)
+
     def _sync_single_row(self, data=None):
         """Post an inline execution with the active preview revision when one exists."""
         payload = dict(data or {})

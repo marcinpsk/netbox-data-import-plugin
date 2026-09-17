@@ -64,13 +64,30 @@
     ModalClass.getOrCreateInstance(target).show(trigger);
   });
 
+  /* The chosen racks, read from the options rather than the control, so an enhanced select
+   * and a plain one answer alike. */
+  function selectedRacks() {
+    var rackSelect = document.getElementById('previewRackFilter');
+    var chosen = [];
+    if (!rackSelect) return chosen;
+    // Tom Select drops an option whose value is empty, so the page names that option instead.
+    var noRackValue = rackSelect.dataset.noRackValue;
+    for (var index = 0; index < rackSelect.options.length; index++) {
+      if (!rackSelect.options[index].selected) continue;
+      var value = rackSelect.options[index].value;
+      chosen.push(value === noRackValue ? '' : value);
+    }
+    return chosen;
+  }
+
   function applyFilters() {
     var filterInput = document.getElementById('previewRowFilter');
     var actionSelect = document.getElementById('previewActionFilter');
     var text = (filterInput ? filterInput.value : '').toLowerCase().trim();
     var action = (actionSelect ? actionSelect.value : '').toLowerCase();
+    var racks = selectedRacks();
     var clearButton = document.getElementById('previewRowFilterClear');
-    if (clearButton) clearButton.style.display = (text || action) ? '' : 'none';
+    if (clearButton) clearButton.style.display = (text || action || racks.length) ? '' : 'none';
 
     // Source rows only: field-difference rows hold sub-tables with rows of their own, and the
     // empty-state rows belong to the table rather than to the file.
@@ -80,7 +97,9 @@
     rows.forEach(function (row) {
       var textMatch = !text || row.textContent.toLowerCase().includes(text);
       var rowAction = (row.dataset.action || '').toLowerCase();
-      var visible = textMatch && (!action || rowAction === action);
+      // An empty option value is the rows that name no rack, as the rack view groups them.
+      var rackMatch = !racks.length || racks.indexOf(row.dataset.rackName || '') !== -1;
+      var visible = textMatch && (!action || rowAction === action) && rackMatch;
       row.style.display = visible ? '' : 'none';
       if (visible) shown++;
       else if (rowAction === 'error') hiddenErrors++;
@@ -101,14 +120,22 @@
     }
   }
 
-  function setFilters(text, action) {
+  function setFilters(text, action, racks) {
     var filterInput = document.getElementById('previewRowFilter');
     var actionSelect = document.getElementById('previewActionFilter');
+    var rackSelect = document.getElementById('previewRackFilter');
+    var chosen = racks || [];
     if (filterInput) filterInput.value = text;
     if (actionSelect) {
       actionSelect.value = action;
       // NetBox replaces the select with a Tom Select control that reads its own value.
       if (actionSelect.tomselect) actionSelect.tomselect.setValue(action, true);
+    }
+    if (rackSelect) {
+      for (var index = 0; index < rackSelect.options.length; index++) {
+        rackSelect.options[index].selected = chosen.indexOf(rackSelect.options[index].value) !== -1;
+      }
+      if (rackSelect.tomselect) rackSelect.tomselect.setValue(chosen, true);
     }
     applyFilters();
   }
@@ -118,7 +145,7 @@
   });
 
   document.addEventListener('change', function (event) {
-    if (event.target.id === 'previewActionFilter') applyFilters();
+    if (event.target.id === 'previewActionFilter' || event.target.id === 'previewRackFilter') applyFilters();
   });
 
   document.addEventListener('keydown', function (event) {
