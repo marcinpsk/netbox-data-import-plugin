@@ -117,7 +117,7 @@ from .import_engine import (
     operator_failure_message,
 )
 from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
-from .field_keys import SELECT_TERMINATION_TASK
+from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, fingerprint_of
 from .review_workspace import (
@@ -3669,6 +3669,17 @@ def _workspace_device_questions(workspace) -> dict[str, dict]:
     return questions
 
 
+def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return findings once per message in their first-seen order."""
+    messages: set[str] = set()
+    unique: list[dict[str, str]] = []
+    for finding in findings:
+        if finding["message"] not in messages:
+            messages.add(finding["message"])
+            unique.append(finding)
+    return unique
+
+
 def _object_type_label(obj) -> str:
     """Return the ``app_label.model_name`` key one termination is offered under."""
     return f"{obj._meta.app_label}.{obj._meta.model_name}"
@@ -3789,6 +3800,9 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         if selected is not None:
             selected = replace(
                 selected,
+                findings=(
+                    _deduplicate_findings(selected.findings) if selected.disposition != "invalid" else selected.findings
+                ),
                 terminations=[
                     {
                         **field,
@@ -3807,7 +3821,26 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             selected.devices if selected else [],
         )
         attention_devices = [device for device in selected_devices if device.get("selectable")]
-        settled_devices = [device for device in selected_devices if not device.get("selectable")]
+        manual_devices = [device for device in selected_devices if device.get("state_style") == "manual"]
+        settled_devices = [
+            device
+            for device in selected_devices
+            if not device.get("selectable") and device.get("state_style") != "manual"
+        ]
+        resolved_devices = {
+            source_device_key(device["key"]): device["selected"]
+            for device in selected_devices
+            if device.get("selected")
+        }
+        attention = [
+            {
+                **termination,
+                "resolved_device": resolved_devices.get(
+                    parse_termination_field_key(termination["field_key"])["device"], ""
+                ),
+            }
+            for termination in attention
+        ]
         from .models import ProposalStatus, ResolutionProposal
 
         if proposal_display.view_reason:
@@ -3828,6 +3861,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "selected_trace": selected,
                 "proposal_fields": proposal_fields,
                 "attention_devices": attention_devices,
+                "manual_devices": manual_devices,
                 "settled_devices": settled_devices,
                 "attention_terminations": attention,
                 "settled_terminations": settled,

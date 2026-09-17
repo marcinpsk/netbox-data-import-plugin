@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Profile-owned Device resolution for Source Traces."""
 
+import re
 from io import BytesIO
 
 from dcim.models import Device, Interface, Location, Rack
@@ -365,6 +366,18 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertContains(response, "Source Alias")
         self.assertContains(response, reverse("plugins:netbox_data_import:trace_device_candidates"))
 
+    def test_attention_questions_render_as_bordered_cards(self):
+        response = self.start_alias_preview(port_name="absent-port")
+
+        page = response.content.decode()
+        devices = re.search(r"<section\b[^>]*data-trace-devices.*?</section>", page, re.DOTALL)
+        terminations = re.search(r"<section\b[^>]*data-trace-terminations.*?</section>", page, re.DOTALL)
+        self.assertIsNotNone(devices)
+        self.assertIsNotNone(terminations)
+        card_classes = r'<li class="[^"]*\bcard\b[^"]*\bndi-proposal-card\b[^"]*"'
+        self.assertRegex(devices.group(), card_classes)
+        self.assertRegex(terminations.group(), card_classes)
+
     def test_saving_a_device_choice_replans_and_persists_the_mapping(self):
         response = self.start_alias_preview()
         revision = response.context["preview_revision"]
@@ -393,6 +406,107 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             self.device_a.pk,
         )
         self.assertContains(saved, "manually resolved")
+
+    def test_a_saved_device_choice_survives_a_later_load_and_re_read(self):
+        def assert_saved_choice_is_rendered(result):
+            devices = re.search(r"<section\b[^>]*data-trace-devices.*?</section>", result.content.decode(), re.DOTALL)
+            self.assertIsNotNone(devices)
+            manual = re.search(r"<div\b[^>]*data-trace-manual-devices.*?</table>", devices.group(), re.DOTALL)
+            self.assertIsNotNone(manual)
+            self.assertIn("Source Alias", manual.group())
+            self.assertIn(str(self.device_a), manual.group())
+            self.assertIn("manually resolved", manual.group())
+
+        response = self.start_alias_preview()
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                "preview_revision": response.context["preview_revision"],
+            },
+        )
+
+        later = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        selected = next(device for device in later.context["selected_trace"].devices if device["key"] == "source alias")
+        self.assertEqual(selected["state"], "manually resolved")
+        assert_saved_choice_is_rendered(later)
+
+        reread = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": later.context["preview_revision"]},
+            follow=True,
+        )
+        selected = next(
+            device for device in reread.context["selected_trace"].devices if device["key"] == "source alias"
+        )
+        self.assertEqual(selected["state"], "manually resolved")
+        assert_saved_choice_is_rendered(reread)
+
+    def test_the_proposed_topology_uses_an_unnamed_devices_display(self):
+        unnamed = Device.objects.create(
+            name=None,
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        Interface.objects.create(device=unnamed, name="eth7", type="1000base-t")
+        TraceDeviceResolution.objects.create(
+            profile=self.profile,
+            source_device_key="source alias",
+            selected_device_id=unnamed.pk,
+            selected_display_name=str(unnamed),
+        )
+
+        response = self.start_alias_preview(port_name="eth7")
+
+        page = response.content.decode()
+        start = page.index("Proposed physical topology")
+        proposed = page[start : page.index("</ol>", start)]
+        self.assertIn(f"{unnamed} eth7", proposed)
+        self.assertNotIn("None eth7", proposed)
+
+    def test_a_saved_device_choice_stays_visible_outside_the_collapsed_disclosure(self):
+        response = self.start_alias_preview()
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                "preview_revision": response.context["preview_revision"],
+            },
+        )
+
+        later = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        devices = re.search(r"<section\b[^>]*data-trace-devices.*?</section>", later.content.decode(), re.DOTALL)
+        self.assertIsNotNone(devices)
+        visible = devices.group().split("<details data-trace-resolved-devices", 1)[0]
+        self.assertIn("Source Alias", visible)
+        self.assertIn(str(self.device_a), visible)
+        self.assertIn("manually resolved", visible)
+
+    def test_an_attention_termination_names_its_resolved_device(self):
+        response = self.start_alias_preview(port_name="absent-port")
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                "preview_revision": response.context["preview_revision"],
+            },
+        )
+
+        later = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        terminations = re.search(
+            r"<section\b[^>]*data-trace-terminations.*?</section>", later.content.decode(), re.DOTALL
+        )
+        self.assertIsNotNone(terminations)
+        attention = terminations.group().split("<details data-trace-settled", 1)[0]
+        self.assertIn("Source Alias absent-port", attention)
+        self.assertIn(str(self.device_a), attention)
 
     def test_an_unoffered_device_choice_is_rejected_as_request_input(self):
         response = self.start_alias_preview()
