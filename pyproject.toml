@@ -68,6 +68,8 @@ addopts = "--cov=netbox_data_import --cov-report=term-missing --reuse-db -n auto
 
 [tool.ruff]
 line-length = 120
+# The OpenGrep fixtures are the violations the rules must catch, so they are not source to lint.
+extend-exclude = [".opengrep/fixtures"]
 
 [tool.ruff.lint]
 # Rules that cost nothing today: the tree has no violation of any of them, so each one is a guard
@@ -174,7 +176,9 @@ source = ["netbox_data_import"]
 omit = ["*/migrations/*", "*/tests/*"]
 
 [tool.coverage.report]
-fail_under = 98
+# Without `precision`, coverage.py compares the rounded total, so `fail_under = 98` enforced 97.5%.
+precision = 2
+fail_under = 97.5
 show_missing = true
 
 [tool.semantic_release]

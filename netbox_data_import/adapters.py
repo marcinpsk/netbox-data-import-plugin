@@ -13,13 +13,14 @@ the NetBox boundary.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .catalog import OutputKind, has_implemented_module
+from .values import identity_text
 
 if TYPE_CHECKING:
-    from .trace_workbook import SourceTrace
+    from .source_trace import SourceTrace
 
 
 class UnknownSourceAdapter(Exception):
@@ -39,6 +40,16 @@ class SourceDiagnostic:
     row_number: int | None = None
 
 
+def _foreign_row_number(row) -> int | None:
+    """Return the source row a foreign row states, so its diagnostic can name a location."""
+    provenance = getattr(row, "provenance", ())
+    if provenance:
+        return provenance[0].row_start
+    if isinstance(row, dict):
+        return row.get("_row_number")
+    return None
+
+
 @dataclass(frozen=True)
 class SourceBatch:
     """The typed source items and source diagnostics from one file (section 1)."""
@@ -47,6 +58,46 @@ class SourceBatch:
     rows: tuple[dict | SourceTrace, ...] = ()
     diagnostics: tuple[SourceDiagnostic, ...] = ()
     unused_columns: dict[str, dict] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Exclude a row the output kinds cannot carry, and mark a Trace with empty Device references."""
+        from .source_trace import SourceTrace
+
+        trace_batch = OutputKind.SOURCE_TRACE in self.output_kinds
+        expected = SourceTrace if trace_batch else dict
+        carries = "Source Traces" if trace_batch else "source rows"
+        rows = []
+        diagnostics = list(self.diagnostics)
+        for row in self.rows:
+            if not isinstance(row, expected):
+                # Excluded here, because every reader below reads the row the output kinds declare.
+                diagnostics.append(
+                    SourceDiagnostic(
+                        code="source.row_type_unexpected",
+                        message=f"This batch carries {carries} only; got {type(row).__name__}.",
+                        row_number=_foreign_row_number(row),
+                    )
+                )
+                continue
+            if not trace_batch:
+                rows.append(row)
+                continue
+            summary = row.endpoint_summary
+            references = [summary.from_termination, summary.to_termination, *row.corroboration]
+            for segment in row.segments:
+                references.extend((segment.left, segment.right))
+            if all(identity_text(reference.device) for reference in references):
+                rows.append(row)
+                continue
+            diagnostic = SourceDiagnostic(
+                code="trace.device_required",
+                message="A Source Trace Termination Reference must name a Device.",
+                row_number=row.provenance[0].row_start,
+            )
+            diagnostics.append(diagnostic)
+            rows.append(replace(row, errors=(*row.errors, diagnostic)))
+        object.__setattr__(self, "rows", tuple(rows))
+        object.__setattr__(self, "diagnostics", tuple(diagnostics))
 
 
 class SourceAdapter:

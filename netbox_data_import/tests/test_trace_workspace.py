@@ -11,6 +11,9 @@ from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
+from netbox_data_import import adapters as adapter_registry
+from netbox_data_import.adapters import TraceWorkbookAdapter
+from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import termination_field_key
 from netbox_data_import.models import ImportProfile, TerminationResolution
 from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
@@ -29,10 +32,35 @@ from netbox_data_import.tests.helpers import (
     cables_on,
     competing_write_during,
     trace_endpoint_line,
+    trace_segment,
     trace_termination,
     trace_workbook_bytes,
 )
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
+from netbox_data_import.views import _review_workspace_url
+
+
+class _MixedOutputTestAdapter(TraceWorkbookAdapter):
+    """A registered test adapter whose complete output needs the generic workspace."""
+
+    key = "mixed_output_test"
+    output_kinds = frozenset({OutputKind.SOURCE_TRACE, OutputKind.DEVICE_SOURCE_ROW})
+
+
+class ReviewWorkspaceRouteTest(TestCase):
+    def test_a_mixed_output_profile_keeps_the_generic_workspace(self):
+        adapter_registry._ADAPTERS_BY_KEY[_MixedOutputTestAdapter.key] = _MixedOutputTestAdapter
+        self.addCleanup(adapter_registry._ADAPTERS_BY_KEY.pop, _MixedOutputTestAdapter.key)
+        profile = ImportProfile.objects.create(
+            name="Mixed output workspace",
+            source_adapter=_MixedOutputTestAdapter.key,
+            adapter_config={},
+        )
+
+        self.assertEqual(
+            _review_workspace_url(profile),
+            reverse("plugins:netbox_data_import:import_preview"),
+        )
 
 
 class TraceWorkspaceTest(CableTopologyMixin, TestCase):
@@ -221,19 +249,37 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertEqual(setup.status_code, 200)
         return self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
 
-    def test_the_preview_offers_the_workspace_for_a_trace_profile(self):
-        """The workspace has to be reachable, and only from a preview that planned traces."""
+    def test_trace_setup_opens_the_trace_workspace_directly(self):
+        """A trace-only profile starts on its review surface instead of the flat preview."""
         self.client.force_login(self.actor)
         upload = BytesIO(trace_workbook_bytes(path_blocks=(patched_path(),)))
         upload.name = "traces.xlsx"
         response = self.client.post(
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
-            follow=True,
         )
 
-        self.assertTrue(response.context["trace_workspace_available"])
-        self.assertContains(response, reverse("plugins:netbox_data_import:trace_workspace"))
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:trace_workspace"),
+            fetch_redirect_response=False,
+        )
+
+    def test_an_empty_trace_workbook_still_opens_the_trace_workspace(self):
+        self.client.force_login(self.actor)
+        upload = BytesIO(trace_workbook_bytes())
+        upload.name = "empty-traces.xlsx"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("plugins:netbox_data_import:trace_workspace"),
+            fetch_redirect_response=False,
+        )
 
     def test_the_page_lists_every_trace_with_its_panels(self):
         """One page per preview: the strip, the list, and the panels of the selected trace."""
@@ -303,6 +349,34 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertRegex(response.content.decode(), r'<button\b[^>]*data-trace-action="sync"[^>]*\sdisabled(?=[\s>])')
         self.assertContains(response, trace.actions[0].reason)
 
+    def test_an_invalid_pass_through_explains_why_resolution_did_not_run(self):
+        """An early source failure must not look like successful Device and port resolution."""
+        source = trace_termination("DEV-A", "", "eth0", "Port")
+        destination = trace_termination("DEV-B", "", "eth1", "NIC")
+        interface_entry = trace_termination("PANEL-1", "", "F1", "Port")
+        panel_exit = trace_termination("PANEL-1", "", "R1", "Punch-Down")
+        invalid = (
+            trace_endpoint_line(source),
+            trace_endpoint_line(destination),
+            (
+                trace_segment(source, "Patch", interface_entry),
+                trace_segment(panel_exit, "Patch", destination),
+            ),
+        )
+
+        response = self.open_workspace(invalid)
+
+        self.assertContains(response, "Why this trace is invalid")
+        self.assertContains(
+            response,
+            "The path continues through PANEL-1 from F1 (Port) to R1 (Punch-Down). "
+            "An interface PortClass can terminate a trace, but it cannot join two cable segments.",
+        )
+        self.assertContains(response, "Planning stopped before it resolved source Devices.")
+        self.assertContains(response, "Planning stopped before it resolved source terminations.")
+        self.assertNotContains(response, "Every source Device on this trace resolves in NetBox.")
+        self.assertNotContains(response, "Every termination on this trace resolves to a NetBox port.")
+
     def test_the_re_read_action_is_visible_even_without_drift(self):
         """Every action is always visible, so a quiet workspace still offers its re-read."""
         response = self.open_workspace(patched_path())
@@ -323,7 +397,7 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         trace = response.context["traces"][0]
         blocked = next(item for item in trace.terminations if item["label"] == "NO-SUCH-DEVICE eth0")
         self.assertFalse(blocked["selectable"])
-        self.assertIn("matching Devices", blocked["reason"])
+        self.assertIn("Resolve the source Device", blocked["reason"])
         self.assertContains(response, blocked["reason"])
 
     def test_the_termination_search_carries_an_accessible_name(self):
@@ -1258,16 +1332,21 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
         self.assertEqual(payload["shown"], 3)
         self.assertEqual(payload["total"], 7)
 
-    def test_the_picker_clamps_a_limit_below_one(self):
-        """The limit is a QuerySet slice stop, so a value under one has to be clamped, not passed on."""
+    def test_the_picker_rejects_invalid_limits(self):
+        """A malformed or out-of-range limit is an invalid request."""
         field_key = self.open_blocked_workspace()
         Interface.objects.create(device=self.device_a, name="eth5", type="1000base-t")
 
-        payload = self.candidates(field_key, limit=-1).json()
+        for limit in ("not-an-integer", "-1", "0", str(ELIGIBLE_TERMINATION_LIMIT + 1)):
+            with self.subTest(limit=limit):
+                response = self.candidates(field_key, limit=limit)
 
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["shown"], 1)
-        self.assertEqual(payload["total"], 2)
+                self.assertEqual(response.status_code, 400)
+                # A bare 400 would still pass if a later regression refused the request elsewhere.
+                self.assertEqual(
+                    response.json()["error"],
+                    f"Candidate limit must be an integer from 1 to {ELIGIBLE_TERMINATION_LIMIT}.",
+                )
 
     def test_the_picker_searches_by_name(self):
         """A searchable picker narrows the same eligible set, and never widens it."""
@@ -1417,6 +1496,59 @@ class TraceTerminationPickerTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("eligible", response.json()["error"])
+        self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
+
+    def test_a_preview_lock_rolls_back_the_termination_resolution(self):
+        """The saved decision and the replacement preview form one database outcome."""
+        import uuid
+
+        from core.choices import JobStatusChoices
+        from core.models import Job
+
+        from netbox_data_import.jobs import ImportJobRunner
+
+        field_key = self.open_blocked_workspace()
+        import_context = self.client.session["import_context"]
+        retained = []
+        decision_writes = []
+
+        def retain_preview_after_initial_guard(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if "netbox_data_import_terminationresolution" in sql.lower() and sql.lstrip().upper().startswith(
+                ("INSERT", "UPDATE")
+            ):
+                decision_writes.append(sql)
+            if not retained and 'FROM "core_job"' in sql:
+                retained.append(sql)
+                Job.objects.create(
+                    name=ImportJobRunner.name,
+                    user=self.actor,
+                    job_id=uuid.uuid4(),
+                    status=JobStatusChoices.STATUS_PENDING,
+                    data={
+                        "job_type": ImportJobRunner.job_type,
+                        "keeps_preview": True,
+                        "profile_id": self.profile.pk,
+                        "source_document_id": import_context["source_document_id"],
+                    },
+                )
+            return result
+
+        with connection.execute_wrapper(retain_preview_after_initial_guard):
+            response = self.client.post(
+                reverse("plugins:netbox_data_import:trace_resolve_termination"),
+                {
+                    "field_key": field_key,
+                    "object_type": "dcim.interface",
+                    "object_id": self.eth0.pk,
+                    "preview_revision": self.client.session[PREVIEW_REVISION_SESSION_KEY],
+                },
+                headers={"accept": "application/json"},
+            )
+
+        self.assertTrue(retained)
+        self.assertTrue(decision_writes)
+        self.assertEqual(response.status_code, 409)
         self.assertFalse(TerminationResolution.objects.filter(profile=self.profile).exists())
 
 
@@ -1594,8 +1726,9 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
     def test_a_replanned_trace_is_executed_again_rather_than_reported_done(self):
         """One trace identity spans two workbooks, so the execution key cannot be the selection alone."""
         from core.models import Job
+        from dcim.models import Cable
 
-        from netbox_data_import.models import ExecutionOutcome, ImportExecution
+        from netbox_data_import.models import CableImportSource, ExecutionOutcome, ImportExecution
 
         self.client.force_login(self.actor)
         keys = []
@@ -1647,7 +1780,21 @@ class TraceSyncExecutionTest(IsolatedRQQueueTestMixin, CableTopologyMixin, Trans
 
         # The patched path replaces the direct Cable with its three physical segments.
         self.assertFalse(cables_on(self.eth0, self.eth1).exists())
-        self.assertTrue(cables_on(self.panel_1_rear).exists())
+        self.assertTrue(cables_on(self.eth0, self.panel_1_fronts[0]).exists())
+        self.assertTrue(cables_on(self.panel_1_rear, self.panel_2_rear).exists())
+        self.assertTrue(cables_on(self.panel_2_fronts[0], self.eth1).exists())
+        self.assertEqual(Cable.objects.count(), 3)
+        self.assertEqual(CableImportSource.objects.count(), 3)
+        self.assertEqual(
+            set(CableImportSource.objects.values_list("cable_id", flat=True)),
+            set(Cable.objects.values_list("pk", flat=True)),
+        )
+        self.assertEqual(
+            sorted(CableImportSource.objects.values_list("segment_index", flat=True)),
+            [0, 1, 2],
+        )
+        self.assertEqual({cable.status for cable in Cable.objects.all()}, {"connected"})
+        self.assertEqual({cable.type for cable in Cable.objects.all()}, {"cat6"})
 
 
 class TraceResolveTargetLossTest(CableTopologyMixin, TransactionTestCase):

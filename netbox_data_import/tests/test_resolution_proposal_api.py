@@ -9,7 +9,8 @@ from rest_framework import serializers, viewsets
 from netbox_data_import.api.serializers import ResolutionProposalSerializer
 from netbox_data_import.api.views import ResolutionProposalViewSet, _ProfileScopedQuerySetMixin
 from netbox_data_import.models import ImportProfile, ProposalFailureReason, ProposalStatus, ResolutionProposal
-from netbox_data_import.proposal_jobs import run_proposal
+from netbox_data_import.proposal_jobs import PROMPT_VERSION, run_proposal
+from netbox_data_import.proposal_response import RESPONSE_SCHEMA_VERSION
 from netbox_data_import.resolution_proposals import cancel_proposal
 from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.test_inference_adapter import completion, serving
@@ -55,8 +56,8 @@ class ResolutionProposalAPITest(WorkerFixture, ProposalFixture):
                     "source_evidence": {"port": "Eth1/1"},
                     "resolved_device_type": self.device_type_ct.pk,
                     "resolved_device_id": self.device.pk,
-                    "prompt_version": 1,
-                    "response_schema_version": 1,
+                    "prompt_version": PROMPT_VERSION,
+                    "response_schema_version": RESPONSE_SCHEMA_VERSION,
                     "candidate_snapshot": self.proposal.candidate_snapshot,
                     "requested_by": self.operator.pk,
                     "created": self.proposal.created.isoformat().replace("+00:00", "Z"),

@@ -473,8 +473,9 @@ def scan_source(src: str, rel: str = "<source>") -> list[Violation]:
 def scan_tree(root: Path = TESTS_ROOT) -> list[Violation]:
     """Scan every test module under *root* (skipping the guard's own files)."""
     out: list[Violation] = []
+    own_files = {root / name for name in _SELF}
     for path in sorted(root.rglob("*.py")):
-        if path.name in _SELF or "__pycache__" in path.parts:
+        if path in own_files or "__pycache__" in path.parts:
             continue
         rel = path.relative_to(root).as_posix()
         out.extend(scan_source(path.read_text(encoding="utf-8"), rel))

@@ -69,6 +69,9 @@ ROW_ACTION_PAYLOADS = {
     "ignore_duplicate_serial": [
         {"source_id": LONG, "row_number": "2"},
     ],
+    "ignore_position": [
+        {"source_id": LONG, "row_number": "2"},
+    ],
     "match_existing_device": [
         {"source_id": LONG, "row_number": "2"},
     ],
@@ -95,6 +98,7 @@ ROW_ACTION_CONTROL_PAYLOADS = {
         "target_field": "serial",
     },
     "ignore_duplicate_serial": {"source_id": "CONTROL-SERIAL", "row_number": "2"},
+    "ignore_position": {"source_id": "CONTROL-POSITION", "row_number": "2"},
     "match_existing_device": {"source_id": "CONTROL-MATCH", "row_number": "2"},
     "sync_single_row": {"row_number": "2"},
     "auto_match_devices": {},
@@ -373,6 +377,20 @@ class QuickActionInputBoundsTest(TransactionTestCase):
                 "duplicate_serial",
                 preview_row,
             )
+        elif url_name == "ignore_position":
+            # The view refuses a row the preview does not report inside a position collision.
+            from dcim.models import Rack
+
+            rack = Rack.objects.create(name=f"bounds-rack-{case_name}", site=self.site, u_height=42)
+            twin = self._device_row(f"{source_id}-TWIN", f"{device_name}-twin")
+            twin["_row_number"] = 3
+            for entry in (row, twin):
+                entry["rack_name"] = rack.name
+                entry["u_position"] = "5"
+                entry["face"] = "Front"
+            result = self._store_active_import([row, twin])
+            refused = next(item for item in result.units if item.object_type == "device" and item.row_number == 3)
+            self.assertIn("rack_position_occupied", refused.extra_data.get("identity_conflicts", ()), refused)
         elif url_name in {"save_resolution", "resolve_duplicate_name"}:
             self._store_active_import([row])
         elif url_name == "match_existing_device":

@@ -652,6 +652,17 @@ def test_scan_tree_skips_the_guard_and_its_test():
     assert "test_mock_discipline.py" not in files
 
 
+def test_scan_tree_exempts_only_the_guard_at_the_tests_root(tmp_path):
+    """A nested module cannot take the guard's exemption by reusing its file name."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "mock_discipline.py").write_text(
+        "from unittest.mock import MagicMock\n\n\ndef test_x():\n    return MagicMock()\n"
+    )
+
+    assert {v.path for v in scan_tree(tmp_path)} == {"nested/mock_discipline.py"}
+
+
 def test_violation_str_format():
     """Violation renders the file:line: message a developer sees."""
     v = Violation("sub/test_x.py", 12, "TestC.test_y", "MagicMock")

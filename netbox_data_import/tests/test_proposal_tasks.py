@@ -164,7 +164,11 @@ class SelectTerminationTaskTest(TestCase):
         self.assertEqual(caught.exception.reason, TOO_MANY_CANDIDATES)
 
     def test_the_resolved_device_is_the_one_the_key_names(self):
-        resolved = self.task.resolved_device(field_key=self.field_key, netbox_reader=self.reader())
+        resolved = self.task.resolved_device(
+            profile=self.profile,
+            field_key=self.field_key,
+            netbox_reader=self.reader(),
+        )
 
         self.assertEqual(resolved, self.device)
 
@@ -173,7 +177,13 @@ class SelectTerminationTaskTest(TestCase):
             device="NO-SUCH-DEVICE", cards="", port="Ethernet 1/1", kind="interface", role=TERMINATION_ROLE
         )
 
-        self.assertIsNone(self.task.resolved_device(field_key=absent, netbox_reader=self.reader()))
+        self.assertIsNone(
+            self.task.resolved_device(
+                profile=self.profile,
+                field_key=absent,
+                netbox_reader=self.reader(),
+            )
+        )
 
     def test_the_mapped_peer_role_is_not_proposed_for(self):
         """Section 7.1 requests proposals for the termination role in this delivery."""

@@ -6,6 +6,10 @@ import { resolve } from "node:path";
 import { Modal } from "bootstrap";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const searchSource = readFileSync(resolve(
+  process.cwd(),
+  "netbox_data_import/static/netbox_data_import/js/trace_picker_search.js",
+), "utf8");
 const controllerSource = readFileSync(resolve(
   process.cwd(),
   "netbox_data_import/static/netbox_data_import/js/trace_termination_picker.js",
@@ -57,6 +61,7 @@ beforeEach(() => {
       </div></div>
     </div>
   `;
+  window.eval(searchSource);
   window.eval(controllerSource);
 });
 
@@ -106,6 +111,27 @@ describe("trace termination picker", () => {
     expect(node("traceTerminationObjectType").value).toBe("");
     expect(node("traceTerminationOfferedSearch").value).toBe("");
     expect(node("traceTerminationSubmit").disabled).toBe(true);
+  });
+
+  it("drops an in-flight search when the operator types again", async () => {
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      await held;
+      return {
+        ok: true,
+        json: async () => ({ ok: true, candidates: [{ id: 9, display: "stale-port" }], shown: 1, total: 1 }),
+      };
+    }));
+
+    node("openPicker").click();
+    const search = node("traceTerminationSearch");
+    search.value = "new search";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(Array.from(node("traceTerminationCandidates").children)).toEqual([]);
   });
 
   it("drops the selection the moment the search changes, before the lookup returns", async () => {

@@ -6,7 +6,7 @@ NetBox baseline: v4.6.6
 ## Conclusion
 
 Store only a **credential reference** in provider configuration. Resolve its current value in
-the background worker immediately before an inference request. Do not put the value in a model,
+the NetBox process that is about to send an inference request. Do not put the value in a model,
 form, serializer, profile export, session, job argument, proposal, result, or log.
 
 Use a small credential-provider seam between inference configuration and the HTTP adapter. The
@@ -96,9 +96,15 @@ Keep the following deployment-owned values outside the database:
 - authentication mode
 
 Use end-to-end TLS and certificate verification for a remote Vault connection. HashiCorp says to
-always use TLS in production. A loopback or private Unix-socket-style trust boundary to a local
-Vault Proxy can be deployment-specific, but the remote Proxy-to-Vault connection still needs TLS.
+always use TLS in production. The remote Proxy-to-Vault connection always needs TLS.
 [Vault production hardening][vault-hardening]
+
+The NetBox-to-Proxy hop carries the resolved inference key, so it needs its own protection. Give
+the Proxy an HTTPS listener with certificate verification, and authenticate each client wherever
+that listener is reachable by anything else. Reject a plain HTTP listener and an unauthenticated
+one. The plugin admits nothing weaker: `inference_settings` refuses a Vault address whose scheme is
+not `https`, a local Proxy included, so a Unix socket is not a deployment option here. See
+[Configuration](../configuration.md#inference-backend-credentials) for the operator instructions.
 
 Do not add a `skip_tls_verify` provider option. A custom CA bundle is the safe solution for a
 private CA.
@@ -143,11 +149,11 @@ a later credential backend without changing proposal or inference logic.
 
 ### Recommended baseline: Vault Proxy
 
-Run a Vault Proxy dedicated to the inference worker, near every process group that executes
-inference jobs. Configure auto-auth for the deployment platform and force the Proxy to use its
-auto-auth token. The worker then calls the Vault API through the Proxy without possessing the
-token. Vault Proxy is the current HashiCorp component for API proxy workflows. The older Vault
-Agent API proxy is deprecated. [Vault Proxy][vault-proxy]
+Run a Vault Proxy dedicated to this plugin, near every NetBox process group that resolves inference
+credentials. Configure auto-auth for the deployment platform and force the Proxy to use its
+auto-auth token. The web and worker processes then call the Vault API through the Proxy without
+possessing the token. Vault Proxy is the current HashiCorp component for API proxy workflows. The
+older Vault Agent API proxy is deprecated. [Vault Proxy][vault-proxy]
 [Vault Agent API proxy deprecation][vault-agent-proxy]
 
 The Proxy must not be shared with another application while auto-auth is forced. A forced
@@ -157,7 +163,8 @@ unavoidable, do not force auto-auth on it: give each client its own token and le
 it through.
 
 Enable the Proxy listener's `require_request_header` option and send `X-Vault-Request: true`.
-HashiCorp documents this as an additional protection against server-side request forgery.
+HashiCorp documents this as an additional protection against server-side request forgery. It is
+not transport security: it neither encrypts the response nor authenticates the caller.
 [Vault Proxy][vault-proxy]
 
 Let Vault Proxy renew the machine token. Do not authenticate to Vault for every inference
@@ -177,7 +184,7 @@ the inference API key.
 
 ## Rotation and caching
 
-- Resolve the latest KV v2 value in the worker at inference-request time.
+- Resolve the latest KV v2 value in the requesting process at inference-request time.
 - Do not cache API-key values in plugin code for the first implementation.
 - Resolve once per outbound inference attempt, not once per row preview.
 - Do not persist the resolved version or value in a Resolution Proposal.
@@ -194,9 +201,14 @@ idempotency policy.
 
 ## Permissions and audit
 
-Give the NetBox worker identity only `read` capability on the exact KV v2 data path or a narrow
-provider path prefix. Do not grant `list`, `create`, `update`, `delete`, metadata administration,
-or access to unrelated secrets. Vault policies deny access by default. [Vault policies][vault-policies]
+Grant only `read` capability on the exact KV v2 data path or a narrow provider path prefix. Which
+identity carries that policy depends on the deployment mode. With a Vault Proxy that forces its
+auto-auth token, Vault sees the Proxy auto-auth identity for every call, and the NetBox processes
+hold no Vault identity of their own, so the policy attaches to the Proxy identity. With direct
+access, or a shared Proxy that does not force auto-auth, each NetBox process group authenticates as
+itself, so the policy attaches to each process identity. In both modes, do not grant `list`,
+`create`, `update`, `delete`, metadata administration, or access to unrelated secrets. Vault
+policies deny access by default. [Vault policies][vault-policies]
 
 The Ask AI action must enforce its own NetBox permission before it queues work. The Vault token
 represents the NetBox service, not the operator. A user must not be able to use the credential
@@ -239,35 +251,35 @@ reports only success or a redacted failure category.
 ## Threat considerations
 
 - **Secret persistence:** The highest local risk is accidental serialization through RQ, native
-  Job data, `ImportJob`, sessions, profile YAML, API serializers, or proposal state. Resolve only
-  in the worker and pass only a provider ID through those boundaries.
+  Job data, `ImportJob`, sessions, profile YAML, API serializers, or proposal state. Proposal jobs
+  resolve credentials in the worker. The explicit connection test resolves one in the web process,
+  reports only a redacted result, and discards it before the response.
 - **Log disclosure:** HTTP client exceptions and debug logging can include headers or response
   bodies. Use a redacting transport boundary and controlled error types.
 - **SSRF and reference abuse:** Keep the Vault address deployment-owned. Validate mount, path,
   and field syntax. Do not offer a general Vault browser or arbitrary URL fetch.
 - **Excess privilege:** Use one read-only policy for the smallest useful provider path. Do not use
   a root or administrator token.
-- **Worker compromise:** A compromised inference worker can use its live service identity to read
-  allowed secrets. Separate the inference queue and process identity later if the deployment
-  needs a smaller blast radius.
+- **Process compromise:** A compromised NetBox process that resolves inference credentials can use
+  its live service identity to read allowed secrets. Separate the inference queue and process
+  identities later if the deployment needs a smaller blast radius.
 - **Stale fallback:** Never use a previously resolved value, a raw file value, or an environment
   API key when Vault fails unless the operator explicitly selects a different credential backend.
 - **TLS interception:** Trust an explicit CA bundle. Do not disable certificate verification.
 
 ## Unresolved operator decisions
 
-1. Can each NetBox worker deployment run a local Vault Proxy, or must the plugin connect directly?
+1. Can each NetBox process group that resolves inference credentials run a local Vault Proxy, or
+   must the plugin connect directly?
 2. Which platform auth method is available to Vault Proxy? If none is available, how will an
    AppRole SecretID be delivered and rotated?
 3. Which Vault namespace, KV v2 mount, path convention, and field name will operators use?
-4. Will the web process also reach Vault for an administrator connection test, or will that test
-   run as a background job on the inference worker?
-5. Does the deployment use Vault Enterprise static-secret caching? This affects request volume,
+4. Does the deployment use Vault Enterprise static-secret caching? This affects request volume,
    not the credential-provider interface.
-6. Which NetBox permission controls provider configuration and the administrator connection test?
-7. Should provider credential references be visible to all users who can view provider
+5. Which NetBox permission controls provider configuration and the administrator connection test?
+6. Should provider credential references be visible to all users who can view provider
    configuration, or only to users who can change it?
-8. What are the required Vault and inference timeouts, retry limits, and proposal failure retention
+7. What are the required Vault and inference timeouts, retry limits, and proposal failure retention
    periods?
 
 [approle-best-practices]: https://developer.hashicorp.com/vault/docs/auth/approle/approle-pattern

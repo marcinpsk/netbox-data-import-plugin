@@ -315,6 +315,32 @@ class ImportProfileEditViewTest(BaseViewTestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
 
+    def test_add_view_renders_the_selected_source_adapter_configuration(self):
+        """Selecting Trace workbook removes unrelated Flat workbook settings before creation."""
+        url = reverse("plugins:netbox_data_import:importprofile_add")
+
+        response = self.client.get(url, {"source_adapter": "trace_workbook"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["form"]["source_adapter"].value(), "trace_workbook")
+        self.assertNotIn("sheet_name", response.context["form"].fields)
+        self.assertContains(response, "CableClass mappings are configured after you create the profile.")
+        self.assertContains(response, "adapter.addEventListener('change'")
+
+    def test_add_profile_post_creates_a_trace_workbook_profile(self):
+        """The add view creates a Trace workbook profile without Flat workbook settings."""
+        url = reverse("plugins:netbox_data_import:importprofile_add")
+
+        response = self.client.post(
+            url,
+            {"name": "Posted Trace Profile", "source_adapter": "trace_workbook", "_create": "1"},
+        )
+
+        self.assertEqual(response.status_code, 302, getattr(response, "context", None))
+        profile = ImportProfile.objects.get(name="Posted Trace Profile")
+        self.assertEqual(profile.source_adapter, "trace_workbook")
+        self.assertEqual(profile.adapter_config, {})
+
     def test_add_profile_post(self):
         """POST to add view creates a profile and redirects."""
         url = reverse("plugins:netbox_data_import:importprofile_add")
@@ -1547,7 +1573,6 @@ manufacturer_mappings:
         """A key the profile block does not define is an error, never ignored."""
         from netbox_data_import.profile_yaml import apply_profile_document
 
-        # `sheet_name` is no longer a stray key: it is one of the pre-1.6 scalars #108 translates.
         with self.assertRaisesMessage(ValueError, "stray_key"):
             apply_profile_document({"profile": {"name": "Stray Key", "stray_key": "Data"}})
 
@@ -1614,6 +1639,24 @@ manufacturer_mappings:
         resp = self.client.post(url, {"yaml_file": bad})
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Failed to parse YAML:")
+
+    def test_post_rejects_a_duplicate_profile_field(self):
+        yaml_file = BytesIO(
+            b"""profile:
+  name: FirstProfileName
+  name: SecondProfileName
+"""
+        )
+        yaml_file.name = "duplicate-profile-field.yaml"
+
+        response = self.client.post(
+            reverse("plugins:netbox_data_import:import_profile_yaml"),
+            {"yaml_file": yaml_file},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "duplicate mapping key")
+        self.assertFalse(ImportProfile.objects.filter(name__in=("FirstProfileName", "SecondProfileName")).exists())
 
     @override_settings(FILE_UPLOAD_HANDLERS=["netbox_data_import.tests.test_views.UnreadableUploadHandler"])
     def test_yaml_upload_unexpected_read_failure_propagates(self):
@@ -3629,6 +3672,21 @@ column_mappings:
         resp = self.client.post(self._url(), {"data": ": {{ invalid yaml", "format": "auto"})
         self.assertIn(resp.status_code, [200, 302])
         self.assertNotEqual(resp.status_code, 500)
+
+    def test_duplicate_policy_row_field_is_reported_without_flat_import_fallback(self):
+        duplicate = """profile:
+  name: DuplicatePolicyField
+column_mappings:
+  - source_column: Name
+    target_field: device_name
+    target_field: rack_name
+"""
+
+        response = self.client.post(self._url(), {"data": duplicate}, follow=True)
+
+        self.assertRedirects(response, self._url())
+        self.assertContains(response, "duplicate mapping key")
+        self.assertFalse(ImportProfile.objects.filter(name="DuplicatePolicyField").exists())
 
     def test_post_non_dict_profile_value_shows_error(self):
         """POST with profile: scalar (not a dict) shows error."""

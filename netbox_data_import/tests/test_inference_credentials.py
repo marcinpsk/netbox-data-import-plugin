@@ -2,17 +2,16 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The credential boundary and its Vault KV v2 implementation (specification 8.5, 8.6).
 
-Every case runs against a real HTTP server on the loopback interface, so the request the plugin
+Every case runs against a real HTTPS server on the loopback interface, so the request the plugin
 actually builds is the one under test: its path, its headers, and its body.
 """
 
 import json
 import pathlib
 import socket
-import threading
 
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -21,12 +20,12 @@ import requests
 from django.test import SimpleTestCase
 
 from netbox_data_import.inference_credentials import (
+    VAULT_RESPONSE_LIMIT,
     CredentialDenied,
     CredentialFailure,
     CredentialReference,
     CredentialUnavailable,
     InvalidCredentialReference,
-    InvalidSecretMaterial,
     VaultKvV2CredentialBackend,
 )
 from netbox_data_import.tests.inference_http import (
@@ -37,6 +36,7 @@ from netbox_data_import.tests.inference_http import (
     serving_after_unavailable_address as _serving_after_unavailable_address,
     serving_rebinding as _serving_rebinding,
     serving_tls as _serving_tls,
+    tls_server_context,
 )
 
 SECRET = "sk-do-not-leak-this-value"
@@ -83,56 +83,64 @@ def serving(status=200, payload=None, handler=RecordingVault):
     Handler.status = status
     Handler.payload = {"data": {"data": {"api_key": SECRET}}} if payload is None else payload
     Handler.seen = []
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield (
-            {
-                "address": f"http://127.0.0.1:{server.server_address[1]}",
-                "auth_method": "proxy",
-                "connect_timeout": 2,
-                "read_timeout": 2,
-            },
-            Handler.seen,
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with TemporaryDirectory() as temporary:
+        ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+        with _serving_tls(Handler, Handler.payload, certificate_path, key_path) as (port, seen, _server_names):
+            yield (
+                {
+                    "address": f"https://localhost:{port}",
+                    "auth_method": "proxy",
+                    "ca_bundle": str(ca_path),
+                    "connect_timeout": 2,
+                    "read_timeout": 2,
+                },
+                seen,
+            )
 
 
 @contextmanager
 def serving_rebinding():
     """Run approved and private Vault stand-ins that share one port."""
     payload = {"data": {"data": {"api_key": SECRET}}}
-    with _serving_rebinding(RecordingVault, payload) as (port, approved_seen, private_seen):
-        yield (
-            {
-                "address": f"http://localhost:{port}",
-                "auth_method": "proxy",
-                "connect_timeout": 2,
-                "read_timeout": 2,
-            },
+    with TemporaryDirectory() as temporary:
+        ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+        context = tls_server_context(certificate_path, key_path)
+        with _serving_rebinding(RecordingVault, payload, tls_context=context) as (
+            port,
             approved_seen,
             private_seen,
-        )
+        ):
+            yield (
+                {
+                    "address": f"https://localhost:{port}",
+                    "auth_method": "proxy",
+                    "ca_bundle": str(ca_path),
+                    "connect_timeout": 2,
+                    "read_timeout": 2,
+                },
+                approved_seen,
+                private_seen,
+            )
 
 
 @contextmanager
 def serving_after_unavailable_address():
     """Keep the first loopback address closed and serve the same port on the second."""
     payload = {"data": {"data": {"api_key": SECRET}}}
-    with _serving_after_unavailable_address(RecordingVault, payload) as (port, seen):
-        yield (
-            {
-                "address": f"http://localhost:{port}",
-                "auth_method": "proxy",
-                "connect_timeout": 2,
-                "read_timeout": 2,
-            },
-            seen,
-        )
+    with TemporaryDirectory() as temporary:
+        ca_path, certificate_path, key_path = issue_server_certificate(pathlib.Path(temporary), "localhost")
+        context = tls_server_context(certificate_path, key_path)
+        with _serving_after_unavailable_address(RecordingVault, payload, tls_context=context) as (port, seen):
+            yield (
+                {
+                    "address": f"https://localhost:{port}",
+                    "auth_method": "proxy",
+                    "ca_bundle": str(ca_path),
+                    "connect_timeout": 2,
+                    "read_timeout": 2,
+                },
+                seen,
+            )
 
 
 @contextmanager
@@ -278,6 +286,22 @@ class VaultReadTest(SimpleTestCase):
 
                 self.assertTrue(owned.closed)
 
+    def test_an_oversized_vault_body_is_refused_instead_of_consumed(self):
+        """An approved endpoint that floods the reader must not be read to EOF."""
+        payload = {"data": {"data": {"api_key": SECRET}}, "padding": "x" * VAULT_RESPONSE_LIMIT}
+        with serving(payload=payload) as (settings, _seen):
+            with self.assertRaises(CredentialUnavailable) as caught:
+                self.resolve(settings)
+
+        self.assertNotIn(SECRET, str(caught.exception))
+
+    def test_an_oversized_refusal_keeps_its_status_classification(self):
+        """A refused read stays a refusal, so it is never retried as a transient failure."""
+        payload = {"errors": ["permission denied"], "padding": "x" * VAULT_RESPONSE_LIMIT}
+        with serving(status=403, payload=payload) as (settings, _seen):
+            with self.assertRaises(CredentialDenied):
+                self.resolve(settings)
+
     def test_the_configured_field_is_returned(self):
         with serving() as (settings, seen):
             self.assertEqual(self.resolve(settings), SECRET)
@@ -291,7 +315,7 @@ class VaultReadTest(SimpleTestCase):
                 self.assertEqual(self.resolve(settings), SECRET)
 
         self.assertEqual(len(approved_seen), 1)
-        self.assertEqual(approved_seen[0]["headers"]["host"], settings["address"].removeprefix("http://"))
+        self.assertEqual(approved_seen[0]["headers"]["host"], settings["address"].removeprefix("https://"))
         self.assertEqual(private_seen, [])
 
     def test_a_connection_failure_tries_the_next_resolved_vault_address(self):
@@ -344,6 +368,12 @@ class VaultReadTest(SimpleTestCase):
 
         self.assertEqual(seen[0]["body"], "")
         self.assertEqual(seen[0]["method"], "GET")
+
+    def test_the_request_supports_the_vault_proxy_request_header_guard(self):
+        with serving() as (settings, seen):
+            self.resolve(settings)
+
+        self.assertEqual(seen[0]["headers"]["x-vault-request"], "true")
 
     def test_the_proxy_auth_method_sends_no_token(self):
         with serving() as (settings, seen):
@@ -418,11 +448,11 @@ class VaultFailureClassificationTest(SimpleTestCase):
             self.failure(status=401, payload={"errors": ["missing client token"]}).category, "credential_denied"
         )
 
-    def test_a_missing_path_is_credential_unavailable(self):
+    def test_a_missing_path_is_an_invalid_credential_reference(self):
         failure = self.failure(status=404, payload={"errors": []})
 
-        self.assertIsInstance(failure, CredentialUnavailable)
-        self.assertEqual(failure.category, "credential_unavailable")
+        self.assertIsInstance(failure, InvalidCredentialReference)
+        self.assertEqual(failure.category, "invalid_credential_reference")
 
     def test_a_server_error_is_credential_unavailable(self):
         self.assertEqual(self.failure(status=500, payload={"errors": ["sealed"]}).category, "credential_unavailable")
@@ -430,11 +460,11 @@ class VaultFailureClassificationTest(SimpleTestCase):
     def test_a_malformed_envelope_is_credential_unavailable(self):
         self.assertEqual(self.failure(payload="not json at all").category, "credential_unavailable")
 
-    def test_an_absent_field_is_invalid_secret_material(self):
+    def test_an_absent_field_is_an_invalid_credential_reference(self):
         failure = self.failure(payload={"data": {"data": {"other": SECRET}}})
 
-        self.assertIsInstance(failure, InvalidSecretMaterial)
-        self.assertEqual(failure.category, "invalid_secret_material")
+        self.assertIsInstance(failure, InvalidCredentialReference)
+        self.assertEqual(failure.category, "invalid_credential_reference")
 
     def test_an_empty_field_is_invalid_secret_material(self):
         self.assertEqual(self.failure(payload={"data": {"data": {"api_key": ""}}}).category, "invalid_secret_material")
@@ -445,20 +475,20 @@ class VaultFailureClassificationTest(SimpleTestCase):
         )
 
     def test_an_unreachable_vault_is_credential_unavailable(self):
-        settings = {"address": "http://127.0.0.1:1", "auth_method": "proxy", "connect_timeout": 1, "read_timeout": 1}
+        settings = {"address": "https://127.0.0.1:1", "auth_method": "proxy", "connect_timeout": 1, "read_timeout": 1}
         backend = VaultKvV2CredentialBackend(settings)
 
         with self.assertRaises(CredentialUnavailable):
             backend.resolve(CredentialReference.from_mapping(REFERENCE))
 
     def test_an_unreachable_vault_does_not_quote_its_address(self):
-        """`run_connection_test` stores this text in `Job.data`, which is readable in the UI.
+        """`run_connection_test` shows this text in the UI.
 
         The address is deployment infrastructure, so the failure names the class of fault only.
         """
         # Loopback: a hostname here is answered by the environment's proxy instead of raising.
         settings = {
-            "address": "http://127.0.0.1:9",
+            "address": "https://127.0.0.1:9",
             "auth_method": "proxy",
             "connect_timeout": 1,
             "read_timeout": 1,

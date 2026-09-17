@@ -368,9 +368,12 @@ class VaultAddressSchemeTest(SimpleTestCase):
 
         self.assertIn("https", str(caught.exception))
 
-    def test_a_loopback_http_address_is_accepted(self):
-        """The same exception the API root makes for a local endpoint, for the same reason."""
-        validate_plugin_settings(settings_with(vault=self.vault("http://127.0.0.1:8200")))
+    def test_a_loopback_http_address_is_rejected(self):
+        """Vault always carries credential material, so loopback does not permit cleartext."""
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            validate_plugin_settings(settings_with(vault=self.vault("http://127.0.0.1:8200")))
+
+        self.assertIn("https", str(caught.exception))
 
 
 class VaultTimeoutTest(SimpleTestCase):

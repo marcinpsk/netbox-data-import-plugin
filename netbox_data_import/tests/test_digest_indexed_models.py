@@ -14,7 +14,12 @@ from core.models import ObjectType
 from dcim.models import Cable, Device, Interface
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, termination_field_key
-from netbox_data_import.models import CableImportSource, ImportProfile, TerminationResolution
+from netbox_data_import.models import (
+    CableImportSource,
+    ImportProfile,
+    TerminationResolution,
+    TraceDeviceResolution,
+)
 from netbox_data_import.tests.helpers import make_dcim_objects
 
 
@@ -62,6 +67,18 @@ class DigestIndexedModelTest(TestCase):
                 "trace_key",
                 '[["dígest device","","eth2"],["digest peer","","eth1"]]',
                 "sheet",
+            ),
+            (
+                TraceDeviceResolution(
+                    profile=self.profile,
+                    source_device_key="digest device",
+                    selected_device_id=self.device.pk,
+                    selected_display_name="Original Device",
+                ),
+                "source_device_key",
+                "source_device_key_digest",
+                "moved digest device",
+                "selected_display_name",
             ),
         )
 

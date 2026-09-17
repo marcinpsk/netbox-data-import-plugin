@@ -13,7 +13,6 @@ from django.utils import timezone
 from core.choices import JobStatusChoices
 from core.models import Job
 from netbox.models import NetBoxModel
-from netbox.models.features import JobsMixin
 from utilities.querysets import RestrictedQuerySet
 
 from .adapters import (
@@ -27,7 +26,9 @@ from . import plan
 from .catalog import CATALOG, POLICY_SECTIONS, has_implemented_module, policy_section
 from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from . import inference_settings as _inference_settings
+from .proposal_contract import OUTCOME_CANDIDATE, OUTCOME_CHOICES, OUTCOME_NO_MATCH
 from .trace_schema import TRACE_EXPORT_TIMESTAMP_MAX_LENGTH
+from .values import identity_text
 
 CONTACT_RESOLUTION_FIELDS = frozenset({"name", "email", "phone"})
 CONTACT_RESOLUTION_REQUIRED_KEYS = frozenset({"contact_resolution_applied", "contact_field_sources"})
@@ -797,6 +798,61 @@ class TerminationResolution(DigestIndexedMixin, PolicySectionModel):
         return f"{self.task_type}: {self.selected_display_name}"
 
 
+class TraceDeviceResolution(DigestIndexedMixin, PolicySectionModel):
+    """Store one selected NetBox Device for a canonical source Device label."""
+
+    POLICY_SECTION = "trace_device_resolutions"
+    DIGEST_SOURCE_FIELD = "source_device_key"
+    DIGEST_FIELD = "source_device_key_digest"
+
+    profile = models.ForeignKey(
+        ImportProfile,
+        on_delete=models.CASCADE,
+        related_name="trace_device_resolutions",
+    )
+    source_device_key = models.TextField(
+        help_text="Canonical source Device label shared by every port on that Device",
+    )
+    source_device_key_digest = models.CharField(
+        max_length=64,
+        blank=True,
+        editable=False,
+        help_text="Fixed-width digest of source_device_key, which the index and constraint carry",
+    )
+    selected_device_id = models.PositiveBigIntegerField(
+        help_text="Primary key of the selected NetBox Device",
+    )
+    selected_display_name = models.CharField(
+        max_length=200,
+        help_text="Device display name at selection time; it can become stale",
+    )
+
+    class Meta:
+        ordering = ["profile", "source_device_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "source_device_key_digest"],
+                name="ndi_tracedevresolution_profile_key",
+            ),
+        ]
+        verbose_name = "Trace Device Resolution"
+        verbose_name_plural = "Trace Device Resolutions"
+
+    def clean(self):
+        """Require a nonempty exact canonical key on a trace-only profile."""
+        super().clean()
+        canonical = identity_text(self.source_device_key)
+        if not canonical or canonical != self.source_device_key:
+            raise ValidationError(
+                {"source_device_key": "Enter the canonical source Device key."},
+                code="invalid",
+            )
+        self._derive_digest()
+
+    def __str__(self):
+        return f"{self.source_device_key} → Device #{self.selected_device_id}"
+
+
 class SourceDocument(models.Model):
     """The stored uploaded workbook that a plan and its executions read.
 
@@ -1123,12 +1179,8 @@ class ManufacturerMapping(PolicySectionModel):
         return f"{self.source_make} → {self.netbox_manufacturer_slug}"
 
 
-class InferenceBackend(JobsMixin, NetBoxModel):
-    """One named Inference Backend definition; the enabled row is the active backend (section 8.2).
-
-    JobsMixin attaches the connection test to the row, so its typed result is read where the
-    configuration lives.
-    """
+class InferenceBackend(NetBoxModel):
+    """One named Inference Backend definition; the enabled row is the active backend (section 8.2)."""
 
     ADAPTER_TYPES = _inference_settings.ADAPTER_TYPES
     AUTHENTICATION_METHODS = _inference_settings.AUTHENTICATION_METHODS
@@ -1137,7 +1189,7 @@ class InferenceBackend(JobsMixin, NetBoxModel):
     backend_key = models.SlugField(
         max_length=100,
         unique=True,
-        help_text="The unique name of this backend, and the only identifier a job payload carries.",
+        help_text="The unique name used in operator-visible results and backend metadata.",
     )
     display_name = models.CharField(max_length=200)
     adapter_type = models.CharField(max_length=50, choices=ADAPTER_TYPES, default="openai_compatible")
@@ -1185,6 +1237,10 @@ class InferenceBackend(JobsMixin, NetBoxModel):
     def get_absolute_url(self):
         """Return the detail URL for this Inference Backend."""
         return reverse("plugins:netbox_data_import:inferencebackend", args=[self.pk])
+
+    def serialize_object(self, exclude=None):
+        """Keep the Vault reference out of NetBox change-log snapshots."""
+        return super().serialize_object(exclude=[*(exclude or ()), "credential_reference"])
 
     def clean(self):
         """Reject a second enabled row, an unapproved api_root, and a reference that is not typed."""
@@ -1234,10 +1290,10 @@ class ProposalStatus:
 class ProposalOutcome:
     """What a completed Resolution Proposal concluded (section 7.8)."""
 
-    CANDIDATE = "candidate"
-    NO_MATCH = "no_match"
+    CANDIDATE = OUTCOME_CANDIDATE
+    NO_MATCH = OUTCOME_NO_MATCH
 
-    CHOICES = ((CANDIDATE, "Candidate"), (NO_MATCH, "No match"))
+    CHOICES = OUTCOME_CHOICES
 
 
 class ProposalDecision:
@@ -1267,6 +1323,7 @@ class ProposalFailureReason:
     CREDENTIAL_UNAVAILABLE = "credential_unavailable"
     CREDENTIAL_DENIED = "credential_denied"
     CREDENTIAL_INVALID = "credential_invalid"
+    SUPERSEDED_REQUEST = "superseded_request"
 
     CHOICES = (
         (BACKEND_REFUSAL, "Backend refusal"),
@@ -1280,6 +1337,7 @@ class ProposalFailureReason:
         (CREDENTIAL_UNAVAILABLE, "Credential infrastructure unavailable"),
         (CREDENTIAL_DENIED, "Credential denied"),
         (CREDENTIAL_INVALID, "Invalid credential reference or secret"),
+        (SUPERSEDED_REQUEST, "Superseded by a newer request contract"),
     )
 
     #: Section 7.5: these retry at most twice inside the same proposal; every other reason fails at once.

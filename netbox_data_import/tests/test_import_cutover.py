@@ -3,7 +3,6 @@
 """The HTTP import workflow uses the target-neutral Import Engine contract."""
 
 import uuid
-from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -126,6 +125,14 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         if revision := self.client.session.get(PREVIEW_REVISION_SESSION_KEY):
             payload.setdefault("preview_revision", revision)
         return self.client.post(reverse("plugins:netbox_data_import:sync_single_row"), payload)
+
+    def _preview_action(self, row_number):
+        """Return the action the current preview plans for one source row."""
+        from netbox_data_import.plan import ImportPlan
+        from netbox_data_import.review_workspace import ReviewWorkspace
+
+        workspace = ReviewWorkspace(ImportPlan.from_dict(self.client.session[PREVIEW_PLAN_SESSION_KEY]))
+        return next(unit.action for unit in workspace.units if unit.row_number == row_number)
 
     def _job(self, *, status="pending", data=None, user=True, queue_name="default"):
         """Create one native data-import Job owned by this actor by default."""
@@ -767,26 +774,6 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         job.refresh_from_db()
         self.assertEqual(job.data["phase"], "validating")
 
-    def test_progress_publication_is_throttled_and_tolerates_no_rq_context(self):
-        """Large imports bound Redis writes, and synchronous calls have no RQ metadata."""
-
-        class ProgressJob:
-            def __init__(self):
-                self.meta = {}
-                self.saved = []
-
-            def save_meta(self):
-                self.saved.append(self.meta["processed"])
-
-        progress_job = ProgressJob()
-        with patch("netbox_data_import.jobs.get_current_job", autospec=True, return_value=progress_job):
-            for processed in range(31):
-                ImportJobRunner._publish_progress(processed, 30)
-        self.assertEqual(progress_job.saved, [0, 25, 30])
-
-        with patch("netbox_data_import.jobs.get_current_job", autospec=True, return_value=None):
-            ImportJobRunner._publish_progress(0, 1)
-
     def test_single_row_sync_rejects_invalid_session_and_row_inputs(self):
         """Inline execution requires a readable plan, profile, source, and create unit."""
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
@@ -810,6 +797,36 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self._upload()
         SourceDocument.objects.get(pk=self.client.session["import_context"]["source_document_id"]).delete()
         self.assertEqual(self._sync_single_row({"row_number": 2}).status_code, 400)
+
+    def test_single_row_sync_executes_an_update_row(self):
+        """Per-row sync runs the same engine step 3 runs, for a row that updates a device."""
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
+
+        from dcim.models import Manufacturer
+
+        rack = Rack.objects.create(name="rack-a", site=self.site, u_height=42)
+        # The row names the Example/Model type, so a device of another type is a real update.
+        other_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.get(slug="example"), model="Other", slug="example-other", u_height=1
+        )
+        expected_type = DeviceType.objects.get(slug="example-model")
+        existing = Device.objects.create(
+            name="server-a",
+            site=self.site,
+            rack=rack,
+            device_type=other_type,
+            role=DeviceRole.objects.get(slug="server"),
+        )
+
+        self._upload()
+        self.assertEqual(self._preview_action(3), "update", "the fixture does not produce an update row")
+
+        response = self._sync_single_row({"row_number": 3})
+        self.assertEqual(response.status_code, 200, response.content[:400])
+        self.assertIn(b"updated in NetBox", response.content)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.device_type_id, expected_type.pk, "the update row did not reach NetBox")
 
     def test_single_row_sync_refuses_an_adapter_with_no_target_module(self):
         """A changed profile can require a Target Module that this release cannot run."""
@@ -854,6 +871,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertNotIn(constraint, response.json()["error"])
         self.assertNotIn("dcim_rack", response.json()["error"])
+        self.assertEqual(
+            ImportExecution.objects.latest("pk").failure_detail["reason"],
+            FailureReason.DATABASE,
+        )
 
     def test_single_row_sync_reports_a_refused_save_as_readable_text(self):
         """A NetBox validator's reason reads as its own text, not as the repr of a list."""
@@ -872,6 +893,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "A NetBox validator refused this rack.")
+        self.assertEqual(
+            ImportExecution.objects.latest("pk").failure_detail["reason"],
+            FailureReason.VALIDATION,
+        )
 
     def test_single_row_sync_rejects_a_queued_or_dirty_preview(self):
         """Inline execution cannot use a plan after import starts or a review changes it."""
@@ -956,8 +981,8 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             FailureReason.STALE_PLAN,
         )
 
-    def test_single_row_sync_reports_a_real_object_permission_failure(self):
-        """A saved Rack outside the actor's object constraint returns a bounded 400."""
+    def test_single_row_sync_blocks_an_object_permission_failure_before_execution(self):
+        """A Rack outside the actor's object constraint is blocked before a write starts."""
         from dcim.models import Rack, Site
 
         actor = user_with_object_permission(
@@ -975,6 +1000,53 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             reverse("plugins:netbox_data_import:import_preview"),
             fetch_redirect_response=False,
         )
+
+        response = self._sync_single_row({"row_number": 2})
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertFalse(Rack.objects.filter(site=self.site, name="rack-a").exists())
+        self.assertFalse(ImportExecution.objects.exists())
+
+    def test_single_row_sync_rechecks_permissions_on_the_wrapped_request_user(self):
+        """The final HTTP write reads permissions again from the concrete request user."""
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Rack, Site
+        from users.models import ObjectPermission
+
+        from netbox_data_import import target_modules
+
+        actor = user_with_object_permission(
+            "cutover-revoked-writer",
+            [
+                (ImportProfile, ("change",), {"pk": self.profile.pk}),
+                (Site, ("view",), {"pk": self.site.pk}),
+                (Rack, ("view", "add"), None),
+            ],
+        )
+        self.client.force_login(actor)
+        upload = self._upload()
+        self.assertRedirects(
+            upload,
+            reverse("plugins:netbox_data_import:import_preview"),
+            fetch_redirect_response=False,
+        )
+        runtime = target_modules.MODULE_RUNTIMES["rack"]
+
+        class RevokingRackRuntime:
+            @staticmethod
+            def plan(*args, **kwargs):
+                return runtime.plan(*args, **kwargs)
+
+            @staticmethod
+            def apply(*args, **kwargs):
+                ObjectPermission.objects.filter(
+                    users=actor,
+                    object_types=ContentType.objects.get_for_model(Rack),
+                ).delete()
+                return runtime.apply(*args, **kwargs)
+
+        target_modules.MODULE_RUNTIMES["rack"] = RevokingRackRuntime()
+        self.addCleanup(target_modules.MODULE_RUNTIMES.__setitem__, "rack", runtime)
 
         response = self._sync_single_row({"row_number": 2})
 

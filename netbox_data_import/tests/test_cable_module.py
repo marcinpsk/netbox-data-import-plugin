@@ -6,6 +6,7 @@ import json
 import secrets
 import uuid
 from contextlib import suppress
+from dataclasses import replace
 from io import BytesIO
 
 from core.models import ObjectType
@@ -26,7 +27,9 @@ from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from extras.models import Tag
 
+from netbox_data_import.adapters import SourceBatch, TraceWorkbookAdapter
 from netbox_data_import.cable_target import CableModule, eligible_terminations
+from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import (
     MAPPED_PEER_ROLE,
     SELECT_TERMINATION_TASK,
@@ -697,6 +700,68 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
 
         self.assertEqual(unit.disposition, Disposition.BLOCKED)
         self.assertIn("trace.device_unresolved", self.codes(unit))
+
+    def test_an_invalid_trace_does_not_supply_device_evidence_to_a_valid_trace(self):
+        """The Source Batch excludes invalid adapter evidence before Cable planning resolves it."""
+        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        trace = parsed.rows[0]
+        summary = trace.endpoint_summary
+        valid = replace(
+            trace,
+            endpoint_summary=replace(
+                summary,
+                from_termination=replace(summary.from_termination, rack="Valid Rack"),
+            ),
+        )
+        invalid = replace(
+            trace,
+            identity="invalid-trace",
+            endpoint_summary=replace(
+                summary,
+                from_termination=replace(summary.from_termination, rack="Invalid Rack"),
+                to_termination=replace(summary.to_termination, device=""),
+            ),
+            segments=(),
+        )
+        batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(valid, invalid))
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+
+        valid_unit, invalid_unit = CableModule().plan(batch, self.profile, None, reader)
+        device_evidence = next(item for item in valid_unit.display["trace"]["devices"] if item["key"] == "dev-a")
+
+        self.assertEqual(valid_unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(device_evidence["racks"], ("Valid Rack",))
+        self.assertEqual(invalid_unit.disposition, Disposition.INVALID)
+        self.assertIn("trace.device_required", self.codes(invalid_unit))
+
+    def test_a_row_that_is_not_a_source_trace_is_reported_and_excluded(self):
+        """SourceBatch states the Source Trace contract, so Cable planning never reads a foreign row."""
+        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        trace = parsed.rows[0]
+        # SourceBatch.rows is typed dict | SourceTrace, so a dict is a legal argument here.
+        batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(trace, {"device": "DEV-A"}))
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+
+        (unit,) = CableModule().plan(batch, self.profile, None, reader)
+
+        self.assertEqual(batch.rows, (trace,))
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertIn("source.row_type_unexpected", [item.code for item in batch.diagnostics])
+
+    def test_an_excluded_row_names_its_type_and_keeps_its_source_location(self):
+        """The batch-level diagnostic identifies the excluded row, so an operator can find it."""
+        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        trace = parsed.rows[0]
+
+        trace_batch = SourceBatch(output_kinds=parsed.output_kinds, rows=({"_row_number": 7},))
+        flat_batch = SourceBatch(output_kinds=frozenset({OutputKind.DEVICE_SOURCE_ROW}), rows=(trace,))
+        (from_trace_batch,) = trace_batch.diagnostics
+        (from_flat_batch,) = flat_batch.diagnostics
+
+        self.assertIn("dict", from_trace_batch.message)
+        self.assertEqual(from_trace_batch.row_number, 7)
+        self.assertIn("SourceTrace", from_flat_batch.message)
+        self.assertEqual(from_flat_batch.row_number, trace.provenance[0].row_start)
 
     def test_endpoint_evidence_only_blocks_when_no_direct_cable_exists(self):
         """A Trace List block states endpoints alone, so nothing proves the physical path."""
@@ -1524,11 +1589,11 @@ class TraceWizardRenderTest(CableTopologyMixin, TestCase):
 
         self.assertContains(response, "DEV-A eth0 to DEV-B eth1")
 
-    def test_a_trace_profile_falls_back_to_the_row_view(self):
-        """Only the flat adapter declares a stored view mode, and reading it answered 500."""
+    def test_a_trace_profile_opens_the_trace_workspace(self):
+        """A trace-only profile starts on the review surface that understands Source Traces."""
         response = self._upload()
 
-        self.assertEqual(response.context["view_mode"], "rows")
+        self.assertTemplateUsed(response, "netbox_data_import/trace_workspace.html")
 
     def test_the_view_query_parameter_overrides_the_fallback(self):
         """The Rack view link has to keep working for a profile that declares no mode."""

@@ -18,8 +18,9 @@ from netbox_data_import.models import (
     SourceDocument,
 )
 from netbox_data_import.plan import Disposition
+from netbox_data_import.object_permissions import ObjectPermissionDenied
 from netbox_data_import.target_modules import PreconditionFailed
-from netbox_data_import.tests.helpers import competing_write_during
+from netbox_data_import.tests.helpers import competing_write_during, run_on_separate_connection
 from netbox_data_import.tests.test_import_engine import ImportEngineTestDataMixin, _workbook
 
 
@@ -351,6 +352,63 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
         self.assertEqual(execution.site_name, self.site.name)
         self.assertEqual(execution.result_counts, {"created": {}, "errors": 1})
 
+    def test_a_permission_failure_rolls_back_and_blocks_the_next_plan(self):
+        """A permission revoked during execution rolls back earlier writes and changes replanning."""
+        from django.contrib.auth import get_user_model
+        from django.contrib.contenttypes.models import ContentType
+        from django.db.models.signals import post_save
+        from dcim.models import Device, Rack
+        from users.models import ObjectPermission
+
+        self.rack.delete()
+        accepted = self._plan()
+        rack_unit = accepted.unit("rack:source:R-1")
+        device_unit = accepted.unit("device:source:D-1")
+        device_type = ContentType.objects.get_for_model(Device)
+
+        def revoke_device_permission(sender, instance, created, **kwargs):
+            if not created or instance.name != "rack-a":
+                return
+
+            def revoke():
+                ObjectPermission.objects.filter(users=self.actor, object_types=device_type).delete()
+
+            with run_on_separate_connection(revoke):
+                pass
+
+        post_save.connect(revoke_device_permission, sender=Rack, weak=False)
+        self.addCleanup(post_save.disconnect, revoke_device_permission, sender=Rack)
+
+        with self.assertRaises(ObjectPermissionDenied):
+            ImportEngine.execute(
+                self.profile,
+                self.document,
+                accepted.to_dict(),
+                [rack_unit.identity, device_unit.identity],
+                "permission-rollback",
+                self.actor,
+            )
+
+        self.assertFalse(Rack.objects.filter(name="rack-a", site=self.site).exists())
+        self.assertFalse(Device.objects.filter(name="server-a", site=self.site).exists())
+        execution = ImportExecution.objects.get(idempotency_key="permission-rollback")
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
+        self.assertEqual(
+            execution.failure_detail,
+            {
+                "failed_change": device_unit.changes[0].identity,
+                "rolled_back": [rack_unit.changes[0].identity],
+                "not_attempted": [],
+                "reason": "permission",
+            },
+        )
+
+        actor = get_user_model().objects.get(pk=self.actor.pk)
+        next_plan = ImportEngine.plan(self.profile, self.document, actor, self.planning_context)
+        blocked = next_plan.unit(device_unit.identity)
+        self.assertEqual(blocked.disposition, Disposition.BLOCKED)
+        self.assertIn("device.add_permission", [diagnostic.code for diagnostic in blocked.diagnostics])
+
     def test_a_finished_idempotency_key_returns_the_same_row_without_writing_again(self):
         """A duplicate delivery returns its succeeded audit row before it replans or writes."""
         from dcim.models import Device
@@ -524,6 +582,28 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
         self.assertFalse(ImportExecution.objects.filter(idempotency_key="empty-selection").exists())
 
+    def test_one_unit_cannot_be_selected_twice(self):
+        """A duplicate unit identity is a selection failure through the public engine seam."""
+        from dcim.models import Device
+
+        accepted = self._plan()
+        unit = accepted.unit("device:source:D-1")
+
+        with self.assertRaises(SelectionError):
+            ImportEngine.execute(
+                self.profile,
+                self.document,
+                accepted.to_dict(),
+                [unit.identity, unit.identity],
+                "duplicate-selection",
+                self.actor,
+            )
+
+        self.assertFalse(Device.objects.filter(name="server-a", site=self.site).exists())
+        execution = ImportExecution.objects.get(idempotency_key="duplicate-selection")
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
+        self.assertEqual(execution.failure_detail["reason"], "selection")
+
     def test_a_selected_unit_that_moved_is_refused_as_stale(self):
         """A target-state change invalidates its accepted unit before any target write."""
         from dcim.models import Device
@@ -585,16 +665,33 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
     def test_an_unrelated_unit_change_does_not_block_a_safe_selection(self):
         """Only selected unit fingerprints take part in selective execution comparison."""
-        from dcim.models import Device
+        from dcim.models import Device, Rack
 
-        accepted = self._plan()
+        other_rack = Rack.objects.create(name="other-rack", site=self.site, u_height=42)
+        document = SourceDocument.store(
+            profile=self.profile,
+            content=_workbook(
+                ("R-OTHER", "Cabinet", "", other_rack.name, "", "", 42),
+                (
+                    "D-1",
+                    "Server",
+                    "server-a",
+                    self.rack.name,
+                    self.manufacturer.name,
+                    self.device_type.model,
+                    1,
+                ),
+            ),
+            filename="unrelated-rack.xlsx",
+        )
+        accepted = self._plan(document)
         unit = accepted.unit("device:source:D-1")
-        self.rack.u_height = 41
-        self.rack.save(update_fields=["u_height"])
+        other_rack.u_height = 41
+        other_rack.save(update_fields=["u_height"])
 
         execution = ImportEngine.execute(
             self.profile,
-            self.document,
+            document,
             accepted.to_dict(),
             [unit.identity],
             "unrelated-unit-moved",
@@ -603,8 +700,8 @@ class ImportEngineExecutionTest(ImportEngineTestDataMixin, TransactionTestCase):
 
         self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED)
         self.assertTrue(Device.objects.filter(name="server-a", site=self.site).exists())
-        self.rack.refresh_from_db()
-        self.assertEqual(self.rack.u_height, 41)
+        other_rack.refresh_from_db()
+        self.assertEqual(other_rack.u_height, 41)
 
     def test_a_selected_unit_cannot_silently_expand_to_its_dependency(self):
         """Leaving a required Rack unit out makes the explicit Device selection invalid."""

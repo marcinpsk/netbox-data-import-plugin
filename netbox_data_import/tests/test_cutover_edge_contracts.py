@@ -7,19 +7,17 @@ from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, TransactionTestCase
 
 from netbox_data_import.device_field_review import DeviceFieldReviewer
 from netbox_data_import.device_identity import DeviceTypeIdentityResolver
-from netbox_data_import.import_engine import EngineConfigurationError, ImportEngine, SelectionError, _resolution_section
+from netbox_data_import.import_engine import EngineConfigurationError, ImportEngine
 from netbox_data_import.ip_assignment import IPAssignmentError, IPTarget, already_assigned, parse_address
 from netbox_data_import.models import (
     ColumnMapping,
     DeviceImportSource,
     DeviceTypeMapping,
     ExecutionOutcome,
-    FailureReason,
     IgnoredFieldDifference,
     ImportExecution,
     ImportProfile,
@@ -29,12 +27,9 @@ from netbox_data_import.models import (
     _validated_contact_id,
     validate_contact_candidate_resolution,
 )
-from netbox_data_import.netbox_reader import PlanningTargetUnavailable
-from netbox_data_import.object_permissions import ObjectPermissionDenied
-from netbox_data_import.plan import Disposition, ImportPlan, PlannedChange, SynchronizationUnit
+from netbox_data_import.plan import Disposition, PlannedChange, SynchronizationUnit
 from netbox_data_import.preview_row_actions import current_preview_revision
 from netbox_data_import.source_resolution import derive_effective_rows
-from netbox_data_import.target_modules import PreconditionFailed
 from netbox_data_import.tests.helpers import workbook_bytes
 from netbox_data_import.values import comparison_key, normalize_for_compare, source_position
 
@@ -318,52 +313,8 @@ class IdentityAndResolutionBoundaryTest(TestCase):
         self.assertIn("(no source ID)", str(provenance))
 
 
-class CoordinatorDefensiveContractTest(TestCase):
-    """Coordinator failure classification remains complete and deterministic."""
-
-    def test_missing_resolution_policy_fails_fast(self):
-        """The engine cannot apply saved policy without its catalog declaration."""
-        from netbox_data_import import catalog
-
-        section = catalog._SECTIONS_BY_KEY.pop("source_resolutions")
-        self.addCleanup(catalog._SECTIONS_BY_KEY.__setitem__, "source_resolutions", section)
-
-        with self.assertRaises(EngineConfigurationError):
-            _resolution_section()
-
-    def test_every_expected_failure_has_an_audit_reason(self):
-        """Typed target and database failures map to stable audit reasons."""
-        cases = (
-            (ObjectPermissionDenied("denied"), FailureReason.PERMISSION),
-            (ValidationError("invalid"), FailureReason.VALIDATION),
-            (DatabaseError("database"), FailureReason.DATABASE),
-            (PlanningTargetUnavailable("target"), FailureReason.PLANNING),
-            (RuntimeError("unknown"), FailureReason.PLANNING),
-            (PreconditionFailed("changed"), FailureReason.PRECONDITION),
-        )
-        for failure, expected in cases:
-            with self.subTest(failure=type(failure).__name__):
-                self.assertEqual(ImportEngine._failure_reason(failure), expected)
-
-    def test_duplicate_selection_and_a_concurrent_failure_marker_are_bounded(self):
-        """A unit is selected once, and an already-finished audit row stays finished."""
-        plan = ImportPlan(
-            units=(SynchronizationUnit(identity="device:one", disposition=Disposition.ACTIONABLE),),
-            source_fingerprint="0" * 64,
-            profile_fingerprint="1" * 64,
-            actor="1",
-        )
-        with self.assertRaises(SelectionError):
-            ImportEngine._selected_units(plan, plan, ["device:one", "device:one"])
-
-        execution = ImportExecution.objects.create(
-            profile=ImportProfile.objects.create(name="Finished Audit Profile"),
-            outcome=ExecutionOutcome.PENDING,
-        )
-        execution.mark_succeeded(applied_changes={"changes": ["device:one:create"], "deleted": []})
-        ImportEngine._mark_failed(execution, reason=FailureReason.PLANNING)
-        execution.refresh_from_db()
-        self.assertEqual(execution.outcome, ExecutionOutcome.SUCCEEDED)
+class CoordinatorPublicContractTest(TransactionTestCase):
+    """Coordinator edge behavior stays observable through its public methods."""
 
     def test_an_unregistered_runtime_is_refused_before_any_write(self):
         """The coordinator cannot silently skip an executable change without a runtime."""
@@ -411,19 +362,18 @@ class CoordinatorDefensiveContractTest(TestCase):
         self.addCleanup(target_modules.MODULE_RUNTIMES.__setitem__, "rack", runtime)
         planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
         plan = ImportEngine.plan(profile, document, actor, planning_context)
-        execution = ImportExecution.objects.create(profile=profile, outcome=ExecutionOutcome.PENDING)
         with self.assertRaises(EngineConfigurationError):
-            ImportEngine._write_selection(
-                execution,
+            ImportEngine.execute(
                 profile,
                 document,
-                plan,
+                plan.to_dict(),
                 ["ghost:one"],
+                "unregistered-runtime",
                 actor,
-                None,
             )
+        execution = ImportExecution.objects.get(idempotency_key="unregistered-runtime")
         execution.refresh_from_db()
-        self.assertEqual(execution.outcome, ExecutionOutcome.PENDING)
+        self.assertEqual(execution.outcome, ExecutionOutcome.FAILED)
         self.assertIsNone(execution.applied_changes)
 
     def test_invalid_current_ip_state_is_not_treated_as_settled(self):

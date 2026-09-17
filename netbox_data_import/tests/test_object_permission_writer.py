@@ -8,11 +8,13 @@ first and then ask again. These tests use real users and real ObjectPermission r
 permission check would only restate the assumption under test.
 """
 
+from copy import copy
+
 from django.core.exceptions import ValidationError
-from django.db import connection
+from django.db import connection, models
 from django.db.models.signals import post_save, pre_save
 from django.test import TestCase, TransactionTestCase
-from django.test.utils import CaptureQueriesContext
+from django.test.utils import CaptureQueriesContext, isolate_apps
 
 from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
 from netbox_data_import.models import (
@@ -24,12 +26,14 @@ from netbox_data_import.models import (
 )
 from netbox_data_import.object_permissions import (
     ObjectPermissionDenied,
+    ProspectiveRelation,
     assess_permission_scoped_save,
+    assess_permission_scoped_save_option,
     delete_permission_scoped_objects,
     enforce_saved_object_permission,
     save_permission_scoped_object,
 )
-from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission
+from netbox_data_import.tests.helpers import make_dcim_objects, run_on_separate_connection, user_with_object_permission
 
 
 class EnforceSavedObjectPermissionTest(TestCase):
@@ -65,6 +69,99 @@ class EnforceSavedObjectPermissionTest(TestCase):
         """Background imports run without a request user and keep their own authorization path."""
         mapping = DeviceTypeMapping.objects.create(profile=self.profile, source_make="A", source_model="B")
         enforce_saved_object_permission(mapping, None, "view")
+
+
+class ProspectiveForeignKeyTargetTest(TransactionTestCase):
+    """Prospective relations use the concrete value named by each foreign key."""
+
+    @isolate_apps("netbox_data_import")
+    def test_a_non_primary_foreign_key_uses_its_known_target_value(self):
+        """A generated related primary key does not hide a known natural relation key."""
+
+        class CopyableTestModel(models.Model):
+            def __copy__(self):
+                duplicate = type(self)()
+                duplicate.__dict__.update(self.__dict__)
+                return duplicate
+
+            class Meta:
+                abstract = True
+                app_label = "netbox_data_import"
+
+        class ProspectiveTargetTestModel(CopyableTestModel):
+            code = models.CharField(max_length=32, unique=True)
+
+            def __str__(self):
+                return self.code
+
+            class Meta:
+                app_label = "netbox_data_import"
+                db_table = "netbox_data_import_test_prospective_target"
+
+        class ProspectiveRootTestModel(CopyableTestModel):
+            target = models.ForeignKey(
+                ProspectiveTargetTestModel,
+                db_constraint=False,
+                on_delete=models.CASCADE,
+                to_field="code",
+            )
+
+            def __str__(self):
+                return str(self.target_id)
+
+            class Meta:
+                app_label = "netbox_data_import"
+                db_table = "netbox_data_import_test_prospective_root"
+
+        with connection.schema_editor() as schema_editor:
+            schema_editor.create_model(ProspectiveTargetTestModel)
+            schema_editor.create_model(ProspectiveRootTestModel)
+        try:
+            saved_target = ProspectiveTargetTestModel.objects.create(code="saved-target")
+            planned_target = ProspectiveTargetTestModel(code="planned-target")
+            saved_user = user_with_object_permission(
+                "prospective-saved-target",
+                [(ProspectiveRootTestModel, ["add"], {"target__code": saved_target.code})],
+            )
+            planned_user = user_with_object_permission(
+                "prospective-planned-target",
+                [(ProspectiveRootTestModel, ["add"], {"target_id": planned_target.code})],
+            )
+            generated_key_user = user_with_object_permission(
+                "prospective-generated-key",
+                [(ProspectiveRootTestModel, ["add"], {"target__pk": -1})],
+            )
+
+            saved_assessment = assess_permission_scoped_save(
+                saved_user,
+                ProspectiveRootTestModel,
+                {},
+                {},
+                prospective_relations={"target": saved_target},
+            )
+            planned_assessment = assess_permission_scoped_save(
+                planned_user,
+                ProspectiveRootTestModel,
+                {},
+                {},
+                prospective_relations={"target": planned_target},
+            )
+            generated_key_assessment = assess_permission_scoped_save(
+                generated_key_user,
+                ProspectiveRootTestModel,
+                {},
+                {},
+                prospective_relations={"target": planned_target},
+            )
+
+            self.assertTrue(saved_assessment.allowed)
+            self.assertTrue(planned_assessment.allowed)
+            self.assertFalse(generated_key_assessment.allowed)
+            self.assertFalse(ProspectiveRootTestModel.objects.exists())
+        finally:
+            with connection.schema_editor() as schema_editor:
+                schema_editor.delete_model(ProspectiveRootTestModel)
+                schema_editor.delete_model(ProspectiveTargetTestModel)
 
 
 class AssessPermissionScopedSaveTest(TestCase):
@@ -106,6 +203,54 @@ class AssessPermissionScopedSaveTest(TestCase):
         self.assertEqual(inside.permission, "netbox_data_import.add_devicetypemapping")
         self.assertFalse(outside.allowed)
         self.assertFalse(DeviceTypeMapping.objects.exists())
+
+    def test_a_save_option_applies_known_constraints_and_defers_the_chosen_value(self):
+        user = user_with_object_permission(
+            "assess-option",
+            [
+                (
+                    DeviceTypeMapping,
+                    ["add"],
+                    {
+                        "profile_id": self.profile.pk,
+                        "netbox_manufacturer_slug": "chosen-later",
+                    },
+                )
+            ],
+        )
+
+        inside = assess_permission_scoped_save_option(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values("not-chosen-yet"),
+            unknown_fields={"netbox_manufacturer_slug"},
+        )
+        outside = assess_permission_scoped_save_option(
+            user,
+            DeviceTypeMapping,
+            self._lookup(profile=self.other),
+            self._values("not-chosen-yet"),
+            unknown_fields={"netbox_manufacturer_slug"},
+        )
+
+        self.assertTrue(inside.allowed)
+        self.assertFalse(outside.allowed)
+        self.assertFalse(DeviceTypeMapping.objects.exists())
+
+    def test_an_unconstrained_grant_survives_stripping_unknown_fields(self):
+        """A grant with no constraints means every object, so the option stays offered."""
+        user = user_with_object_permission("assess-unconstrained", [(DeviceTypeMapping, ["add"], None)])
+
+        assessment = assess_permission_scoped_save_option(
+            user,
+            DeviceTypeMapping,
+            self._lookup(),
+            self._values("not-chosen-yet"),
+            unknown_fields={"netbox_manufacturer_slug"},
+        )
+
+        self.assertTrue(assessment.allowed)
 
     def test_a_json_value_is_prepared_for_the_prospective_database_row(self):
         user = user_with_object_permission(
@@ -336,6 +481,467 @@ class AssessPermissionScopedSaveTest(TestCase):
         )
 
         self.assertFalse(assessment.allowed)
+
+    def test_unsaved_related_rows_are_visible_in_the_prospective_world(self):
+        """Relation constraints see exact planned rows without saving or consuming keys."""
+        from dcim.models import Device, DeviceRole, Rack
+
+        site, _manufacturer, device_type, existing_role = make_dcim_objects("ProspectiveRelation")
+        existing_rack = Rack.objects.create(name="existing-rack", site=site)
+        existing_device = Device.objects.create(
+            name="existing-device",
+            site=site,
+            device_type=device_type,
+            role=existing_role,
+        )
+        planned_rack = Rack(name="planned-rack", site=site)
+        planned_role = DeviceRole(name="Planned Role", slug="planned-role", color="9e9e9e")
+        user = user_with_object_permission(
+            "assess-related",
+            [
+                (
+                    Device,
+                    ["add"],
+                    {
+                        "rack__isnull": False,
+                        "rack__name": planned_rack.name,
+                        "role__isnull": False,
+                        "role__slug": planned_role.slug,
+                    },
+                )
+            ],
+        )
+        signals = []
+
+        def record_signal(sender, **kwargs):
+            signals.append(sender)
+
+        for model in (Device, Rack, DeviceRole):
+            pre_save.connect(record_signal, sender=model, weak=False)
+            post_save.connect(record_signal, sender=model, weak=False)
+            self.addCleanup(pre_save.disconnect, record_signal, sender=model)
+            self.addCleanup(post_save.disconnect, record_signal, sender=model)
+
+        assessment = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": "planned-device"},
+            {"site": site, "device_type": device_type},
+            prospective_relations={"rack": planned_rack, "role": planned_role},
+        )
+
+        self.assertTrue(assessment.allowed)
+        self.assertEqual(signals, [])
+        self.assertIsNone(planned_rack.pk)
+        self.assertIsNone(planned_role.pk)
+        self.assertFalse(Device.objects.filter(name="planned-device").exists())
+        self.assertFalse(Rack.objects.filter(name=planned_rack.name).exists())
+        self.assertFalse(DeviceRole.objects.filter(slug=planned_role.slug).exists())
+
+        for model in (Device, Rack, DeviceRole):
+            pre_save.disconnect(record_signal, sender=model)
+            post_save.disconnect(record_signal, sender=model)
+        following_rack = Rack.objects.create(name="following-rack", site=site)
+        following_role = DeviceRole.objects.create(name="Following Role", slug="following-role")
+        following_device = Device.objects.create(
+            name="following-device",
+            site=site,
+            device_type=device_type,
+            role=existing_role,
+        )
+        self.assertEqual(following_rack.pk, existing_rack.pk + 1)
+        self.assertEqual(following_role.pk, existing_role.pk + 1)
+        self.assertEqual(following_device.pk, existing_device.pk + 1)
+
+    def test_synthetic_relation_keys_are_presence_only(self):
+        """Synthetic keys support nullness but cannot satisfy value constraints."""
+        from dcim.models import Device, DeviceRole, Rack
+
+        site, _manufacturer, device_type, _existing_role = make_dcim_objects("SyntheticRelation")
+        planned_rack = Rack(name="planned-rack", site=site)
+        planned_role = DeviceRole(name="Planned Role", slug="planned-role", color="9e9e9e")
+        values = {"site": site, "device_type": device_type}
+        related = {"rack": planned_rack, "role": planned_role}
+        cases = (
+            ("assess-related-null", {"rack__isnull": True}),
+            ("assess-related-id-null", {"rack_id": None}),
+            ("assess-related-role-null", {"role__isnull": True}),
+            ("assess-related-synthetic-id", {"rack_id": -1}),
+            ("assess-related-traversed-id", {"role__pk": -1}),
+            ("assess-related-wrong-name", {"rack__name": "other-rack"}),
+        )
+
+        for username, constraint in cases:
+            with self.subTest(constraint=constraint):
+                user = user_with_object_permission(username, [(Device, ["add"], constraint)])
+                assessment = assess_permission_scoped_save(
+                    user,
+                    Device,
+                    {"name": "planned-device"},
+                    values,
+                    prospective_relations=related,
+                )
+                self.assertFalse(assessment.allowed)
+
+    def test_an_alternate_traversal_cannot_use_a_synthetic_relation_key(self):
+        """A generated Rack key stays hidden when the constraint reaches it through Site."""
+        from dcim.models import Device, Rack
+
+        site, _manufacturer, device_type, role = make_dcim_objects("AlternateSynthetic")
+        planned_rack = Rack(name="planned-rack", site=site)
+        values = {"site": site, "device_type": device_type, "role": role}
+        cases = (
+            ("assess-alternate-related-pk", {"site__racks__pk": -1}),
+            ("assess-alternate-root-fk", {"site__devices__rack_id": -1}),
+        )
+
+        for username, constraint in cases:
+            with self.subTest(constraint=constraint):
+                user = user_with_object_permission(username, [(Device, ["add"], constraint)])
+                assessment = assess_permission_scoped_save(
+                    user,
+                    Device,
+                    {"name": "planned-device"},
+                    values,
+                    prospective_relations={"rack": planned_rack},
+                )
+
+                self.assertFalse(assessment.allowed)
+
+    def test_multiple_unsaved_relations_of_one_model_share_one_world(self):
+        """Two forward relations can resolve to distinct planned rows of one model."""
+        from dcim.models import Device
+        from ipam.models import IPAddress
+
+        site, _manufacturer, device_type, role = make_dcim_objects("MultipleRelation")
+        primary = IPAddress(address="198.18.0.10/32")
+        out_of_band = IPAddress(address="198.18.0.11/32")
+        user = user_with_object_permission(
+            "assess-multiple-related",
+            [
+                (
+                    Device,
+                    ["add"],
+                    {
+                        "primary_ip4__address": str(primary.address),
+                        "oob_ip__address": str(out_of_band.address),
+                    },
+                )
+            ],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": "multiple-relation-device"},
+            {"site": site, "device_type": device_type, "role": role},
+            prospective_relations={"primary_ip4": primary, "oob_ip": out_of_band},
+        )
+
+        self.assertTrue(assessment.allowed)
+        self.assertIsNone(primary.pk)
+        self.assertIsNone(out_of_band.pk)
+        self.assertFalse(IPAddress.objects.filter(address__in=(primary.address, out_of_band.address)).exists())
+
+    def test_a_saved_related_row_replaces_its_physical_state(self):
+        """The related world contains the final saved row once, not its stored version too."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        site, _manufacturer, device_type, role = make_dcim_objects("SavedRelation")
+        interface_device = Device.objects.create(
+            name="interface-device",
+            site=site,
+            device_type=device_type,
+            role=role,
+        )
+        interface = Interface.objects.create(device=interface_device, name="mgmt0", type="1000base-t")
+        stored = IPAddress.objects.create(address="198.18.0.12/32")
+        final = copy(stored)
+        final.assigned_object = interface
+        planned_oob = IPAddress(address="198.18.0.15/32")
+        assigned = user_with_object_permission(
+            "assess-saved-related-final",
+            [
+                (
+                    Device,
+                    ["add"],
+                    {"primary_ip4__pk": stored.pk, "primary_ip4__assigned_object_id__isnull": False},
+                )
+            ],
+        )
+        stored_only = user_with_object_permission(
+            "assess-saved-related-physical",
+            [(Device, ["add"], {"primary_ip4__assigned_object_id__isnull": True})],
+        )
+        values = {"site": site, "device_type": device_type, "role": role}
+        related = {"primary_ip4": final, "oob_ip": planned_oob}
+
+        final_assessment = assess_permission_scoped_save(
+            assigned,
+            Device,
+            {"name": "saved-relation-device"},
+            values,
+            prospective_relations=related,
+        )
+        physical_assessment = assess_permission_scoped_save(
+            stored_only,
+            Device,
+            {"name": "saved-relation-device"},
+            values,
+            prospective_relations=related,
+        )
+
+        self.assertTrue(final_assessment.allowed)
+        self.assertFalse(physical_assessment.allowed)
+        stored.refresh_from_db()
+        self.assertIsNone(stored.assigned_object)
+
+    def test_a_saved_root_keeps_its_real_primary_key_when_a_relation_is_planned(self):
+        """An unsaved relation marks the root's foreign key generated, never its own primary key."""
+        from dcim.models import Device
+        from ipam.models import IPAddress
+
+        site, _manufacturer, device_type, role = make_dcim_objects("SavedRootPk")
+        device = Device.objects.create(
+            name="saved-root-pk-device",
+            site=site,
+            device_type=device_type,
+            role=role,
+        )
+        planned = IPAddress(address="198.18.0.20/32")
+        user = user_with_object_permission(
+            "assess-saved-root-pk",
+            [(Device, ["change"], {"id": device.pk})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": device.name},
+            {"site": site, "device_type": device_type, "role": role},
+            prospective_relations={"primary_ip4": planned},
+        )
+
+        self.assertTrue(assessment.allowed, "the root primary key is real, so the constraint on it is knowable")
+        self.assertIsNone(planned.pk)
+
+    def test_an_unsaved_root_still_refuses_a_predicate_on_its_invented_primary_key(self):
+        """Narrowing the guard to the primary key must not weaken the unsaved-root refusal."""
+        from dcim.models import Device
+
+        site, _manufacturer, device_type, role = make_dcim_objects("UnsavedRootPk")
+        # The world invents a negative primary key, so this predicate matches only the invention.
+        user = user_with_object_permission(
+            "assess-unsaved-root-pk",
+            [(Device, ["add"], {"pk__lt": 0})],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": "unsaved-root-pk-device"},
+            {"site": site, "device_type": device_type, "role": role},
+        )
+
+        self.assertFalse(assessment.allowed, "an unallocated primary key cannot satisfy a predicate on it")
+
+    def test_duplicate_saved_candidates_must_describe_one_final_state(self):
+        """Identical saved candidates coalesce, while conflicting copies fail closed."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        site, _manufacturer, device_type, role = make_dcim_objects("DuplicateRelation")
+        interface_device = Device.objects.create(
+            name="interface-device",
+            site=site,
+            device_type=device_type,
+            role=role,
+        )
+        interface = Interface.objects.create(device=interface_device, name="mgmt0", type="1000base-t")
+        stored = IPAddress.objects.create(address="198.18.0.13/32")
+        assigned = copy(stored)
+        assigned.assigned_object = interface
+        same = copy(assigned)
+        conflicting = copy(stored)
+        user = user_with_object_permission("assess-duplicate-related", [(Device, ["add"], None)])
+        values = {"site": site, "device_type": device_type, "role": role}
+
+        coalesced = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": "coalesced-device"},
+            values,
+            prospective_relations={"primary_ip4": assigned, "oob_ip": same},
+        )
+        refused = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": "conflicting-device"},
+            values,
+            prospective_relations={"primary_ip4": assigned, "oob_ip": conflicting},
+        )
+
+        self.assertTrue(coalesced.allowed)
+        self.assertFalse(refused.allowed)
+
+    def test_a_generated_related_field_is_presence_only(self):
+        """A synthetic interface key can prove assignment, but it has no usable value."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        site, _manufacturer, device_type, role = make_dcim_objects("GeneratedField")
+        physical_device = Device.objects.create(
+            name="physical-interface-device",
+            site=site,
+            device_type=device_type,
+            role=role,
+        )
+        physical_interface = Interface.objects.create(
+            device=physical_device,
+            name="physical-interface",
+            type="1000base-t",
+        )
+        interface = Interface(device=Device(), name="mgmt0", type="1000base-t")
+        interface.pk = physical_interface.pk
+        address = IPAddress(address="198.18.0.14/32")
+        address.assigned_object = interface
+        relation = ProspectiveRelation(address, generated_fields=frozenset({"assigned_object_id"}))
+        present = user_with_object_permission(
+            "assess-generated-related-present",
+            [(Device, ["add"], {"primary_ip4__assigned_object_id__isnull": False})],
+        )
+        exact = user_with_object_permission(
+            "assess-generated-related-exact",
+            [(Device, ["add"], {"primary_ip4__assigned_object_id": physical_interface.pk})],
+        )
+        alternate = user_with_object_permission(
+            "assess-generated-related-alternate",
+            [
+                (
+                    Device,
+                    ["add"],
+                    {"site__devices__primary_ip4__assigned_object_id": physical_interface.pk},
+                )
+            ],
+        )
+        downstream = user_with_object_permission(
+            "assess-generated-related-downstream",
+            [(Device, ["add"], {"primary_ip4__interface__name": "physical-interface"})],
+        )
+        values = {"site": site, "device_type": device_type, "role": role}
+
+        present_assessment = assess_permission_scoped_save(
+            present,
+            Device,
+            {"name": "generated-field-device"},
+            values,
+            prospective_relations={"primary_ip4": relation},
+        )
+        exact_assessment = assess_permission_scoped_save(
+            exact,
+            Device,
+            {"name": "generated-field-device"},
+            values,
+            prospective_relations={"primary_ip4": relation},
+        )
+        alternate_assessment = assess_permission_scoped_save(
+            alternate,
+            Device,
+            {"name": "generated-field-device"},
+            values,
+            prospective_relations={"primary_ip4": relation},
+        )
+        downstream_assessment = assess_permission_scoped_save(
+            downstream,
+            Device,
+            {"name": "generated-field-device"},
+            values,
+            prospective_relations={"primary_ip4": relation},
+        )
+
+        self.assertTrue(present_assessment.allowed)
+        self.assertFalse(exact_assessment.allowed)
+        self.assertFalse(alternate_assessment.allowed)
+        self.assertFalse(downstream_assessment.allowed)
+
+    def test_root_reverse_relations_cannot_authorize_a_prospective_write(self):
+        """Missing planned components, contacts, or provenance do not grant scope."""
+        from dcim.models import Device
+
+        site, _manufacturer, device_type, role = make_dcim_objects("ReverseRelation")
+        values = {"site": site, "device_type": device_type, "role": role}
+        paths = (
+            "interfaces",
+            "contacts",
+            "data_import_source",
+            "site__devices__interfaces",
+            "site__devices__contacts",
+            "site__devices__data_import_source",
+        )
+        for index, path in enumerate(paths):
+            with self.subTest(path=path):
+                user = user_with_object_permission(
+                    f"assess-reverse-related-{index}",
+                    [(Device, ["add"], {f"{path}__isnull": True})],
+                )
+
+                assessment = assess_permission_scoped_save(
+                    user,
+                    Device,
+                    {"name": "reverse-relation-device"},
+                    values,
+                )
+
+                self.assertFalse(assessment.allowed)
+
+    def test_a_reverse_relation_does_not_refuse_an_independent_permission_arm(self):
+        """One conservative arm stays false without overriding another matching grant."""
+        from dcim.models import Device
+
+        site, _manufacturer, device_type, role = make_dcim_objects("ReverseArm")
+        user = user_with_object_permission(
+            "assess-reverse-independent-arm",
+            [
+                (Device, ["add"], {"contacts__isnull": True}),
+                (Device, ["add"], {"name": "reverse-arm-device"}),
+            ],
+        )
+
+        assessment = assess_permission_scoped_save(
+            user,
+            Device,
+            {"name": "reverse-arm-device"},
+            {"site": site, "device_type": device_type, "role": role},
+        )
+
+        self.assertTrue(assessment.allowed)
+
+    def test_invalid_prospective_relation_input_fails_closed(self):
+        """The interface validates relation metadata even for an unconstrained grant."""
+        from dcim.models import Device, Rack
+
+        site, _manufacturer, device_type, role = make_dcim_objects("InvalidRelation")
+        rack = Rack(name="planned-rack", site=site)
+        user = user_with_object_permission("assess-invalid-related", [(Device, ["add"], None)])
+        cases = (
+            ("missing", rack, {}),
+            ("tags", rack, {}),
+            ("rack", role, {}),
+            ("rack", "not-a-model", {}),
+            ("rack", rack, {"rack": Rack.objects.create(name="stored-rack", site=site)}),
+        )
+
+        for relation_name, relation, extra_values in cases:
+            with self.subTest(relation_name=relation_name, relation=relation):
+                assessment = assess_permission_scoped_save(
+                    user,
+                    Device,
+                    {"name": "invalid-relation-device"},
+                    {"site": site, "device_type": device_type, "role": role, **extra_values},
+                    prospective_relations={relation_name: relation},
+                )
+                self.assertFalse(assessment.allowed)
 
 
 class SavePermissionScopedObjectTest(TestCase):

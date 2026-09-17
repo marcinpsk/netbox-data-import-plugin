@@ -79,6 +79,20 @@ repos:
         pass_filenames: false
         files: ^netbox_data_import/tests/.*\.py$
 
+      - id: review-patterns
+        name: Private coordinator access (OpenGrep)
+        entry: scripts/check-review-patterns scan
+        language: system
+        pass_filenames: false
+        files: ^(netbox_data_import/.*\.py|\.opengrep/.*|scripts/check-review-patterns)$
+
+      - id: review-pattern-tests
+        name: OpenGrep rule fixtures
+        entry: scripts/check-review-patterns test
+        language: system
+        pass_filenames: false
+        files: ^(\.opengrep/.*|scripts/check-review-patterns)$
+
       - id: gen-compatibility
         name: Compatibility metadata follows the version and the test matrix
         entry: python3 scripts/gen_compatibility.py

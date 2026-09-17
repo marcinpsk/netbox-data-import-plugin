@@ -5,6 +5,10 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+const searchSource = readFileSync(
+  resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_picker_search.js"),
+  "utf8",
+);
 const controllerSource = readFileSync(
   resolve(process.cwd(), "netbox_data_import/static/netbox_data_import/js/trace_termination_picker.js"),
   "utf8",
@@ -68,6 +72,7 @@ test("the picker states how many of the eligible terminations it shows", async (
     total: 7,
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -85,6 +90,7 @@ test("saving is refused until a candidate is chosen", async ({ page }) => {
     total: 1,
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -107,6 +113,7 @@ test("the picker sends the preview revision, which the server checks before it a
     });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -128,6 +135,7 @@ test("the search that produced the offer travels with the saved decision", async
     });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -147,6 +155,7 @@ test("a refused candidate query reports its reason and offers nothing", async ({
     });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -169,6 +178,7 @@ test("a slower earlier search does not overwrite the answer to a later one", asy
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -201,6 +211,7 @@ test("the search that travels with a decision is the one that produced the offer
     });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -232,6 +243,7 @@ test("a refused lookup drops the candidate the previous search offered", async (
     });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -261,6 +273,7 @@ test("a lookup that never answers drops the offer on screen", async ({ page }) =
     });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -286,9 +299,11 @@ test("a boosted navigation that evaluates the script again opens the picker once
     });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
   // An htmx boost swaps the page and evaluates the script the new page carries a second time.
   await page.evaluate((markup) => { document.body.innerHTML = markup; }, fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -304,6 +319,7 @@ test("a boosted navigation that evaluates the script again opens the picker once
 test("opening the picker twice reuses the one Modal the page already has", async ({ page }) => {
   await serveCandidates(page, { ok: true, candidates: [], shown: 0, total: 0 });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   await page.locator("[data-trace-picker]").click();
@@ -324,6 +340,7 @@ test("a lookup that settles after a swap does not answer into the page that repl
     });
   });
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
   await page.locator("[data-trace-picker]").click();
 
@@ -340,6 +357,7 @@ test("a search on a page whose picker the swap removed does not throw", async ({
   const failures = [];
   page.on("pageerror", (error) => failures.push(error.message));
   await page.setContent(fixture);
+  await page.addScriptTag({ content: searchSource });
   await page.addScriptTag({ content: controllerSource });
 
   // A boost can land on a page with no picker at all, while the debounce is still pending.

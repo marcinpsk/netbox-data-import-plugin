@@ -212,22 +212,29 @@ COMPETING_WRITE_LOCK_TIMEOUT = "750ms"
 
 
 @contextmanager
-def competing_write_during(signal, sender, competing_write):
-    """Attempt *competing_write* on a second connection at the first *signal* this thread sends.
+def competing_write_during(signal, sender, competing_write, *, skip=0):
+    """Attempt *competing_write* on a second connection at one *signal* this thread sends.
 
     Yields the ``observed`` and ``blocked`` lists. ``blocked`` holds one entry when the competing
     write waited for the lock the code under test holds, so an empty list means it landed.
+
+    *skip* passes that many earlier signals untouched, which places the write inside a window that
+    opens only after the code under test has already read the row once.
     """
     from threading import current_thread
 
     from django.db import OperationalError, connection
 
     calling_thread = current_thread()
+    seen: list[bool] = []
     observed: list[bool] = []
     blocked: list[bool] = []
 
     def contend_during_write(sender, instance, **kwargs):
         if observed or current_thread() is not calling_thread:
+            return
+        seen.append(True)
+        if len(seen) <= skip:
             return
         observed.append(True)
 
@@ -273,6 +280,34 @@ def run_on_separate_connection(target):
             raise AssertionError("The separate database connection did not finish.")
         if not errors.empty():
             raise errors.get()
+
+
+@contextmanager
+def profile_deleted_at_the_policy_lock(profile_pk):
+    """Delete one Import Profile on another connection as this thread takes its policy lock.
+
+    Stands in for a profile deleted between a view's own lookup and its policy lock. Yields the
+    `deleted` list, which holds one entry once the lock statement has run.
+    """
+    from django.db import connection
+
+    from netbox_data_import.models import ImportProfile
+
+    deleted = []
+
+    def delete_when_the_lock_runs(execute, sql, params, many, context):
+        if not deleted and "FOR UPDATE" in sql and ImportProfile._meta.db_table in sql:
+            deleted.append(True)
+
+            def delete_it():
+                ImportProfile.objects.filter(pk=profile_pk).delete()
+
+            with run_on_separate_connection(delete_it):
+                pass
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(delete_when_the_lock_runs):
+        yield deleted
 
 
 def user_with_object_permission(username, grants):

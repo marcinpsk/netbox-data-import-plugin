@@ -438,6 +438,17 @@ class DeviceModuleDuplicateTest(DeviceModulePlanTestBase):
         self.assertEqual([unit.disposition for unit in units], [Disposition.INVALID] * 2)
         self.assertEqual(units[0].diagnostics[0].code, "device.duplicate_serial")
 
+    def test_an_overlong_scalar_is_invalid_even_when_the_rack_is_planned(self):
+        """A rack planned by the same batch defers the relation, not the row's own field values."""
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_row = self._row(3, "D-1", "srv-01", rack_name="batch-rack", serial="S" * 51)
+
+        unit = self._plan(rack_row, device_row)[0]
+
+        self.assertEqual(unit.disposition, Disposition.INVALID)
+        self.assertEqual(unit.diagnostics[0].code, "device.validation_failed")
+        self.assertIn("serial", unit.diagnostics[0].display["message"].lower())
+
     def test_a_duplicate_asset_tag_in_one_file_is_invalid(self):
         units = self._plan(
             self._row(2, "D-1", "srv-01", asset_tag="AT-1"),
@@ -1414,6 +1425,24 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
             netbox_snapshot={"canonical": stored_address, "display": stored_address},
         )
 
+    def _plan_with_device_scope(self, username, actions, constraint, row):
+        """Plan one row with an actor whose Device write has the given final-state scope."""
+        from dcim.models import Device, Rack
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        constraints = constraint if isinstance(constraint, tuple) else (constraint,)
+        actor = user_with_object_permission(
+            username,
+            [
+                (Device, ("view",), {}),
+                *((Device, actions, item) for item in constraints),
+                (Rack, ("view",), {}),
+            ],
+        )
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+        return DeviceModule().plan(self._batch(row), self.profile, CATALOG, reader)
+
     def test_a_create_carries_and_assigns_the_rows_address(self):
         """A created device gets its parsed address after its interface exists."""
         self._interface_template()
@@ -1624,6 +1653,108 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
         with self.assertRaises(ObjectPermissionDenied):
             DeviceModule().apply(change, ExecutionContext(actor=scoped, reader=self.reader, profile=self.profile))
 
+    def test_an_assignable_create_address_is_checked_during_planning(self):
+        """Planning blocks a create that its address moves outside the Device add scope."""
+        self._interface_template()
+
+        units = self._plan_with_device_scope(
+            "device-module-ip-plan-null",
+            ("add",),
+            {"primary_ip4__isnull": True},
+            self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.25"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.BLOCKED)
+        self.assertEqual(units[0].diagnostics[0].code, "device.add_permission")
+
+    def test_an_assignable_create_address_can_grant_matching_scope(self):
+        """Planning sees the same address value that execution will select on the Device."""
+        self._interface_template()
+
+        units = self._plan_with_device_scope(
+            "device-module-ip-plan-address",
+            ("add",),
+            {"primary_ip4__address": "198.18.0.26/32"},
+            self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.26"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+
+    def test_prospective_addresses_share_a_row_without_writing_or_mutating(self):
+        """Two fields for one host use the row execution will create, without side effects."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        from netbox_data_import import ip_assignment
+
+        self._interface_template()
+        candidate = Device(
+            name="prospective-address-device",
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+
+        addresses = ip_assignment.prospective_addresses(
+            candidate,
+            {"primary_ip4": "198.18.0.30/32", "oob_ip": "198.18.0.30/32"},
+        )
+
+        self.assertIs(addresses["primary_ip4"].instance, addresses["oob_ip"].instance)
+        self.assertIsNone(candidate.pk)
+        self.assertIsNone(candidate.primary_ip4_id)
+        self.assertFalse(Device.objects.filter(name=candidate.name).exists())
+        self.assertFalse(Interface.objects.filter(name="mgmt0").exists())
+        self.assertFalse(IPAddress.objects.filter(address="198.18.0.30/32").exists())
+
+    def test_an_unplaceable_create_address_keeps_null_scope(self):
+        """Planning keeps the field null when execution will store an unassigned value."""
+        units = self._plan_with_device_scope(
+            "device-module-ip-plan-unassigned",
+            ("add",),
+            {"primary_ip4__isnull": True},
+            self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.27"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+
+    def test_an_assignable_update_address_is_checked_during_planning(self):
+        """Planning blocks an update that starts in scope but leaves it after IP assignment."""
+        self._interface_template()
+        self._with_provenance(self._device("srv-01", rack=self.rack))
+
+        units = self._plan_with_device_scope(
+            "device-module-ip-plan-update",
+            ("change",),
+            {"primary_ip4__isnull": True},
+            self._row(2, "D-1", "srv-01", primary_ip4="198.18.0.28"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.BLOCKED)
+        self.assertEqual(units[0].diagnostics[0].code, "device.change_permission")
+
+    def test_a_stored_unassigned_address_is_checked_in_its_final_assignment_state(self):
+        """Planning replaces the stored IP row without changing it in the database."""
+        from ipam.models import IPAddress
+
+        self._interface_template()
+        self._with_provenance(self._device("srv-01", rack=self.rack, serial="CURRENT"))
+        stored = IPAddress.objects.create(address="198.18.0.29/32")
+
+        units = self._plan_with_device_scope(
+            "device-module-ip-plan-existing",
+            ("change",),
+            (
+                {"primary_ip4__isnull": True, "serial": "CURRENT"},
+                {"primary_ip4__assigned_object_id__isnull": False, "serial": "FINAL"},
+            ),
+            self._row(2, "D-1", "srv-01", serial="FINAL", primary_ip4="198.18.0.29"),
+        )
+
+        self.assertEqual(units[0].disposition, Disposition.ACTIONABLE, units[0].diagnostics)
+        stored.refresh_from_db()
+        self.assertIsNone(stored.assigned_object)
+
     def test_a_stored_unassigned_address_is_cleared_after_it_places(self):
         """A later import clears stale provenance when the address can now land."""
         self._interface_template()
@@ -1694,6 +1825,40 @@ class DeviceModuleFieldReviewTest(DeviceModulePlanTestBase):
 
         self.assertEqual(unit.disposition, Disposition.NO_OP, unit.diagnostics)
         self.assertEqual(unit.changes, ())
+
+    def test_an_ignored_deferred_rack_is_not_used_for_update_permission(self):
+        """A discarded Rack relation cannot conflict with the reviewed final Device state."""
+        from dcim.models import Device, Rack
+
+        from netbox_data_import.tests.helpers import user_with_object_permission
+
+        device = self._with_provenance(self._device("srv-01", rack=self.rack, serial="OLD"))
+        IgnoredFieldDifference.objects.create(
+            profile=self.profile,
+            source_id="D-1",
+            netbox_device_id=device.pk,
+            target_field="rack_name",
+            file_snapshot={"canonical": ":batch-rack", "display": "batch-rack"},
+            netbox_snapshot={"canonical": ":dm-rack", "display": "dm-rack"},
+        )
+        actor = user_with_object_permission(
+            "device-module-reviewed-rack-scope",
+            [
+                (Device, ("view",), {}),
+                (Device, ("change",), {"rack_id": self.rack.pk}),
+                (Rack, ("view",), {}),
+            ],
+        )
+        reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
+        rack_row = self._row(2, "R-1", "batch-rack", device_class="Cabinet", rack_name="batch-rack")
+        device_row = self._row(3, "D-1", "srv-01", rack_name="batch-rack", serial="NEW")
+
+        unit = DeviceModule().plan(self._batch(rack_row, device_row), self.profile, CATALOG, reader)[0]
+
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE, unit.diagnostics)
+        self.assertEqual(unit.changes[0].payload["rack_id"], self.rack.pk)
+        self.assertIsNone(unit.changes[0].payload["rack_name"])
+        self.assertEqual(unit.changes[0].payload["serial"], "NEW")
 
     def test_a_review_saved_against_another_device_does_not_apply(self):
         """A review names one device, so it cannot settle a difference on a different one."""
@@ -1957,7 +2122,11 @@ class DeviceModuleProvenanceTest(DeviceModulePlanTestBase):
         )
         actor = user_with_object_permission(
             "device-module-review-blind",
-            [(Device, ("view", "add"), {"name": "nothing-matches-this"}), (Rack, ("view",), {})],
+            [
+                (Device, ("view",), {"name": "nothing-matches-this"}),
+                (Device, ("add",), {"name": "srv-02"}),
+                (Rack, ("view",), {}),
+            ],
         )
         reader = NetBoxReader.for_actor(actor).for_target(site=self.site)
 
@@ -2115,24 +2284,30 @@ class PreviewActionContractTest(DeviceModulePlanTestBase):
         if conflict == "name_placement_conflict":
             self._device("srv-placed", rack=self.rack, position=10, face="front")
             return (self._row(2, "D-1", "srv-placed", rack_name="dm-rack", u_position="20", face="Front"),)
+        if conflict == "rack_position_occupied":
+            return (
+                self._row(2, "D-1", "srv-01", u_position="5", face="Front"),
+                self._row(3, "D-2", "srv-02", u_position="5", face="Front"),
+            )
         raise AssertionError(f"add a planned row that raises {conflict!r} before listing its action")
 
     def test_every_conflict_the_preview_acts_on_offers_its_action(self):
         """A conflict in the table without its payload is the defect this test exists to catch."""
-        for conflict, (action, required) in _CONFLICT_ACTIONS.items():
-            with self.subTest(conflict=conflict):
-                units = self._plan(*self._rows_for(conflict))
-                rows = [WorkspaceUnit.from_unit(unit) for unit in units]
-                carrying = [row for row in rows if conflict in row.extra_data.get("identity_conflicts", ())]
+        for conflict, entries in _CONFLICT_ACTIONS.items():
+            for action, required in entries:
+                with self.subTest(conflict=conflict, action=action):
+                    units = self._plan(*self._rows_for(conflict))
+                    rows = [WorkspaceUnit.from_unit(unit) for unit in units]
+                    carrying = [row for row in rows if conflict in row.extra_data.get("identity_conflicts", ())]
 
-                self.assertTrue(carrying, f"no planned row raised {conflict}")
-                for row in carrying:
-                    for key in required:
-                        self.assertTrue(
-                            row.extra_data.get(key),
-                            f"{conflict} offers {action}, which needs extra_data[{key!r}]",
-                        )
-                    self.assertIn(action, row.extra_data["offered_actions"])
+                    self.assertTrue(carrying, f"no planned row raised {conflict}")
+                    for row in carrying:
+                        for key in required:
+                            self.assertTrue(
+                                row.extra_data.get(key),
+                                f"{conflict} offers {action}, which needs extra_data[{key!r}]",
+                            )
+                        self.assertIn(action, row.extra_data["offered_actions"])
 
 
 class DeviceModuleReportsEveryProblemTest(DeviceModulePlanTestBase):

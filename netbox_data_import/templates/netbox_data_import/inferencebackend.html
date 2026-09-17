@@ -90,6 +90,26 @@
       </div>
       {% endif %}
     </div>
+    {% if perms.netbox_data_import.change_inferencebackend and model_choices %}
+    <div class="card">
+      <h2 class="card-header">Available models</h2>
+      <div class="card-body">
+        <p>The endpoint offered these model ids. Select one to open the edit form with that value.</p>
+        <form method="get"
+              action="{% url 'plugins:netbox_data_import:inferencebackend_edit' pk=object.pk %}">
+          <div class="input-group">
+            <select class="form-select" name="model" aria-label="Available models">
+              {% for model in model_choices %}
+              <option value="{{ model }}"{% if model == object.model %} selected{% endif %}>{{ model }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-primary">Use selected model</button>
+          </div>
+        </form>
+        <p class="text-secondary mt-2 mb-0">You can still enter a model id manually on the edit form.</p>
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
 {% endblock content %}

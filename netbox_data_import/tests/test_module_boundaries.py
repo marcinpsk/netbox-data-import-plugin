@@ -38,6 +38,7 @@ FORBIDDEN_INTERPRETER_IMPORTS = frozenset(
         "views",
     }
 )
+PERMISSION_CONSTRAINT_INTERNALS = frozenset({"qs_filter_from_constraints", "_object_perm_cache"})
 
 
 def _import_engine_calls(path: pathlib.Path) -> set[str]:
@@ -84,6 +85,18 @@ def _referenced_names(path: pathlib.Path) -> set[str]:
     return names
 
 
+def _constraint_offenders(root: pathlib.Path) -> dict[str, list[str]]:
+    """Return every module under `root` except its own owner that reads NetBox constraint state."""
+    owner = root / "object_permissions.py"
+    return {
+        str(path.relative_to(root)): sorted(names)
+        for path in root.rglob("*.py")
+        if "tests" not in path.relative_to(root).parts
+        and path != owner
+        and (names := _referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS)
+    }
+
+
 def _imports_target_modules(path: pathlib.Path) -> bool:
     """Return whether a caller bypasses the coordinator for a Target Module."""
     tree = ast.parse(path.read_text())
@@ -104,6 +117,17 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
     def test_the_legacy_engine_is_deleted(self):
         self.assertFalse((PACKAGE / "engine.py").exists())
+
+    def test_proposal_protocol_and_persistence_share_one_contract(self):
+        """Response validation, prompting, and storage cannot drift independently."""
+        from netbox_data_import import proposal_contract, proposal_jobs, proposal_response
+        from netbox_data_import.models import ProposalOutcome
+
+        self.assertIs(ProposalOutcome.CHOICES, proposal_contract.OUTCOME_CHOICES)
+        self.assertIs(proposal_response.OUTCOMES, proposal_contract.OUTCOMES)
+        self.assertIs(proposal_response.RESPONSE_MEMBERS, proposal_contract.RESPONSE_MEMBERS)
+        for member in proposal_contract.RESPONSE_MEMBER_NAMES:
+            self.assertIn(member, proposal_jobs.SYSTEM_INSTRUCTION)
 
     def test_the_architecture_guidance_names_the_public_coordinator(self):
         guidance = PACKAGE.parent / "AGENTS.md"
@@ -195,6 +219,37 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         for name in TARGET_MODULES:
             with self.subTest(module=name):
                 self.assertEqual(_imported_roots(PACKAGE / name) & FORBIDDEN_TARGET_MODULE_IMPORTS, set())
+
+    def test_permission_constraint_parsing_has_one_owner(self):
+        """Only the object permission module interprets NetBox constraint state."""
+        self.assertEqual(_constraint_offenders(PACKAGE), {})
+
+    def test_the_owner_exemption_covers_one_module_only(self):
+        """A nested module cannot take the exemption by reusing the owner's file name."""
+        with TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "object_permissions.py").write_text(
+                "from utilities.permissions import qs_filter_from_constraints\n"
+            )
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "object_permissions.py").write_text(
+                "from utilities.permissions import qs_filter_from_constraints\n"
+            )
+
+            self.assertEqual(
+                _constraint_offenders(root), {"nested/object_permissions.py": ["qs_filter_from_constraints"]}
+            )
+
+    def test_permission_constraint_owner_guard_reads_imports_and_attributes(self):
+        """The ownership guard detects both supported access forms."""
+        with TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "permission_reader.py"
+            path.write_text(
+                "from utilities.permissions import qs_filter_from_constraints\nconstraints = actor._object_perm_cache\n"
+            )
+
+            self.assertEqual(_referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS, PERMISSION_CONSTRAINT_INTERNALS)
 
     def test_no_first_party_module_names_the_cable_path_model(self):
         """Section 6.4: the plugin writes Cables and NetBox derives every path from them."""

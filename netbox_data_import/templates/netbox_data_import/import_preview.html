@@ -779,16 +779,18 @@
                 </button>
                 {% endif %}
 
-                {# Per-row sync button: show on create rows for devices and racks only; disabled when conflicts present #}
-                {% if row.action == 'create' and row.object_type == 'device' or row.action == 'create' and row.object_type == 'rack' %}
+                {# Per-row sync button: devices and racks the import creates or updates; disabled when conflicts present #}
+                {% if row.object_type == 'device' or row.object_type == 'rack' %}
+                {% if row.action == 'create' or row.action == 'update' %}
                 <button type="button" class="btn btn-sm btn-outline-success ms-1 ndi-sync-row-btn"
                         {% if row.extra_data.conflicts %}
                           disabled
                           title="Resolve all conflicts before syncing"
                         {% else %}
                           data-ndi-modal="#syncRowModal"
-                          title="Create this {{ row.object_type }} in NetBox now"
+                          title="{% if row.action == 'update' %}Update{% else %}Create{% endif %} this {{ row.object_type }} in NetBox now"
                         {% endif %}
+                        data-action="{{ row.action }}"
                         data-row-number="{{ row.row_number }}"
                         data-object-type="{{ row.object_type }}"
                         data-name="{{ row.name }}"
@@ -807,6 +809,7 @@
                         data-status="{{ row.extra_data.status|default:'' }}">
                   <i class="mdi mdi-lightning-bolt"></i> Sync to NetBox
                 </button>
+                {% endif %}
                 {% endif %}
 
               </td>
@@ -911,6 +914,7 @@
                             </td>
                             <td class="text-nowrap">
                               {% if conflict_row.source_id and profile_id %}
+                              {% if conflict_row.has_resolve_action %}
                               {% if 'ignore_serial' in conflict_row.offered_actions %}
                               {# The operator picks which of the colliding rows gives the serial up. #}
                               <form method="post" action="{% url 'plugins:netbox_data_import:ignore_duplicate_serial' %}"
@@ -931,6 +935,42 @@
                                   <i class="mdi mdi-barcode-off"></i> Ignore serial
                                 </button>
                               </form>
+                              {% endif %}
+                              {% if 'ignore_position' in conflict_row.offered_actions %}
+                              {# Either row of a position collision may give the unit up. #}
+                              <form method="post" action="{% url 'plugins:netbox_data_import:ignore_position' %}"
+                                    hx-post="{% url 'plugins:netbox_data_import:ignore_position' %}"
+                                    hx-target="#page-content"
+                                    hx-select="#page-content"
+                                    hx-swap="outerHTML show:top"
+                                    hx-disabled-elt="find button"
+                                    class="d-inline ndi-conflict-comparison-action">
+                                {% csrf_token %}
+                                <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                                <input type="hidden" name="source_id" value="{{ conflict_row.source_id }}">
+                                <input type="hidden" name="row_number" value="{{ conflict_row.row_number }}">
+                                <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+                                <input type="hidden" name="next" value="{{ preview_url }}">
+                                <button type="submit" class="btn btn-xs btn-outline-warning"
+                                        title="Import row {{ conflict_row.row_number }} into its rack without position U{{ conflict_row.u_position }}, leaving the unit to the other row.">
+                                  <i class="mdi mdi-arrow-collapse-down"></i> Ignore position
+                                </button>
+                              </form>
+                              {% endif %}
+                              {% if 'ignore_row' in conflict_row.offered_actions %}
+                              <form method="post" action="{% url 'plugins:netbox_data_import:ignore_device' %}"
+                                    class="d-inline ms-1 ndi-conflict-comparison-action">
+                                {% csrf_token %}
+                                <input type="hidden" name="profile_id" value="{{ profile_id }}">
+                                <input type="hidden" name="source_id" value="{{ conflict_row.source_id }}">
+                                <input type="hidden" name="device_name" value="{{ conflict_row.name }}">
+                                <input type="hidden" name="next" value="{{ preview_url }}">
+                                <button type="submit" class="btn btn-xs btn-outline-dark"
+                                        title="Ignore row {{ conflict_row.row_number }} for this profile, so no later import reads it either.">
+                                  <i class="mdi mdi-eye-off"></i> Ignore row
+                                </button>
+                              </form>
+                              {% endif %}
                               {% else %}
                               <span class="text-muted small">—</span>
                               {% endif %}
