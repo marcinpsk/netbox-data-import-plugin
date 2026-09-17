@@ -2057,6 +2057,7 @@ class DeviceModule:
                 "field_diff": review.differing,
                 "field_ignored": review.ignored,
                 "field_informational": review.informational,
+                "field_matching": review.matching,
                 "field_review_snapshots": snapshots,
                 "field_non_writable": sorted(DeviceFieldReviewer.non_writable_fields()),
             },

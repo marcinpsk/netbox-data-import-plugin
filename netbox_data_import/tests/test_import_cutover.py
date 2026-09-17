@@ -18,6 +18,7 @@ from netbox_data_import.import_engine import operator_failure_message
 from netbox_data_import.jobs import ImportJobRunner
 from netbox_data_import.models import (
     ClassRoleMapping,
+    DeviceExistingMatch,
     ColumnMapping,
     DeviceTypeMapping,
     ExecutionOutcome,
@@ -118,6 +119,39 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
             reverse("plugins:netbox_data_import:import_setup"),
             {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
         )
+
+    def test_the_preview_states_what_a_row_sync_would_change(self):
+        """The sync confirmation reads this blob, so the rendered preview has to carry it."""
+        from dcim.models import Device, DeviceRole, DeviceType, Rack
+
+        device = Device.objects.create(
+            name="server-a",
+            site=self.site,
+            device_type=DeviceType.objects.get(slug="example-model"),
+            role=DeviceRole.objects.get(slug="server"),
+            rack=Rack.objects.create(name="rack-b", site=self.site, u_height=42),
+            status="active",
+        )
+        DeviceExistingMatch.objects.create(
+            profile=self.profile,
+            source_id="D-1",
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+        self._upload()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'id="ndi-sync-change-preview-by-row"', response.content)
+        entries = {
+            entry["field"]: entry for row in response.context["sync_change_preview_by_row"].values() for entry in row
+        }
+        self.assertEqual(entries["rack_name"]["state"], "change")
+        self.assertEqual(entries["rack_name"]["netbox"], "rack-b")
+        self.assertEqual(entries["rack_name"]["file"], "rack-a")
+        # The name NetBox already holds is reported, not dropped, so the write is not read as total.
+        self.assertEqual(entries["device_name"]["state"], "unchanged")
 
     def _sync_single_row(self, data=None):
         """Post an inline execution with the active preview revision when one exists."""

@@ -85,48 +85,129 @@
       }
     }
 
-    function makeValueCell(value, fieldKey) {
-      var td = document.createElement('td');
-      td.appendChild(document.createTextNode(value || '—'));
-      if (resolvedFieldKeys[fieldKey]) {
-        var badge = document.createElement('span');
-        badge.className = 'badge text-bg-success ms-1';
-        badge.textContent = 'from resolution';
-        td.appendChild(badge);
-      }
-      return td;
+    function resolutionBadge(fieldKey) {
+      if (!resolvedFieldKeys[fieldKey]) return null;
+      var badge = document.createElement('span');
+      badge.className = 'badge text-bg-success ms-1';
+      badge.textContent = 'from resolution';
+      return badge;
     }
 
     var tbody = document.getElementById('syncRowFields');
+    var summary = document.getElementById('syncRowSummary');
+    var showUnchanged = document.getElementById('syncRowShowUnchanged');
     tbody.innerHTML = '';
 
-    var fieldDefs = [
-      ['Name', btn.dataset.name, 'device_name'],
-      ['Rack', btn.dataset.rackName, 'rack_name'],
-      ['Source ID', btn.dataset.sourceId, 'source_id'],
-      ['Manufacturer', btn.dataset.sourceMake, 'source_make'],
-      ['Model', btn.dataset.sourceModel, 'source_model'],
-      ['Asset tag', btn.dataset.assetTag, 'asset_tag'],
-      ['Rack type', btn.dataset.rackTypeName, 'rack_type'],
-      ['Serial', btn.dataset.serial, 'serial'],
-      ['U Position', btn.dataset.uPosition, 'u_position'],
-      ['U Height', btn.dataset.uHeight, 'u_height'],
-      ['Face', btn.dataset.face, 'face'],
-      ['Airflow', btn.dataset.airflow, 'airflow'],
-      ['Status', btn.dataset.status, 'status'],
-    ];
+    function addCell(tr, text, className) {
+      var td = document.createElement('td');
+      if (className) td.className = className;
+      td.appendChild(document.createTextNode(text === '' || text == null ? '\u2014' : text));
+      tr.appendChild(td);
+      return td;
+    }
 
-    fieldDefs.forEach(function (def) {
-      var label = def[0], value = def[1], fieldKey = def[2];
-      if (!value) return;
-      var tr = document.createElement('tr');
-      var th = document.createElement('td');
-      th.className = 'fw-semibold';
-      th.textContent = label;
-      tr.appendChild(th);
-      tr.appendChild(makeValueCell(value, fieldKey));
-      tbody.appendChild(tr);
+    /* The operator is about to write to NetBox, so each field says what the write does to it. */
+    var STATE_LABELS = {
+      change: ['will update', 'text-bg-warning'],
+      unchanged: ['unchanged', 'text-bg-light text-muted'],
+      ignored: ['ignored', 'text-bg-secondary'],
+      not_written: ['not written', 'text-bg-secondary']
+    };
+
+    var changePreview = readJson('ndi-sync-change-preview-by-row')[currentRowNumber] || [];
+    var isUpdate = btn.dataset.action === 'update';
+    var reviewed = isUpdate && changePreview.length > 0;
+    var unchangedRows = [];
+
+    if (reviewed) {
+      changePreview.forEach(function (entry) {
+        var tr = document.createElement('tr');
+        addCell(tr, entry.label, 'fw-semibold');
+        addCell(tr, entry.netbox, entry.state === 'change' ? '' : 'text-muted');
+        var after = addCell(tr, entry.state === 'change' ? entry.file : entry.netbox,
+                            entry.state === 'change' ? 'fw-semibold' : 'text-muted');
+        var state = STATE_LABELS[entry.state] || STATE_LABELS.unchanged;
+        var badge = document.createElement('span');
+        badge.className = 'badge ms-1 ' + state[1];
+        badge.textContent = state[0];
+        after.appendChild(badge);
+        /* A value the writer will not send is shown struck through, so it reads as not applied. */
+        if (entry.state === 'ignored' || entry.state === 'not_written') {
+          var skipped = document.createElement('span');
+          skipped.className = 'text-muted small d-block text-decoration-line-through';
+          skipped.textContent = entry.file;
+          after.appendChild(skipped);
+        }
+        var resolved = resolutionBadge(entry.field);
+        if (resolved) after.appendChild(resolved);
+        if (entry.state === 'unchanged') {
+          tr.hidden = true;
+          unchangedRows.push(tr);
+        }
+        tbody.appendChild(tr);
+      });
+    } else {
+      /* A create has nothing in NetBox yet, and a rack row carries no field review. */
+      var fieldDefs = [
+        ['Name', btn.dataset.name, 'device_name'],
+        ['Rack', btn.dataset.rackName, 'rack_name'],
+        ['Source ID', btn.dataset.sourceId, 'source_id'],
+        ['Manufacturer', btn.dataset.sourceMake, 'source_make'],
+        ['Model', btn.dataset.sourceModel, 'source_model'],
+        ['Asset tag', btn.dataset.assetTag, 'asset_tag'],
+        ['Rack type', btn.dataset.rackTypeName, 'rack_type'],
+        ['Serial', btn.dataset.serial, 'serial'],
+        ['U Position', btn.dataset.uPosition, 'u_position'],
+        ['U Height', btn.dataset.uHeight, 'u_height'],
+        ['Face', btn.dataset.face, 'face'],
+        ['Airflow', btn.dataset.airflow, 'airflow'],
+        ['Status', btn.dataset.status, 'status']
+      ];
+      fieldDefs.forEach(function (def) {
+        if (!def[1]) return;
+        var tr = document.createElement('tr');
+        addCell(tr, def[0], 'fw-semibold');
+        addCell(tr, '', 'text-muted');
+        var after = addCell(tr, def[1]);
+        var resolved = resolutionBadge(def[2]);
+        if (resolved) after.appendChild(resolved);
+        tbody.appendChild(tr);
+      });
+    }
+
+    var changeCount = 0;
+    var skippedCount = 0;
+    changePreview.forEach(function (entry) {
+      if (entry.state === 'change') changeCount += 1;
+      else if (entry.state !== 'unchanged') skippedCount += 1;
     });
+
+    if (showUnchanged) {
+      showUnchanged.parentNode.hidden = unchangedRows.length === 0;
+      showUnchanged.checked = false;
+      showUnchanged.onchange = function () {
+        unchangedRows.forEach(function (tr) { tr.hidden = !showUnchanged.checked; });
+      };
+    }
+
+    document.getElementById('syncRowNextHead').textContent = reviewed ? 'After sync' : 'Will be set to';
+
+    if (!reviewed) {
+      summary.className = 'small mb-2 text-muted';
+      summary.textContent = isUpdate
+        ? 'This row has no reviewed field differences.'
+        : 'Creates this ' + (btn.dataset.objectType || 'object') + ' in NetBox with the values below.';
+    } else if (changeCount === 0) {
+      summary.className = 'small mb-2 text-muted';
+      summary.textContent = 'No field changes. NetBox already holds every reviewed value'
+        + (skippedCount ? ', and ' + skippedCount + ' field' + (skippedCount === 1 ? ' is' : 's are')
+           + ' not written.' : '.');
+    } else {
+      summary.className = 'small mb-2';
+      summary.textContent = changeCount + ' field' + (changeCount === 1 ? '' : 's')
+        + ' will change. ' + unchangedRows.length + ' unchanged'
+        + (skippedCount ? ', ' + skippedCount + ' not written.' : '.');
+    }
 
     // Append extra_columns (custom fields / unmapped columns) below standard fields
     var extraCols = readJson('ndi-extra-columns-by-row')[btn.dataset.rowNumber] || {};
@@ -134,26 +215,20 @@
       var ecVal = String(extraCols[ecKey]);
       if (!ecVal) continue;
       var ecTr = document.createElement('tr');
-      var ecTd1 = document.createElement('td');
-      ecTd1.className = 'text-muted small';
-      ecTd1.textContent = ecKey;
-      var ecTd2 = document.createElement('td');
-      ecTd2.textContent = ecVal;
-      ecTr.appendChild(ecTd1);
-      ecTr.appendChild(ecTd2);
+      addCell(ecTr, ecKey, 'text-muted small');
+      addCell(ecTr, '', 'text-muted');
+      addCell(ecTr, ecVal);
       tbody.appendChild(ecTr);
     }
 
     if (btn.dataset.detail) {
-      var tr = document.createElement('tr');
-      var th = document.createElement('td');
-      th.className = 'fw-semibold';
-      th.textContent = 'Detail';
-      tr.appendChild(th);
-      var td = document.createElement('td');
-      td.textContent = btn.dataset.detail;
-      tr.appendChild(td);
-      tbody.appendChild(tr);
+      var detailTr = document.createElement('tr');
+      addCell(detailTr, 'Detail', 'fw-semibold');
+      var detailTd = document.createElement('td');
+      detailTd.colSpan = 2;
+      detailTd.textContent = btn.dataset.detail;
+      detailTr.appendChild(detailTd);
+      tbody.appendChild(detailTr);
     }
 
     var errorDiv = document.getElementById('syncRowError');
