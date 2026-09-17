@@ -144,7 +144,9 @@
     var rows = document.querySelectorAll('#previewRowsBody > tr[data-action]');
     for (var index = 0; index < rows.length; index++) {
       if (rows[index].style.display === 'none') continue;
-      if (rows[index].getBoundingClientRect().bottom > 0) {
+      var rect = rows[index].getBoundingClientRect();
+      // Both edges, so a table entirely below the fold does not answer with its first row.
+      if (rect.bottom > 0 && rect.top < (window.innerHeight || 0)) {
         return {row: rows[index].dataset.rowNumber || '', type: rows[index].dataset.objectType || ''};
       }
     }

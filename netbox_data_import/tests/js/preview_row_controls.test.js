@@ -388,6 +388,7 @@ describe("a recalculation that reloads the page", () => {
       window.__scrolledTo = y;
     };
     window.__scrolledTo = null;
+    window.innerHeight = 800;
   });
 
   it("keeps the action filter the operator picked", () => {
@@ -414,8 +415,8 @@ describe("a recalculation that reloads the page", () => {
   });
 
   it("returns to the row the operator was looking at", () => {
-    document.getElementById("row-1").getBoundingClientRect = () => ({ bottom: -50 });
-    document.getElementById("row-2").getBoundingClientRect = () => ({ bottom: 120 });
+    document.getElementById("row-1").getBoundingClientRect = () => ({ bottom: -50, top: -90 });
+    document.getElementById("row-2").getBoundingClientRect = () => ({ bottom: 120, top: 80 });
     document.getElementById("row-2").dataset.rowNumber = "7";
     document.getElementById("row-2").dataset.objectType = "device";
 
@@ -432,8 +433,8 @@ describe("a recalculation that reloads the page", () => {
   it("falls back to the offset when that row is gone", () => {
     document.getElementById("row-2").dataset.rowNumber = "7";
     document.getElementById("row-2").dataset.objectType = "device";
-    document.getElementById("row-1").getBoundingClientRect = () => ({ bottom: -10 });
-    document.getElementById("row-2").getBoundingClientRect = () => ({ bottom: 40 });
+    document.getElementById("row-1").getBoundingClientRect = () => ({ bottom: -10, top: -50 });
+    document.getElementById("row-2").getBoundingClientRect = () => ({ bottom: 40, top: 0 });
     window.scrollY = 640;
 
     window.ndiRememberPreviewView();
@@ -441,6 +442,24 @@ describe("a recalculation that reloads the page", () => {
     window.ndiRestorePreviewView();
 
     expect(window.__scrolledTo).toBe(640);
+  });
+
+  it("keeps the offset when the whole table is still below the fold", () => {
+    // The operator is above the table, so no row is the one they are reading.
+    ["row-1", "row-2", "row-3"].forEach((id, index) => {
+      const row = document.getElementById(id);
+      row.dataset.rowNumber = String(index + 1);
+      row.dataset.objectType = "device";
+      row.getBoundingClientRect = () => ({ bottom: 5000, top: 4800 });
+    });
+    window.innerHeight = 800;
+    window.scrollY = 90;
+
+    window.ndiRememberPreviewView();
+    window.ndiRestorePreviewView();
+
+    expect(window.__scrolledTo).toBe(90);
+    expect(document.getElementById("row-1").dataset.scrolledIntoView).toBe(undefined);
   });
 
   it("restores once, so a later visit is not moved", () => {

@@ -114,7 +114,9 @@
       not_written: ['not written', 'text-bg-secondary']
     };
 
-    var changePreview = readJson('ndi-sync-change-preview-by-row')[currentRowNumber] || [];
+    // Row numbers repeat across object types, so the key names the type as well as the number.
+    var previewKey = (btn.dataset.objectType || '') + ':' + currentRowNumber;
+    var changePreview = readJson('ndi-sync-change-preview-by-row')[previewKey] || [];
     var isUpdate = btn.dataset.action === 'update';
     var reviewed = isUpdate && changePreview.length > 0;
     var unchangedRows = [];
@@ -202,8 +204,9 @@
         : 'Creates this ' + (btn.dataset.objectType || 'object') + ' in NetBox with the values below.';
     } else if (counts.change === 0) {
       summary.className = 'small mb-2 text-muted';
-      summary.textContent = 'No field changes. NetBox already holds every reviewed value'
-        + (skippedPhrase ? ', and ' + skippedPhrase + '.' : '.');
+      summary.textContent = skippedPhrase
+        ? 'No fields will change. ' + counts.unchanged + ' unchanged, ' + skippedPhrase + '.'
+        : 'No field changes. NetBox already holds every reviewed value.';
     } else {
       summary.className = 'small mb-2';
       summary.textContent = counts.change + ' field' + (counts.change === 1 ? '' : 's')
@@ -212,7 +215,7 @@
     }
 
     // Append extra_columns (custom fields / unmapped columns) below standard fields
-    var extraCols = readJson('ndi-extra-columns-by-row')[btn.dataset.rowNumber] || {};
+    var extraCols = readJson('ndi-extra-columns-by-row')[previewKey] || {};
     for (var ecKey in extraCols) {
       var ecVal = String(extraCols[ecKey]);
       if (!ecVal) continue;

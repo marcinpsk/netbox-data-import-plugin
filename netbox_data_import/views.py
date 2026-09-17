@@ -168,13 +168,21 @@ def _parse_posted_profile_id(request):
         return None
 
 
+def _row_key(unit) -> str:
+    """Return the key the sync modal looks a row up by.
+
+    Row numbers repeat across object types, so the number alone lets one row replace another.
+    """
+    return f"{unit.object_type}:{unit.row_number}"
+
+
 def _sync_change_preview_by_row(units, labels):
     """Return each reviewed row's fields grouped by what a sync would do to them."""
     previews = {}
     for unit in units:
         entries = sync_change_preview(unit.extra_data, labels)
         if entries:
-            previews[str(unit.row_number)] = entries
+            previews[_row_key(unit)] = entries
     return previews
 
 
@@ -1275,7 +1283,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if candidates.get("contact")
         }
         extra_columns_by_row = {
-            str(r.row_number): r.extra_data.get("extra_columns", {})
+            _row_key(r): r.extra_data.get("extra_columns", {})
             for r in result.units
             if r.extra_data.get("extra_columns")
         }

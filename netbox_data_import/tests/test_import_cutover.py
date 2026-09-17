@@ -144,9 +144,10 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'id="ndi-sync-change-preview-by-row"', response.content)
-        entries = {
-            entry["field"]: entry for row in response.context["sync_change_preview_by_row"].values() for entry in row
-        }
+        previews = response.context["sync_change_preview_by_row"]
+        # Row numbers repeat across object types, so a row-only key lets one row replace another.
+        self.assertTrue(all(key.startswith(("device:", "rack:")) for key in previews), sorted(previews))
+        entries = {entry["field"]: entry for row in previews.values() for entry in row}
         self.assertEqual(entries["rack_name"]["state"], "change")
         self.assertEqual(entries["rack_name"]["netbox"], "rack-b")
         self.assertEqual(entries["rack_name"]["file"], "rack-a")
