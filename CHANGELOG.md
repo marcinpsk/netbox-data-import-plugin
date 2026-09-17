@@ -2,6 +2,105 @@
 
 <!-- version list -->
 
+## v2.4.0 (2026-09-17)
+
+### Bug Fixes
+
+- Address inference review findings
+  ([`efb69ac`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/efb69ac425a5797a392506444b67dc0f000f9e9d))
+
+- Address review findings on permissions, resolution, and docs
+  ([`396434a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/396434a35b0595d9e2cec465cdfa735086d324cf))
+
+- Answer a deleted import profile at every policy write
+  ([`388ef6c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/388ef6c5682acf43991792dd22c385b0b1090107))
+
+- Drop the redundant lock and nested error paths in Ignore position
+  ([`f09d5b0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f09d5b00d62a0ecd2b797579a9c0a1e43625ed7b))
+
+- Drop the search in flight when a picker search changes
+  ([`e62491c`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e62491c3b3ec79f8ddc0d177aebf28922c4fa112))
+
+- Keep a saved root primary key knowable when a relation is planned
+  ([`7215ce9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7215ce9499195f2b7aa4299065ee1411c2bdd10a))
+
+- Require a source position on every Source Trace
+  ([`f4168c6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f4168c605dad30aae42894a1c14b84d564863080))
+
+- Validate independent Device fields when a relation is unresolved
+  ([`82eaaaa`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/82eaaaa7fd8d2ce0d90af90d873e96e1ba3e87f7))
+
+- **adapters**: Name the excluded row and keep its source location
+  ([`f9ea2e5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f9ea2e59e7556fbbc3bb64f2e6e94cd8a22e9fa5))
+
+- **adapters**: Reject a row the declared output kinds cannot carry
+  ([`f341328`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f34132807cb805347b6731fa0b2671c0a4cdf7ff))
+
+- **inference**: Keep the status classification of an oversized response
+  ([`46eba07`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/46eba079eef30abc353810352588d04d89790075))
+
+- **inference**: Refuse a saturated deadline pool instead of starving the caller
+  ([`091b942`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/091b942cca1ffaf3ba0998565980ce8b59a7ec0a))
+
+- **migrations**: Refuse to reverse the superseded-proposal retirement
+  ([`abe7f0f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/abe7f0fa3cda7bcd927eca1aceefa659872dbaff))
+
+- **opengrep**: Catch getattr on a bound coordinator
+  ([`f307853`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f307853b204f71b955f59515760243d133aa134a))
+
+- **opengrep**: Match the effective response body limit
+  ([`6037da5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6037da5f1b5d4c8cdb5bb85ce4367b2617d1ee37))
+
+- **proposals**: Retire requests queued under a superseded contract
+  ([`339d14f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/339d14fc53aa16294ac4a44a0b9ce262f07c9d5e))
+
+### Chores
+
+- **opengrep**: Replace the private-coordinator AST scanner with a taint rule
+  ([`c2e4642`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c2e4642bb8e2a9cfa4c695b808bbb272c42aac22))
+
+### Documentation
+
+- Require a protected NetBox-to-Proxy hop in the Vault research note
+  ([`640382d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/640382dd02fc29e4eaa8ec75b94b4838f837725a))
+
+### Features
+
+- Settle a rack position collision and sync an update row
+  ([`c818d75`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c818d75e63b4ada653e6ac961c4881909f04157d))
+
+### Refactoring
+
+- Keep one opengrep ruleset and one proposal-contract test module
+  ([`bd570f0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/bd570f034235fa487c194174e1bf889fa972f7aa))
+
+- Share one debounced search between the trace pickers
+  ([`e4a4590`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e4a4590070d55337685c0f892122b44b2182b11f))
+
+### Testing
+
+- Assert the exact read-failure message
+  ([`6a32c48`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6a32c48d7073461b2814e2dff82001cc532ffa07))
+
+- Exempt only the owning module in both tree guards
+  ([`0d46852`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/0d46852fbb91ea78e1063d04e6fa9e457abe46e8))
+
+- Fake migration 0035 on the walk back
+  ([`353e2e4`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/353e2e42984bbcbe825c2f276b46d89b2934779b))
+
+- Give the redaction header list its own module
+  ([`12ba5d3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/12ba5d30bdccd42b9902292983042e33329f93e9))
+
+- Prove each deleted-profile refusal with a real request
+  ([`494fdbd`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/494fdbdfd30d456dbb41dc5a74d5e9c24937cd3d))
+
+- Reject a negative candidate limit on the device endpoint
+  ([`3565897`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3565897c820e9eb808445ca0031d2e7d7a349073))
+
+- **opengrep**: Cover the alias import forms in the boundary fixture
+  ([`25bd06d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/25bd06db72c80ea2b6949e7ecc2238ecf518b1a7))
+
+
 ## v2.3.0 (2026-09-14)
 
 ### Bug Fixes
