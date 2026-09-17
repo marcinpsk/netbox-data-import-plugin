@@ -133,4 +133,87 @@
       setFilters('', 'error');
     }
   });
+
+  /* A recalculation reloads the whole page, so the filters and the place the operator was reading
+   * are carried across it. The entry is consumed on arrival, so only that reload is moved. */
+  var VIEW_KEY = 'ndi-preview-view';
+
+  /* The first row still on screen. A recalculated preview can hold a different number of rows,
+   * so an offset alone would land somewhere else. */
+  function rowInView() {
+    var rows = document.querySelectorAll('#previewRowsBody > tr[data-action]');
+    for (var index = 0; index < rows.length; index++) {
+      if (rows[index].style.display === 'none') continue;
+      var rect = rows[index].getBoundingClientRect();
+      // Both edges, so a table entirely below the fold does not answer with its first row.
+      if (rect.bottom > 0 && rect.top < (window.innerHeight || 0)) {
+        return {row: rows[index].dataset.rowNumber || '', type: rows[index].dataset.objectType || ''};
+      }
+    }
+    return null;
+  }
+
+  function findRow(anchor) {
+    if (!anchor) return null;
+    var rows = document.querySelectorAll('#previewRowsBody > tr[data-action]');
+    for (var index = 0; index < rows.length; index++) {
+      if (rows[index].dataset.rowNumber === anchor.row && rows[index].dataset.objectType === anchor.type) {
+        return rows[index];
+      }
+    }
+    return null;
+  }
+
+  function rememberView() {
+    var filterInput = document.getElementById('previewRowFilter');
+    var actionSelect = document.getElementById('previewActionFilter');
+    try {
+      window.sessionStorage.setItem(VIEW_KEY, JSON.stringify({
+        text: filterInput ? filterInput.value : '',
+        action: actionSelect ? actionSelect.value : '',
+        scrollY: window.scrollY || 0,
+        anchor: rowInView()
+      }));
+    } catch (error) {
+      /* The recalculation still runs. Only the restore is lost. */
+    }
+  }
+
+  function restoreView() {
+    var stored = null;
+    try {
+      stored = window.sessionStorage.getItem(VIEW_KEY);
+      window.sessionStorage.removeItem(VIEW_KEY);
+    } catch (error) {
+      return;
+    }
+    if (!stored) return;
+    var view;
+    try {
+      view = JSON.parse(stored);
+    } catch (error) {
+      return;
+    }
+    if (view.text || view.action) setFilters(view.text || '', view.action || '');
+    var target = findRow(view.anchor);
+    if (target && target.style.display !== 'none') {
+      target.scrollIntoView();
+      return;
+    }
+    if (view.scrollY) window.scrollTo(0, view.scrollY);
+  }
+
+  window.ndiRememberPreviewView = rememberView;
+  window.ndiRestorePreviewView = restoreView;
+
+  // A direct press navigates without the row-action script, so the view is stored here too.
+  document.addEventListener('click', function (event) {
+    if (event.target.closest('.ndi-recalculate-preview')) rememberView();
+  });
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', restoreView);
+  } else {
+    restoreView();
+  }
 }());

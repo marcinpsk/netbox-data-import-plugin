@@ -82,7 +82,7 @@ from .tables import (
 )
 from . import adapters, ip_assignment
 from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
-from .device_field_review import DeviceFieldReviewer
+from .device_field_review import DeviceFieldReviewer, sync_change_preview
 from .object_permissions import (
     ObjectPermissionDenied,
     assess_permission_scoped_save_option,
@@ -166,6 +166,24 @@ def _parse_posted_profile_id(request):
         return int(request.POST.get("profile_id", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _row_key(unit) -> str:
+    """Return the key the sync modal looks a row up by.
+
+    Row numbers repeat across object types, so the number alone lets one row replace another.
+    """
+    return f"{unit.object_type}:{unit.row_number}"
+
+
+def _sync_change_preview_by_row(units, labels):
+    """Return each reviewed row's fields grouped by what a sync would do to them."""
+    previews = {}
+    for unit in units:
+        entries = sync_change_preview(unit.extra_data, labels)
+        if entries:
+            previews[_row_key(unit)] = entries
+    return previews
 
 
 def _candidate_values(extra_data):
@@ -1265,10 +1283,11 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if candidates.get("contact")
         }
         extra_columns_by_row = {
-            str(r.row_number): r.extra_data.get("extra_columns", {})
+            _row_key(r): r.extra_data.get("extra_columns", {})
             for r in result.units
             if r.extra_data.get("extra_columns")
         }
+        sync_change_preview_by_row = _sync_change_preview_by_row(result.units, target_field_labels)
         split_field_values_by_source_id = {
             r.source_id: {
                 "device_name": r.name or "",
@@ -1325,6 +1344,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "contact_suggestions_by_row": contact_suggestions_by_row,
                 "contact_role_suggestions_by_row": contact_role_suggestions_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
+                "sync_change_preview_by_row": sync_change_preview_by_row,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
                 "preview_revision": current_preview_revision(request.session),

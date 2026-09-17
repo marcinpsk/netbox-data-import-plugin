@@ -205,6 +205,7 @@ class DeviceFieldReview:
     differing: dict[str, dict[str, str]]
     ignored: dict[str, dict[str, str]]
     informational: dict[str, dict[str, str]]
+    matching: dict[str, dict[str, str]]
     effective_proposal: dict[str, Any]
     snapshots: dict[str, tuple[dict[str, str], dict[str, str]]]
 
@@ -272,7 +273,7 @@ class DeviceFieldReviewer:
         display_overrides: Mapping[str, str] | None = None,
     ):
         """Return the writable differences and the reported-only ones as two maps."""
-        differing, informational, _ = DeviceFieldReviewer._compare(
+        differing, informational, _, _ = DeviceFieldReviewer._compare(
             matched_device,
             proposal,
             display_overrides=display_overrides,
@@ -306,7 +307,7 @@ class DeviceFieldReviewer:
         display_overrides: Mapping[str, str] | None = None,
     ) -> DeviceFieldReview:
         """Return differing, ignored, and write-safe values for one Device."""
-        differing, informational, snapshots = self._compare(
+        differing, informational, matching, snapshots = self._compare(
             matched_device,
             proposal,
             display_overrides=display_overrides,
@@ -333,6 +334,7 @@ class DeviceFieldReviewer:
             differing=differing,
             ignored=ignored,
             informational=informational,
+            matching=matching,
             effective_proposal=effective,
             snapshots=snapshots,
         )
@@ -348,6 +350,7 @@ class DeviceFieldReviewer:
         display_overrides = display_overrides or {}
         differing: dict[str, dict[str, str]] = {}
         informational: dict[str, dict[str, str]] = {}
+        matching: dict[str, dict[str, str]] = {}
         snapshots: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
         for definition in _FIELD_DEFINITIONS:
             if definition.target_field not in proposal or not definition.provided(proposal[definition.target_field]):
@@ -363,6 +366,11 @@ class DeviceFieldReviewer:
             if definition.target_field == "rack_name":
                 _scope_rack_canonical(netbox_snapshot, _device_rack_location_id(matched_device))
             if file_snapshot["canonical"] == netbox_snapshot["canonical"]:
+                # Recorded, not dropped: a sync has to be able to say what it leaves alone.
+                matching[definition.target_field] = {
+                    "netbox": netbox_snapshot["display"],
+                    "file": file_snapshot["display"],
+                }
                 continue
             snapshots[definition.target_field] = (file_snapshot, netbox_snapshot)
             values = {"netbox": netbox_snapshot["display"], "file": file_snapshot["display"]}
@@ -370,4 +378,38 @@ class DeviceFieldReviewer:
                 differing[definition.target_field] = values
             else:
                 informational[definition.target_field] = values
-        return differing, informational, snapshots
+        return differing, informational, matching, snapshots
+
+
+#: What a sync would do to one field. The preview and the sync modal read these same names.
+SYNC_STATE_CHANGE = "change"
+SYNC_STATE_UNCHANGED = "unchanged"
+SYNC_STATE_IGNORED = "ignored"
+SYNC_STATE_NOT_WRITTEN = "not_written"
+
+#: The review bucket each state is built from, in the order the operator reads them.
+_SYNC_STATE_BUCKETS: tuple[tuple[str, str], ...] = (
+    (SYNC_STATE_CHANGE, "field_diff"),
+    (SYNC_STATE_UNCHANGED, "field_matching"),
+    (SYNC_STATE_IGNORED, "field_ignored"),
+    (SYNC_STATE_NOT_WRITTEN, "field_informational"),
+)
+
+
+def sync_change_preview(extra_data: Mapping[str, Any], labels: Mapping[str, str]) -> list[dict[str, str]]:
+    """Return one matched row's reviewed fields, each labelled with what a sync would do to it."""
+    entries = []
+    for state, bucket in _SYNC_STATE_BUCKETS:
+        values = extra_data.get(bucket) or {}
+        for target_field in sorted(values):
+            pair = values[target_field]
+            entries.append(
+                {
+                    "field": target_field,
+                    "label": labels.get(target_field) or target_field,
+                    "netbox": pair.get("netbox", ""),
+                    "file": pair.get("file", ""),
+                    "state": state,
+                }
+            )
+    return entries

@@ -24,7 +24,12 @@ function loadModal() {
       <span id="syncRowNumber"></span>
       <span id="syncRowSourceId"></span>
       <span id="syncRowBadge"></span>
-      <table><tbody id="syncRowFields"></tbody></table>
+      <p id="syncRowSummary"></p>
+      <table>
+        <thead><tr><th>Field</th><th id="syncRowCurrentHead"></th><th id="syncRowNextHead"></th></tr></thead>
+        <tbody id="syncRowFields"></tbody>
+      </table>
+      <div><input type="checkbox" id="syncRowShowUnchanged"></div>
       <input type="checkbox" id="syncRowRecalculate" checked>
       <div id="syncRowError" class="d-none"></div>
       <button id="syncRowConfirm">
@@ -43,6 +48,124 @@ beforeEach(() => {
 
 afterEach(() => {
   window.sessionStorage.clear();
+});
+
+function openRow(entries, dataset) {
+  loadModal();
+  const blob = document.createElement("script");
+  blob.type = "application/json";
+  blob.id = "ndi-sync-change-preview-by-row";
+  // Keyed by object type and row number together, as the preview page writes it.
+  blob.textContent = JSON.stringify(
+    entries === null ? {} : { "device:11": entries, 11: [], "rack:11": [] },
+  );
+  document.body.appendChild(blob);
+  const modal = document.getElementById("syncRowModal");
+  const trigger = document.createElement("button");
+  Object.assign(trigger.dataset, { rowNumber: "11", sourceId: "SRC-1001", objectType: "device" }, dataset);
+  document.body.appendChild(trigger);
+  modal.dispatchEvent(Object.assign(new Event("show.bs.modal"), { relatedTarget: trigger }));
+  return document.getElementById("syncRowFields");
+}
+
+const REVIEWED = [
+  { field: "u_position", label: "U position", netbox: "5", file: "31", state: "change" },
+  { field: "serial", label: "Serial", netbox: "SERIAL-ONE", file: "SERIAL-ONE", state: "unchanged" },
+  { field: "status", label: "Status", netbox: "active", file: "active", state: "unchanged" },
+  { field: "asset_tag", label: "Asset tag", netbox: "TAG-OLD", file: "TAG-NEW", state: "ignored" },
+  { field: "device_name", label: "Name", netbox: "device-one", file: "device-one-from-file", state: "not_written" },
+];
+
+describe("the update confirmation", () => {
+  it("states what NetBox holds now beside what the sync writes", () => {
+    const rows = openRow(REVIEWED, { action: "update" }).querySelectorAll("tr");
+
+    const changed = rows[0].querySelectorAll("td");
+    expect(changed[0].textContent).toBe("U position");
+    expect(changed[1].textContent).toBe("5");
+    expect(changed[2].textContent).toContain("31");
+    expect(changed[2].textContent).toContain("will update");
+  });
+
+  it("hides the unchanged fields until the operator asks for them", () => {
+    const tbody = openRow(REVIEWED, { action: "update" });
+    const unchanged = [...tbody.querySelectorAll("tr")].filter((tr) => tr.textContent.includes("unchanged"));
+
+    expect(unchanged).toHaveLength(2);
+    expect(unchanged.every((tr) => tr.hidden)).toBe(true);
+
+    const toggle = document.getElementById("syncRowShowUnchanged");
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change"));
+
+    expect(unchanged.every((tr) => tr.hidden)).toBe(false);
+  });
+
+  it("counts the changes so the operator sees the size of the write", () => {
+    openRow(REVIEWED, { action: "update" });
+
+    // An ignored field and an unwritten one are different states, so one count cannot cover both.
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("1 field will change. 2 unchanged, 1 ignored, 1 not written.");
+  });
+
+  it("says plainly when the write changes nothing", () => {
+    openRow(REVIEWED.filter((entry) => entry.state === "unchanged"), { action: "update" });
+
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("No field changes. NetBox already holds every reviewed value.");
+  });
+
+  it("names each skipped state when nothing changes", () => {
+    openRow(REVIEWED.filter((entry) => entry.state !== "change"), { action: "update" });
+
+    // An ignored or unwritten field differs from NetBox, so the value is not already held there.
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("No fields will change. 2 unchanged, 1 ignored, 1 not written.");
+  });
+
+  it("shows an ignored or unwritten value struck through, because it is not applied", () => {
+    const tbody = openRow(REVIEWED, { action: "update" });
+    const ignored = [...tbody.querySelectorAll("tr")].find((tr) => tr.textContent.includes("ignored"));
+
+    const skipped = ignored.querySelector(".text-decoration-line-through");
+    expect(skipped.textContent).toBe("TAG-NEW");
+    expect(ignored.querySelectorAll("td")[2].textContent).toContain("OLD");
+  });
+});
+
+describe("the extra columns", () => {
+  it("come from the row's own key, not from another object with the same number", () => {
+    loadModal();
+    const blob = document.createElement("script");
+    blob.type = "application/json";
+    blob.id = "ndi-extra-columns-by-row";
+    blob.textContent = JSON.stringify({ "device:11": { depth: "508" }, "rack:11": { depth: "WRONG" }, 11: { depth: "ALSO WRONG" } });
+    document.body.appendChild(blob);
+    const modal = document.getElementById("syncRowModal");
+    const trigger = document.createElement("button");
+    Object.assign(trigger.dataset, { rowNumber: "11", objectType: "device", action: "create", name: "dev" });
+    document.body.appendChild(trigger);
+    modal.dispatchEvent(Object.assign(new Event("show.bs.modal"), { relatedTarget: trigger }));
+
+    const cells = [...document.querySelectorAll("#syncRowFields tr")].map((tr) =>
+      [...tr.querySelectorAll("td")].map((td) => td.textContent),
+    );
+
+    expect(cells).toContainEqual(["depth", "\u2014", "508"]);
+    expect(JSON.stringify(cells)).not.toContain("WRONG");
+  });
+});
+
+describe("the create confirmation", () => {
+  it("falls back to the source values, because NetBox holds nothing yet", () => {
+    const tbody = openRow(null, { action: "create", name: "new-device", serial: "SER-1" });
+    const cells = [...tbody.querySelectorAll("tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
+
+    expect(cells).toContainEqual(["Name", "\u2014", "new-device"]);
+    expect(document.getElementById("syncRowNextHead").textContent).toBe("Will be set to");
+    expect(document.getElementById("syncRowSummary").textContent).toContain("Creates this device");
+  });
 });
 
 describe("a modal open with no trigger button", () => {
