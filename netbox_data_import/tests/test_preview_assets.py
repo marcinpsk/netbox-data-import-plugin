@@ -13,6 +13,7 @@ from pathlib import Path
 from django.test import SimpleTestCase
 from django.urls import reverse
 
+from netbox_data_import import device_field_review
 from netbox_data_import.catalog import CATALOG
 from netbox_data_import.tests.test_views import BaseViewTestCase, PreviewSessionMixin
 
@@ -52,6 +53,24 @@ class DeferredFormsReadTheirActionAttributeTest(SimpleTestCase):
             if re.search(r"\bform\.action\b", line)
         ]
         self.assertEqual(offenders, [], "Read the posted URL with form.getAttribute('action').")
+
+
+class SyncStateLabelsMatchTheServerTest(SimpleTestCase):
+    """Every server sync state needs an explicit label in the confirmation modal."""
+
+    def test_every_server_sync_state_has_a_modal_label(self):
+        """A missing label makes the browser call an unknown write state unchanged."""
+        source = (STATIC_JS_DIR / "sync_row_modal.js").read_text()
+        labels_match = re.search(r"var STATE_LABELS = \{(.*?)\n    \};", source, re.DOTALL)
+        self.assertIsNotNone(labels_match, "the sync modal must declare STATE_LABELS")
+        label_keys = set(re.findall(r"^\s+([a-z_]+):", labels_match.group(1), re.MULTILINE))
+        server_states = {
+            value
+            for name, value in vars(device_field_review).items()
+            if name.startswith("SYNC_STATE_") and isinstance(value, str)
+        }
+
+        self.assertEqual(server_states - label_keys, set(), "add a modal label for every server sync state")
 
 
 class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
@@ -199,6 +218,116 @@ class DetailRowIdsAreUniqueTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertTrue(rows, "the preview must render source rows")
         self.assertTrue(all('role="button"' not in attrs for attrs in rows), rows[:2])
         self.assertTrue(all("tabindex=" not in attrs for attrs in rows), rows[:2])
+
+
+class PreviewMapsNameTheirObjectTypeTest(PreviewSessionMixin, BaseViewTestCase):
+    """Preview maps must distinguish rows that share a number across object types."""
+
+    ROW_NUMBER = 12
+
+    def _preview_with_repeated_row_number(self):
+        """Render a materialized preview with one Device and one Rack on the same source row."""
+        from dataclasses import replace
+
+        from netbox_data_import.plan import Disposition, ImportPlan, SynchronizationUnit
+        from netbox_data_import.preview_row_actions import (
+            PREVIEW_PLAN_SESSION_KEY,
+            PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY,
+            start_new_preview,
+        )
+
+        self._setup_session()
+        session = self.client.session
+        stored_plan = ImportPlan.from_dict(session[PREVIEW_PLAN_SESSION_KEY])
+
+        def unit(object_type, marker, suggestion_id):
+            email = f"{marker}@example.invalid"
+            return SynchronizationUnit(
+                identity=f"{object_type}:source:{marker}",
+                disposition=Disposition.NO_OP,
+                display={
+                    "row_number": self.ROW_NUMBER,
+                    "source_id": marker,
+                    "name": f"{marker} name",
+                    "rack_name": f"{marker} rack",
+                    "source_row": {"_row_number": self.ROW_NUMBER, "source_id": marker},
+                    "extra_data": {
+                        "conflicts": {"device_name": {"Name": f"{marker} conflict"}},
+                        "candidate_values": {"contact": {"Contact Email": email}},
+                        "contact_suggestion": {
+                            "id": suggestion_id,
+                            "name": f"{marker} suggestion",
+                            "email": email,
+                            "phone": "",
+                        },
+                        "extra_columns": {"Unmapped": marker},
+                        "field_diff": {"device_name": {"netbox": f"old {marker}", "file": f"new {marker}"}},
+                    },
+                },
+            )
+
+        plan = replace(
+            stored_plan,
+            units=(
+                unit("device", "device-row", 41),
+                unit("rack", "rack-row", 52),
+            ),
+        )
+        start_new_preview(session, plan)
+        session[PREVIEW_USE_MATERIALIZED_ONCE_SESSION_KEY] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+        self.assertEqual(response.status_code, 200)
+        return response
+
+    def test_each_repeated_row_keeps_its_own_modal_data(self):
+        """A row-only key lets the Rack replace the Device in every modal data map."""
+        response = self._preview_with_repeated_row_number()
+        expected_keys = {"device:12", "rack:12"}
+
+        conflicts = response.context["conflicts_by_row"]
+        self.assertEqual(set(conflicts), expected_keys)
+        self.assertEqual(conflicts["device:12"]["device_name"]["Name"], "device-row conflict")
+        self.assertEqual(conflicts["rack:12"]["device_name"]["Name"], "rack-row conflict")
+
+        candidates = response.context["candidate_values_by_row"]
+        self.assertEqual(set(candidates), expected_keys)
+        self.assertEqual(candidates["device:12"]["contact"]["Contact Email"], "device-row@example.invalid")
+        self.assertEqual(candidates["rack:12"]["contact"]["Contact Email"], "rack-row@example.invalid")
+
+        suggestions = response.context["contact_suggestions_by_row"]
+        self.assertEqual(set(suggestions), expected_keys)
+        self.assertEqual(suggestions["device:12"]["name"], "device-row suggestion")
+        self.assertEqual(suggestions["rack:12"]["name"], "rack-row suggestion")
+
+    def test_every_by_row_context_map_uses_composite_keys(self):
+        """A new row map must name the object type or extend this real preview fixture."""
+        response = self._preview_with_repeated_row_number()
+        context_names = sorted(filter(lambda name: name.endswith("_by_row"), response.context.keys()))
+        object_types = {unit.object_type for unit in response.context["result"].units}
+
+        self.assertTrue(context_names, "the preview must publish row-keyed context")
+        for context_name in context_names:
+            with self.subTest(context=context_name):
+                row_map = response.context[context_name]
+                self.assertTrue(row_map, f"extend the fixture to exercise {context_name}")
+                for key in row_map:
+                    object_type, separator, row_number = key.rpartition(":")
+                    self.assertEqual(separator, ":", key)
+                    self.assertIn(object_type, object_types, key)
+                    self.assertTrue(row_number.isdigit(), key)
+
+    def test_every_composite_row_modal_trigger_names_its_object_type(self):
+        """A trigger without the type builds a key that cannot match its row data."""
+        html = self._preview_with_repeated_row_number().content.decode()
+        triggers = re.findall(
+            r'<button\b[^>]*data-ndi-modal="#(?:conflictModal|contactCandidateModal)"[^>]*>',
+            html,
+        )
+
+        self.assertTrue(triggers, "the fixture must render a conflict or contact modal trigger")
+        self.assertEqual([trigger for trigger in triggers if "data-object-type=" not in trigger], [])
 
 
 class SplitModalMarkupMatchesItsScriptTest(PreviewSessionMixin, BaseViewTestCase):

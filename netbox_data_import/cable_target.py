@@ -118,6 +118,7 @@ class _Termination:
     kind: str
     device_id: int
     display: str
+    topology_display: str
 
     @property
     def key(self) -> tuple[str, int]:
@@ -444,6 +445,11 @@ class _CableBatch:
             evidence=self._device_evidence,
             lock_rows=self.lock_plan_references,
         )
+        self._device_displays = {
+            resolution.device.pk: str(resolution.device)
+            for resolution in self._device_resolutions.values()
+            if resolution.device is not None
+        }
         self._resolve_terminations()
         self._load_mappings()
         self._build_segments()
@@ -647,6 +653,7 @@ class _CableBatch:
             kind=_KIND_BY_MODEL_NAME[label.partition(".")[2]],
             device_id=component.device_id,
             display=str(component),
+            topology_display=f"{self._device_displays[component.device_id]} {component.name}",
         )
 
     def _load_mappings(self) -> None:
@@ -1191,8 +1198,8 @@ class _CableBatch:
         for index, stated in enumerate(stated_segments):
             planned = resolved.get(index)
             source_left, source_right = _endpoint_label(stated.left), _endpoint_label(stated.right)
-            left = source_left if planned is None else planned.left.display
-            right = source_right if planned is None else planned.right.display
+            left = source_left if planned is None else planned.left.topology_display
+            right = source_right if planned is None else planned.right.topology_display
             segments.append(
                 {
                     "index": index,

@@ -13,12 +13,15 @@ const source = readFileSync(
 );
 
 const CONFLICTS = {
-  4: {
+  "device:4": {
     device_name: { Name: "L1798 - EH 01", Hostname: "L1798" },
     primary_ip4: { "IP Address (IPv4)": "10.0.0.1", "Management IP Address": "10.0.0.2" },
   },
-  5: {
+  "device:5": {
     device_name: { Name: "L1799 - EH 01", Hostname: "L1799" },
+  },
+  "rack:4": {
+    device_name: { Name: "Rack Four" },
   },
 };
 
@@ -37,8 +40,9 @@ function render() {
   );
   window.ndiMarkPreviewStale = vi.fn();
   document.body.innerHTML = `
-    <button id="trigger" data-ndi-modal="#conflictModal" data-row-number="4" data-source-id="L1798">2 conflicts</button>
-    <button id="other-trigger" data-ndi-modal="#conflictModal" data-row-number="5" data-source-id="L1799">1 conflict</button>
+    <button id="trigger" data-ndi-modal="#conflictModal" data-object-type="device" data-row-number="4" data-source-id="L1798">2 conflicts</button>
+    <button id="other-trigger" data-ndi-modal="#conflictModal" data-object-type="device" data-row-number="5" data-source-id="L1799">1 conflict</button>
+    <button id="rack-trigger" data-ndi-modal="#conflictModal" data-object-type="rack" data-row-number="4" data-source-id="R4">1 conflict</button>
     <div class="modal" id="conflictModal">
       <form id="conflictForm">
         <input type="hidden" id="conf_source_id" name="source_id">
@@ -85,6 +89,19 @@ describe("conflict modal", () => {
 
   it("offers every source column that supplies the field", () => {
     expect(buttons()).toHaveLength(4);
+  });
+
+  it("uses the object type with the row number to find conflicts", () => {
+    document
+      .getElementById("conflictModal")
+      .dispatchEvent(
+        Object.assign(new Event("show.bs.modal"), {
+          relatedTarget: document.getElementById("rack-trigger"),
+        }),
+      );
+
+    expect(document.getElementById("conflictModalBody").textContent).toContain("Rack Four");
+    expect(document.getElementById("conflictModalBody").textContent).not.toContain("L1798");
   });
 
   it("saves the value without navigating away from the preview", async () => {
