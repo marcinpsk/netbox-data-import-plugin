@@ -372,6 +372,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#inference-backend-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inference backend credentials
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#native-primary-contacts" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -504,6 +515,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#inference-backend-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inference backend credentials
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#native-primary-contacts" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -568,6 +590,117 @@
 
 
 <h1 id="configuration">Configuration</h1>
+<h2 id="inference-backend-credentials">Inference backend credentials</h2>
+<p>Configure the Vault connection before you add an Inference Backend. The recommended setup uses a
+Vault Proxy. The Proxy authenticates to Vault and renews its token. The NetBox web and worker
+processes call the Proxy without holding a Vault credential.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">PLUGINS_CONFIG</span> <span class="o">=</span> <span class="p">{</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    <span class="s2">"netbox_data_import"</span><span class="p">:</span> <span class="p">{</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>        <span class="s2">"vault"</span><span class="p">:</span> <span class="p">{</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>            <span class="s2">"address"</span><span class="p">:</span> <span class="s2">"https://vault-proxy.example.invalid:8100"</span><span class="p">,</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>            <span class="s2">"auth_method"</span><span class="p">:</span> <span class="s2">"proxy"</span><span class="p">,</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>            <span class="s2">"ca_bundle"</span><span class="p">:</span> <span class="s2">"/etc/ssl/certs/vault-proxy-ca.pem"</span><span class="p">,</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>            <span class="s2">"connect_timeout"</span><span class="p">:</span> <span class="mi">5</span><span class="p">,</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>            <span class="s2">"read_timeout"</span><span class="p">:</span> <span class="mi">10</span><span class="p">,</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        <span class="p">},</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="p">},</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="p">}</span>
+</code></pre></div>
+<p>Configure <code>vault.address</code> with HTTPS for both <code>proxy</code> and <code>token</code> authentication. The connection
+carries either a Vault token or a resolved inference API key. TLS can terminate at the Proxy, but
+the NetBox-to-Proxy connection must remain encrypted through the Proxy's HTTPS listener.</p>
+<p>The example uses a private CA. Mount that CA bundle in the NetBox web and worker processes. Set
+<code>ca_bundle</code> to its path. This adds the private CA to certificate verification. It does not disable
+verification. The Inference Backend <code>api_root</code> is separate: it can use HTTP only for an exact local
+endpoint in <code>inference_backend_origin_allowlist</code>.</p>
+<p>If Vault Proxy uses AppRole, give the RoleID and SecretID to the Proxy deployment. For local
+development, its gitignored <code>.env</code> file can supply them. For production, use the deployment's
+secret store. Do not give these values to the NetBox process, and do not put them in
+<code>PLUGINS_CONFIG</code>.</p>
+<p>The Proxy needs an AppRole auto-auth method, a listener, and API proxying. This is the essential
+Vault Proxy configuration:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nb">vault</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="na">address</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"https://vault.example.invalid:8200"</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="p">}</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="nb">auto_auth</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">  </span><span class="nb">method</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">    </span><span class="na">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"approle"</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="nb">config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">      </span><span class="na">role_id_file_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/run/secrets/vault-role-id"</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="w">      </span><span class="na">secret_id_file_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/run/secrets/vault-secret-id"</span>
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="w">      </span><span class="na">remove_secret_id_file_after_reading</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="no">true</span>
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="p">}</span>
+<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>
+<a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="err">listener</span><span class="w"> </span><span class="s2">"tcp"</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a><span class="w">  </span><span class="na">address</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"0.0.0.0:8100"</span>
+<a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a><span class="w">  </span><span class="na">tls_cert_file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/run/secrets/vault-proxy-cert.pem"</span>
+<a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a><span class="w">  </span><span class="na">tls_key_file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/run/secrets/vault-proxy-key.pem"</span>
+<a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a><span class="w">  </span><span class="na">require_request_header</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="no">true</span>
+<a id="__codelineno-1-22" name="__codelineno-1-22" href="#__codelineno-1-22"></a><span class="p">}</span>
+<a id="__codelineno-1-23" name="__codelineno-1-23" href="#__codelineno-1-23"></a>
+<a id="__codelineno-1-24" name="__codelineno-1-24" href="#__codelineno-1-24"></a><span class="nb">api_proxy</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-25" name="__codelineno-1-25" href="#__codelineno-1-25"></a><span class="w">  </span><span class="na">use_auto_auth_token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"force"</span>
+<a id="__codelineno-1-26" name="__codelineno-1-26" href="#__codelineno-1-26"></a><span class="p">}</span>
+</code></pre></div>
+<p>A SecretID stays usable until it expires, and the RoleID sits beside it, so a reader of the Proxy
+filesystem can mint new Vault tokens from the pair. <code>remove_secret_id_file_after_reading</code> deletes
+the file after auto-auth reads it, but it only works on a path the Proxy can write. The Compose
+secrets below mount <code>/run/secrets</code> read-only: Vault logs the failed removal and keeps
+authenticating, so the SecretID stays readable for the life of the container.</p>
+<p>Pick one of two delivery models. Either accept the retained file and limit it: short SecretID TTL,
+regular rotation, and no other reader of the Proxy container. Or make the removal real: write the
+SecretID to a path the Proxy owns, such as a tmpfs file, or set
+<code>secret_id_response_wrapping_path</code> so the file holds a single-use wrapping token instead of the
+SecretID itself.</p>
+<p>The TCP example lets a sibling container reach the Proxy. Keep both containers on an isolated
+container network. Do not publish the listener outside the isolated container network. The
+<code>X-Vault-Request</code> header is SSRF protection, not client authentication. If NetBox connects to a
+separate Proxy, restrict network ingress and authenticate each client, for example with mTLS.</p>
+<p>Mount the RoleID, SecretID, Proxy certificate, and Proxy key at the configured file paths. Mount the
+CA that signed the Proxy certificate in the NetBox web and worker processes. A local Docker Compose
+deployment can source the AppRole values from its gitignored <code>.env</code> file and expose them only to the
+Proxy as Compose secrets:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>NBDI_VAULT_PROXY_ADDRESS=https://vault-proxy.example.invalid:8100
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>NBDI_VAULT_ADDRESS=https://vault.example.invalid:8200
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>NBDI_VAULT_NAMESPACE=
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>NBDI_VAULT_ROLE_ID=replace-with-vault-role-id
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>NBDI_VAULT_SECRET_ID=replace-with-vault-secret-id
+</code></pre></div>
+<p>Give the AppRole only <code>read</code> access to the required KV v2 data paths. Set <code>token_num_uses</code> to <code>0</code>,
+because Vault auto-auth does not support limited-use tokens. See HashiCorp's
+<a href="https://developer.hashicorp.com/vault/docs/agent-and-proxy/autoauth/methods/approle">AppRole auto-auth documentation</a>
+and <a href="https://developer.hashicorp.com/vault/docs/agent-and-proxy/proxy/apiproxy">Vault Proxy API documentation</a>.
+The plugin sends <code>X-Vault-Request: true</code>, so the Proxy listener can require this header as shown.</p>
+<p>The plugin does not perform an AppRole login directly. It supports <code>auth_method: "proxy"</code> as shown
+above. It also supports <code>auth_method: "token"</code>, which reads a token from each NetBox process that
+resolves credentials. Set <code>VAULT_TOKEN</code> in both the web and worker process environments. Direct
+token authentication uses the same HTTPS and CA-bundle requirements.</p>
+<p>The <strong>Credential reference</strong> field on an Inference Backend tells the plugin which value to read
+from Vault KV v2. It has this JSON shape:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="p">{</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">"backend"</span><span class="p">:</span><span class="w"> </span><span class="s2">"vault_kv_v2"</span><span class="p">,</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">"mount"</span><span class="p">:</span><span class="w"> </span><span class="s2">"secret"</span><span class="p">,</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="nt">"path"</span><span class="p">:</span><span class="w"> </span><span class="s2">"inference/backend"</span><span class="p">,</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span><span class="nt">"field"</span><span class="p">:</span><span class="w"> </span><span class="s2">"api_key"</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="p">}</span>
+</code></pre></div>
+<p><code>mount</code> is the KV v2 mount. <code>path</code> is the secret path in that mount. <code>field</code> is the key that holds
+the inference API key. This reference contains no Vault address, Vault credential, or inference API
+key.</p>
+<p>Save the AI backend, then open its detail page and select <strong>Run connection test</strong>. The foreground
+test resolves the credential and sends a small request to the configured
+<code>{api_root}/chat/completions</code> endpoint. This request can consume provider tokens and can have a
+provider cost.</p>
+<p>The test also tries <code>GET {api_root}/models</code>. If the endpoint returns a compatible model list, the
+detail page shows up to 100 model ids. Select one to open the normal edit form with that value. Review
+the value and save the form. Model discovery is optional. If the endpoint does not support it, enter
+the exact model id manually.</p>
+<p>The foreground test has one overall time limit. The limit is the backend connect timeout plus its read
+timeout. Credential resolution, model discovery, and the completion request share this time.</p>
 <h2 id="native-primary-contacts">Native primary contacts</h2>
 <p>Map the source contact column to the <code>primary_contact</code> target field. Then configure these fields on the Import Profile:</p>
 <ul>
@@ -605,9 +738,21 @@ belongs to that format. A different source format needs a new Import Profile.</p
 <p>The selected adapter declares the profile's remaining settings, which the profile stores together as
 its adapter configuration. The flat workbook adapter declares the sheet name, the source ID column,
 the custom field name, the update and create switches, the extra-data switch, the primary contact
-role and lookup field, and the preview view mode. The trace workbook adapter declares no settings.</p>
-<p>Only the flat workbook adapter is selectable today. An adapter becomes selectable when a Target
-Module that consumes its output ships, so the plugin never offers a source format it cannot import.</p>
+role and lookup field, and the preview view mode. The trace workbook adapter currently declares no
+settings. It reads the fixed <code>Trace From To</code> and optional <code>Trace List</code> workbook sheets.</p>
+<p>The flat workbook and trace workbook adapters are selectable. An adapter becomes selectable when a
+Target Module that consumes its output ships, so the plugin never offers a source format it cannot
+import.</p>
+<p>A trace import opens the <strong>Trace Review Workspace</strong> directly. If a source Device label does not
+match exactly one visible NetBox Device in the selected Site, select <strong>Choose Device</strong>. The Import
+Profile stores that choice. A later trace file reuses it when the source Device label has the same
+letters after case and whitespace normalization. The choice applies to all ports on that source
+Device.</p>
+<p>Rack, Location, and U position are search hints. They can change the candidate order, but they never
+select a Device. A Rack or Location hint is used only when you can view that NetBox object.</p>
+<p>The trace workbook layout is not configurable in this release. A later adapter setting can map other
+sheet names and columns to the same Source Trace values. Device choices do not depend on Excel column
+names, so they remain reusable across that change.</p>
 <p>An object reference inside the adapter configuration uses a natural key, never a database id. The
 primary contact role is referenced by its name, so a profile exported as YAML imports into a
 different NetBox instance.</p>
@@ -615,13 +760,13 @@ different NetBox instance.</p>
 stamps the flat workbook adapter on every existing profile, copies each column into the adapter
 configuration, and drops the columns.</p>
 <p>The exported profile YAML carries the adapter and its configuration:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">profile</span><span class="p">:</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Profile</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="nt">source_adapter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">flat_workbook</span>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="nt">adapter_config</span><span class="p">:</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="nt">sheet_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Data</span>
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="nt">source_id_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Id</span>
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="nt">primary_contact_role</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Primary Contact</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">profile</span><span class="p">:</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Profile</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="nt">source_adapter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">flat_workbook</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span><span class="nt">adapter_config</span><span class="p">:</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">    </span><span class="nt">sheet_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Data</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">source_id_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Id</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">    </span><span class="nt">primary_contact_role</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Primary Contact</span>
 </code></pre></div>
 <p>When imported, <code>adapter_config</code> replaces the profile's stored adapter configuration. It is not
 merged. A setting that is absent from the mapping resets to the adapter's declared default. Include

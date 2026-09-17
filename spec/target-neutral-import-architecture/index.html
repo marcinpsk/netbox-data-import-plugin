@@ -1946,7 +1946,7 @@ applicable sections. Validation rejects an inapplicable row.</p>
 <td><code>flat_workbook</code></td>
 </tr>
 <tr>
-<td><code>TerminationResolution</code></td>
+<td><code>TraceDeviceResolution</code>, <code>TerminationResolution</code></td>
 <td>Decision persistence scoped to the trace adapter output</td>
 <td><code>trace_workbook</code></td>
 </tr>
@@ -2126,7 +2126,8 @@ stay in the evidence for display. The source Device column names the panel.</p>
 operator and the Inference Backend. Deterministic matching never uses it: port resolution uses only
 the unique exact port-name match on the resolved Device (section 6.1). This supersedes the phrasing in
 issue #84 that said the cards label narrows port matching, and follows the rule set in issue #86.</p>
-<p>Corroboration values support validation and review display. They never identify anything.</p>
+<p>Corroboration values support validation, Device candidate ranking, and review display. They never
+identify anything or select a Device.</p>
 <h3 id="52-identity-and-content-fingerprint">5.2 Identity and content fingerprint</h3>
 <p>Per ADR 0002:</p>
 <ul>
@@ -2255,6 +2256,12 @@ existing Cables, PortMapping rows) and cannot be detected during source interpre
 <td>Cable Target Module</td>
 </tr>
 <tr>
+<td>Saved Device is deleted, hidden, or outside the selected Site</td>
+<td><code>trace.device_resolution_stale</code></td>
+<td><code>blocked</code></td>
+<td>Cable Target Module</td>
+</tr>
+<tr>
 <td>Endpoint evidence only and no matching direct Cable</td>
 <td><code>trace.endpoint_evidence_only</code></td>
 <td><code>blocked</code></td>
@@ -2320,8 +2327,19 @@ introduced in place of the single rear-port reference on a front port. The plugi
 version is 4.6.0, for this feature and for the plugin as a whole, because 4.6 is the oldest release
 the test matrix covers.</p>
 <h3 id="61-port-resolution">6.1 Port resolution</h3>
-<p>Each Termination Reference resolves inside its resolved Device. Endpoint Device resolution uses the
-existing explicit matching approach and runs before port resolution begins.</p>
+<p>Each Termination Reference resolves inside its resolved Device. Device resolution runs before port
+resolution begins. A saved <code>TraceDeviceResolution</code> maps the normalized source Device label to one
+NetBox Device for the Import Profile. The mapping applies to every port under that label and to later
+source documents that use the same normalized label. A saved choice takes precedence over exact-name
+matching.</p>
+<p>Without a saved choice, one exact Device-name match inside the actor's view scope and selected Site
+resolves automatically. Zero or several matches leave one Device question open in the Trace Review
+Workspace. Rack, Location, and U position can rank candidates and explain the order. The operator
+must select the Device. Each placement hint is used only when the actor can also view its related
+Rack or Location.</p>
+<p>A saved Device that is deleted, hidden, or outside the selected Site becomes stale. Planning does not
+fall back to another exact-name match and does not show the saved display snapshot. A placement
+change inside the selected Site does not invalidate the choice.</p>
 <p>The adapter's fixed PortClass vocabulary claims the termination kind:</p>
 <table>
 <thead>
@@ -2759,9 +2777,10 @@ dismiss a suggestion made for it. Neither acceptance nor rejection changes the s
 <a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    user:   serialized JSON with schema_version, task, source_evidence, candidates
 </code></pre></div>
 <p>The response must be one JSON object:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span><span class="nt">"schema_version"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">"outcome"</span><span class="p">:</span><span class="w"> </span><span class="s2">"candidate"</span><span class="p">,</span><span class="w"> </span><span class="nt">"candidate_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"candidate-0001"</span><span class="p">,</span><span class="w"> </span><span class="nt">"explanation"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span><span class="nt">"schema_version"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">"outcome"</span><span class="p">:</span><span class="w"> </span><span class="s2">"candidate"</span><span class="p">,</span><span class="w"> </span><span class="nt">"candidate_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"candidate-0001"</span><span class="p">,</span><span class="w"> </span><span class="nt">"candidate_display_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Ethernet 1/1"</span><span class="p">,</span><span class="w"> </span><span class="nt">"explanation"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">}</span>
 </code></pre></div>
-<p><code>outcome</code> is <code>candidate</code> or <code>no_match</code>. For <code>no_match</code>, <code>candidate_id</code> must be null.</p>
+<p><code>outcome</code> is <code>candidate</code> or <code>no_match</code>. For <code>no_match</code>, <code>candidate_id</code> and
+<code>candidate_display_name</code> must be null.</p>
 <p>The plugin validates every response itself, even when the Inference Backend reports that it enforced a
 schema. Semantic checks after schema validation:</p>
 <ul>
@@ -2770,6 +2789,8 @@ schema. Semantic checks after schema validation:</p>
   them.</li>
 <li>For <code>candidate</code>, require the identifier to be an exact member of the immutable request candidate
   set.</li>
+<li>For <code>candidate</code>, require <code>candidate_display_name</code> to equal the display name paired with that
+  identifier in the immutable request candidate set.</li>
 <li>Require a non-empty explanation and enforce a length limit of 2000 characters (spec default).</li>
 <li>Recheck that the selected target object still exists and is still eligible before display and again
   before acceptance.</li>
@@ -2840,7 +2861,7 @@ validates <code>content_text</code>.</p>
 <tr>
 <td>Backend key</td>
 <td>Required</td>
-<td>The unique name of the Inference Backend. Only an Inference Backend connection-test job carries this key; a proposal job carries its Resolution Proposal id.</td>
+<td>The unique name of the Inference Backend. The foreground connection test shows this key; a proposal job carries only its Resolution Proposal id.</td>
 </tr>
 <tr>
 <td>Display name</td>
@@ -2928,11 +2949,11 @@ time and records the source it used in backend metadata.</p>
 <tbody>
 <tr>
 <td><code>proxy</code></td>
-<td>Default. The worker calls Vault through a Vault Proxy that holds an auto-auth token. The plugin stores and handles no Vault credential.</td>
+<td>Default. Each NetBox process calls Vault through a Vault Proxy that holds an auto-auth token. The plugin stores and handles no Vault credential.</td>
 </tr>
 <tr>
 <td><code>token</code></td>
-<td>The worker reads a Vault token from a deployment environment variable. The token is never stored in the database, in a plugin setting value, or in any plugin-managed file.</td>
+<td>Each NetBox process that resolves credentials reads a Vault token from its deployment environment. The token is never stored in the database, in a plugin setting value, or in any plugin-managed file.</td>
 </tr>
 </tbody>
 </table>
@@ -2943,9 +2964,10 @@ SecretID, or a TLS verification override.</p>
 <p><strong>Validation split.</strong> Configuration shape validates at application startup and fails fast: the setting
 names, the field set of <code>inference_backend</code>, the <code>api_root</code> trust boundary (section 8.3), the
 allowlist entry format, and the permitted <code>vault.auth_method</code> values. Credential resolution and
-network liveness never run at startup; they fail at request time in the worker, with the typed reasons
-in section 13.3. A malformed <code>inference_backend</code> mapping is an <code>invalid_configuration</code> failure, never
-a silent fallback to a different backend.</p>
+network liveness never run at startup. They fail at request time in the process that sends the
+outbound request: the proposal worker or the foreground connection-test web process. Section 13.3
+defines the typed reasons. A malformed <code>inference_backend</code> mapping is an <code>invalid_configuration</code>
+failure, never a silent fallback to a different backend.</p>
 <h3 id="83-api_root-trust-boundary">8.3 <code>api_root</code> trust boundary</h3>
 <p><code>api_root</code> names a destination the NetBox server itself calls. Validate it identically for a database
 row and for an <code>inference_backend</code> setting value:</p>
@@ -2984,30 +3006,42 @@ classify failures without including response bodies or credential values.</p>
 <p>The Vault implementation supports KV v2 only, reads one named field from one configured path, rejects
 a missing, empty, or non-string value, and omits the secret from all exception text. It sends no
 Source Trace, device, contact, or operator data to Vault.</p>
-<p>Vault Proxy auto-auth is the recommended deployment baseline. The worker calls the Vault API through
-the Proxy without possessing the token. Direct Vault access is a valid deployment variant, but this
-delivery does not implement direct AppRole login.</p>
-<p>Resolution happens in the inference worker, once per outbound inference attempt. The plugin caches no
-API-key value. Key rotation takes effect on the next resolution. An already running HTTP request
-continues with the value it received. The system never silently replays a possibly accepted inference
-request.</p>
+<p>Vault Proxy auto-auth is the recommended deployment baseline. The web and worker processes call the
+Vault API through the Proxy without possessing the token. Direct Vault access is a valid deployment
+variant, but this delivery does not implement direct AppRole login.</p>
+<p>Resolution happens in the process that sends the request, once per outbound inference attempt. A
+proposal resolves in its worker. A foreground connection test resolves in its web process. The plugin
+caches no API-key value. Key rotation takes effect on the next resolution. An already running HTTP
+request continues with the value it received. The system never silently replays a possibly accepted
+inference request.</p>
 <h3 id="86-secrets-never-persist">8.6 Secrets never persist</h3>
 <p>The resolved secret value never enters a model, form, serializer, profile YAML export, session, job
 argument, Resolution Proposal, <code>ImportExecution</code> row, or log.</p>
 <p>The typed credential reference is different from a secret value. It lives in exactly one authoritative
 place: the enabled <code>InferenceBackend</code> row, or the <code>inference_backend</code> file fallback when no enabled
 row exists. It is restricted configuration metadata, never copied elsewhere.</p>
-<p>The connection-test job receives only the stable backend key and resolves the credential itself. The
-request-handling process never resolves a secret and passes it to the worker.</p>
+<p>The foreground connection test receives only the authorized backend row id and its display key. The
+request-handling process resolves the credential, sends one small Chat Completions request with the
+configured model, reports a typed redacted result, and discards the credential before it sends the
+response. The test also tries the optional models endpoint. A discovery failure does not override the
+Chat Completions result.</p>
 <p>Plugin audit and job state may record the backend key, the proposal job id, the credential backend
 name, the resolution outcome category, and request start and completion times. They must not record
 the secret value, the authorization header, a Vault token, a Vault response body, or inference request
 headers. The Vault mount, path, and field are restricted configuration metadata.</p>
-<p>Vault availability is never required at startup. The connection test runs as a worker Job, on the same
-queue and the same secret boundary as a proposal job, so no web process ever resolves a credential. It
-resolves the configured reference and returns a typed result: <code>ok</code>, <code>credential_unavailable</code>,
-<code>credential_denied</code>, <code>invalid_credential_reference</code>, <code>invalid_secret_material</code>, or
-<code>invalid_configuration</code>. It never returns a secret value or a Vault response body.</p>
+<p>Vault availability is never required at startup. The connection test runs in the foreground request so
+the operator sees its result immediately. It resolves the configured reference and returns a typed
+result: <code>ok</code>, <code>credential_unavailable</code>, <code>credential_denied</code>, <code>invalid_credential_reference</code>,
+<code>invalid_secret_material</code>, <code>invalid_configuration</code>, <code>transport_failure</code>, <code>timeout</code>,
+<code>authentication_failure</code>, <code>rate_limit</code>, <code>malformed_envelope</code>, or <code>invalid_response</code>. It never returns
+a secret value, a Vault response body, or Inference Backend response text, and it creates no native
+NetBox Job.</p>
+<p>The backend connect timeout plus its read timeout forms one wall-clock deadline for the foreground
+test. Credential resolution, model discovery, completion, DNS, and response reads share this deadline.</p>
+<p>A compatible <code>GET {api_root}/models</code> response can provide at most 100 unique model ids of at most the
+stored model field length. These ids are one-use edit suggestions. The picker opens the normal edit
+form with the selected value, so standard validation, permissions, change logging, and explicit save
+still apply. Manual model entry remains available and is the only path when discovery is unsupported.</p>
 <p>Running the connection test is authorized by the dedicated <code>InferenceBackend</code> object permission in
 section 13.1. There is no separate administrator or superuser check.</p>
 <h2 id="9-database-changes-and-migration-ownership">9. Database changes and migration ownership</h2>
@@ -3030,6 +3064,12 @@ whose operations cannot be generated, and that migration contains data operation
 <td>The stored uploaded workbook that <code>source_document</code> references</td>
 <td>Content fingerprint indexed per Import Profile</td>
 <td>T2</td>
+</tr>
+<tr>
+<td><code>TraceDeviceResolution</code></td>
+<td>A trace source Device label selected as one NetBox Device</td>
+<td>(Import Profile, normalized source Device key) unique</td>
+<td>T6</td>
 </tr>
 <tr>
 <td><code>TerminationResolution</code></td>
@@ -3078,6 +3118,10 @@ type, the canonical JSON field key (which carries the role marker, section 7.1),
 type, the selected object id, and the display name at selection time. The three value columns hold the
 selection for both the <code>termination</code> and <code>mapped_peer</code> roles. <code>SourceResolution</code> keeps its flat
 <code>(profile, source_id, source_column)</code> shape and stays flat-adapter-specific.</p>
+<p><code>TraceDeviceResolution</code> stores the canonical source Device key, its fixed-width digest, the selected
+Device ID, and a display snapshot. The plain Device ID preserves a stale decision after Device
+deletion so the operator can replace it. The snapshot is never shown unless the Device is still in
+the actor's view scope. Installation-local Device IDs are not part of portable profile YAML.</p>
 <p><code>CableImportSource</code> records the Import Profile, the Cable (a plain foreign key), the trace identity,
 the segment index, the original From/To text and direction, the workbook provenance (fingerprint,
 sheet, block ordinal, row range), and the source export timestamp. One Cable created for a shared
@@ -3285,7 +3329,7 @@ key, <code>adapter_config</code> with natural-key object references, and only th
 that adapter, including CableClass mappings. The per-section hand-rolled handling is removed. An
 Inference Backend is never part of profile YAML.</p>
 <h3 id="106-jobs">10.6 Jobs</h3>
-<p>Three job types run through the NetBox job system:</p>
+<p>Two job types run through the NetBox job system:</p>
 <table>
 <thead>
 <tr>
@@ -3305,17 +3349,12 @@ Inference Backend is never part of profile YAML.</p>
 <td>Resolution Proposal id</td>
 <td>A completed, failed, or cancelled Resolution Proposal</td>
 </tr>
-<tr>
-<td>Inference Backend connection test</td>
-<td>The stable Inference Backend key</td>
-<td>A typed result category, never a secret value or a Vault response body</td>
-</tr>
 </tbody>
 </table>
-<p>No job receives a secret value or a database id for an Inference Backend. The connection test still
-carries a backend key, because an administrator starts it against one named row; a proposal carries
-none, because a scoped operator starts it from an editable field (section 7.5). Import execution
-progress counts Synchronization Units and Planned Changes.</p>
+<p>No job receives a secret value or a database id for an Inference Backend. A proposal carries no backend
+identifier because a scoped operator starts it from an editable field (section 7.5). The foreground
+connection test reports against the named row without creating a Job. Import execution progress counts
+Synchronization Units and Planned Changes.</p>
 <h3 id="107-audit">10.7 Audit</h3>
 <table>
 <thead>
@@ -3665,6 +3704,11 @@ transaction.</p>
 <td>Non-transient, typed reason <code>invalid_response</code></td>
 <td>Set the row to <code>failed</code>, retain the response diagnostic without non-empty response text, never produce a candidate outcome, no automatic retry</td>
 </tr>
+<tr>
+<td>Stored request below the current prompt or response contract</td>
+<td>Non-transient, typed reason <code>superseded_request</code></td>
+<td>Retire the queued or running row when the upgrade runs, so the operator asks again under the contract the release sends</td>
+</tr>
 </tbody>
 </table>
 <p>The transient HTTP statuses are the four this table names. Every other status at or above 400 is
@@ -3856,11 +3900,12 @@ Until T10 lands, a trace profile is configurable through the UI only.</p>
 <p><strong>Blocked by.</strong> T2, T4.</p>
 <h3 id="t6-trace-review-workspace-ui">T6. Trace Review Workspace UI</h3>
 <p><strong>Scope.</strong> Build the review workspace: summary strip, trace list with disposition badges, the three
-per-trace panels, termination field state badges, the searchable candidate picker with its eligible
-count, the <code>Sync with dependencies</code> selection, the drift warning strip with its re-read action, and
-the disabled-with-reason pattern for every action. Consume the <code>TerminationResolution</code> write path from
-T4 and the eligible-candidate retrieval from T5. Wire review commands through the Review Workspace
-module so they persist decisions and request a new plan. Adopt NetBox theme variables.</p>
+per-trace panels, Device and termination state badges, searchable candidate pickers with their
+eligible counts, the <code>Sync with dependencies</code> selection, the drift warning strip with its re-read
+action, and the disabled-with-reason pattern for every action. Consume the <code>TerminationResolution</code>
+write path from T4 and the eligible-candidate retrieval from T5. Wire review commands through the
+Review Workspace module so they persist decisions and request a new plan. Adopt NetBox theme
+variables.</p>
 <p><strong>Acceptance criteria.</strong></p>
 <ul>
 <li>Every action is always visible; an illegal action renders disabled with its reason.</li>
@@ -3868,6 +3913,11 @@ module so they persist decisions and request a new plan. Adopt NetBox theme vari
   conflict.</li>
 <li>The picker lists only eligible candidates of the claimed kind on the resolved Device and shows the
   "N of M eligible" count.</li>
+<li>A trace-only profile opens this workspace directly. An open source Device label offers a Device
+  picker before its termination picker.</li>
+<li>Selecting a Device writes one profile-owned <code>TraceDeviceResolution</code> and replans. A later source
+  document reuses it for the same normalized label and for every port under that label.</li>
+<li>Rack, Location, and U position only rank visible Device candidates. They never select one.</li>
 <li>Selecting a candidate writes a <code>TerminationResolution</code> row through its owning model and triggers a
   replan; no review command edits an Import Plan.</li>
 <li>A termination matched by the exact-name rule shows <code>automatically resolved</code>; one selected by an
@@ -3885,8 +3935,8 @@ file fallback. Implement <code>api_root</code> validation with the origin allowl
 checks, and redirect handling. Implement the OpenAI-compatible backend adapter for non-streaming Chat
 Completions with typed error classification. Implement the credential backend seam and its Vault KV v2
 implementation. Add the three plugin settings with the shapes in section 8.2.1, including the two
-permitted <code>vault.auth_method</code> values. Add the connection test as a worker Job, authorized by the
-dedicated <code>InferenceBackend</code> object permission in section 13.1.</p>
+permitted <code>vault.auth_method</code> values. Add the foreground connection test, authorized by the dedicated
+<code>InferenceBackend</code> object permission in section 13.1.</p>
 <p><strong>Acceptance criteria.</strong></p>
 <ul>
 <li>The enabled database row is the active backend; the <code>inference_backend</code> setting under the fixed key
@@ -3909,8 +3959,11 @@ dedicated <code>InferenceBackend</code> object permission in section 13.1.</p>
 <li>No test can find a secret value in any model row, serializer output, YAML export, session, job
   payload, audit record, or log record. The typed credential reference exists in exactly one
   authoritative place.</li>
-<li>The connection test runs as a worker Job and returns one of the typed result categories, never a
-  secret value and never a Vault response body.</li>
+<li>The connection test runs in the foreground, sends one small Chat Completions request, creates no
+  Job, and shows one typed result category. It never shows a secret value, a Vault response body, or
+  Inference Backend response text.</li>
+<li>Compatible model discovery provides bounded suggestions through the normal edit form. Discovery is
+  optional, never controls job execution, and never removes manual model entry.</li>
 <li>A user holding the dedicated <code>InferenceBackend</code> object permission can run the connection test, and a
   user without it cannot; no separate administrator or superuser check exists.</li>
 <li>The change is independently mergeable with all tests passing.</li>

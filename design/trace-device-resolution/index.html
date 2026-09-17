@@ -1,0 +1,1034 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://marcinpsk.github.io/netbox-data-import-plugin/design/trace-device-resolution/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Trace device resolution - NetBox Data Import</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#trace-device-resolution" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="NetBox Data Import" class="md-header__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Data Import
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Trace device resolution
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="NetBox Data Import" class="md-nav__button md-logo" aria-label="NetBox Data Import" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    NetBox Data Import
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/marcinpsk/netbox-data-import-plugin" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    marcinpsk/netbox-data-import-plugin
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#0-review-record" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0. Review record
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#problem-brief" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Problem brief
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#observable-acceptance-conditions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Observable acceptance conditions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#evidence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Evidence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#candidate-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Candidate shapes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Candidate shapes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#a-helper-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A. Helper profile
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#b-trace-owned-device-resolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        B. Trace-owned Device resolution
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#c-adapter-neutral-device-binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C. Adapter-neutral Device binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#independent-design-a" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Independent design A
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Independent design A">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ownership-and-persistent-identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ownership and persistent identity
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#planning-interface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Planning interface
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#candidate-query-and-ranking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Candidate query and ranking
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#save-and-replan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Save and replan
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#workspace-routing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Workspace routing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#future-workbook-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Future workbook shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#independent-design-b" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Independent design B
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#divergence-and-merge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Divergence and merge
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#merged-design" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Merged design
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#open-decisions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Open decisions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ratification-round-1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ratification round 1
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ratification-round-2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ratification round 2
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ratification-round-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ratification round 3
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ratification-round-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ratification round 4
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#follow-up-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Follow-up scope
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
+-->
+
+<h1 id="trace-device-resolution">Trace device resolution</h1>
+<h2 id="0-review-record">0. Review record</h2>
+<p>Round 4: RATIFY. The ratifier accepted the merged design after revisions for policy-row
+authorization, placement-evidence permissions, adapter-neutral Source Trace types, exact routing,
+and an authoritative database-backed preview coordinator.</p>
+<h2 id="problem-brief">Problem brief</h2>
+<p>The trace import currently opens the generic preview after setup. It must open the Trace Review
+Workspace directly when the selected Source Adapter emits only Source Traces. A future adapter that
+mixes output kinds stays on the generic workspace until a combined review surface exists.</p>
+<p>The Cable Target Module resolves a source device label only by one exact Device-name match at the
+selected import target. When that lookup finds zero or several Devices, the trace is blocked before
+the termination picker can offer a port. An operator needs to select the intended NetBox Device once.
+The Import Profile must reuse that decision when a later workbook uses the same source device label.</p>
+<p>Rack, U position, and Location are corroborating source evidence. They can help rank and explain
+Device candidates. They must not identify the source device or silently select a different Device.</p>
+<p>The current <code>trace_workbook</code> Source Adapter recognizes one fixed workbook shape. Its output types
+also live in that parser module, which makes another trace adapter depend on the wrong module.
+Supporting changed sheet names, columns, or layouts is follow-up scope. The device-resolution
+interface must remain usable by another Source Adapter that emits the same <code>SourceTrace</code> output kind.</p>
+<h2 id="observable-acceptance-conditions">Observable acceptance conditions</h2>
+<ol>
+<li>A successful import setup for a profile whose output kinds are exactly <code>{SOURCE_TRACE}</code> redirects
+   directly to the Trace Review Workspace. A mixed-output profile keeps the generic preview.</li>
+<li>A source device label with no unique exact Device-name match offers an operator-visible Device
+   picker inside that workspace.</li>
+<li>Candidate reads remain inside the actor's object permissions and the selected import target.</li>
+<li>Rack, U position, and Location can rank or explain candidates. They never make the final selection.</li>
+<li>Saving a Device selection replans the current preview and stores one profile-owned decision.</li>
+<li>A later workbook under the same profile reuses the decision for the same normalized source device
+   label, including when it names a different port.</li>
+<li>A deleted, hidden, moved outside the selected Site, or otherwise ineligible selected Device is
+   not used silently. A move within the Site does not break an explicit mapping. Rack and U position
+   are evidence, not identity.</li>
+<li>A trace profile does not require a second helper Import Profile.</li>
+<li>Flat-workbook Device matching keeps its current behavior.</li>
+<li>The direct-route and persistent-resolution behavior have end-to-end tests through real views,
+    ORM rows, planning, and permission-scoped candidates.</li>
+</ol>
+<h2 id="evidence">Evidence</h2>
+<ul>
+<li><code>ImportSetupView.post</code> stores the plan and always redirects to <code>import_preview</code>.</li>
+<li><code>CablePlanner._load_devices</code> and <code>_resolve_one</code> use exact Device-name lookup. No Device candidate
+  query follows <code>trace.device_unresolved</code>.</li>
+<li><code>TerminationResolution</code> stores a selected termination under a field key that contains device,
+  cards, port, kind, and role. It cannot answer a later question about another port on the same source
+  device.</li>
+<li><code>DeviceExistingMatch</code> stores a flat source row ID to Device choice and is declared applicable only
+  to Device source rows.</li>
+<li>A <code>SourceTrace</code> already carries Rack, U position, and Location as corroborating evidence on its
+  termination references.</li>
+</ul>
+<h2 id="candidate-shapes">Candidate shapes</h2>
+<h3 id="a-helper-profile">A. Helper profile</h3>
+<p>A trace profile refers to a flat-workbook profile and borrows its Device matches.</p>
+<h3 id="b-trace-owned-device-resolution">B. Trace-owned Device resolution</h3>
+<p>A new profile-owned decision maps a normalized source device label to one NetBox Device.</p>
+<h3 id="c-adapter-neutral-device-binding">C. Adapter-neutral Device binding</h3>
+<p>The existing persistent Device-match concept becomes an output-kind-neutral binding used by both
+flat Device rows and Source Traces through one shared interface.</p>
+<h2 id="independent-design-a">Independent design A</h2>
+<h3 id="ownership-and-persistent-identity">Ownership and persistent identity</h3>
+<p>Add a trace-only <code>TraceDeviceResolution</code> policy row. It belongs to one Import Profile and maps one
+canonical source Device label to one NetBox Device ID. Keep the source label used for display and a
+fixed-width digest of its canonical form. Uniqueness applies to the profile and canonical source
+label only.</p>
+<p>Do not make the target Device unique within a profile. Two source labels can be aliases for the same
+Device after a source rename. The explicit mapping makes that aliasing intentional. Existing Cable
+and termination conflict checks still reject an impossible topology.</p>
+<p>Keep this row separate from <code>DeviceExistingMatch</code>. A flat source row has a stable row ID and supplies
+Device fields for a create-or-update decision. A trace Device label identifies the owner of a port
+reference. These are different identity contracts even though both can point at a Device.</p>
+<p>Keep this row separate from <code>TerminationResolution</code>. One Device decision must apply to all ports and
+all termination kinds named under that source Device label.</p>
+<h3 id="planning-interface">Planning interface</h3>
+<p>Put trace Device binding behind one Cable Target Module function. Given the profile, every source
+Device label in a <code>SourceTrace</code> batch, and a permission-scoped <code>NetBoxReader</code>, it returns one of:</p>
+<ul>
+<li>a saved manual Device that is still visible inside the selected Site;</li>
+<li>one automatic exact-name match when no saved decision exists;</li>
+<li>an open Device decision with a reason.</li>
+</ul>
+<p>A saved decision takes precedence over name matching. If its Device is unavailable, planning keeps
+the decision open. It does not silently fall back to a different exact-name match.</p>
+<p>The plan carries one Device-resolution presentation record per canonical source label. The Trace
+Review Workspace aggregates repeated references, so one decision answers every port on that source
+Device. A request can act only on a Device key carried by the active reviewed plan.</p>
+<h3 id="candidate-query-and-ranking">Candidate query and ranking</h3>
+<p>The candidate endpoint reads only Devices the actor can view in the selected Site. Text search
+filters the same set. Each candidate includes a short explanation for matching source evidence.</p>
+<p>Order candidates by these hints, then by Device name and primary key:</p>
+<ol>
+<li>exact source Device name;</li>
+<li>matching Location;</li>
+<li>matching Rack;</li>
+<li>matching U position.</li>
+</ol>
+<p>The picker always needs an operator click. Hint scores never select a Device. Conflicting evidence
+from repeated references is shown as multiple source values. It is not collapsed to a guessed fact.</p>
+<h3 id="save-and-replan">Save and replan</h3>
+<p>The save endpoint repeats the permission-scoped candidate query that produced the offer. It saves
+the policy row and replans while holding the profile policy lock. The current preview records the
+new plan only after the transaction succeeds.</p>
+<p>If a saved Device is deleted, hidden from the actor, or outside the selected Site, the next plan
+shows a generic unavailable-selection reason and asks for a new choice. It does not disclose a
+hidden Device. A Rack, Location, or U-position change inside the Site changes candidate evidence but
+does not invalidate an explicit mapping.</p>
+<h3 id="workspace-routing">Workspace routing</h3>
+<p>Derive the review destination from the selected profile's registered output kinds. A profile opens
+the Trace Review Workspace only when its output kinds equal exactly <code>{SOURCE_TRACE}</code>. It opens even
+when the parsed workbook produces zero valid traces. This lets trace-specific parse and planning
+feedback stay in its own workspace. A profile that emits <code>SourceTrace</code> together with any other
+output kind keeps the generic preview route, as do all profiles that emit no traces.</p>
+<p>Keep the route choice in one helper used after setup. Do not infer it from <code>workspace.has_traces</code>,
+because an empty or invalid trace workbook still has trace semantics.</p>
+<h3 id="future-workbook-shapes">Future workbook shapes</h3>
+<p>Keep workbook layout inside Source Adapters. A later change can make sheet and column mappings part
+of validated <code>adapter_config</code>, or register another Source Adapter. Both approaches must emit the same
+<code>SourceTrace</code> and <code>TerminationReference</code> types. Device resolution and the Cable Target Module must
+not know workbook column names.</p>
+<h2 id="independent-design-b">Independent design B</h2>
+<p>The blind design also selected a trace-only <code>TraceDeviceResolution</code> row and rejected a helper
+profile, <code>DeviceExistingMatch</code>, and <code>TerminationResolution</code> as owners. It placed normalization,
+bulk resolution, stale-selection checks, candidate ranking, and evidence explanations in one deep
+Trace Device Resolution Module used by planning and workspace commands.</p>
+<p>It added these constraints:</p>
+<ul>
+<li>Store a plain Device ID so deleting a Device preserves a stale decision that the workspace can
+  explain and replace.</li>
+<li>Do not show the saved display snapshot after the actor loses access to the Device.</li>
+<li>Let several source aliases select one Device. Only the source key is unique within a profile.</li>
+<li>Bulk-load decisions and Devices so query count does not grow with Termination References.</li>
+<li>Rank exact name first, then more matching placement dimensions, then fewer conflicting dimensions.</li>
+<li>Reproduce and lock the permission-scoped candidate offer during the save command.</li>
+<li>Route only a trace-only output set directly. Keep a future mixed-output adapter on the generic
+  workspace until a combined review surface exists.</li>
+</ul>
+<h2 id="divergence-and-merge">Divergence and merge</h2>
+<table>
+<thead>
+<tr>
+<th>Question</th>
+<th>Design A</th>
+<th>Design B</th>
+<th>Merged decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Module boundary</td>
+<td>Cable Target Module function</td>
+<td>Sibling Trace Device Resolution Module</td>
+<td>Use one sibling deep module owned by the Cable Target Module.</td>
+</tr>
+<tr>
+<td>Stale Device deletion</td>
+<td>Plain ID implied by existing patterns</td>
+<td>Plain ID required to preserve stale state</td>
+<td>Store a plain ID and a display snapshot. Never show the snapshot when the Device is not visible.</td>
+</tr>
+<tr>
+<td>Candidate ordering</td>
+<td>Exact name, Location, Rack, U</td>
+<td>Exact name, more matches, fewer conflicts</td>
+<td>Use deterministic match and conflict counts. Show the matched and conflicting evidence.</td>
+</tr>
+<tr>
+<td>Route predicate</td>
+<td>Profile emits <code>SourceTrace</code></td>
+<td>Output kinds equal trace-only</td>
+<td>Route trace-only profiles directly. Keep mixed-output profiles on the generic workspace.</td>
+</tr>
+<tr>
+<td>Write concurrency</td>
+<td>Lock profile and replan</td>
+<td>Also reproduce and lock the candidate offer</td>
+<td>Reproduce the offer under the profile lock, lock candidate rows, save, then replan.</td>
+</tr>
+<tr>
+<td>Portable YAML</td>
+<td>Not specified</td>
+<td>Exclude installation-local IDs</td>
+<td>Do not add a portable YAML schema. The catalog section still participates in the planning fingerprint.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="merged-design">Merged design</h2>
+<p>Implement the Trace Device Resolution Module described by the two designs, with these public
+responsibilities:</p>
+<ol>
+<li>Canonicalize one source Device label.</li>
+<li>Aggregate placement evidence for that label from all active <code>TerminationReference</code> values.</li>
+<li>Bulk-resolve saved choices and exact Device-name matches through one permission-scoped reader.</li>
+<li>Return automatic, manual, unresolved, or stale presentation state.</li>
+<li>Return a bounded and deterministically ranked candidate page with evidence explanations.</li>
+<li>Save a reproduced candidate choice and replan under the profile policy lock.</li>
+</ol>
+<p>Before adding a second Source Adapter, move <code>SourceTrace</code>, <code>TerminationReference</code>, and their related
+output value types from <code>trace_workbook.py</code> to an adapter-neutral <code>source_trace.py</code>. The current
+parser and Cable Target Module both import that contract. A test-only trace adapter must be able to
+emit the contract without importing <code>trace_workbook</code>.</p>
+<p>The Cable Target Module consumes only resolved outcomes. The Trace Review Workspace consumes only
+server-authored Device questions and candidate pages. Neither caller queries Device identity on its
+own.</p>
+<p>The active plan carries each Device question. A Device candidate or save request is valid only when
+its canonical source key appears in that reviewed plan. Termination questions for an unresolved or
+stale Device remain visible but disabled with the instruction to resolve the Device first.</p>
+<p>Candidate placement evidence follows separate object-permission scopes. The module reads visible
+Rack and Location IDs through <code>NetBoxReader.racks()</code> and <code>NetBoxReader.locations()</code>. A Device's Rack
+or Location affects ranking and explanation only when that related object is also visible to the
+actor. Hidden placement values produce no score, conflict, text, or count.</p>
+<p>The policy upsert uses <code>save_permission_scoped_object(actor, TraceDeviceResolution, ...)</code>. Add and
+change permission constraints apply to the decision row itself. A denial rolls back both the
+decision and its replan, even when the Device candidate is visible.</p>
+<p>One database-backed preview coordinator owns the active preview identity and revision for each
+browser session. Its row is the authoritative compare-and-set record. Starting or replacing a
+preview, discarding it, re-reading it, or running any command that writes policy or replaces the
+materialized plan must lock the same session-owned row.</p>
+<p>A mutation verifies the posted active-preview token, revision, Source Document, and profile before
+it writes. The policy write, candidate recheck, and replan occur in that transaction. The winner
+advances the revision. A second request carrying the old identity or revision receives 409 and
+cannot commit a policy row or replace the newer preview.</p>
+<p>The database coordinator stores the authoritative active-preview identity, revision, context, and
+materialized plan. Session data is only a pointer or cache. Every preview read validates it against
+the coordinator row and refreshes or refuses a stale cache. No response middleware session save can
+restore an older preview after the coordinator has advanced.</p>
+<p>Device and termination decisions, proposal decisions, the re-read command, new import setup, and
+preview discard use this same coordinator rather than implementing separate checks. A concurrent
+new setup for document B therefore has one linear order with an older Device decision for document
+A. If A locks first, A can commit and B then replaces it. If B locks first, A receives 409. In both
+orders B is the final active preview, and a stale session save cannot restore A.</p>
+<p>Direct routing uses the profile's declared output kinds after the preview state is stored. A
+trace-only profile opens the Trace Review Workspace, including when it produces no valid trace unit.</p>
+<p>The first implementation keeps the <code>trace_workbook</code> parser fixed. Its validated adapter settings
+can later declare sheet roles, header aliases, and column mappings. That change must still emit the
+current <code>SourceTrace</code> types and must not alter this Device-resolution interface.</p>
+<h2 id="open-decisions">Open decisions</h2>
+<p>No product-shape decisions remain. Ratification can still reject an invariant or require a narrower
+first delivery.</p>
+<h2 id="ratification-round-1">Ratification round 1</h2>
+<p>Result: REJECT.</p>
+<p>Required revisions were:</p>
+<ol>
+<li>State object-permission enforcement for the policy-row write.</li>
+<li>Prevent Rack and Location hints from crossing their own object-permission scopes.</li>
+<li>Move Source Trace output types out of the fixed workbook parser.</li>
+<li>Make the trace-only route predicate explicit for mixed-output adapters.</li>
+<li>Serialize concurrent preview mutations with a database-backed revision claim.</li>
+</ol>
+<p>The merged design above includes all five revisions.</p>
+<h2 id="ratification-round-2">Ratification round 2</h2>
+<p>Result: REJECT.</p>
+<p>The document-scoped preview claim did not serialize an old Device decision against a concurrent new
+upload in the same browser session. The coordinator now owns the session's active preview identity,
+and every preview lifecycle operation uses the same compare-and-set record.</p>
+<h2 id="ratification-round-3">Ratification round 3</h2>
+<p>Result: REJECT.</p>
+<p>An implementation that saved only the request session under the coordinator lock could still be
+overwritten later by unrelated response middleware. The coordinator now stores the authoritative
+preview context and plan. The session cannot restore state. The concurrent ordering statement now
+allows an old decision to commit before a later setup replaces it.</p>
+<h2 id="ratification-round-4">Ratification round 4</h2>
+<p>Result: RATIFY.</p>
+<p>The accepted design closes every observable acceptance condition and the permission, stale-state,
+adapter-boundary, and concurrent-preview failure cases found in the earlier rounds.</p>
+<h2 id="follow-up-scope">Follow-up scope</h2>
+<p>Make trace workbook structure configurable or add more Source Adapters that emit <code>SourceTrace</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.sections"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
