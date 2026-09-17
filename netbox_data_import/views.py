@@ -1274,7 +1274,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         ]
         unused_columns.sort(key=lambda x: -x["count"])
         conflicts_by_row = {
-            str(r.row_number): r.extra_data.get("conflicts", {}) for r in result.units if r.extra_data.get("conflicts")
+            _row_key(r): r.extra_data.get("conflicts", {}) for r in result.units if r.extra_data.get("conflicts")
         }
         # The modal names a field for the operator; the catalog is where those names live.
         target_field_labels = {key: CATALOG.display(key) for key, _label in CATALOG.choices()}
@@ -1283,13 +1283,13 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             for row in result.units:
                 candidate_values = _candidate_values(row.extra_data)
                 if candidate_values:
-                    candidate_values_by_row[str(row.row_number)] = candidate_values
+                    candidate_values_by_row[_row_key(row)] = candidate_values
         except ValidationError as exc:
             _discard_import_preview(request)
             messages.error(request, "; ".join(exc.messages))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         contact_suggestions_by_row = {
-            str(r.row_number): r.extra_data["contact_suggestion"]
+            _row_key(r): r.extra_data["contact_suggestion"]
             for r in result.units
             if r.extra_data.get("contact_suggestion")
         }

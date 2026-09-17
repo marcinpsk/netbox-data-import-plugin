@@ -760,6 +760,7 @@
                         class="btn btn-sm btn-outline-success ms-1 ndi-contact-resolved"
                         data-ndi-modal="#contactCandidateModal"
                         data-row-number="{{ row.row_number }}"
+                        data-object-type="{{ row.object_type }}"
                         data-source-id="{{ row.source_id }}"
                         title="This row's Contact fields are resolved. Open to review or change them.">
                   <i class="mdi mdi-account-check"></i> Contact resolved
@@ -769,6 +770,7 @@
                         class="btn btn-sm btn-outline-warning ms-1"
                         data-ndi-modal="#contactCandidateModal"
                         data-row-number="{{ row.row_number }}"
+                        data-object-type="{{ row.object_type }}"
                         data-source-id="{{ row.source_id }}"
                         title="Choose which candidate values supply this row's Contact fields">
                   <i class="mdi mdi-account-question"></i> Resolve contact fields
@@ -782,6 +784,7 @@
                       class="badge text-bg-warning ms-1 border-0 ndi-conflict-badge"
                       data-ndi-modal="#conflictModal"
                       data-row-number="{{ row.row_number }}"
+                      data-object-type="{{ row.object_type }}"
                       data-source-id="{{ row.source_id }}"
                       aria-label="Show conflicts for row {{ row.row_number }}"
                       title="This row has field conflicts that require manual resolution before import">
@@ -877,6 +880,7 @@
                     <button type="button" class="btn btn-xs btn-outline-warning ndi-conflict-detail-resolve"
                             data-ndi-modal="#conflictModal"
                             data-row-number="{{ row.row_number }}"
+                            data-object-type="{{ row.object_type }}"
                             data-source-id="{{ row.source_id }}">
                       <i class="mdi mdi-check-decagram"></i> Pick a value
                     </button>

@@ -38,7 +38,7 @@
   var addValue = document.getElementById('contactCandidateAddValue');
   var provenance = document.getElementById('contactCandidateProvenance');
   var linkedContacts = {};
-  var shownRow = null;
+  var shownRowKey = null;
   var heldOffer = null;
   var saveInFlight = false;
   var summary = {
@@ -303,15 +303,17 @@
     if (!button) return;
     var sourceId = button.dataset.sourceId || '';
     var rowNumber = button.dataset.rowNumber;
-    var rowCandidates = (candidateValues[rowNumber] || {}).contact || {};
+    // Row numbers repeat across object types, so the key names the type as well as the number.
+    var rowKey = (button.dataset.objectType || '') + ':' + rowNumber;
+    var rowCandidates = (candidateValues[rowKey] || {}).contact || {};
     var resolutions = window.EXISTING_RESOLUTIONS || {};
     var existing = (resolutions[sourceId] || {})['candidate:contact'];
     var resolvedFields = existing ? (existing.resolved_fields || {}) : {};
     var savedSources = resolvedFields.contact_field_sources || {};
     var savedValues = resolvedFields.contact_field_values || {};
-    var suggestion = contactSuggestions[rowNumber];
-    var proposed = roleSuggestions[rowNumber] || {};
-    shownRow = rowNumber;
+    var suggestion = contactSuggestions[rowKey];
+    var proposed = roleSuggestions[rowKey] || {};
+    shownRowKey = rowKey;
     heldOffer = null;
 
     document.getElementById('contactCandidateSourceId').value = sourceId;
@@ -352,7 +354,7 @@
     }
     // The message asks for a Contact to be linked, so a row that has one is not asked again.
     showSuggestion(contactId.value ? null : suggestion);
-    refreshSuggestion(sourceId, rowNumber);
+    refreshSuggestion(sourceId, rowKey);
 
     noContact.checked = resolvedFields.contact_resolution_applied === true
       && !Object.keys(savedSources).length
@@ -404,14 +406,14 @@
       }
       heldOffer = null;
     }
-    showSuggestion(contactId.value ? null : contactSuggestions[shownRow]);
+    showSuggestion(contactId.value ? null : contactSuggestions[shownRowKey]);
   }
 
   var latestRefresh = 0;
 
   /* The page's suggestion map was built when the preview rendered, so a Contact created since,
    * on another row, is only offered here if the server is asked again. */
-  function refreshSuggestion(sourceId, rowNumber) {
+  function refreshSuggestion(sourceId, rowKey) {
     var url = form.dataset.contactSuggestionUrl;
     var profileField = form.querySelector('input[name=profile_id]');
     var profileId = profileField ? profileField.value : '';
@@ -427,15 +429,15 @@
         // The modal is shared, so a late answer must not write over the row now on screen.
         if (!stillShowing(sourceId)) return;
         var instance = picker();
-        var offered = contactSuggestions[rowNumber];
+        var offered = contactSuggestions[rowKey];
         if (!data.suggestion) {
           // The Contact the page offers is gone, so keeping it would only fail on save.
-          delete contactSuggestions[rowNumber];
+          delete contactSuggestions[rowKey];
           dropOffered(instance, offered);
           showSuggestion(null);
           return;
         }
-        contactSuggestions[rowNumber] = data.suggestion;
+        contactSuggestions[rowKey] = data.suggestion;
         // One row identifies one Contact, so an offer it replaces must not stay on the list.
         if (offered && String(offered.id) !== String(data.suggestion.id)) dropOffered(instance, offered);
         if (instance) {
