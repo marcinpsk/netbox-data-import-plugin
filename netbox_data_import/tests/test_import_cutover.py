@@ -154,6 +154,17 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         # The name NetBox already holds is reported, not dropped, so the write is not read as total.
         self.assertEqual(entries["device_name"]["state"], "unchanged")
 
+    def test_the_preview_offers_the_racks_its_rows_name(self):
+        """The flat view filters by rack, so the page carries the racks and each row's own rack."""
+        self._upload()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["rack_filter_options"], [{"value": "rack-a", "label": "rack-a"}])
+        self.assertIn(b'data-rack-name="rack-a"', response.content)
+        self.assertIn(b'id="previewRackFilter"', response.content)
+
     def _sync_single_row(self, data=None):
         """Post an inline execution with the active preview revision when one exists."""
         payload = dict(data or {})

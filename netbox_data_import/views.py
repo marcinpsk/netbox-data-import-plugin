@@ -176,6 +176,22 @@ def _row_key(unit) -> str:
     return f"{unit.object_type}:{unit.row_number}"
 
 
+#: The rack filter's "no rack" option value. Tom Select drops an option whose value is empty.
+NO_RACK_FILTER_VALUE = "__no_rack__"
+
+
+def _rack_filter_options(units) -> list[dict[str, str]]:
+    """Return the racks the preview names, so the flat view can filter by them.
+
+    Rows that name no rack are offered as their own option, matching the rack view's group.
+    """
+    named = {unit.rack_name for unit in units if unit.rack_name}
+    options = [{"value": rack, "label": rack} for rack in sorted(named, key=identity_text)]
+    if any(unit.object_type == "device" and not unit.rack_name for unit in units):
+        options.append({"value": NO_RACK_FILTER_VALUE, "label": "(No rack)"})
+    return options
+
+
 def _sync_change_preview_by_row(units, labels):
     """Return each reviewed row's fields grouped by what a sync would do to them."""
     previews = {}
@@ -1288,6 +1304,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if r.extra_data.get("extra_columns")
         }
         sync_change_preview_by_row = _sync_change_preview_by_row(result.units, target_field_labels)
+        rack_filter_options = _rack_filter_options(result.units)
         split_field_values_by_source_id = {
             r.source_id: {
                 "device_name": r.name or "",
@@ -1345,6 +1362,8 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "contact_role_suggestions_by_row": contact_role_suggestions_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
                 "sync_change_preview_by_row": sync_change_preview_by_row,
+                "rack_filter_options": rack_filter_options,
+                "no_rack_filter_value": NO_RACK_FILTER_VALUE,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
                 "preview_revision": current_preview_revision(request.session),

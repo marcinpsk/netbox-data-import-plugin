@@ -54,12 +54,16 @@ function addFilterRows() {
     <button id="previewRowFilterClear" style="display:none;">x</button>
     <select id="previewActionFilter"><option value=""></option><option value="update">Update</option>
       <option value="error">Error</option></select>
+    <select id="previewRackFilter" multiple data-no-rack-value="__no_rack__">
+      <option value="V1">V1</option><option value="V3">V3</option>
+      <option value="__no_rack__">(No rack)</option>
+    </select>
     <div id="ndi-hidden-err-warn" style="display:none;">
       <span id="ndi-hidden-err-count">0</span>
       <a href="#" id="ndi-show-errors-link">show errors</a>
     </div>
     <table><tbody id="previewRowsBody">
-      <tr id="row-1" data-action="update">
+      <tr id="row-1" data-action="update" data-rack-name="V1">
         <td>dev-a</td>
         <td>
           <button type="button" class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="false">
@@ -73,7 +77,7 @@ function addFilterRows() {
           <tbody><tr id="diff-field-1-serial"><td>serial</td><td>OLD</td><td>NEW</td></tr></tbody>
         </table>
       </td></tr>
-      <tr id="row-2" data-action="update"><td>dev-b</td></tr>
+      <tr id="row-2" data-action="update" data-rack-name="V3"><td>dev-b</td></tr>
       <tr id="row-3" data-action="error"><td>dev-c</td></tr>
     </tbody></table>
     <p id="previewNoFilterResults" style="display:none;">No rows match</p>
@@ -484,5 +488,76 @@ describe("a recalculation that reloads the page", () => {
     window.ndiRestorePreviewView();
 
     expect(document.getElementById("previewActionFilter").value).toBe("error");
+  });
+});
+
+
+function selectRacks(values) {
+  const select = document.getElementById("previewRackFilter");
+  [...select.options].forEach((option) => {
+    option.selected = values.includes(option.value);
+  });
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+describe("filtering the flat view by rack", () => {
+  beforeEach(() => {
+    addFilterRows();
+  });
+
+  it("shows only the devices in the chosen rack", () => {
+    selectRacks(["V1"]);
+
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-2").style.display).toBe("none");
+    expect(document.getElementById("row-3").style.display).toBe("none");
+  });
+
+  it("takes more than one rack at a time", () => {
+    selectRacks(["V1", "V3"]);
+
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-2").style.display).toBe("");
+    expect(document.getElementById("row-3").style.display).toBe("none");
+  });
+
+  it("finds the rows that name no rack", () => {
+    // The option carries a sentinel, because Tom Select drops an empty option value.
+    selectRacks(["__no_rack__"]);
+
+    expect(document.getElementById("row-3").style.display).toBe("");
+    expect(document.getElementById("row-1").style.display).toBe("none");
+  });
+
+  it("shows every row again when no rack is chosen", () => {
+    selectRacks(["V1"]);
+    selectRacks([]);
+
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-2").style.display).toBe("");
+    expect(document.getElementById("row-3").style.display).toBe("");
+  });
+
+  it("narrows within the action filter rather than replacing it", () => {
+    filterBy("", "update");
+    selectRacks(["V1"]);
+
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-2").style.display).toBe("none");
+  });
+
+  it("is cleared with the other filters", () => {
+    selectRacks(["V1"]);
+
+    document.getElementById("previewRowFilterClear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+    expect(document.getElementById("row-2").style.display).toBe("");
+    expect([...document.getElementById("previewRackFilter").selectedOptions]).toHaveLength(0);
+  });
+
+  it("offers the clear button while only a rack is chosen", () => {
+    selectRacks(["V1"]);
+
+    expect(document.getElementById("previewRowFilterClear").style.display).not.toBe("none");
   });
 });
