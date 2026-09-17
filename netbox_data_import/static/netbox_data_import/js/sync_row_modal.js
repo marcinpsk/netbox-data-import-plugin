@@ -175,12 +175,15 @@
       });
     }
 
-    var changeCount = 0;
-    var skippedCount = 0;
+    var counts = {change: 0, unchanged: 0, ignored: 0, not_written: 0};
     changePreview.forEach(function (entry) {
-      if (entry.state === 'change') changeCount += 1;
-      else if (entry.state !== 'unchanged') skippedCount += 1;
+      if (entry.state in counts) counts[entry.state] += 1;
     });
+    /* Ignored and not written are separate states, so one count cannot stand for both. */
+    var skipped = [];
+    if (counts.ignored) skipped.push(counts.ignored + ' ignored');
+    if (counts.not_written) skipped.push(counts.not_written + ' not written');
+    var skippedPhrase = skipped.join(', ');
 
     if (showUnchanged) {
       showUnchanged.parentNode.hidden = unchangedRows.length === 0;
@@ -197,16 +200,15 @@
       summary.textContent = isUpdate
         ? 'This row has no reviewed field differences.'
         : 'Creates this ' + (btn.dataset.objectType || 'object') + ' in NetBox with the values below.';
-    } else if (changeCount === 0) {
+    } else if (counts.change === 0) {
       summary.className = 'small mb-2 text-muted';
       summary.textContent = 'No field changes. NetBox already holds every reviewed value'
-        + (skippedCount ? ', and ' + skippedCount + ' field' + (skippedCount === 1 ? ' is' : 's are')
-           + ' not written.' : '.');
+        + (skippedPhrase ? ', and ' + skippedPhrase + '.' : '.');
     } else {
       summary.className = 'small mb-2';
-      summary.textContent = changeCount + ' field' + (changeCount === 1 ? '' : 's')
-        + ' will change. ' + unchangedRows.length + ' unchanged'
-        + (skippedCount ? ', ' + skippedCount + ' not written.' : '.');
+      summary.textContent = counts.change + ' field' + (counts.change === 1 ? '' : 's')
+        + ' will change. ' + counts.unchanged + ' unchanged'
+        + (skippedPhrase ? ', ' + skippedPhrase + '.' : '.');
     }
 
     // Append extra_columns (custom fields / unmapped columns) below standard fields

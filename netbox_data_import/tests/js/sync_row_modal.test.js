@@ -101,15 +101,23 @@ describe("the update confirmation", () => {
   it("counts the changes so the operator sees the size of the write", () => {
     openRow(REVIEWED, { action: "update" });
 
+    // An ignored field and an unwritten one are different states, so one count cannot cover both.
     expect(document.getElementById("syncRowSummary").textContent)
-      .toBe("1 field will change. 2 unchanged, 2 not written.");
+      .toBe("1 field will change. 2 unchanged, 1 ignored, 1 not written.");
   });
 
   it("says plainly when the write changes nothing", () => {
     openRow(REVIEWED.filter((entry) => entry.state === "unchanged"), { action: "update" });
 
     expect(document.getElementById("syncRowSummary").textContent)
-      .toContain("NetBox already holds every reviewed value");
+      .toBe("No field changes. NetBox already holds every reviewed value.");
+  });
+
+  it("names each skipped state when nothing changes", () => {
+    openRow(REVIEWED.filter((entry) => entry.state !== "change"), { action: "update" });
+
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("No field changes. NetBox already holds every reviewed value, and 1 ignored, 1 not written.");
   });
 
   it("shows an ignored or unwritten value struck through, because it is not applied", () => {
