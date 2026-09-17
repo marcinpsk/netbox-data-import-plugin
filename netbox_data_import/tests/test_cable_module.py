@@ -29,6 +29,7 @@ from extras.models import Tag
 
 from netbox_data_import.adapters import SourceBatch, TraceWorkbookAdapter
 from netbox_data_import.cable_target import CableModule, eligible_terminations
+from netbox_data_import.catalog import OutputKind
 from netbox_data_import.field_keys import (
     MAPPED_PEER_ROLE,
     SELECT_TERMINATION_TASK,
@@ -746,6 +747,21 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(batch.rows, (trace,))
         self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
         self.assertIn("source.row_type_unexpected", [item.code for item in batch.diagnostics])
+
+    def test_an_excluded_row_names_its_type_and_keeps_its_source_location(self):
+        """The batch-level diagnostic identifies the excluded row, so an operator can find it."""
+        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        trace = parsed.rows[0]
+
+        trace_batch = SourceBatch(output_kinds=parsed.output_kinds, rows=({"_row_number": 7},))
+        flat_batch = SourceBatch(output_kinds=frozenset({OutputKind.DEVICE_SOURCE_ROW}), rows=(trace,))
+        (from_trace_batch,) = trace_batch.diagnostics
+        (from_flat_batch,) = flat_batch.diagnostics
+
+        self.assertIn("dict", from_trace_batch.message)
+        self.assertEqual(from_trace_batch.row_number, 7)
+        self.assertIn("SourceTrace", from_flat_batch.message)
+        self.assertEqual(from_flat_batch.row_number, trace.provenance[0].row_start)
 
     def test_endpoint_evidence_only_blocks_when_no_direct_cable_exists(self):
         """A Trace List block states endpoints alone, so nothing proves the physical path."""

@@ -40,6 +40,16 @@ class SourceDiagnostic:
     row_number: int | None = None
 
 
+def _foreign_row_number(row) -> int | None:
+    """Return the source row a foreign row states, so its diagnostic can name a location."""
+    provenance = getattr(row, "provenance", ())
+    if provenance:
+        return provenance[0].row_start
+    if isinstance(row, dict):
+        return row.get("_row_number")
+    return None
+
+
 @dataclass(frozen=True)
 class SourceBatch:
     """The typed source items and source diagnostics from one file (section 1)."""
@@ -64,7 +74,8 @@ class SourceBatch:
                 diagnostics.append(
                     SourceDiagnostic(
                         code="source.row_type_unexpected",
-                        message=f"This batch carries {carries} only.",
+                        message=f"This batch carries {carries} only; got {type(row).__name__}.",
+                        row_number=_foreign_row_number(row),
                     )
                 )
                 continue
