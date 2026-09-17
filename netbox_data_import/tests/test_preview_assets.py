@@ -13,6 +13,7 @@ from pathlib import Path
 from django.test import SimpleTestCase
 from django.urls import reverse
 
+from netbox_data_import import device_field_review
 from netbox_data_import.catalog import CATALOG
 from netbox_data_import.tests.test_views import BaseViewTestCase, PreviewSessionMixin
 
@@ -52,6 +53,24 @@ class DeferredFormsReadTheirActionAttributeTest(SimpleTestCase):
             if re.search(r"\bform\.action\b", line)
         ]
         self.assertEqual(offenders, [], "Read the posted URL with form.getAttribute('action').")
+
+
+class SyncStateLabelsMatchTheServerTest(SimpleTestCase):
+    """Every server sync state needs an explicit label in the confirmation modal."""
+
+    def test_every_server_sync_state_has_a_modal_label(self):
+        """A missing label makes the browser call an unknown write state unchanged."""
+        source = (STATIC_JS_DIR / "sync_row_modal.js").read_text()
+        labels_match = re.search(r"var STATE_LABELS = \{(.*?)\n    \};", source, re.DOTALL)
+        self.assertIsNotNone(labels_match, "the sync modal must declare STATE_LABELS")
+        label_keys = set(re.findall(r"^\s+([a-z_]+):", labels_match.group(1), re.MULTILINE))
+        server_states = {
+            value
+            for name, value in vars(device_field_review).items()
+            if name.startswith("SYNC_STATE_") and isinstance(value, str)
+        }
+
+        self.assertEqual(server_states - label_keys, set(), "add a modal label for every server sync state")
 
 
 class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
