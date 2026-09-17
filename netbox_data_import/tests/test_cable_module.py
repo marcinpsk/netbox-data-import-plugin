@@ -733,6 +733,20 @@ class CablePlanningTest(CableTopologyMixin, TestCase):
         self.assertEqual(invalid_unit.disposition, Disposition.INVALID)
         self.assertIn("trace.device_required", self.codes(invalid_unit))
 
+    def test_a_row_that_is_not_a_source_trace_is_reported_and_excluded(self):
+        """SourceBatch states the Source Trace contract, so Cable planning never reads a foreign row."""
+        parsed = TraceWorkbookAdapter.interpret(trace_workbook_bytes(path_blocks=(direct_path(),)), {})
+        trace = parsed.rows[0]
+        # SourceBatch.rows is typed dict | SourceTrace, so a dict is a legal argument here.
+        batch = SourceBatch(output_kinds=parsed.output_kinds, rows=(trace, {"device": "DEV-A"}))
+        reader = NetBoxReader.for_actor(self.actor).for_planning_context(self.planning_context)
+
+        (unit,) = CableModule().plan(batch, self.profile, None, reader)
+
+        self.assertEqual(batch.rows, (trace,))
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertIn("source.row_type_unexpected", [item.code for item in batch.diagnostics])
+
     def test_endpoint_evidence_only_blocks_when_no_direct_cable_exists(self):
         """A Trace List block states endpoints alone, so nothing proves the physical path."""
         content = trace_workbook_bytes(

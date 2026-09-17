@@ -50,15 +50,25 @@ class SourceBatch:
     unused_columns: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self):
-        """Mark Source Traces with empty Device references as invalid adapter output."""
-        if OutputKind.SOURCE_TRACE not in self.output_kinds:
-            return
+        """Exclude a row the output kinds cannot carry, and mark a Trace with empty Device references."""
         from .source_trace import SourceTrace
 
+        trace_batch = OutputKind.SOURCE_TRACE in self.output_kinds
+        expected = SourceTrace if trace_batch else dict
+        carries = "Source Traces" if trace_batch else "source rows"
         rows = []
         diagnostics = list(self.diagnostics)
         for row in self.rows:
-            if not isinstance(row, SourceTrace):
+            if not isinstance(row, expected):
+                # Excluded here, because every reader below reads the row the output kinds declare.
+                diagnostics.append(
+                    SourceDiagnostic(
+                        code="source.row_type_unexpected",
+                        message=f"This batch carries {carries} only.",
+                    )
+                )
+                continue
+            if not trace_batch:
                 rows.append(row)
                 continue
             summary = row.endpoint_summary

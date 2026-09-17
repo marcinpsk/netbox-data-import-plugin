@@ -45,6 +45,38 @@ class TargetModuleJsonBoundaryTest(SimpleTestCase):
         self.assertEqual(_display_value(object()).startswith("<object object"), True)
 
 
+class SourceBatchRowContractTest(SimpleTestCase):
+    """Every declared output kind states the row type its readers may assume."""
+
+    #: The row type each output kind carries. A new kind must be added here and to SourceBatch.
+    ROW_TYPE_BY_KIND = {
+        OutputKind.DEVICE_SOURCE_ROW: dict,
+        OutputKind.RACK_SOURCE_ROW: dict,
+        OutputKind.SOURCE_TRACE: "source_trace",
+    }
+
+    def test_every_output_kind_is_covered_by_the_row_contract(self):
+        """A new output kind fails here until SourceBatch states the row type it carries."""
+        declared = {
+            value for name, value in vars(OutputKind).items() if not name.startswith("_") and isinstance(value, str)
+        }
+
+        self.assertEqual(declared, set(self.ROW_TYPE_BY_KIND))
+
+    def test_each_output_kind_excludes_a_row_of_the_other_type(self):
+        """SourceBatch reports a foreign row instead of passing it to a reader that cannot read it."""
+        from netbox_data_import.source_trace import SourceTrace
+
+        for kind, row_type in self.ROW_TYPE_BY_KIND.items():
+            with self.subTest(kind=kind):
+                # The other family's row, so a swapped expected type fails here. It is never read.
+                foreign = {"device": "DEV-A"} if row_type == "source_trace" else SourceTrace.__new__(SourceTrace)
+                batch = SourceBatch(output_kinds=frozenset({kind}), rows=(foreign,))
+
+                self.assertEqual(batch.rows, ())
+                self.assertEqual([item.code for item in batch.diagnostics], ["source.row_type_unexpected"])
+
+
 class TargetModuleDatabaseEdgeTest(TestCase):
     """Target mutations reject identities and dependencies that appeared after planning."""
 
