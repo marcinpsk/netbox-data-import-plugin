@@ -12,7 +12,7 @@ from time import monotonic, sleep
 
 from django.db import connections
 
-FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
 
 
 def workbook_bytes(headers, rows, *, sheet_name="Data") -> bytes:
@@ -372,7 +372,7 @@ def setup_preview_with_device_matches(client, profile):
     document = SourceDocument.store(
         profile=profile,
         content=content,
-        filename="sample_cans.xlsx",
+        filename="sample_workbook.xlsx",
         uploaded_by=actor,
     )
     planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
@@ -406,7 +406,7 @@ def setup_preview_with_device_matches(client, profile):
         "site_id": site.pk,
         "location_id": None,
         "tenant_id": None,
-        "filename": "sample_cans.xlsx",
+        "filename": "sample_workbook.xlsx",
         "source_document_id": document.pk,
     }
     session["import_preview_pending"] = True

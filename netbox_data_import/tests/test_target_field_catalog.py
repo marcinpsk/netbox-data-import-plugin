@@ -28,7 +28,7 @@ from netbox_data_import.forms import ColumnMappingForm, ColumnTransformRuleForm,
 from netbox_data_import.models import ColumnMapping, ColumnTransformRule, ImportProfile
 from netbox_data_import.plan import Disposition
 
-FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
 
 API = "plugins-api:netbox_data_import-api"
 

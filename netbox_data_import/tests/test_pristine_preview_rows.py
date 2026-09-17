@@ -64,7 +64,7 @@ class UploadStoresPristineSourceTest(TestCase):
         from netbox_data_import.adapter_config import interpreter_config_for
         from netbox_data_import.models import SourceResolution
 
-        fixture = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
+        fixture = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
         with open(fixture, "rb") as handle:
             original = handle.read()
         batch = FlatWorkbookAdapter.interpret(original, interpreter_config_for(self.profile))

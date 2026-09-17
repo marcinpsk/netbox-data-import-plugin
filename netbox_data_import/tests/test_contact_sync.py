@@ -117,7 +117,7 @@ class LocalExamplePrivacyTest(SimpleTestCase):
             str(value).strip().casefold() for author in project_metadata.get("authors", []) for value in author.values()
         )
         synthetic_workbook = openpyxl.load_workbook(
-            Path(__file__).resolve().parent / "fixtures" / "sample_cans.xlsx",
+            Path(__file__).resolve().parent / "fixtures" / "sample_workbook.xlsx",
             read_only=True,
             data_only=True,
         )
