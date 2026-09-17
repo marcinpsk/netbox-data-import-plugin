@@ -55,6 +55,48 @@ class DeferredFormsReadTheirActionAttributeTest(SimpleTestCase):
         self.assertEqual(offenders, [], "Read the posted URL with form.getAttribute('action').")
 
 
+class PreviewFilterStateIsRememberedTest(SimpleTestCase):
+    """Every filter that changes row visibility must survive preview recalculation."""
+
+    def test_every_applied_filter_is_stored_in_the_view_payload(self):
+        """A new filter must extend the recalculation payload in the same change."""
+        source = (STATIC_JS_DIR / "preview_row_controls.js").read_text()
+
+        def function_body(name):
+            start = source.index(f"function {name}(")
+            opening = source.index("{", start)
+            depth = 1
+            cursor = opening + 1
+            while depth:
+                depth += (source[cursor] == "{") - (source[cursor] == "}")
+                cursor += 1
+            return source[opening + 1 : cursor - 1]
+
+        applied = function_body("applyFilters")
+        control_variables = set(re.findall(r"var (\w+) = document\.getElementById\('[^']*Filter'\);", applied))
+        helper_calls = set(re.findall(r"(?<![.\w])(\w+)\(\)", applied))
+        filter_helpers = {
+            name for name in helper_calls if re.search(r"getElementById\('[^']*Filter'\)", function_body(name))
+        }
+        applied_state = {
+            name
+            for name, expression in re.findall(r"var (\w+) = ([^;]+);", applied)
+            if "getElementById" not in expression
+            and (
+                any(re.search(rf"\b{variable}\b", expression) for variable in control_variables)
+                or any(re.search(rf"\b{helper}\(", expression) for helper in filter_helpers)
+            )
+        }
+
+        remembered = function_body("rememberView")
+        payload = re.search(r"JSON\.stringify\(\{(.*?)\}\)\)", remembered, re.DOTALL)
+        self.assertIsNotNone(payload, "rememberView must store one JSON object")
+        stored_state = set(re.findall(r"^\s+(\w+):", payload.group(1), re.MULTILINE))
+
+        self.assertTrue(applied_state, "applyFilters must read at least one filter control")
+        self.assertEqual(applied_state - stored_state, set(), "store every applied filter before recalculation")
+
+
 class SyncStateLabelsMatchTheServerTest(SimpleTestCase):
     """Every server sync state needs an explicit label in the confirmation modal."""
 

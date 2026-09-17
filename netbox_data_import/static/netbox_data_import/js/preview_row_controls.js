@@ -64,18 +64,26 @@
     ModalClass.getOrCreateInstance(target).show(trigger);
   });
 
+  function selectedRackValues(rackSelect) {
+    var chosen = [];
+    if (!rackSelect) return chosen;
+    for (var index = 0; index < rackSelect.options.length; index++) {
+      if (!rackSelect.options[index].selected) continue;
+      chosen.push(rackSelect.options[index].value);
+    }
+    return chosen;
+  }
+
   /* The chosen racks, read from the options rather than the control, so an enhanced select
    * and a plain one answer alike. */
   function selectedRacks() {
     var rackSelect = document.getElementById('previewRackFilter');
-    var chosen = [];
+    var chosen = selectedRackValues(rackSelect);
     if (!rackSelect) return chosen;
     // Tom Select drops an option whose value is empty, so the page names that option instead.
     var noRackValue = rackSelect.dataset.noRackValue;
-    for (var index = 0; index < rackSelect.options.length; index++) {
-      if (!rackSelect.options[index].selected) continue;
-      var value = rackSelect.options[index].value;
-      chosen.push(value === noRackValue ? '' : value);
+    for (var index = 0; index < chosen.length; index++) {
+      if (chosen[index] === noRackValue) chosen[index] = '';
     }
     return chosen;
   }
@@ -194,10 +202,12 @@
   function rememberView() {
     var filterInput = document.getElementById('previewRowFilter');
     var actionSelect = document.getElementById('previewActionFilter');
+    var rackSelect = document.getElementById('previewRackFilter');
     try {
       window.sessionStorage.setItem(VIEW_KEY, JSON.stringify({
         text: filterInput ? filterInput.value : '',
         action: actionSelect ? actionSelect.value : '',
+        racks: selectedRackValues(rackSelect),
         scrollY: window.scrollY || 0,
         anchor: rowInView()
       }));
@@ -221,7 +231,9 @@
     } catch (error) {
       return;
     }
-    if (view.text || view.action) setFilters(view.text || '', view.action || '');
+    if (view.text || view.action || (view.racks && view.racks.length)) {
+      setFilters(view.text || '', view.action || '', view.racks || []);
+    }
     var target = findRow(view.anchor);
     if (target && target.style.display !== 'none') {
       target.scrollIntoView();

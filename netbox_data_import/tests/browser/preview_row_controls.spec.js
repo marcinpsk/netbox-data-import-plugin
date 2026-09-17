@@ -11,6 +11,10 @@ const controllerSource = readFileSync(
 );
 const bootstrapSource = readFileSync(resolve(process.cwd(), "node_modules/bootstrap/dist/js/bootstrap.js"), "utf8");
 const bootstrapStyles = readFileSync(resolve(process.cwd(), "node_modules/bootstrap/dist/css/bootstrap.css"), "utf8");
+const tomSelectSource = readFileSync(
+  resolve(process.cwd(), "node_modules/tom-select/dist/js/tom-select.complete.js"),
+  "utf8",
+);
 
 /* The page loads this script from the head, before the rows exist, and carries no plugin
  * stylesheet here: the collapsed state must hold on the `hidden` attribute alone. */
@@ -28,6 +32,62 @@ const previewFixture = `
     <tr id="diff-1" class="ndi-diff-row" hidden><td colspan="2">serial FIELD-REVIEW-SERIAL</td></tr>
   </tbody></table>
 `;
+
+const rackFilterFixture = `
+  <input type="text" id="previewRowFilter">
+  <button id="previewRowFilterClear" style="display:none;">Clear</button>
+  <select id="previewActionFilter">
+    <option value="">All actions</option>
+    <option value="update">Update</option>
+  </select>
+  <select id="previewRackFilter" multiple aria-label="Filter by rack" data-no-rack-value="__no_rack__">
+    <option value="V1">V1</option>
+    <option value="V3">V3</option>
+    <option value="__no_rack__">(No rack)</option>
+  </select>
+  <table><tbody id="previewRowsBody">
+    <tr id="rack-v1" data-action="update" data-rack-name="V1"><td>rack-v1-device</td></tr>
+    <tr id="rack-v3" data-action="update" data-rack-name="V3"><td>rack-v3-device</td></tr>
+    <tr id="no-rack" data-action="update" data-rack-name=""><td>no-rack-device</td></tr>
+  </tbody></table>
+  <p id="previewNoFilterResults" style="display:none;">No rows match</p>
+`;
+
+/* NetBox enhances each select with Tom Select and then removes the global constructor. */
+async function initNetBoxSelects(page) {
+  await page.addScriptTag({ content: tomSelectSource });
+  await page.evaluate(() => {
+    for (const select of document.querySelectorAll("select:not(.tomselected)")) {
+      new TomSelect(select, { create: false, maxOptions: undefined, plugins: { clear_button: {} } });
+    }
+    delete window.TomSelect;
+  });
+}
+
+async function setUpRackFilter(page) {
+  await page.route("http://preview.test/", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<head><script>${controllerSource}</script></head>${rackFilterFixture}`,
+    }),
+  );
+  await page.goto("http://preview.test/");
+  await page.evaluate(() => window.sessionStorage.clear());
+  await initNetBoxSelects(page);
+}
+
+async function recalculateWithRackFilter(page, rack) {
+  await page.evaluate(
+    ({ markup, value }) => {
+      document.getElementById("previewRackFilter").tomselect.setValue([value]);
+      window.ndiRememberPreviewView();
+      document.body.innerHTML = markup;
+    },
+    { markup: rackFilterFixture, value: rack },
+  );
+  await initNetBoxSelects(page);
+  await page.evaluate(() => window.ndiRestorePreviewView());
+}
 
 test("field differences stay collapsed until the toggle is pressed", async ({ page }) => {
   await page.setContent(previewFixture);
@@ -79,4 +139,24 @@ test("a row button opens its modal and reports itself as the related target", as
   await page.getByRole("button", { name: "Close" }).click();
   await expect(page.locator("#conflictModal")).toBeHidden();
   await expect(page.getByRole("button", { name: "2 conflicts" })).toBeFocused();
+});
+
+test("a named rack filter survives recalculation with NetBox select enhancement", async ({ page }) => {
+  await setUpRackFilter(page);
+
+  await recalculateWithRackFilter(page, "V1");
+
+  await expect(page.locator("#rack-v1")).toBeVisible();
+  await expect(page.locator("#rack-v3")).toBeHidden();
+  await expect(page.locator("#no-rack")).toBeHidden();
+});
+
+test("the no-rack filter survives recalculation with NetBox select enhancement", async ({ page }) => {
+  await setUpRackFilter(page);
+
+  await recalculateWithRackFilter(page, "__no_rack__");
+
+  await expect(page.locator("#no-rack")).toBeVisible();
+  await expect(page.locator("#rack-v1")).toBeHidden();
+  await expect(page.locator("#rack-v3")).toBeHidden();
 });

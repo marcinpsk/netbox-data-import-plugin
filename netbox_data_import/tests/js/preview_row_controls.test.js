@@ -5,7 +5,7 @@
  * handler against the row markup the preview page renders. */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import Modal from "bootstrap/js/dist/modal.js";
 import TomSelect from "tom-select";
 
@@ -416,6 +416,35 @@ describe("a recalculation that reloads the page", () => {
 
     expect(document.getElementById("previewRowFilter").value).toBe("dev-b");
     expect(document.getElementById("row-2").style.display).toBe("");
+  });
+
+  it.each([
+    { label: "a named rack", value: "V1", visibleRow: "row-1", hiddenRow: "row-2" },
+    { label: "the no-rack option", value: "__no_rack__", visibleRow: "row-3", hiddenRow: "row-1" },
+  ])("keeps $label as a rack-only filter", ({ value, visibleRow, hiddenRow }) => {
+    selectRacks([value]);
+
+    window.ndiRememberPreviewView();
+    addFilterRows();
+    window.ndiRestorePreviewView();
+
+    expect([...document.getElementById("previewRackFilter").selectedOptions].map((option) => option.value)).toEqual([
+      value,
+    ]);
+    expect(document.getElementById(visibleRow).style.display).toBe("");
+    expect(document.getElementById(hiddenRow).style.display).toBe("none");
+  });
+
+  it("restores a rack-only filter through the filter setter", () => {
+    selectRacks(["V1"]);
+    window.ndiRememberPreviewView();
+    addFilterRows();
+    const rackSelect = new TomSelect(document.getElementById("previewRackFilter"), { create: false });
+    const setValue = vi.spyOn(rackSelect, "setValue");
+
+    window.ndiRestorePreviewView();
+
+    expect(setValue).toHaveBeenCalledWith(["V1"], true);
   });
 
   it("returns to the row the operator was looking at", () => {
