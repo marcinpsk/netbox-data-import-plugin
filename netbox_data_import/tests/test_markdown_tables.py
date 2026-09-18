@@ -23,13 +23,13 @@ def _table_rows_with_a_piped_code_span(path):
     """Yield each table row in *path* whose code span holds a cell separator."""
     fence = ""
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        marker = re.match(r"(`{3,}|~{3,})", line.lstrip())
+        marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)", line)
         if marker:
             # GFM closes a fence on the same character, repeated at least as many times.
-            opened = marker.group(1)
+            opened, trailing = marker.groups()
             if not fence:
                 fence = opened
-            elif opened[0] == fence[0] and len(opened) >= len(fence):
+            elif opened[0] == fence[0] and len(opened) >= len(fence) and not trailing.strip(" \t"):
                 fence = ""
         elif not fence and line.startswith("|"):
             for span in re.findall(r"`[^`]*`", line):
@@ -46,6 +46,10 @@ class MarkdownTableRenderingTest(SimpleTestCase):
             path = pathlib.Path(directory) / "table.md"
             path.write_text(f"| Value |\n| --- |\n| `{code_span}` |\n", encoding="utf-8")
             return list(_table_rows_with_a_piped_code_span(path))
+
+    def _offender_lines(self, document):
+        """Run the repository guard over one document and number the rows it reports."""
+        return [int(row.split(":")[1].split()[0]) for row in self._offenders_in(document)]
 
     def _offenders_in(self, document):
         """Run the repository guard over one explicit temporary document."""
@@ -65,6 +69,14 @@ class MarkdownTableRenderingTest(SimpleTestCase):
 
     def test_a_table_after_a_closed_tilde_fence_is_still_checked(self):
         self.assertEqual(len(self._offenders_in("~~~\ncode\n~~~\n| `left|right` |\n")), 1)
+
+    def test_an_over_indented_fence_does_not_close_a_block(self):
+        document = "```\n     ```\n| `left|right` |\n```\n| `left|right` |\n"
+        self.assertEqual(self._offender_lines(document), [5])
+
+    def test_a_closing_fence_carrying_trailing_content_does_not_close_a_block(self):
+        document = "```\n```not-a-close\n| `left|right` |\n```\n| `left|right` |\n"
+        self.assertEqual(self._offender_lines(document), [5])
 
     def test_an_escaped_pipe_in_a_code_span_is_accepted(self):
         self.assertEqual(self._offenders_for(r"left\|right"), [])
