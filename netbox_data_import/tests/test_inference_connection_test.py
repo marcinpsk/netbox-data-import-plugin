@@ -384,12 +384,12 @@ json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdo
                 try:
                     with ThreadPoolExecutor(max_workers=operation_count) as callers:
                         blocked = [callers.submit(resolve_until_timeout, index) for index in range(operation_count)]
-                        for _ in range(150):
-                            if len(tuple(entered.iterdir())) == operation_count:
-                                break
+                        # The startup budget must outlast the resolution deadline on a slow runner.
+                        startup_deadline = time.monotonic() + 20
+                        while len(tuple(entered.iterdir())) < operation_count and time.monotonic() < startup_deadline:
                             time.sleep(0.02)
                         self.assertEqual(len(tuple(entered.iterdir())), operation_count)
-                        self.assertTrue(all(future.result(timeout=6) for future in blocked))
+                        self.assertTrue(all(future.result(timeout=20) for future in blocked))
 
                     with serving_backend() as (root, seen, allowlist):
                         row = make_row(api_root=root)

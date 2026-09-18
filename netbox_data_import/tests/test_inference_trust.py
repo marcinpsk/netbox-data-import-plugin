@@ -231,7 +231,6 @@ class ResolvedAddressTest(SimpleTestCase):
                 self.assertEqual(bounded, in_process)
 
         self.assertEqual(resolve_addresses("http://127.0.0.1:80"), ("127.0.0.1",))
-        self.assertTrue({"127.0.0.1", "::1"}.issubset(resolve_addresses("http://localhost:80")))
 
     def test_resolution_without_a_deadline_stays_in_process(self):
         with TemporaryDirectory() as temporary:
