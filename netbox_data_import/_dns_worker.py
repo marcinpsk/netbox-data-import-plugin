@@ -16,7 +16,6 @@ def main() -> int:
         answers = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
         addresses = list(dict.fromkeys(str(answer[4][0]) for answer in answers))
     except Exception:  # noqa: BLE001 - the parent exposes one typed resolution failure
-        json.dump({"error": "Name resolution failed."}, sys.stdout)
         return 1
     json.dump(addresses, sys.stdout)
     return 0

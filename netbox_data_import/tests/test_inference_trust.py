@@ -205,11 +205,11 @@ class DnsWorkerScriptTest(SimpleTestCase):
         self.assertEqual(answer.returncode, 0, answer.stderr)
         self.assertEqual(json.loads(answer.stdout), list(resolve_addresses("http://localhost:80")))
 
-    def test_an_unusable_request_exits_nonzero_with_one_generic_failure(self):
+    def test_an_unusable_request_exits_nonzero_and_writes_nothing(self):
         answer = self._run_script(json.dumps(["only-one-value"]))
 
         self.assertEqual(answer.returncode, 1)
-        self.assertEqual(json.loads(answer.stdout), {"error": "Name resolution failed."})
+        self.assertEqual(answer.stdout, "")
 
 
 class DnsWorkerTest(SimpleTestCase):
@@ -234,11 +234,11 @@ class DnsWorkerTest(SimpleTestCase):
         self.assertGreater(armed, 0)
         self.assertLessEqual(armed, 30)
 
-    def test_an_unusable_request_answers_with_one_generic_failure(self):
+    def test_an_unusable_request_answers_with_nothing(self):
         status, output, _armed = self._run_worker(json.dumps(["only-one-value"]))
 
         self.assertEqual(status, 1)
-        self.assertEqual(json.loads(output), {"error": "Name resolution failed."})
+        self.assertEqual(output, "")
 
 
 class ResolvedAddressTest(SimpleTestCase):
@@ -283,6 +283,16 @@ class ResolvedAddressTest(SimpleTestCase):
                 resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(5))
 
         self.assertIn("could not be resolved", str(caught.exception))
+
+    def test_well_formed_output_that_is_not_addresses_is_a_typed_failure(self):
+        for payload in ('{"error": "nope"}', "[42]", '["not-an-address"]'):
+            with self.subTest(payload=payload):
+                command = ("-I", "-S", "-c", f"print({payload!r})")
+                with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+                    with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                        resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(5))
+
+                self.assertIn("could not be resolved", str(caught.exception))
 
     def test_zero_exit_without_usable_output_is_a_typed_failure(self):
         command = ("-I", "-S", "-c", "pass")
