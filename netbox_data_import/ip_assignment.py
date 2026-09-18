@@ -129,7 +129,7 @@ def already_assigned(device, field, address) -> bool:
     if current is None:
         return False
     try:
-        if host_key(current.address) != host_key(address):
+        if _host(current.address) != _host(address):
             return False
         held = held_by_device(device, address)
     except ValueError:
@@ -137,7 +137,7 @@ def already_assigned(device, field, address) -> bool:
     return held is not None and held.pk == current.pk
 
 
-def host_key(address) -> str:
+def _host(address) -> str:
     """Return the host part, which is what identifies an address inside one VRF."""
     return str(ipaddress.ip_interface(str(address)).ip)
 
@@ -154,9 +154,9 @@ def held_by_device(device, address):
     """
     from ipam.models import IPAddress
 
-    wanted = host_key(address)
+    wanted = _host(address)
     candidates = IPAddress.objects.filter(interface__device=device).select_related("vrf")
-    matches = [candidate for candidate in candidates if host_key(candidate.address) == wanted]
+    matches = [candidate for candidate in candidates if _host(candidate.address) == wanted]
     if not matches:
         return None
     # A management interface answers first when the device holds the address more than once.
@@ -200,7 +200,7 @@ def resolve(device, field: str, value) -> IPTarget:
 
     interface = interface_for(device)
     # The interface's VRF scopes the address: the same host in another VRF is a different address.
-    existing = IPAddress.objects.filter(address__net_host=host_key(address), vrf=interface.vrf).first()
+    existing = IPAddress.objects.filter(address__net_host=_host(address), vrf=interface.vrf).first()
     if existing is not None and existing.assigned_object is not None:
         owner = getattr(existing.assigned_object, "device", None) or existing.assigned_object
         raise IPAssignmentError(f"Address {existing.address} is already assigned to '{owner}'.")
@@ -212,7 +212,7 @@ def _prospective_new_device_target(device, field: str, value, interface) -> IPTa
     from ipam.models import IPAddress
 
     address = normalized_address(field, value)
-    existing = IPAddress.objects.filter(address__net_host=host_key(address), vrf=interface.vrf).first()
+    existing = IPAddress.objects.filter(address__net_host=_host(address), vrf=interface.vrf).first()
     if existing is not None and existing.assigned_object is not None:
         owner = getattr(existing.assigned_object, "device", None) or existing.assigned_object
         raise IPAssignmentError(f"Address {existing.address} is already assigned to '{owner}'.")
@@ -248,7 +248,7 @@ def prospective_addresses(device, ip_fields) -> dict[str, ProspectiveAddress]:
         except IPAssignmentError:
             continue
         vrf_key = getattr(target.interface, "vrf_id", None)
-        key = (host_key(target.address), vrf_key)
+        key = (_host(target.address), vrf_key)
         prospective = shared.get(key)
         if prospective is None:
             address = (

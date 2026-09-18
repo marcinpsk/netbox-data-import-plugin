@@ -1416,16 +1416,13 @@ class DeviceModuleIPAssignmentTest(DeviceModulePlanTestBase):
 
     def _ignore_primary_ip4(self, device, file_address, stored_address):
         """Record the exact primary IPv4 difference the operator ignored."""
-        from netbox_data_import.device_field_review import _ip_normalize
-
-        # The canonical comes from the preview's own rule, so the fixture cannot drift from it.
         IgnoredFieldDifference.objects.create(
             profile=self.profile,
             source_id="D-1",
             netbox_device_id=device.pk,
             target_field="primary_ip4",
-            file_snapshot={"canonical": _ip_normalize(file_address), "display": file_address},
-            netbox_snapshot={"canonical": _ip_normalize(stored_address), "display": stored_address},
+            file_snapshot={"canonical": file_address, "display": file_address},
+            netbox_snapshot={"canonical": stored_address, "display": stored_address},
         )
 
     def _plan_with_device_scope(self, username, actions, constraint, row):
