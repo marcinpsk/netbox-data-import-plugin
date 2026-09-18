@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-"""Text reads and writes name their encoding, so the caller's locale cannot decide it.
-
-`Path.read_text` and `Path.write_text` fall back to `locale.getpreferredencoding(False)`. The
-project supports Python 3.12 and newer and forces no UTF-8 mode, so on a non-UTF-8 locale a
-repository file holding non-ASCII text raises `UnicodeDecodeError` instead of being read.
-"""
+"""Text reads and writes name their encoding, so the runner's locale cannot decide it."""
 
 import ast
 import pathlib
