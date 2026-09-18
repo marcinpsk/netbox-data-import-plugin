@@ -19,27 +19,38 @@ from markdown_it import MarkdownIt
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 MARKDOWN = MarkdownIt("commonmark")
+GFM = MarkdownIt("commonmark").enable("table")
+UNESCAPED_PIPE = re.compile(r"(?<!\\)(?:\\\\)*\|")
 
 
-def _code_block_lines(document):
-    """Number every line the Markdown parser reads as part of a code block."""
-    inside = set()
-    for token in MARKDOWN.parse(document):
-        if token.type in ("fence", "code_block") and token.map:
-            inside.update(range(token.map[0] + 1, token.map[1] + 1))
-    return inside
+def _line_numbers(document, parser, wanted):
+    """Number every line the parser puts inside one of the *wanted* block tokens."""
+    lines = set()
+    for token in parser.parse(document):
+        if token.type in wanted and token.map:
+            lines.update(range(token.map[0] + 1, token.map[1] + 1))
+    return lines
+
+
+def _code_spans(line):
+    """Yield the content of each code span on one line, at any backtick count."""
+    for token in MARKDOWN.parseInline(line, {}):
+        for child in token.children or []:
+            if child.type == "code_inline":
+                yield child.content
 
 
 def _table_rows_with_a_piped_code_span(path):
     """Yield each table row in *path* whose code span holds a cell separator."""
     document = path.read_text(encoding="utf-8")
-    fenced = _code_block_lines(document)
+    fenced = _line_numbers(document, MARKDOWN, ("fence", "code_block"))
+    rows = _line_numbers(document, GFM, ("table_open",))
     for number, line in enumerate(document.splitlines(), 1):
-        if number in fenced or not line.startswith("|"):
+        if number in fenced or number not in rows:
             continue
-        for span in re.findall(r"`[^`]*`", line):
-            if re.search(r"(?<!\\)(?:\\\\)*\|", span):
-                yield f"{path.relative_to(REPOSITORY)}:{number} {span}"
+        for span in _code_spans(line):
+            if UNESCAPED_PIPE.search(span):
+                yield f"{path.relative_to(REPOSITORY)}:{number} `{span}`"
 
 
 class MarkdownTableRenderingTest(SimpleTestCase):
@@ -51,6 +62,8 @@ class MarkdownTableRenderingTest(SimpleTestCase):
             path = pathlib.Path(directory) / "table.md"
             path.write_text(f"| Value |\n| --- |\n| `{code_span}` |\n", encoding="utf-8")
             return list(_table_rows_with_a_piped_code_span(path))
+
+    TABLE = "| V |\n| --- |\n| `left|right` |\n"
 
     def _offender_lines(self, document):
         """Run the repository guard over one document and number the rows it reports."""
@@ -64,31 +77,40 @@ class MarkdownTableRenderingTest(SimpleTestCase):
             return list(_table_rows_with_a_piped_code_span(path))
 
     def test_a_tilde_fence_hides_its_contents_from_the_guard(self):
-        self.assertEqual(self._offenders_in("~~~\n| `left|right` |\n~~~\n"), [])
+        self.assertEqual(self._offender_lines(f"~~~\n{self.TABLE}~~~\n"), [])
 
     def test_a_backtick_fence_hides_its_contents_from_the_guard(self):
-        self.assertEqual(self._offenders_in("```\n| `left|right` |\n```\n"), [])
+        self.assertEqual(self._offender_lines(f"```\n{self.TABLE}```\n"), [])
 
     def test_a_longer_backtick_fence_is_not_closed_by_a_shorter_one(self):
-        self.assertEqual(self._offenders_in("````\n```\n| `left|right` |\n````\n"), [])
+        self.assertEqual(self._offender_lines(f"````\n```\n{self.TABLE}````\n"), [])
 
     def test_a_table_after_a_closed_tilde_fence_is_still_checked(self):
-        self.assertEqual(len(self._offenders_in("~~~\ncode\n~~~\n| `left|right` |\n")), 1)
+        self.assertEqual(self._offender_lines(f"~~~\ncode\n~~~\n\n{self.TABLE}"), [7])
 
     def test_an_over_indented_fence_does_not_close_a_block(self):
-        document = "```\n     ```\n| `left|right` |\n```\n| `left|right` |\n"
-        self.assertEqual(self._offender_lines(document), [5])
+        self.assertEqual(self._offender_lines(f"```\n     ```\n{self.TABLE}```\n\n{self.TABLE}"), [10])
 
     def test_a_closing_fence_carrying_trailing_content_does_not_close_a_block(self):
-        document = "```\n```not-a-close\n| `left|right` |\n```\n| `left|right` |\n"
-        self.assertEqual(self._offender_lines(document), [5])
+        self.assertEqual(self._offender_lines(f"```\n```not-a-close\n{self.TABLE}```\n\n{self.TABLE}"), [10])
 
     def test_a_fence_nested_in_a_list_item_closes_on_its_own_indentation(self):
-        document = "- item\n\n  ```\n  code\n    ```\n\n| `left|right` |\n"
-        self.assertEqual(self._offender_lines(document), [7])
+        self.assertEqual(self._offender_lines(f"- item\n\n  ```\n  code\n    ```\n\n{self.TABLE}"), [9])
 
     def test_a_backtick_in_an_info_string_opens_no_fence(self):
-        self.assertEqual(self._offender_lines("```bad`info\n\n| `left|right` |\n"), [3])
+        self.assertEqual(self._offender_lines(f"```bad`info\n\n{self.TABLE}"), [5])
+
+    def test_a_multi_backtick_code_span_is_scanned(self):
+        self.assertEqual(self._offender_lines("| V |\n| --- |\n| ``left|right`` |\n"), [3])
+
+    def test_an_indented_table_row_is_scanned(self):
+        self.assertEqual(self._offender_lines("| V |\n| --- |\n  | `left|right` |\n"), [3])
+
+    def test_a_table_row_without_a_leading_pipe_is_scanned(self):
+        self.assertEqual(self._offender_lines("V | Other\n--- | ---\n`left|right` | x\n"), [3])
+
+    def test_a_code_span_outside_a_table_is_not_an_offender(self):
+        self.assertEqual(self._offender_lines("Some `left|right` in prose.\n"), [])
 
     def test_an_escaped_pipe_in_a_code_span_is_accepted(self):
         self.assertEqual(self._offenders_for(r"left\|right"), [])

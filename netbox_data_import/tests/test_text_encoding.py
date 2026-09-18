@@ -38,11 +38,20 @@ def _python_files():
             yield path
 
 
+def _receiver_is_a_class(value):
+    """Say whether a text call goes through a class rather than an instance."""
+    # `pathlib.Path.write_text(path, data)` passes the receiver itself, shifting every index.
+    name = value.attr if isinstance(value, ast.Attribute) else getattr(value, "id", "")
+    return name[:1].isupper()
+
+
 def _names_an_encoding(node, position):
     """Say whether one text call names an encoding the runner's locale cannot decide."""
     named = next((keyword.value for keyword in node.keywords if keyword.arg == "encoding"), None)
-    # A splat hides how many arguments reach *position*, so it counts as naming nothing.
+    # A splat hides how many arguments reach *position*, and an unbound call shifts it.
     if named is None and not any(isinstance(argument, ast.Starred) for argument in node.args):
+        if _receiver_is_a_class(node.func.value):
+            return False
         named = node.args[position] if len(node.args) > position else None
     return named is not None and not (isinstance(named, ast.Constant) and named.value is None)
 
@@ -96,6 +105,13 @@ class EncodingGuardTest(SimpleTestCase):
     def test_an_explicit_none_encoding_is_reported(self):
         self.assertEqual(self._unencoded_calls("path.write_text(data, None)"), ["write_text"])
         self.assertEqual(self._unencoded_calls("path.read_text(encoding=None)"), ["read_text"])
+
+    def test_an_unbound_call_passing_its_receiver_is_reported(self):
+        self.assertEqual(self._unencoded_calls("pathlib.Path.read_text(path)"), ["read_text"])
+        self.assertEqual(self._unencoded_calls("pathlib.Path.write_text(path, data)"), ["write_text"])
+
+    def test_an_unbound_call_that_names_its_encoding_is_accepted(self):
+        self.assertEqual(self._unencoded_calls('pathlib.Path.write_text(path, data, encoding="utf-8")'), [])
 
     def test_a_splatted_argument_list_is_reported(self):
         self.assertEqual(self._unencoded_calls("path.write_text(data, *rest)"), ["write_text"])
