@@ -234,6 +234,16 @@ class DnsWorkerTest(SimpleTestCase):
         self.assertGreater(armed, 0)
         self.assertLessEqual(armed, 30)
 
+    def test_an_alarm_that_cannot_be_armed_is_not_reported_as_a_failed_resolution(self):
+        """Without the alarm the worker has no deadline, so it must not exit as if DNS had failed."""
+        # A negative interval makes the real setitimer refuse, so this needs no mock.
+        stdin, stdout = io.StringIO(json.dumps(("localhost", 80, -1))), io.StringIO()
+        with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+            with self.assertRaises(signal.ItimerError):
+                _dns_worker.main()
+
+        self.assertEqual(stdout.getvalue(), "")
+
     def test_an_unusable_request_answers_with_nothing(self):
         status, output, _armed = self._run_worker(json.dumps(["only-one-value"]))
 
