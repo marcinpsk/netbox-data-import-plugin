@@ -227,8 +227,8 @@ types are in that group: `circuits.circuitgroupassignment`, `extras.eventrule`, 
 and `tenancy.contactassignment`.
 
 The API token needs `extras.view_customfield`, `core.view_objecttype`, and
-`extras.add_customlink`. The `PATCH` below also needs `extras.change_customlink`, because
-NetBox maps `PATCH` to the change action.
+`extras.add_customlink`. Updating an existing link with `PATCH` also needs
+`extras.change_customlink`, because NetBox maps `PATCH` to the change action.
 
 ```python
 import requests
