@@ -3,12 +3,30 @@
 """Text reads and writes name their encoding, so the runner's locale cannot decide it."""
 
 import ast
+import inspect
 import pathlib
 
 from django.test import SimpleTestCase
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 TEXT_METHODS = frozenset({"read_text", "write_text"})
+
+
+def _encoding_positions():
+    """Map each text method to the positional index its encoding argument occupies."""
+    positions = {}
+    for method in TEXT_METHODS:
+        parameters = inspect.signature(getattr(pathlib.Path, method)).parameters.values()
+        names = [
+            parameter.name
+            for parameter in parameters
+            if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        positions[method] = names.index("encoding") - 1
+    return positions
+
+
+ENCODING_POSITIONS = _encoding_positions()
 # The OpenGrep fixtures are deliberate violations, and ruff skips them for the same reason.
 SKIPPED = ("/.git/", "/.venv/", "/node_modules/", "/build/", "/dist/", "/.opengrep/fixtures/")
 
@@ -20,6 +38,15 @@ def _python_files():
             yield path
 
 
+def _names_an_encoding(node, position):
+    """Say whether one text call names an encoding the runner's locale cannot decide."""
+    named = next((keyword.value for keyword in node.keywords if keyword.arg == "encoding"), None)
+    # A splat hides how many arguments reach *position*, so it counts as naming nothing.
+    if named is None and not any(isinstance(argument, ast.Starred) for argument in node.args):
+        named = node.args[position] if len(node.args) > position else None
+    return named is not None and not (isinstance(named, ast.Constant) and named.value is None)
+
+
 def _text_calls(tree):
     """Yield each text read or write with whether it names an encoding."""
     for node in ast.walk(tree):
@@ -27,9 +54,7 @@ def _text_calls(tree):
             continue
         if node.func.attr not in TEXT_METHODS:
             continue
-        # read_text takes encoding first, so a positional argument already names it.
-        positional = node.func.attr == "read_text" and bool(node.args)
-        yield node, positional or any(keyword.arg == "encoding" for keyword in node.keywords)
+        yield node, _names_an_encoding(node, ENCODING_POSITIONS[node.func.attr])
 
 
 class TextIoNamesItsEncodingTest(SimpleTestCase):
@@ -47,3 +72,30 @@ class TextIoNamesItsEncodingTest(SimpleTestCase):
         # A scan that matches nothing would pass this guard while the calls are renamed away.
         self.assertTrue(scanned, "the guard found no text read or write, so it checked nothing")
         self.assertEqual(offenders, [], "pass encoding='utf-8' to every text read and write")
+
+
+class EncodingGuardTest(SimpleTestCase):
+    """Each signature says where its encoding sits, so the guard reads it from pathlib."""
+
+    def _unencoded_calls(self, source):
+        """Run the guard over one snippet and name the calls it reports."""
+        return [node.func.attr for node, encoded in _text_calls(ast.parse(source)) if not encoded]
+
+    def test_a_positional_read_encoding_is_accepted(self):
+        self.assertEqual(self._unencoded_calls('path.read_text("utf-8")'), [])
+
+    def test_a_positional_write_encoding_is_accepted(self):
+        self.assertEqual(self._unencoded_calls('path.write_text(data, "utf-8")'), [])
+
+    def test_a_read_without_an_encoding_is_reported(self):
+        self.assertEqual(self._unencoded_calls("path.read_text()"), ["read_text"])
+
+    def test_a_write_carrying_only_its_data_is_reported(self):
+        self.assertEqual(self._unencoded_calls("path.write_text(data)"), ["write_text"])
+
+    def test_an_explicit_none_encoding_is_reported(self):
+        self.assertEqual(self._unencoded_calls("path.write_text(data, None)"), ["write_text"])
+        self.assertEqual(self._unencoded_calls("path.read_text(encoding=None)"), ["read_text"])
+
+    def test_a_splatted_argument_list_is_reported(self):
+        self.assertEqual(self._unencoded_calls("path.write_text(data, *rest)"), ["write_text"])
