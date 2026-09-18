@@ -91,7 +91,7 @@ class FlatWorkbookConfigForm(AdapterConfigForm):
         max_length=100,
         required=False,
         initial="",
-        help_text="NetBox custom field name to store the source ID in (e.g. 'cans_id')",
+        help_text="NetBox custom field name to store the source ID in (e.g. 'external_id')",
     )
     update_existing = forms.BooleanField(
         required=False,

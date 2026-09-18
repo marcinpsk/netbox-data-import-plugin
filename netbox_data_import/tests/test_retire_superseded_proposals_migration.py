@@ -148,7 +148,7 @@ CONTRACT_CONSTANTS = ("PROMPT_VERSION", "RESPONSE_SCHEMA_VERSION")
 def _declared_contract(path):
     """Return the contract pair one migration retires up to, or None when it retires none."""
     declared = {}
-    for node in ast.parse(path.read_text()).body:
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
             continue
         for target in node.targets:

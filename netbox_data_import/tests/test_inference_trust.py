@@ -2,10 +2,23 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The `api_root` trust boundary: allowlist, scheme rules, resolution and redirects (specification 8.3)."""
 
+import io
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from django.test import SimpleTestCase
 
+from netbox_data_import.inference_transport import WallClockDeadline, WallClockDeadlineExceeded
+from netbox_data_import import _dns_worker, inference_trust
 from netbox_data_import.inference_trust import (
     InvalidInferenceConfiguration,
     assert_resolved_address_allowed,
@@ -172,8 +185,225 @@ class OriginReparseTest(SimpleTestCase):
                 self.assertEqual(parts.port, port)
 
 
+class DnsWorkerScriptTest(SimpleTestCase):
+    """Run the worker as the transport runs it: the real script, in its own interpreter."""
+
+    @staticmethod
+    def _run_script(request):
+        return subprocess.run(
+            [sys.executable, *inference_trust.DNS_WORKER_COMMAND],
+            input=request,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    def test_a_resolvable_host_answers_with_the_same_addresses_as_the_in_process_path(self):
+        answer = self._run_script(json.dumps(("localhost", 80, 30)))
+
+        self.assertEqual(answer.returncode, 0, answer.stderr)
+        self.assertEqual(json.loads(answer.stdout), list(resolve_addresses("http://localhost:80")))
+
+    def test_an_unusable_request_exits_nonzero_and_writes_nothing(self):
+        answer = self._run_script(json.dumps(["only-one-value"]))
+
+        self.assertEqual(answer.returncode, 1)
+        self.assertEqual(answer.stdout, "")
+
+
+class DnsWorkerTest(SimpleTestCase):
+    """Call main() in this process, which is the only way coverage can measure a child-only module."""
+
+    @staticmethod
+    def _run_worker(request):
+        stdin, stdout = io.StringIO(request), io.StringIO()
+        with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+            try:
+                status = _dns_worker.main()
+                armed = signal.getitimer(signal.ITIMER_REAL)[0]
+            finally:
+                # main() leaves the alarm running for a child that exits, so this process disarms it.
+                signal.setitimer(signal.ITIMER_REAL, 0)
+        return status, stdout.getvalue(), armed
+
+    def test_the_worker_arms_its_own_alarm_before_it_resolves(self):
+        status, _output, armed = self._run_worker(json.dumps(("localhost", 80, 30)))
+
+        self.assertEqual(status, 0)
+        self.assertGreater(armed, 0)
+        self.assertLessEqual(armed, 30)
+
+    def test_an_alarm_that_cannot_be_armed_is_not_reported_as_a_failed_resolution(self):
+        """Without the alarm the worker has no deadline, so it must not exit as if DNS had failed."""
+        # A negative interval makes the real setitimer refuse, so this needs no mock.
+        stdin, stdout = io.StringIO(json.dumps(("localhost", 80, -1))), io.StringIO()
+        with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+            with self.assertRaises(signal.ItimerError):
+                _dns_worker.main()
+
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_an_unusable_request_answers_with_nothing(self):
+        status, output, _armed = self._run_worker(json.dumps(["only-one-value"]))
+
+        self.assertEqual(status, 1)
+        self.assertEqual(output, "")
+
+
 class ResolvedAddressTest(SimpleTestCase):
     """Resolution is rechecked, so an allowlisted name cannot point at an internal address."""
+
+    def test_deadline_resolution_matches_in_process_order_and_deduplication(self):
+        for api_root in ("http://127.0.0.1:80", "http://localhost:80"):
+            with self.subTest(api_root=api_root):
+                in_process = resolve_addresses(api_root)
+                bounded = resolve_addresses(api_root, deadline=WallClockDeadline.after(5))
+
+                self.assertEqual(bounded, in_process)
+
+        self.assertEqual(resolve_addresses("http://127.0.0.1:80"), ("127.0.0.1",))
+
+    def test_a_helper_the_worker_started_dies_with_it_at_the_deadline(self):
+        worker_probe = (
+            "import json,pathlib,subprocess,sys,time; "
+            "json.load(sys.stdin); "
+            "helper=subprocess.Popen([sys.executable,'-I','-S','-c','import time; time.sleep(60)']); "
+            "pathlib.Path(sys.argv[1]).write_text(str(helper.pid), encoding='utf-8'); "
+            "time.sleep(60)"
+        )
+        with TemporaryDirectory() as temporary:
+            pid_file = pathlib.Path(temporary) / "helper"
+            command = ("-I", "-S", "-c", worker_probe, str(pid_file))
+            with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+                with self.assertRaises(WallClockDeadlineExceeded):
+                    resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(1))
+
+            self.assertTrue(pid_file.exists(), "the worker never started its helper")
+            helper = int(pid_file.read_text(encoding="utf-8"))
+            try:
+                for _ in range(150):
+                    if not pathlib.Path(f"/proc/{helper}").exists():
+                        break
+                    time.sleep(0.02)
+
+                self.assertFalse(
+                    pathlib.Path(f"/proc/{helper}").exists(),
+                    "the helper outlived the worker's deadline",
+                )
+            finally:
+                if pathlib.Path(f"/proc/{helper}").exists():
+                    os.kill(helper, signal.SIGKILL)
+
+    def test_resolution_without_a_deadline_stays_in_process(self):
+        with TemporaryDirectory() as temporary:
+            marker = pathlib.Path(temporary) / "spawned"
+            command = ("-I", "-S", "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker))
+            with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+                addresses = resolve_addresses("http://127.0.0.1:80")
+
+            self.assertEqual(addresses, ("127.0.0.1",))
+            self.assertFalse(marker.exists())
+
+    def test_deadline_resolution_keeps_the_unresolvable_host_message(self):
+        with self.assertRaises(InvalidInferenceConfiguration) as caught:
+            resolve_addresses(
+                "https://backend.example.invalid:443",
+                deadline=WallClockDeadline.after(5),
+            )
+
+        self.assertEqual(
+            str(caught.exception),
+            "'api_root' host 'backend.example.invalid' could not be resolved.",
+        )
+
+    def test_garbage_worker_output_is_a_typed_failure(self):
+        command = ("-I", "-S", "-c", "print('not json')")
+        with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+            with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(5))
+
+        self.assertIn("could not be resolved", str(caught.exception))
+
+    def test_well_formed_output_that_is_not_addresses_is_a_typed_failure(self):
+        for payload in ('{"error": "nope"}', "[42]", '["not-an-address"]'):
+            with self.subTest(payload=payload):
+                command = ("-I", "-S", "-c", f"print({payload!r})")
+                with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+                    with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                        resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(5))
+
+                self.assertIn("could not be resolved", str(caught.exception))
+
+    def test_zero_exit_without_usable_output_is_a_typed_failure(self):
+        command = ("-I", "-S", "-c", "pass")
+        with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+            with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(5))
+
+        self.assertIn("could not be resolved", str(caught.exception))
+
+    def test_missing_python_executable_is_a_typed_failure(self):
+        with patch.object(inference_trust.sys, "executable", ""):
+            with self.assertRaises(InvalidInferenceConfiguration) as caught:
+                resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(5))
+
+        self.assertIn("Python executable is unavailable", str(caught.exception))
+
+    def test_dns_worker_environment_does_not_contain_the_vault_token(self):
+        probe = (
+            "import json,os,sys; json.load(sys.stdin); "
+            "json.dump(['not-an-address'] if 'VAULT_TOKEN' in os.environ else ['127.0.0.1'], sys.stdout)"
+        )
+        command = ("-I", "-S", "-c", probe)
+        with patch.dict(os.environ, {"VAULT_TOKEN": "secret"}):
+            with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+                addresses = resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(5))
+
+        self.assertEqual(addresses, ("127.0.0.1",))
+
+    def test_dns_worker_expires_after_its_parent_exits(self):
+        worker = inference_trust.DNS_WORKER_COMMAND[-1]
+        child_probe = (
+            "import os,pathlib,runpy,socket,sys,time; "
+            "pathlib.Path(sys.argv[2]).write_text(str(os.getpid())); "
+            "socket.getaddrinfo=lambda *args,**kwargs: time.sleep(4); "
+            "runpy.run_path(sys.argv[1],run_name='__main__')"
+        )
+        parent_probe = (
+            "import json,os,subprocess,sys; "
+            "child=subprocess.Popen([sys.executable,'-I','-S','-c',sys.argv[1],sys.argv[2],sys.argv[3]],"
+            "stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,text=True); "
+            "child.stdin.write(json.dumps(('localhost',80,1.0))); child.stdin.close(); os._exit(0)"
+        )
+        with TemporaryDirectory() as temporary:
+            pid_file = pathlib.Path(temporary) / "pid"
+            parent = subprocess.run(
+                [sys.executable, "-I", "-S", "-c", parent_probe, child_probe, worker, str(pid_file)],
+                check=False,
+                timeout=5,
+            )
+            self.assertEqual(parent.returncode, 0)
+            for _ in range(100):
+                if pid_file.exists():
+                    break
+                time.sleep(0.02)
+            self.assertTrue(pid_file.exists(), "the child did not enter the blocking resolver")
+            pid = int(pid_file.read_text(encoding="utf-8"))
+            # The alarm may already have reaped the worker, so only its absence is asserted.
+            for _ in range(150):
+                if not pathlib.Path(f"/proc/{pid}").exists():
+                    break
+                time.sleep(0.02)
+
+            try:
+                self.assertFalse(
+                    pathlib.Path(f"/proc/{pid}").exists(),
+                    "the orphaned DNS worker survived its alarm",
+                )
+            finally:
+                if pathlib.Path(f"/proc/{pid}").exists():
+                    os.kill(pid, signal.SIGKILL)
 
     def test_a_public_address_is_accepted(self):
         assert_resolved_address_allowed(

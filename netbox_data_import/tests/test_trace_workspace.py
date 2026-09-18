@@ -5,9 +5,10 @@
 import re
 from io import BytesIO
 
-from dcim.models import Interface
+from dcim.models import Device, Interface
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
@@ -292,6 +293,44 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertContains(response, "reuse existing", count=0, status_code=200)
         self.assertContains(response, "automatically resolved")
 
+    def test_the_proposed_topology_names_both_devices_for_each_segment(self):
+        response = self.open_workspace(patched_path())
+
+        page = response.content.decode()
+        proposed = page[
+            page.index("Proposed physical topology") : page.index("</ol>", page.index("Proposed physical topology"))
+        ]
+        self.assertIn("DEV-A eth0 &rarr; PANEL-1 F1", proposed)
+        self.assertIn("PANEL-1 R1 &rarr; PANEL-2 R1", proposed)
+        self.assertIn("PANEL-2 F1 &rarr; DEV-B eth1", proposed)
+
+    def test_a_longer_proposed_topology_does_not_add_device_reads(self):
+        def rendered_device_reads(block):
+            self.open_workspace(block)
+            with CaptureQueriesContext(connection) as captured:
+                response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+            self.assertEqual(response.status_code, 200)
+            table = Device._meta.db_table
+            return [
+                query["sql"]
+                for query in captured.captured_queries
+                if f'FROM "{table}"' in query["sql"] and f'WHERE "{table}"."id" =' in query["sql"]
+            ]
+
+        short_reads = rendered_device_reads(direct_path())
+        long_reads = rendered_device_reads(patched_path())
+
+        self.assertEqual(
+            (len(short_reads), len(long_reads)),
+            (0, 0),
+            {"short": short_reads, "long": long_reads},
+        )
+
+    def test_repeated_findings_render_one_message(self):
+        response = self.open_workspace(patched_path())
+
+        self.assertContains(response, "A PortMapping proves the stated pass-through.", count=1)
+
     def test_the_list_shows_every_trace_but_the_panels_show_one(self):
         """Section 10.2 is a trace list plus the three panels of the selected trace."""
         Interface.objects.create(device=self.make_device("SEL-A"), name="eth0", type="1000base-t")
@@ -332,6 +371,28 @@ class TraceWorkspacePageTest(CableTopologyMixin, TestCase):
         self.assertEqual(response.context["summary"]["saved_decisions"], 0)
         self.assertEqual(response.context["summary"]["preview_state"], "current")
         self.assertContains(response, "current")
+
+    def test_the_summary_strip_groups_each_tile_by_its_meaning(self):
+        response = self.open_workspace(patched_path())
+
+        groups = re.findall(
+            r'<section\b[^>]*data-trace-summary-group="([^"]+)"[^>]*>(.*?)</section>',
+            response.content.decode(),
+            re.DOTALL,
+        )
+        self.assertEqual([name for name, _content in groups], ["traces", "terminations", "proposals", "review"])
+        expected_groups = {
+            "traces": ("Traces", ("Traces", "Actionable", "Blocked", "Invalid", "No change")),
+            "terminations": ("Terminations", ("Terminations resolved", "Terminations open")),
+            "proposals": ("Proposals", ("Active proposals",)),
+            "review": ("Review state", ("Saved decisions", "Preview")),
+        }
+        for name, content in groups:
+            with self.subTest(group=name):
+                heading, labels = expected_groups[name]
+                self.assertRegex(content, rf"<h2\b[^>]*>{heading}</h2>")
+                for label in labels:
+                    self.assertIn(f">{label}</div>", content)
 
     def test_a_blocked_trace_renders_its_sync_action_disabled_with_its_reason(self):
         """An illegal action stays on screen, disabled, with the reason underneath."""

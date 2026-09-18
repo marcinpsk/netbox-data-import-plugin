@@ -20,7 +20,7 @@ MARKDOWN_INSERTION_FLAG = "<!-- version list -->"
 
 
 def _pyproject():
-    return tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+    return tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
 def _changelog_config():
@@ -34,7 +34,7 @@ def _changelog_path():
 
 def _locked_project_version():
     """Return the version uv.lock records for this project's own package entry."""
-    lockfile = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
+    lockfile = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text(encoding="utf-8"))
     entries = [package for package in lockfile["package"] if package["name"] == DISTRIBUTION_NAME]
     assert len(entries) == 1, f"uv.lock holds {len(entries)} entries for {DISTRIBUTION_NAME}"
     return entries[0]["version"]
@@ -79,4 +79,4 @@ def test_the_changelog_carries_the_insertion_flag():
     """
     flag = _changelog_config().get("insertion_flag") or MARKDOWN_INSERTION_FLAG
 
-    assert flag in _changelog_path().read_text()
+    assert flag in _changelog_path().read_text(encoding="utf-8")

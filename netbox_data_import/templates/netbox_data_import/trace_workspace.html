@@ -65,31 +65,53 @@
 </div>
 
 <div class="card mb-3">
-  <div class="card-body d-flex flex-wrap gap-4">
-    <div><div class="text-secondary small">Traces</div><div class="h2 mb-0">{{ summary.traces }}</div></div>
-    <div><div class="text-secondary small">Actionable</div><div class="h2 mb-0">{{ summary.actionable }}</div></div>
-    <div><div class="text-secondary small">Blocked</div><div class="h2 mb-0">{{ summary.blocked }}</div></div>
-    <div><div class="text-secondary small">Invalid</div><div class="h2 mb-0">{{ summary.invalid }}</div></div>
-    <div><div class="text-secondary small">No change</div><div class="h2 mb-0">{{ summary.no_change }}</div></div>
-    <div>
-      <div class="text-secondary small">Terminations resolved</div>
-      <div class="h2 mb-0">{{ summary.resolved_terminations }}</div>
-    </div>
-    <div>
-      <div class="text-secondary small">Terminations open</div>
-      <div class="h2 mb-0">{{ summary.unresolved_terminations }}</div>
-    </div>
-    <div>
-      <div class="text-secondary small">Active proposals</div>
-      <div class="h2 mb-0">{{ summary.active_proposals }}</div>
-    </div>
-    <div>
-      <div class="text-secondary small">Saved decisions</div>
-      <div class="h2 mb-0">{{ summary.saved_decisions }}</div>
-    </div>
-    <div>
-      <div class="text-secondary small">Preview</div>
-      <div class="h2 mb-0">{{ summary.preview_state }}</div>
+  <div class="card-body">
+    <div class="d-flex flex-wrap gap-5">
+      <section data-trace-summary-group="traces">
+        <h2 class="h4 mb-2">Traces</h2>
+        <div class="d-flex flex-wrap gap-4">
+          <div><div class="text-secondary small">Traces</div><div class="h2 mb-0">{{ summary.traces }}</div></div>
+          <div><div class="text-secondary small">Actionable</div><div class="h2 mb-0">{{ summary.actionable }}</div></div>
+          <div><div class="text-secondary small">Blocked</div><div class="h2 mb-0">{{ summary.blocked }}</div></div>
+          <div><div class="text-secondary small">Invalid</div><div class="h2 mb-0">{{ summary.invalid }}</div></div>
+          <div><div class="text-secondary small">No change</div><div class="h2 mb-0">{{ summary.no_change }}</div></div>
+        </div>
+      </section>
+      <section data-trace-summary-group="terminations">
+        <h2 class="h4 mb-2">Terminations</h2>
+        <div class="d-flex flex-wrap gap-4">
+          <div>
+            <div class="text-secondary small">Terminations resolved</div>
+            <div class="h2 mb-0">{{ summary.resolved_terminations }}</div>
+          </div>
+          <div>
+            <div class="text-secondary small">Terminations open</div>
+            <div class="h2 mb-0">{{ summary.unresolved_terminations }}</div>
+          </div>
+        </div>
+      </section>
+      <section data-trace-summary-group="proposals">
+        <h2 class="h4 mb-2">Proposals</h2>
+        <div class="d-flex flex-wrap gap-4">
+          <div>
+            <div class="text-secondary small">Active proposals</div>
+            <div class="h2 mb-0">{{ summary.active_proposals }}</div>
+          </div>
+        </div>
+      </section>
+      <section data-trace-summary-group="review">
+        <h2 class="h4 mb-2">Review state</h2>
+        <div class="d-flex flex-wrap gap-4">
+          <div>
+            <div class="text-secondary small">Saved decisions</div>
+            <div class="h2 mb-0">{{ summary.saved_decisions }}</div>
+          </div>
+          <div>
+            <div class="text-secondary small">Preview</div>
+            <div class="h2 mb-0">{{ summary.preview_state }}</div>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </div>
@@ -234,9 +256,11 @@
         <h3>Devices</h3>
         <ul class="list-unstyled mb-0">
           {% for device in attention_devices %}
-            <li class="mb-3">
-              {{ device.label }}
-              <span class="badge ndi-trace-state-{{ device.state_style }}">{{ device.state }}</span>
+            <li class="card ndi-proposal-card mb-3">
+              <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                <strong>{{ device.label }}</strong>
+                <span class="badge ndi-trace-state-{{ device.state_style }}">{{ device.state }}</span>
+              </div>
               {% if device.locations or device.racks or device.u_positions %}
                 <div class="ndi-trace-claim">
                   Source hints:
@@ -260,12 +284,43 @@
             </li>
           {% empty %}
             {% if trace.resolution_started %}
-              <li class="text-secondary">Every source Device on this trace resolves in NetBox.</li>
+              {% if manual_devices %}
+                <li class="text-secondary">Devices you mapped are shown below.</li>
+              {% else %}
+                <li class="text-secondary">Every source Device on this trace resolves in NetBox.</li>
+              {% endif %}
             {% else %}
               <li class="text-secondary">Planning stopped before it resolved source Devices.</li>
             {% endif %}
           {% endfor %}
         </ul>
+        {% if manual_devices %}
+          <div class="table-responsive" data-trace-manual-devices>
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Source Device</th><th>Selected Device</th><th>State</th><th></th></tr></thead>
+              <tbody>
+                {% for device in manual_devices %}
+                  <tr>
+                    <td>{{ device.label }}</td>
+                    <td>{{ device.selected }}</td>
+                    <td><span class="badge ndi-trace-state-{{ device.state_style }}">{{ device.state }}</span></td>
+                    <td class="text-end">
+                      <div class="ndi-trace-action">
+                        <button type="button" class="btn btn-sm btn-outline-secondary"
+                                data-trace-device-picker="{{ device.key }}" {% if not device.action_allowed %}disabled{% endif %}
+                                data-trace-device-label="{{ device.label }}"
+                                {% if not device.action_allowed %}aria-describedby="deviceReasonManual{{ forloop.counter }}"{% endif %}>Change Device</button>
+                        {% if not device.action_allowed %}
+                          <div class="ndi-trace-reason" id="deviceReasonManual{{ forloop.counter }}">{{ device.action_reason }}</div>
+                        {% endif %}
+                      </div>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
         {% if settled_devices %}
           <details data-trace-resolved-devices>
             <summary>{{ settled_devices|length }} Device(s) resolved</summary>
@@ -302,15 +357,20 @@
         <h3>Terminations</h3>
         <ul class="list-unstyled mb-0">
           {% for termination in attention_terminations %}
-            <li class="mb-3" data-proposal-field="{{ termination.field_key }}"
+            <li class="card ndi-proposal-card mb-3" data-proposal-field="{{ termination.field_key }}"
                 data-proposal-url="{% url 'plugins:netbox_data_import:trace_proposal' %}"
                 data-preview-revision="{{ preview_revision }}">
-              {{ termination.label }}
-              <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}"
-                    data-proposal-state data-proposal-state-prefix="ndi-trace-state-">{{ termination.proposal.field_state }}</span>
-              {% if termination.selected %}
-                <span class="text-secondary">{{ termination.selected }}</span>
-              {% endif %}
+              <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                <strong>{{ termination.label }}</strong>
+                <span class="badge ndi-trace-state-{{ termination.proposal.state_style }}"
+                      data-proposal-state data-proposal-state-prefix="ndi-trace-state-">{{ termination.proposal.field_state }}</span>
+                {% if termination.resolved_device %}
+                  <span class="text-secondary">NetBox Device: {{ termination.resolved_device }}</span>
+                {% endif %}
+                {% if termination.selected %}
+                  <span class="text-secondary">{{ termination.selected }}</span>
+                {% endif %}
+              </div>
               {% with field_number=forloop.counter %}
                 <div data-proposal-content>
                   {% if termination.proposal.has_proposal %}
@@ -369,11 +429,14 @@
       </section>
 
       {% if trace.findings and trace.disposition != "invalid" %}
-        <ul class="list-unstyled mt-3 mb-0">
-          {% for finding in trace.findings %}
-            <li class="ndi-trace-reason">{{ finding.message }}</li>
-          {% endfor %}
-        </ul>
+        <div class="mt-3" data-trace-findings>
+          <strong>What this trace found</strong>
+          <ul class="list-unstyled mt-1 mb-0">
+            {% for finding in trace.findings %}
+              <li class="ndi-trace-reason">{{ finding.message }}</li>
+            {% endfor %}
+          </ul>
+        </div>
       {% endif %}
     </div>
   </div>

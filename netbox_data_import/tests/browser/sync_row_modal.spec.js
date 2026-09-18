@@ -18,7 +18,15 @@ const fixture = `
     <span id="syncRowNumber"></span>
     <span id="syncRowSourceId"></span>
     <span id="syncRowBadge"></span>
-    <table><tbody id="syncRowFields"></tbody></table>
+    <p id="syncRowSummary"></p>
+    <table>
+      <thead><tr><th>Field</th><th id="syncRowCurrentHead"></th><th id="syncRowNextHead"></th></tr></thead>
+      <tbody id="syncRowFields"></tbody>
+    </table>
+    <div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" id="syncRowShowUnchanged">
+      <label class="form-check-label" for="syncRowShowUnchanged">Show fields that stay the same</label>
+    </div>
     <div class="form-check">
       <input class="form-check-input" type="checkbox" id="syncRowRecalculate" checked>
       <label class="form-check-label" for="syncRowRecalculate">Recalculate the preview after syncing</label>

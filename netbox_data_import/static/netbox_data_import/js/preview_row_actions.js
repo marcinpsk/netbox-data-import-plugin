@@ -128,6 +128,8 @@
     if (!link) return false;
     // One recalculation is already on its way, and a second navigation would only interrupt it.
     if (link.dataset.ndiRecalculating === 'true') return true;
+    // An automatic recalculation navigates without a click, so the view is stored here.
+    if (typeof window.ndiRememberPreviewView === 'function') window.ndiRememberPreviewView();
     latchRecalculation(link);
     window.location.assign(link.href);
     return true;

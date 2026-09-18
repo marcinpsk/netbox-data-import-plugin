@@ -24,6 +24,6 @@ class InstallationGuideRegexTest(SimpleTestCase):
         self.assertIsNone(TransformPattern.compile(r"(?i)(ß)").capture_groups("SS"))
         self.assertIsNone(word.capture_groups("Ä"))
 
-        guide = " ".join(INSTALLATION_GUIDE.read_text().split())
+        guide = " ".join(INSTALLATION_GUIDE.read_text(encoding="utf-8").split())
         self.assertIn("uses Unicode simple case folding", guide)
         self.assertIn("families use ASCII semantics", guide)

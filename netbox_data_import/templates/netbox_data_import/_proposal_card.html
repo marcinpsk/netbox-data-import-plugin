@@ -19,13 +19,13 @@
       {% include 'netbox_data_import/_proposal_action.html' %}
     {% endfor %}
   </div>
+  <details class="mt-2" data-proposal-history-disclosure>
+    <summary>Proposal history</summary>
+    <ul class="list-unstyled small" data-proposal-history>
+      {% for attempt in termination.proposal_history %}
+        <li>#{{ attempt.id }} · {{ attempt.created }} · {{ attempt.status }} · {{ attempt.outcome }}{% if attempt.decision %} · {{ attempt.decision }}{% endif %}{% if attempt.failure %} · {{ attempt.failure }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+    <a data-proposal-history-link{% if termination.proposal_history_url %} href="{{ termination.proposal_history_url }}"{% endif %} {% if not termination.proposal_history_has_more %}hidden{% endif %}>View all attempts</a>
+  </details>
 </div>
-<details class="mt-2" data-proposal-history-disclosure>
-  <summary>Proposal history</summary>
-  <ul class="list-unstyled small" data-proposal-history>
-    {% for attempt in termination.proposal_history %}
-      <li>#{{ attempt.id }} · {{ attempt.created }} · {{ attempt.status }} · {{ attempt.outcome }}{% if attempt.decision %} · {{ attempt.decision }}{% endif %}{% if attempt.failure %} · {{ attempt.failure }}{% endif %}</li>
-    {% endfor %}
-  </ul>
-  <a data-proposal-history-link{% if termination.proposal_history_url %} href="{{ termination.proposal_history_url }}"{% endif %} {% if not termination.proposal_history_has_more %}hidden{% endif %}>View all attempts</a>
-</details>

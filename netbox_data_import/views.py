@@ -82,7 +82,7 @@ from .tables import (
 )
 from . import adapters, ip_assignment
 from .contact_resolution import PrimaryContactResolver, contact_identity, suggest_contact_roles
-from .device_field_review import DeviceFieldReviewer
+from .device_field_review import DeviceFieldReviewer, sync_change_preview
 from .object_permissions import (
     ObjectPermissionDenied,
     assess_permission_scoped_save_option,
@@ -117,7 +117,7 @@ from .import_engine import (
     operator_failure_message,
 )
 from .cable_target import ELIGIBLE_TERMINATION_LIMIT, eligible_terminations
-from .field_keys import SELECT_TERMINATION_TASK
+from .field_keys import SELECT_TERMINATION_TASK, parse_termination_field_key
 from .netbox_reader import NetBoxReader, PlanningTargetUnavailable
 from .plan import ImportPlan, PlanError, fingerprint_of
 from .review_workspace import (
@@ -166,6 +166,44 @@ def _parse_posted_profile_id(request):
         return int(request.POST.get("profile_id", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _row_key(unit) -> str:
+    """Return the key the sync modal looks a row up by.
+
+    Row numbers repeat across object types, so the number alone lets one row replace another.
+    """
+    return f"{unit.object_type}:{unit.row_number}"
+
+
+#: The rack filter's "no rack" option value. Tom Select drops an option whose value is empty.
+NO_RACK_FILTER_VALUE = "__no_rack__"
+
+
+def _rack_filter_options(units) -> tuple[list[dict[str, str]], str]:
+    """Return the racks the preview names and the value that stands for no rack.
+
+    Rows that name no rack are offered as their own option, matching the rack view's group.
+    """
+    named = {unit.rack_name for unit in units if unit.rack_name}
+    options = [{"value": rack, "label": rack} for rack in sorted(named, key=identity_text)]
+    no_rack_value = NO_RACK_FILTER_VALUE
+    # A rack may legally carry the sentinel's name, and two options cannot share one value.
+    while no_rack_value in named:
+        no_rack_value += "_"
+    if any(unit.object_type == "device" and not unit.rack_name for unit in units):
+        options.append({"value": no_rack_value, "label": "(No rack)"})
+    return options, no_rack_value
+
+
+def _sync_change_preview_by_row(units, labels):
+    """Return each reviewed row's fields grouped by what a sync would do to them."""
+    previews = {}
+    for unit in units:
+        entries = sync_change_preview(unit.extra_data, labels)
+        if entries:
+            previews[_row_key(unit)] = entries
+    return previews
 
 
 def _candidate_values(extra_data):
@@ -1240,7 +1278,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
         ]
         unused_columns.sort(key=lambda x: -x["count"])
         conflicts_by_row = {
-            str(r.row_number): r.extra_data.get("conflicts", {}) for r in result.units if r.extra_data.get("conflicts")
+            _row_key(r): r.extra_data.get("conflicts", {}) for r in result.units if r.extra_data.get("conflicts")
         }
         # The modal names a field for the operator; the catalog is where those names live.
         target_field_labels = {key: CATALOG.display(key) for key, _label in CATALOG.choices()}
@@ -1249,13 +1287,13 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             for row in result.units:
                 candidate_values = _candidate_values(row.extra_data)
                 if candidate_values:
-                    candidate_values_by_row[str(row.row_number)] = candidate_values
+                    candidate_values_by_row[_row_key(row)] = candidate_values
         except ValidationError as exc:
             _discard_import_preview(request)
             messages.error(request, "; ".join(exc.messages))
             return redirect(reverse("plugins:netbox_data_import:import_setup"))
         contact_suggestions_by_row = {
-            str(r.row_number): r.extra_data["contact_suggestion"]
+            _row_key(r): r.extra_data["contact_suggestion"]
             for r in result.units
             if r.extra_data.get("contact_suggestion")
         }
@@ -1265,10 +1303,12 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if candidates.get("contact")
         }
         extra_columns_by_row = {
-            str(r.row_number): r.extra_data.get("extra_columns", {})
+            _row_key(r): r.extra_data.get("extra_columns", {})
             for r in result.units
             if r.extra_data.get("extra_columns")
         }
+        sync_change_preview_by_row = _sync_change_preview_by_row(result.units, target_field_labels)
+        rack_filter_options, no_rack_filter_value = _rack_filter_options(result.units)
         split_field_values_by_source_id = {
             r.source_id: {
                 "device_name": r.name or "",
@@ -1325,6 +1365,9 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "contact_suggestions_by_row": contact_suggestions_by_row,
                 "contact_role_suggestions_by_row": contact_role_suggestions_by_row,
                 "extra_columns_by_row": extra_columns_by_row,
+                "sync_change_preview_by_row": sync_change_preview_by_row,
+                "rack_filter_options": rack_filter_options,
+                "no_rack_filter_value": no_rack_filter_value,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
                 "preview_revision": current_preview_revision(request.session),
@@ -3630,6 +3673,17 @@ def _workspace_device_questions(workspace) -> dict[str, dict]:
     return questions
 
 
+def _deduplicate_findings(findings: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return findings once per message in their first-seen order."""
+    messages: set[str] = set()
+    unique: list[dict[str, str]] = []
+    for finding in findings:
+        if finding["message"] not in messages:
+            messages.add(finding["message"])
+            unique.append(finding)
+    return unique
+
+
 def _object_type_label(obj) -> str:
     """Return the ``app_label.model_name`` key one termination is offered under."""
     return f"{obj._meta.app_label}.{obj._meta.model_name}"
@@ -3750,6 +3804,9 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
         if selected is not None:
             selected = replace(
                 selected,
+                findings=(
+                    _deduplicate_findings(selected.findings) if selected.disposition != "invalid" else selected.findings
+                ),
                 terminations=[
                     {
                         **field,
@@ -3768,7 +3825,26 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
             selected.devices if selected else [],
         )
         attention_devices = [device for device in selected_devices if device.get("selectable")]
-        settled_devices = [device for device in selected_devices if not device.get("selectable")]
+        manual_devices = [device for device in selected_devices if device.get("state_style") == "manual"]
+        settled_devices = [
+            device
+            for device in selected_devices
+            if not device.get("selectable") and device.get("state_style") != "manual"
+        ]
+        resolved_devices = {
+            source_device_key(device["key"]): device["selected"]
+            for device in selected_devices
+            if device.get("selected")
+        }
+        attention = [
+            {
+                **termination,
+                "resolved_device": resolved_devices.get(
+                    parse_termination_field_key(termination["field_key"])["device"], ""
+                ),
+            }
+            for termination in attention
+        ]
         from .models import ProposalStatus, ResolutionProposal
 
         if proposal_display.view_reason:
@@ -3789,6 +3865,7 @@ class TraceReviewWorkspaceView(_TraceWorkspaceMixin, PermissionRequiredMixin, Vi
                 "selected_trace": selected,
                 "proposal_fields": proposal_fields,
                 "attention_devices": attention_devices,
+                "manual_devices": manual_devices,
                 "settled_devices": settled_devices,
                 "attention_terminations": attention,
                 "settled_terminations": settled,

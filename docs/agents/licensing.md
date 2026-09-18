@@ -55,5 +55,5 @@ generated or vendored file.
 The `reuse-lint` pre-commit hook gates every commit. Run it directly with:
 
 ```bash
-uvx --native-tls reuse lint
+uvx --system-certs reuse lint
 ```

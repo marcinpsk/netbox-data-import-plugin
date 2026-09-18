@@ -5,7 +5,7 @@
  * handler against the row markup the preview page renders. */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import Modal from "bootstrap/js/dist/modal.js";
 import TomSelect from "tom-select";
 
@@ -54,12 +54,16 @@ function addFilterRows() {
     <button id="previewRowFilterClear" style="display:none;">x</button>
     <select id="previewActionFilter"><option value=""></option><option value="update">Update</option>
       <option value="error">Error</option></select>
+    <select id="previewRackFilter" multiple data-no-rack-value="__no_rack__">
+      <option value="V1">V1</option><option value="V3">V3</option>
+      <option value="__no_rack__">(No rack)</option>
+    </select>
     <div id="ndi-hidden-err-warn" style="display:none;">
       <span id="ndi-hidden-err-count">0</span>
       <a href="#" id="ndi-show-errors-link">show errors</a>
     </div>
     <table><tbody id="previewRowsBody">
-      <tr id="row-1" data-action="update">
+      <tr id="row-1" data-action="update" data-rack-name="V1">
         <td>dev-a</td>
         <td>
           <button type="button" class="ndi-diff-toggle" data-diff-target="diff-1" aria-expanded="false">
@@ -73,7 +77,7 @@ function addFilterRows() {
           <tbody><tr id="diff-field-1-serial"><td>serial</td><td>OLD</td><td>NEW</td></tr></tbody>
         </table>
       </td></tr>
-      <tr id="row-2" data-action="update"><td>dev-b</td></tr>
+      <tr id="row-2" data-action="update" data-rack-name="V3"><td>dev-b</td></tr>
       <tr id="row-3" data-action="error"><td>dev-c</td></tr>
     </tbody></table>
     <p id="previewNoFilterResults" style="display:none;">No rows match</p>
@@ -370,5 +374,219 @@ describe("keyboard activation", () => {
     toggle.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     expect(document.getElementById("diff-11").hidden).toBe(false);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+});
+
+describe("a recalculation that reloads the page", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+    addFilterRows();
+    document.body.insertAdjacentHTML(
+      "beforeend",
+      '<a href="/preview/" class="ndi-recalculate-preview">Recalculate</a>',
+    );
+    Element.prototype.scrollIntoView = function () {
+      this.dataset.scrolledIntoView = "true";
+    };
+    window.scrollTo = (x, y) => {
+      window.__scrolledTo = y;
+    };
+    window.__scrolledTo = null;
+    window.innerHeight = 800;
+  });
+
+  it("keeps the action filter the operator picked", () => {
+    filterBy("", "error");
+
+    window.ndiRememberPreviewView();
+    addFilterRows();
+    window.ndiRestorePreviewView();
+
+    expect(document.getElementById("previewActionFilter").value).toBe("error");
+    expect(document.getElementById("row-1").style.display).toBe("none");
+    expect(document.getElementById("row-3").style.display).toBe("");
+  });
+
+  it("keeps the text filter too", () => {
+    filterBy("dev-b", "");
+
+    window.ndiRememberPreviewView();
+    addFilterRows();
+    window.ndiRestorePreviewView();
+
+    expect(document.getElementById("previewRowFilter").value).toBe("dev-b");
+    expect(document.getElementById("row-2").style.display).toBe("");
+  });
+
+  it.each([
+    { label: "a named rack", value: "V1", visibleRow: "row-1", hiddenRow: "row-2" },
+    { label: "the no-rack option", value: "__no_rack__", visibleRow: "row-3", hiddenRow: "row-1" },
+  ])("keeps $label as a rack-only filter", ({ value, visibleRow, hiddenRow }) => {
+    selectRacks([value]);
+
+    window.ndiRememberPreviewView();
+    addFilterRows();
+    window.ndiRestorePreviewView();
+
+    expect([...document.getElementById("previewRackFilter").selectedOptions].map((option) => option.value)).toEqual([
+      value,
+    ]);
+    expect(document.getElementById(visibleRow).style.display).toBe("");
+    expect(document.getElementById(hiddenRow).style.display).toBe("none");
+  });
+
+  it("restores a rack-only filter through the filter setter", () => {
+    selectRacks(["V1"]);
+    window.ndiRememberPreviewView();
+    addFilterRows();
+    const rackSelect = new TomSelect(document.getElementById("previewRackFilter"), { create: false });
+    const setValue = vi.spyOn(rackSelect, "setValue");
+
+    window.ndiRestorePreviewView();
+
+    expect(setValue).toHaveBeenCalledWith(["V1"], true);
+  });
+
+  it("returns to the row the operator was looking at", () => {
+    document.getElementById("row-1").getBoundingClientRect = () => ({ bottom: -50, top: -90 });
+    document.getElementById("row-2").getBoundingClientRect = () => ({ bottom: 120, top: 80 });
+    document.getElementById("row-2").dataset.rowNumber = "7";
+    document.getElementById("row-2").dataset.objectType = "device";
+
+    window.ndiRememberPreviewView();
+    addFilterRows();
+    const landing = document.getElementById("row-2");
+    landing.dataset.rowNumber = "7";
+    landing.dataset.objectType = "device";
+    window.ndiRestorePreviewView();
+
+    expect(landing.dataset.scrolledIntoView).toBe("true");
+  });
+
+  it("falls back to the offset when that row is gone", () => {
+    document.getElementById("row-2").dataset.rowNumber = "7";
+    document.getElementById("row-2").dataset.objectType = "device";
+    document.getElementById("row-1").getBoundingClientRect = () => ({ bottom: -10, top: -50 });
+    document.getElementById("row-2").getBoundingClientRect = () => ({ bottom: 40, top: 0 });
+    window.scrollY = 640;
+
+    window.ndiRememberPreviewView();
+    document.getElementById("previewRowsBody").innerHTML = "";
+    window.ndiRestorePreviewView();
+
+    expect(window.__scrolledTo).toBe(640);
+  });
+
+  it("keeps the offset when the whole table is still below the fold", () => {
+    // The operator is above the table, so no row is the one they are reading.
+    ["row-1", "row-2", "row-3"].forEach((id, index) => {
+      const row = document.getElementById(id);
+      row.dataset.rowNumber = String(index + 1);
+      row.dataset.objectType = "device";
+      row.getBoundingClientRect = () => ({ bottom: 5000, top: 4800 });
+    });
+    window.innerHeight = 800;
+    window.scrollY = 90;
+
+    window.ndiRememberPreviewView();
+    window.ndiRestorePreviewView();
+
+    expect(window.__scrolledTo).toBe(90);
+    expect(document.getElementById("row-1").dataset.scrolledIntoView).toBe(undefined);
+  });
+
+  it("restores once, so a later visit is not moved", () => {
+    filterBy("", "error");
+    window.ndiRememberPreviewView();
+
+    addFilterRows();
+    window.ndiRestorePreviewView();
+    addFilterRows();
+    window.ndiRestorePreviewView();
+
+    expect(document.getElementById("previewActionFilter").value).toBe("");
+  });
+
+  it("remembers the view when the operator presses Recalculate", () => {
+    filterBy("", "error");
+
+    document
+      .querySelector(".ndi-recalculate-preview")
+      .dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    addFilterRows();
+    window.ndiRestorePreviewView();
+
+    expect(document.getElementById("previewActionFilter").value).toBe("error");
+  });
+});
+
+
+function selectRacks(values) {
+  const select = document.getElementById("previewRackFilter");
+  [...select.options].forEach((option) => {
+    option.selected = values.includes(option.value);
+  });
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+describe("filtering the flat view by rack", () => {
+  beforeEach(() => {
+    addFilterRows();
+  });
+
+  it("shows only the devices in the chosen rack", () => {
+    selectRacks(["V1"]);
+
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-2").style.display).toBe("none");
+    expect(document.getElementById("row-3").style.display).toBe("none");
+  });
+
+  it("takes more than one rack at a time", () => {
+    selectRacks(["V1", "V3"]);
+
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-2").style.display).toBe("");
+    expect(document.getElementById("row-3").style.display).toBe("none");
+  });
+
+  it("finds the rows that name no rack", () => {
+    // The option carries a sentinel, because Tom Select drops an empty option value.
+    selectRacks(["__no_rack__"]);
+
+    expect(document.getElementById("row-3").style.display).toBe("");
+    expect(document.getElementById("row-1").style.display).toBe("none");
+  });
+
+  it("shows every row again when no rack is chosen", () => {
+    selectRacks(["V1"]);
+    selectRacks([]);
+
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-2").style.display).toBe("");
+    expect(document.getElementById("row-3").style.display).toBe("");
+  });
+
+  it("narrows within the action filter rather than replacing it", () => {
+    filterBy("", "update");
+    selectRacks(["V1"]);
+
+    expect(document.getElementById("row-1").style.display).toBe("");
+    expect(document.getElementById("row-2").style.display).toBe("none");
+  });
+
+  it("is cleared with the other filters", () => {
+    selectRacks(["V1"]);
+
+    document.getElementById("previewRowFilterClear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+    expect(document.getElementById("row-2").style.display).toBe("");
+    expect([...document.getElementById("previewRackFilter").selectedOptions]).toHaveLength(0);
+  });
+
+  it("offers the clear button while only a rack is chosen", () => {
+    selectRacks(["V1"]);
+
+    expect(document.getElementById("previewRowFilterClear").style.display).not.toBe("none");
   });
 });

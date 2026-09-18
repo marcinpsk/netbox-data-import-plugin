@@ -34,7 +34,7 @@ from netbox_data_import.tests.helpers import (
 
 User = get_user_model()
 
-FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_cans.xlsx")
+FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "sample_workbook.xlsx")
 
 
 class RefusedRowWriteLoggingTest(SimpleTestCase):
@@ -701,7 +701,7 @@ class PreviewSessionMixin:
         document = SourceDocument.store(
             profile=profile,
             content=content,
-            filename="sample_cans.xlsx",
+            filename="sample_workbook.xlsx",
             uploaded_by=self.user,
         )
         planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
@@ -716,7 +716,7 @@ class PreviewSessionMixin:
             "site_id": site.pk,
             "location_id": None,
             "tenant_id": None,
-            "filename": "sample_cans.xlsx",
+            "filename": "sample_workbook.xlsx",
             "source_document_id": document.pk,
         }
         session["import_preview_pending"] = True
@@ -751,7 +751,7 @@ class ImportPreviewViewTest(PreviewSessionMixin, BaseViewTestCase):
         self._setup_session()
         url = reverse("plugins:netbox_data_import:import_preview")
         resp = self.client.get(url)
-        self.assertContains(resp, "sample_cans.xlsx")
+        self.assertContains(resp, "sample_workbook.xlsx")
 
     def test_first_preview_get_renders_the_materialized_upload_result(self):
         """The upload result is not calculated again on its redirect target."""

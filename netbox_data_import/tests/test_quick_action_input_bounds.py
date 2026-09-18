@@ -147,7 +147,7 @@ def _permission_scoped_writer_url_names():
     """Return deferred writers, excluding the quick actions covered by their own ratchet."""
     from netbox_data_import import urls
 
-    source = pathlib.Path(urls.__file__).with_name("views.py").read_text()
+    source = pathlib.Path(urls.__file__).with_name("views.py").read_text(encoding="utf-8")
     writers = _permission_scoped_writer_class_names(source)
     names = set()
     for pattern in urls.urlpatterns:
@@ -452,7 +452,7 @@ class DeleteOnlyView:
         import ast
 
         writer_names = frozenset(("delete_permission_scoped_objects", "save_permission_scoped_object"))
-        tree = ast.parse(pathlib.Path(__file__).read_text())
+        tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
         registries = [
             node
             for node in ast.walk(tree)
@@ -500,7 +500,7 @@ class UpdatesMetadata(_PermissionScopedWriteMixin):
         """A routed preview writer cannot bypass object constraints with a direct ORM write."""
         from netbox_data_import import urls
 
-        source = pathlib.Path(urls.__file__).with_name("views.py").read_text()
+        source = pathlib.Path(urls.__file__).with_name("views.py").read_text(encoding="utf-8")
         self.assertEqual(_quick_action_write_seam_errors(source, _quick_action_routes()), [])
 
     def test_an_overlength_quick_action_leaves_the_database_unchanged(self):

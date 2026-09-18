@@ -45,7 +45,7 @@ def as_tuple(version: str) -> tuple[int, ...]:
 def read_plugin_config() -> tuple[str, str]:
     """Return `__version__` and the config's `min_version`, read without importing NetBox."""
     found: dict[str, str] = {}
-    for node in ast.walk(ast.parse(PLUGIN_CONFIG.read_text())):
+    for node in ast.walk(ast.parse(PLUGIN_CONFIG.read_text(encoding="utf-8"))):
         if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
             continue
         if not isinstance(node.value.value, str):
@@ -61,7 +61,7 @@ def read_plugin_config() -> tuple[str, str]:
 
 def newest_tested_netbox() -> str:
     """Return the newest NetBox release the test matrix runs, which is the highest verified version."""
-    tested = MATRIX_NETBOX.findall(TEST_WORKFLOW.read_text())
+    tested = MATRIX_NETBOX.findall(TEST_WORKFLOW.read_text(encoding="utf-8"))
     if not tested:
         raise SystemExit(f"gen-compatibility: {TEST_WORKFLOW.name} lists no netbox-version, so the scan is broken")
     return max(tested, key=as_tuple)
@@ -138,8 +138,8 @@ def main() -> int:
         (ROOT / "netbox-plugin.yaml", render_yaml(rows)),
         (ROOT / "COMPATIBILITY.md", render_markdown(rows)),
     ):
-        if path.read_text() != text:
-            path.write_text(text)
+        if path.read_text(encoding="utf-8") != text:
+            path.write_text(text, encoding="utf-8")
             written.append(path.name)
     if written:
         print(f"gen-compatibility: rewrote {', '.join(written)}", file=sys.stderr)

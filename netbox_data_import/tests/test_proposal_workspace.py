@@ -1335,7 +1335,7 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertNotIn("<button", group)
         self.assertNotIn("DEV-A absent-port", group)
         attention = html[html.index("data-trace-terminations") : settled.start()]
-        self.assertRegex(attention, r">\s*DEV-A absent-port\s*<span")
+        self.assertRegex(attention, r"DEV-A absent-port</strong>\s*<span[^>]*data-proposal-state")
         self.assertNotIn("DEV-B eth1", attention)
         self.assertLess(html.index("Proposed physical topology"), html.index("data-trace-terminations"))
         self.assertLess(html.index("data-trace-devices"), html.index("data-trace-terminations"))

@@ -8,10 +8,12 @@ import socket
 import threading
 import time
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -21,6 +23,9 @@ from netbox_data_import.inference_connection_test import (
     CONNECTION_TEST_CATEGORIES,
     run_connection_test,
 )
+from netbox_data_import import inference_trust
+from netbox_data_import.inference_transport import WallClockDeadline, WallClockDeadlineExceeded
+from netbox_data_import.inference_trust import resolve_addresses
 from netbox_data_import.models import InferenceBackend
 from netbox_data_import.tests.helpers import user_with_object_permission
 from netbox_data_import.tests.inference_http import issue_server_certificate, serving_tls
@@ -328,6 +333,78 @@ class ConnectionTestResultTest(TestCase):
                 result = run_connection_test(row.pk, "primary")
 
         self.assertEqual(result.category, "timeout")
+
+    def test_a_resolution_killed_at_the_deadline_reports_timeout(self):
+        sleeper = "import json,sys,time; json.load(sys.stdin); time.sleep(60)"
+        command = ("-I", "-S", "-c", sleeper)
+        row = make_row(connect_timeout=1, read_timeout=1)
+
+        with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+            with vault() as vault_settings:
+                with override_settings(PLUGINS_CONFIG=settings_for(vault_settings)):
+                    result = run_connection_test(row.pk, "primary")
+
+        self.assertEqual(result.category, "timeout")
+
+    def test_blocked_resolutions_expire_before_a_healthy_connection_test(self):
+        operation_count = 40
+        worker_probe = """
+import json
+import os
+import pathlib
+import socket
+import sys
+import time
+
+host, port, _timeout = json.load(sys.stdin)
+if host.startswith("blocked-"):
+    (pathlib.Path(sys.argv[1]) / str(os.getpid())).touch()
+    while not pathlib.Path(sys.argv[2]).exists():
+        time.sleep(0.02)
+answers = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+json.dump(list(dict.fromkeys(str(answer[4][0]) for answer in answers)), sys.stdout)
+"""
+        with TemporaryDirectory() as temporary:
+            entered = pathlib.Path(temporary) / "entered"
+            entered.mkdir()
+            release = pathlib.Path(temporary) / "release"
+            command = ("-I", "-S", "-c", worker_probe, str(entered), str(release))
+
+            def resolve_until_timeout(index):
+                try:
+                    resolve_addresses(
+                        f"http://blocked-{index}.example.invalid:80",
+                        deadline=WallClockDeadline.after(4),
+                    )
+                except WallClockDeadlineExceeded:
+                    return True
+                return False
+
+            with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+                try:
+                    with ThreadPoolExecutor(max_workers=operation_count) as callers:
+                        blocked = [callers.submit(resolve_until_timeout, index) for index in range(operation_count)]
+                        # The startup budget must outlast the resolution deadline on a slow runner.
+                        startup_deadline = time.monotonic() + 20
+                        while len(tuple(entered.iterdir())) < operation_count and time.monotonic() < startup_deadline:
+                            time.sleep(0.02)
+                        self.assertEqual(len(tuple(entered.iterdir())), operation_count)
+                        self.assertTrue(all(future.result(timeout=20) for future in blocked))
+
+                    with serving_backend() as (root, seen, allowlist):
+                        row = make_row(api_root=root)
+                        with vault() as vault_settings:
+                            with override_settings(
+                                PLUGINS_CONFIG=settings_for(vault_settings, origin_allowlist=allowlist)
+                            ):
+                                result = run_connection_test(row.pk, "primary")
+
+                    self.assertEqual(result.category, "ok")
+                    self.assertIn("/chat/completions", [request["path"] for request in seen])
+                    surviving = [path.name for path in entered.iterdir() if pathlib.Path(f"/proc/{path.name}").exists()]
+                    self.assertEqual(surviving, [], "timed-out DNS workers were not reaped")
+                finally:
+                    release.touch()
 
     def test_slow_response_headers_cannot_exceed_the_shared_deadline(self):
         row = make_row(connect_timeout=1, read_timeout=1)

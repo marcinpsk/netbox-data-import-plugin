@@ -2,16 +2,25 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Profile-owned Device resolution for Source Traces."""
 
+import json
+import re
+
 from io import BytesIO
 
 from dcim.models import Device, Interface, Location, Rack
 from django.core.exceptions import ValidationError
 from django.db import connection
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
-from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from netbox_data_import.field_keys import (
+    INTERFACE_KIND,
+    SELECT_TERMINATION_TASK,
+    TERMINATION_ROLE,
+    parse_termination_field_key,
+    termination_field_key,
+)
 from netbox_data_import.models import ImportProfile, SourceDocument, TerminationResolution, TraceDeviceResolution
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.object_permissions import ObjectPermissionDenied, clear_user_permission_caches
@@ -24,6 +33,7 @@ from netbox_data_import.trace_device_resolution import (
     UNRESOLVED,
     eligible_trace_devices,
     resolve_trace_devices,
+    source_device_key,
 )
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
 from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
@@ -67,6 +77,35 @@ class DeviceEvidenceSerializationTest(TestCase):
             with self.subTest(field=field, value=value):
                 with self.assertRaisesMessage(TypeError, f"Device evidence {field} must be a list or tuple of strings"):
                     DeviceEvidence.from_dict({**self.evidence, field: value})
+
+
+class TerminationKeyCarriesTheDeviceKeyTest(SimpleTestCase):
+    """The workspace reads a resolved Device out of a map keyed by `source_device_key`."""
+
+    def test_a_canonical_termination_key_already_holds_the_source_device_key(self):
+        """A lookup by the parsed device needs no second normalization step."""
+        label = "Source Alias"
+        key = termination_field_key(device=label, cards="Card  One", port="Eth 1", kind=INTERFACE_KIND)
+
+        self.assertEqual(parse_termination_field_key(key)["device"], source_device_key(label))
+
+    def test_a_key_holding_an_unnormalized_device_is_not_canonical(self):
+        """An unnormalized device can never reach a lookup, because parsing refuses the key."""
+        raw = json.dumps(
+            {
+                "cards": source_device_key("Card One"),
+                "device": "Source Alias",
+                "kind": INTERFACE_KIND,
+                "port": source_device_key("Eth 1"),
+                "role": TERMINATION_ROLE,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        with self.assertRaises(ValueError):
+            parse_termination_field_key(raw)
 
 
 class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
@@ -365,6 +404,18 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
         self.assertContains(response, "Source Alias")
         self.assertContains(response, reverse("plugins:netbox_data_import:trace_device_candidates"))
 
+    def test_attention_questions_render_as_bordered_cards(self):
+        response = self.start_alias_preview(port_name="absent-port")
+
+        page = response.content.decode()
+        devices = re.search(r"<section\b[^>]*data-trace-devices.*?</section>", page, re.DOTALL)
+        terminations = re.search(r"<section\b[^>]*data-trace-terminations.*?</section>", page, re.DOTALL)
+        self.assertIsNotNone(devices)
+        self.assertIsNotNone(terminations)
+        card_classes = r'<li class="[^"]*\bcard\b[^"]*\bndi-proposal-card\b[^"]*"'
+        self.assertRegex(devices.group(), card_classes)
+        self.assertRegex(terminations.group(), card_classes)
+
     def test_saving_a_device_choice_replans_and_persists_the_mapping(self):
         response = self.start_alias_preview()
         revision = response.context["preview_revision"]
@@ -393,6 +444,107 @@ class TraceDeviceResolutionWorkspaceTest(CableTopologyMixin, TestCase):
             self.device_a.pk,
         )
         self.assertContains(saved, "manually resolved")
+
+    def test_a_saved_device_choice_survives_a_later_load_and_re_read(self):
+        def assert_saved_choice_is_rendered(result):
+            devices = re.search(r"<section\b[^>]*data-trace-devices.*?</section>", result.content.decode(), re.DOTALL)
+            self.assertIsNotNone(devices)
+            manual = re.search(r"<div\b[^>]*data-trace-manual-devices.*?</table>", devices.group(), re.DOTALL)
+            self.assertIsNotNone(manual)
+            self.assertIn("Source Alias", manual.group())
+            self.assertIn(str(self.device_a), manual.group())
+            self.assertIn("manually resolved", manual.group())
+
+        response = self.start_alias_preview()
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                "preview_revision": response.context["preview_revision"],
+            },
+        )
+
+        later = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        selected = next(device for device in later.context["selected_trace"].devices if device["key"] == "source alias")
+        self.assertEqual(selected["state"], "manually resolved")
+        assert_saved_choice_is_rendered(later)
+
+        reread = self.client.post(
+            reverse("plugins:netbox_data_import:trace_workspace_reread"),
+            {"preview_revision": later.context["preview_revision"]},
+            follow=True,
+        )
+        selected = next(
+            device for device in reread.context["selected_trace"].devices if device["key"] == "source alias"
+        )
+        self.assertEqual(selected["state"], "manually resolved")
+        assert_saved_choice_is_rendered(reread)
+
+    def test_the_proposed_topology_uses_an_unnamed_devices_display(self):
+        unnamed = Device.objects.create(
+            name=None,
+            site=self.site,
+            device_type=self.device_type,
+            role=self.role,
+        )
+        Interface.objects.create(device=unnamed, name="eth7", type="1000base-t")
+        TraceDeviceResolution.objects.create(
+            profile=self.profile,
+            source_device_key="source alias",
+            selected_device_id=unnamed.pk,
+            selected_display_name=str(unnamed),
+        )
+
+        response = self.start_alias_preview(port_name="eth7")
+
+        page = response.content.decode()
+        start = page.index("Proposed physical topology")
+        proposed = page[start : page.index("</ol>", start)]
+        self.assertIn(f"{unnamed} eth7", proposed)
+        self.assertNotIn("None eth7", proposed)
+
+    def test_a_saved_device_choice_stays_visible_outside_the_collapsed_disclosure(self):
+        response = self.start_alias_preview()
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                "preview_revision": response.context["preview_revision"],
+            },
+        )
+
+        later = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        devices = re.search(r"<section\b[^>]*data-trace-devices.*?</section>", later.content.decode(), re.DOTALL)
+        self.assertIsNotNone(devices)
+        visible = devices.group().split("<details data-trace-resolved-devices", 1)[0]
+        self.assertIn("Source Alias", visible)
+        self.assertIn(str(self.device_a), visible)
+        self.assertIn("manually resolved", visible)
+
+    def test_an_attention_termination_names_its_resolved_device(self):
+        response = self.start_alias_preview(port_name="absent-port")
+        self.client.post(
+            reverse("plugins:netbox_data_import:trace_resolve_device"),
+            {
+                "device_key": "source alias",
+                "device_id": self.device_a.pk,
+                "search": "DEV-A",
+                "preview_revision": response.context["preview_revision"],
+            },
+        )
+
+        later = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+        terminations = re.search(
+            r"<section\b[^>]*data-trace-terminations.*?</section>", later.content.decode(), re.DOTALL
+        )
+        self.assertIsNotNone(terminations)
+        attention = terminations.group().split("<details data-trace-settled", 1)[0]
+        self.assertIn("Source Alias absent-port", attention)
+        self.assertIn(str(self.device_a), attention)
 
     def test_an_unoffered_device_choice_is_rejected_as_request_input(self):
         response = self.start_alias_preview()

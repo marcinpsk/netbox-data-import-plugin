@@ -19,38 +19,51 @@ const controllerPath = resolve(
 const controllerSource = readFileSync(controllerPath, "utf8");
 
 const candidates = {
-  "first-row": {
+  "device:first-row": {
     contact: {
       "Contact Name": "First Contact",
       "Contact Email": "first@example.invalid",
     },
   },
   // A row the preview found no Contact for, which is what the live lookup answers again.
-  "second-row": {
+  "device:second-row": {
     contact: {
       "Contact Name": "Second Contact",
     },
   },
   // A row that names a person but carries nothing the configured lookup field can use.
-  "name-only-row": {
+  "device:name-only-row": {
     contact: {
       "Contact Name": "Named Contact",
+    },
+  },
+  "rack:first-row": {
+    contact: {
+      "Rack Contact Name": "Rack Contact",
+      "Rack Contact Email": "rack@example.invalid",
     },
   },
 };
 
 const contactSuggestions = {
-  "first-row": {
+  "device:first-row": {
     id: 41,
     name: "Existing First Contact",
     email: "first@example.invalid",
     phone: "+1 202-555-0103",
   },
+  "rack:first-row": {
+    id: 61,
+    name: "Existing Rack Contact",
+    email: "rack@example.invalid",
+    phone: "",
+  },
 };
 
 const roleSuggestions = {
-  "first-row": { name: "Contact Name", email: "Contact Email" },
-  "name-only-row": { name: "Contact Name" },
+  "device:first-row": { name: "Contact Name", email: "Contact Email" },
+  "device:name-only-row": { name: "Contact Name" },
+  "rack:first-row": { name: "Rack Contact Name", email: "Rack Contact Email" },
 };
 
 function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/", suggestionUrl = null } = {}) {
@@ -96,9 +109,10 @@ function addPreviewFixture(resolutions = {}, { lookupUrl = "/contact-lookup/", s
   window.eval(controllerSource);
 }
 
-function openRow(rowNumber, sourceId) {
+function openRow(rowNumber, sourceId, objectType = "device") {
   const button = document.createElement("button");
   button.dataset.rowNumber = rowNumber;
+  button.dataset.objectType = objectType;
   button.dataset.sourceId = sourceId;
   const event = new Event("show.bs.modal");
   Object.defineProperty(event, "relatedTarget", { value: button });
@@ -134,6 +148,80 @@ afterEach(() => {
 });
 
 describe("contact candidate modal", () => {
+  it("uses the object type with the row number to find row data", () => {
+    addPreviewFixture();
+
+    openRow("first-row", "source-rack", "rack");
+
+    expect(rolesByColumn()).toEqual({
+      "Rack Contact Name": "name",
+      "Rack Contact Email": "email",
+    });
+    expect(document.getElementById("contactCandidateExisting").tomselect.options["61"]).toBeDefined();
+    expect(document.getElementById("contactCandidateExisting").tomselect.options["41"]).toBeUndefined();
+  });
+
+  it("stores a refreshed suggestion under the composite row key", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: () =>
+        Promise.resolve({
+          suggestion: { id: 62, name: "Refreshed Rack Contact", email: "rack@example.invalid", phone: "" },
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-rack", "rack");
+    await vi.waitFor(() => {
+      expect(document.getElementById("contactCandidateExisting").tomselect.options["62"]).toBeDefined();
+    });
+
+    document.getElementById("contactCandidateForm").dataset.contactSuggestionUrl = "";
+    openRow("first-row", "source-device", "device");
+
+    const options = document.getElementById("contactCandidateExisting").tomselect.options;
+    expect(options["41"]).toBeDefined();
+    expect(options["62"]).toBeUndefined();
+  });
+
+  it("ignores a held answer for another row that shares its source ID", async () => {
+    let answer;
+    const held = new Promise((resolve) => { answer = resolve; });
+    const fetchMock = vi.fn().mockResolvedValue({ json: () => held });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+
+    // The device row holds no contact, so it asks the server and the answer is held in flight.
+    openRow("first-row", "shared-source", "device");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // A save for that same source lands, so the next row opens with a contact already selected.
+    window.EXISTING_RESOLUTIONS["shared-source"] = {
+      "candidate:contact": { resolved_fields: { contact_id: "41" } },
+    };
+    openRow("first-row", "shared-source", "rack");
+
+    answer({ suggestion: { id: 62, name: "Other Row Contact", email: "other@example.invalid", phone: "" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The answer belongs to device:first-row, not to the rack row now on screen.
+    expect(document.getElementById("contactCandidateExisting").tomselect.options["62"]).toBeUndefined();
+  });
+
+  it("deletes a stale suggestion under the composite row key", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+    openRow("first-row", "source-rack", "rack");
+    await vi.waitFor(() => {
+      expect(document.getElementById("contactCandidateSuggestion").classList.contains("d-none")).toBe(true);
+    });
+
+    document.getElementById("contactCandidateForm").dataset.contactSuggestionUrl = "";
+    openRow("first-row", "source-device", "device");
+
+    expect(document.getElementById("contactCandidateExisting").tomselect.options["41"]).toBeDefined();
+  });
+
   it("opens a row when no saved-resolution global is present", () => {
     addPreviewFixture();
     delete window.EXISTING_RESOLUTIONS;
