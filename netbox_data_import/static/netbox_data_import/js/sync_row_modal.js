@@ -204,6 +204,8 @@
 
     document.getElementById('syncRowNextHead').textContent = reviewed ? 'After sync' : 'Will be set to';
 
+    // Appended once after the chain, so no summary branch can omit the pending writes.
+    var pendingWrites = pendingWriteSummary(btn);
     if (!reviewed) {
       summary.className = 'small mb-2 text-muted';
       summary.textContent = isUpdate
@@ -211,13 +213,12 @@
         : 'Creates this ' + (btn.dataset.objectType || 'object') + ' in NetBox with the values below.';
     } else if (counts.change === 0) {
       summary.className = 'small mb-2 text-muted';
-      var pendingWrites = pendingWriteSummary(btn);
       if (skippedPhrase) {
         summary.textContent = 'No reviewed device fields will change. ' + counts.unchanged
-          + ' unchanged, ' + skippedPhrase + '.' + pendingWrites;
+          + ' unchanged, ' + skippedPhrase + '.';
       } else {
         summary.textContent = pendingWrites
-          ? 'No reviewed device fields will change.' + pendingWrites
+          ? 'No reviewed device fields will change.'
           : 'No reviewed device fields will change. NetBox already holds every reviewed value.';
       }
     } else {
@@ -226,6 +227,7 @@
         + ' will change. ' + counts.unchanged + ' unchanged'
         + (skippedPhrase ? ', ' + skippedPhrase + '.' : '.');
     }
+    summary.textContent += pendingWrites;
 
     // Append extra_columns (custom fields / unmapped columns) below standard fields
     var extraCols = readJson('ndi-extra-columns-by-row')[previewKey] || {};

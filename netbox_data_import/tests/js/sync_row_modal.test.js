@@ -136,6 +136,21 @@ describe("the update confirmation", () => {
       .toBe("No reviewed device fields will change. Sync will also write provenance data.");
   });
 
+  it("names a pending contact write when reviewed fields also change", () => {
+    openRow(REVIEWED, { action: "update", pendingWriteContact: "true" });
+
+    // The confirmation must not report fewer writes than the sync performs.
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("1 field will change. 2 unchanged, 1 ignored, 1 not written. Sync will also write contact data.");
+  });
+
+  it("names a pending provenance write when the row creates the object", () => {
+    openRow(null, { action: "create", name: "new-device", pendingWriteProvenance: "true" });
+
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("Creates this device in NetBox with the values below. Sync will also write provenance data.");
+  });
+
   it("names each skipped state when nothing changes", () => {
     openRow(REVIEWED.filter((entry) => entry.state !== "change"), { action: "update" });
 
