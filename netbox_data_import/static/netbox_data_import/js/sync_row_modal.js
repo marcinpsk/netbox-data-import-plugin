@@ -58,6 +58,13 @@
     return window.ndiRecalculatePreview();
   }
 
+  function pendingWriteSummary(btn) {
+    var pendingWrites = [];
+    if (btn.dataset.pendingWriteContact === 'true') pendingWrites.push('contact data');
+    if (btn.dataset.pendingWriteProvenance === 'true') pendingWrites.push('provenance data');
+    return pendingWrites.length ? ' Sync will also write ' + pendingWrites.join(' and ') + '.' : '';
+  }
+
   modal.addEventListener('show.bs.modal', function (e) {
     var btn = e.relatedTarget;
     // An open with no trigger must not inherit the row the last open left behind.
@@ -204,9 +211,15 @@
         : 'Creates this ' + (btn.dataset.objectType || 'object') + ' in NetBox with the values below.';
     } else if (counts.change === 0) {
       summary.className = 'small mb-2 text-muted';
-      summary.textContent = skippedPhrase
-        ? 'No fields will change. ' + counts.unchanged + ' unchanged, ' + skippedPhrase + '.'
-        : 'No field changes. NetBox already holds every reviewed value.';
+      var pendingWrites = pendingWriteSummary(btn);
+      if (skippedPhrase) {
+        summary.textContent = 'No reviewed device fields will change. ' + counts.unchanged
+          + ' unchanged, ' + skippedPhrase + '.' + pendingWrites;
+      } else {
+        summary.textContent = pendingWrites
+          ? 'No reviewed device fields will change.' + pendingWrites
+          : 'No reviewed device fields will change. NetBox already holds every reviewed value.';
+      }
     } else {
       summary.className = 'small mb-2';
       summary.textContent = counts.change + ' field' + (counts.change === 1 ? '' : 's')

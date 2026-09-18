@@ -1929,12 +1929,9 @@ class DeviceModule:
                 problem(Disposition.INVALID, "device.name_unplaced_match", rename)
             else:
                 problem(Disposition.INVALID, "device.name_placement_conflict", rename)
-        if (
-            not issues
-            and not self._differs(match.device, payload)
-            and _contact_writes_nothing(contact)
-            and _provenance_is_current(match.device, payload, batch.profile)
-        ):
+        contact_writes_nothing = _contact_writes_nothing(contact)
+        provenance_is_current = _provenance_is_current(match.device, payload, batch.profile)
+        if not issues and not self._differs(match.device, payload) and contact_writes_nothing and provenance_is_current:
             batch.commit_claim(row, claim)
             batch.commit_device_claim(row, match)
             display = {
@@ -1964,6 +1961,14 @@ class DeviceModule:
             return _with_issues(identity, issues)
         batch.commit_claim(row, claim)
         batch.commit_device_claim(row, match)
+        display = {
+            **display,
+            "extra_data": {
+                **display["extra_data"],
+                "pending_write_contact": not contact_writes_nothing,
+                "pending_write_provenance": not provenance_is_current,
+            },
+        }
         device_change = self._change(
             identity,
             "update",

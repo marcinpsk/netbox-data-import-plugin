@@ -115,6 +115,179 @@ class SyncStateLabelsMatchTheServerTest(SimpleTestCase):
         self.assertEqual(server_states - label_keys, set(), "add a modal label for every server sync state")
 
 
+class SyncPendingWritesReachTheModalTest(SimpleTestCase):
+    """Every pending write the planner names must reach the modal summary."""
+
+    def test_every_server_pending_write_flag_reaches_the_summary_builder(self):
+        """A new write category must be projected and summarized in the same change."""
+        server_source = (Path(__file__).resolve().parents[1] / "target_modules.py").read_text()
+        server_flags = set(re.findall(r'"(pending_write_[a-z_]+)"\s*:', server_source))
+        if not server_flags:
+            return
+
+        template = (TEMPLATE_DIR / "import_preview.html").read_text()
+        projected_flags = {
+            attribute.replace("-", "_") for attribute in re.findall(r"data-(pending-write-[a-z-]+)=", template)
+        }
+
+        modal_source = (STATIC_JS_DIR / "sync_row_modal.js").read_text()
+        start = modal_source.index("function pendingWriteSummary(")
+        opening = modal_source.index("{", start)
+        depth = 1
+        cursor = opening + 1
+        while depth:
+            depth += (modal_source[cursor] == "{") - (modal_source[cursor] == "}")
+            cursor += 1
+        summary_builder = modal_source[opening + 1 : cursor - 1]
+        read_flags = {
+            re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+            for name in re.findall(r"btn\.dataset\.(pendingWrite[A-Za-z0-9]+)", summary_builder)
+        }
+
+        self.assertEqual(server_flags - projected_flags, set(), "project every pending-write flag onto the trigger")
+        self.assertEqual(server_flags - read_flags, set(), "summarize every server pending-write flag")
+
+
+class PendingContactWritePreviewTest(BaseViewTestCase):
+    """The rendered sync trigger names work outside reviewed Device fields."""
+
+    def test_matching_reviewed_fields_carry_the_pending_contact_write(self):
+        """Plan and render an update whose only pending write is its Contact assignment."""
+        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import ColumnMapping, DeviceExistingMatch
+        from netbox_data_import.plan import Disposition
+        from netbox_data_import.preview_row_actions import start_new_preview
+        from netbox_data_import.tests.helpers import set_import_source, store_workbook_document
+        from netbox_data_import.tests.test_views import _make_profile
+
+        site = Site.objects.create(name="Pending Contact Site", slug="pending-contact-site")
+        rack = Rack.objects.create(name="Pending Contact Rack", site=site, u_height=42)
+        manufacturer = Manufacturer.objects.create(name="Pending Contact Vendor", slug="pending-contact-vendor")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Pending Contact Model",
+            slug="pending-contact-vendor-pending-contact-model",
+            u_height=1,
+        )
+        role = DeviceRole.objects.create(name="Pending Contact Server", slug="server")
+        contact_role = ContactRole.objects.create(name="Pending Contact Primary", slug="pending-contact-primary")
+        profile = _make_profile("Pending Contact Profile")
+        profile.adapter_config = {
+            **profile.adapter_config,
+            "primary_contact_role": contact_role.name,
+            "primary_contact_lookup_field": "email",
+        }
+        profile.save(update_fields=["adapter_config"])
+        ColumnMapping.objects.create(
+            profile=profile,
+            source_column="Primary Contact",
+            target_field="primary_contact",
+        )
+        headers = [
+            "Id",
+            "Rack",
+            "Name",
+            "Class",
+            "Make",
+            "Model",
+            "UHeight",
+            "UPosition",
+            "Side",
+            "Airflow",
+            "Serial Number",
+            "Asset Tag",
+            "Status",
+            "Primary Contact",
+        ]
+        source_id = "pending-contact-1"
+        document = store_workbook_document(
+            profile,
+            headers,
+            [
+                [
+                    source_id,
+                    rack.name,
+                    "pending-contact-device",
+                    "Server",
+                    manufacturer.name,
+                    device_type.model,
+                    "1",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "active",
+                    "owner@example.invalid",
+                ]
+            ],
+            self.user,
+            "pending-contact.xlsx",
+        )
+        planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+        initial_plan = ImportEngine.plan(profile, document, self.user, planning_context)
+        initial_unit = initial_plan.unit(f"device:source:{source_id}")
+        self.assertTrue(initial_unit.changes, initial_unit.diagnostics)
+        payload = initial_unit.changes[-1].payload
+        device = Device.objects.create(
+            name=payload["name"],
+            serial=payload["serial"],
+            asset_tag=payload["asset_tag"] or None,
+            device_type_id=payload["device_type_id"],
+            role_id=role.pk,
+            site_id=payload["site_id"],
+            location_id=payload["location_id"],
+            rack_id=payload["rack_id"],
+            position=payload["u_position"],
+            face=payload["face"],
+            airflow=payload["airflow"],
+            status=payload["status"],
+            tenant_id=payload["tenant_id"],
+        )
+        set_import_source(device, profile, source_id, extra_columns=payload["extra_columns"])
+        DeviceExistingMatch.objects.create(
+            profile=profile,
+            source_id=source_id,
+            source_asset_tag=payload["asset_tag"],
+            netbox_device_id=device.pk,
+            device_name=device.name,
+        )
+
+        plan = ImportEngine.plan(profile, document, self.user, planning_context)
+        session = self.client.session
+        start_new_preview(session, plan)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": document.filename,
+            "source_document_id": document.pk,
+        }
+        session["import_preview_pending"] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        unit = next(unit for unit in response.context["result"].units if unit.identity == f"device:source:{source_id}")
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertEqual(unit.extra_data["field_diff"], {})
+        self.assertTrue(unit.extra_data["field_matching"])
+        self.assertTrue(unit.extra_data["pending_write_contact"])
+        self.assertFalse(unit.extra_data["pending_write_provenance"])
+        trigger = next(
+            button
+            for button in re.findall(r'<button[^>]*class="[^"]*ndi-sync-row-btn[^"]*"[^>]*>', response.content.decode())
+            if f'data-source-id="{source_id}"' in button
+        )
+        self.assertIn('data-pending-write-contact="true"', trigger)
+        self.assertIn('data-pending-write-provenance="false"', trigger)
+
+
 class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
     """The class editor resets its fields on open, so a trigger that states nothing opens empty."""
 

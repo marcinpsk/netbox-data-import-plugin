@@ -806,6 +806,8 @@
                         data-action="{{ row.action }}"
                         data-row-number="{{ row.row_number }}"
                         data-object-type="{{ row.object_type }}"
+                        data-pending-write-contact="{% if row.extra_data.pending_write_contact %}true{% else %}false{% endif %}"
+                        data-pending-write-provenance="{% if row.extra_data.pending_write_provenance %}true{% else %}false{% endif %}"
                         data-name="{{ row.name }}"
                         data-source-id="{{ row.source_id }}"
                         data-rack-name="{{ row.rack_name|default:'' }}"

@@ -109,11 +109,31 @@ describe("the update confirmation", () => {
       .toBe("1 field will change. 2 unchanged, 1 ignored, 1 not written.");
   });
 
-  it("says plainly when the write changes nothing", () => {
+  it("qualifies the zero-change summary when no other write is pending", () => {
     openRow(REVIEWED.filter((entry) => entry.state === "unchanged"), { action: "update" });
 
     expect(document.getElementById("syncRowSummary").textContent)
-      .toBe("No field changes. NetBox already holds every reviewed value.");
+      .toBe("No reviewed device fields will change. NetBox already holds every reviewed value.");
+  });
+
+  it("names a pending contact write when reviewed fields do not change", () => {
+    openRow(REVIEWED.filter((entry) => entry.state === "unchanged"), {
+      action: "update",
+      pendingWriteContact: "true",
+    });
+
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("No reviewed device fields will change. Sync will also write contact data.");
+  });
+
+  it("names a pending provenance write when reviewed fields do not change", () => {
+    openRow(REVIEWED.filter((entry) => entry.state === "unchanged"), {
+      action: "update",
+      pendingWriteProvenance: "true",
+    });
+
+    expect(document.getElementById("syncRowSummary").textContent)
+      .toBe("No reviewed device fields will change. Sync will also write provenance data.");
   });
 
   it("names each skipped state when nothing changes", () => {
@@ -121,7 +141,7 @@ describe("the update confirmation", () => {
 
     // An ignored or unwritten field differs from NetBox, so the value is not already held there.
     expect(document.getElementById("syncRowSummary").textContent)
-      .toBe("No fields will change. 2 unchanged, 1 ignored, 1 not written.");
+      .toBe("No reviewed device fields will change. 2 unchanged, 1 ignored, 1 not written.");
   });
 
   it("shows an ignored or unwritten value struck through, because it is not applied", () => {
