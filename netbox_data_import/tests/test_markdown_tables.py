@@ -21,11 +21,17 @@ REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 
 def _table_rows_with_a_piped_code_span(path):
     """Yield each table row in *path* whose code span holds a cell separator."""
-    inside_fence = False
+    fence = ""
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if line.lstrip().startswith("```"):
-            inside_fence = not inside_fence
-        elif not inside_fence and line.startswith("|"):
+        marker = re.match(r"(`{3,}|~{3,})", line.lstrip())
+        if marker:
+            # GFM closes a fence on the same character, repeated at least as many times.
+            opened = marker.group(1)
+            if not fence:
+                fence = opened
+            elif opened[0] == fence[0] and len(opened) >= len(fence):
+                fence = ""
+        elif not fence and line.startswith("|"):
             for span in re.findall(r"`[^`]*`", line):
                 if re.search(r"(?<!\\)(?:\\\\)*\|", span):
                     yield f"{path.relative_to(REPOSITORY)}:{number} {span}"
@@ -40,6 +46,25 @@ class MarkdownTableRenderingTest(SimpleTestCase):
             path = pathlib.Path(directory) / "table.md"
             path.write_text(f"| Value |\n| --- |\n| `{code_span}` |\n", encoding="utf-8")
             return list(_table_rows_with_a_piped_code_span(path))
+
+    def _offenders_in(self, document):
+        """Run the repository guard over one explicit temporary document."""
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            path = pathlib.Path(directory) / "document.md"
+            path.write_text(document, encoding="utf-8")
+            return list(_table_rows_with_a_piped_code_span(path))
+
+    def test_a_tilde_fence_hides_its_contents_from_the_guard(self):
+        self.assertEqual(self._offenders_in("~~~\n| `left|right` |\n~~~\n"), [])
+
+    def test_a_backtick_fence_hides_its_contents_from_the_guard(self):
+        self.assertEqual(self._offenders_in("```\n| `left|right` |\n```\n"), [])
+
+    def test_a_longer_backtick_fence_is_not_closed_by_a_shorter_one(self):
+        self.assertEqual(self._offenders_in("````\n```\n| `left|right` |\n````\n"), [])
+
+    def test_a_table_after_a_closed_tilde_fence_is_still_checked(self):
+        self.assertEqual(len(self._offenders_in("~~~\ncode\n~~~\n| `left|right` |\n")), 1)
 
     def test_an_escaped_pipe_in_a_code_span_is_accepted(self):
         self.assertEqual(self._offenders_for(r"left\|right"), [])
