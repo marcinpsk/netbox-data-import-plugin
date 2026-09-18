@@ -19,6 +19,7 @@ network, not only loopback. This residual risk is an accepted deployment choice.
 import ipaddress
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -239,7 +240,10 @@ def _worker_addresses(stdout: str) -> tuple[str, ...] | None:
 
 
 def _kill_and_reap(process: subprocess.Popen[str]) -> None:
-    """Stop and reap a DNS worker without replacing the caller's result or failure."""
+    """Stop the worker and anything it started, then reap it, without replacing the caller's failure."""
+    with suppress(OSError):
+        # The worker owns its process group, so this also reaches a helper the resolver started.
+        os.killpg(process.pid, signal.SIGKILL)
     with suppress(OSError):
         process.kill()
     with suppress(OSError, subprocess.SubprocessError):
@@ -286,6 +290,8 @@ def _resolve_addresses_before_deadline(
             stderr=subprocess.DEVNULL,
             text=True,
             env=environment,
+            # Its own process group, so the deadline can stop descendants and not just the worker.
+            start_new_session=True,
         )
     except Exception as exc:
         raise _resolution_failure(setting, host) from exc

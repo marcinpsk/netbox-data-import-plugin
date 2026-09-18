@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from django.test import SimpleTestCase
 
-from netbox_data_import.inference_transport import WallClockDeadline
+from netbox_data_import.inference_transport import WallClockDeadline, WallClockDeadlineExceeded
 from netbox_data_import import _dns_worker, inference_trust
 from netbox_data_import.inference_trust import (
     InvalidInferenceConfiguration,
@@ -253,6 +253,37 @@ class ResolvedAddressTest(SimpleTestCase):
                 self.assertEqual(bounded, in_process)
 
         self.assertEqual(resolve_addresses("http://127.0.0.1:80"), ("127.0.0.1",))
+
+    def test_a_helper_the_worker_started_dies_with_it_at_the_deadline(self):
+        worker_probe = (
+            "import json,pathlib,subprocess,sys,time; "
+            "json.load(sys.stdin); "
+            "helper=subprocess.Popen([sys.executable,'-I','-S','-c','import time; time.sleep(60)']); "
+            "pathlib.Path(sys.argv[1]).write_text(str(helper.pid), encoding='utf-8'); "
+            "time.sleep(60)"
+        )
+        with TemporaryDirectory() as temporary:
+            pid_file = pathlib.Path(temporary) / "helper"
+            command = ("-I", "-S", "-c", worker_probe, str(pid_file))
+            with patch.object(inference_trust, "DNS_WORKER_COMMAND", command):
+                with self.assertRaises(WallClockDeadlineExceeded):
+                    resolve_addresses("http://127.0.0.1:80", deadline=WallClockDeadline.after(1))
+
+            self.assertTrue(pid_file.exists(), "the worker never started its helper")
+            helper = int(pid_file.read_text(encoding="utf-8"))
+            try:
+                for _ in range(150):
+                    if not pathlib.Path(f"/proc/{helper}").exists():
+                        break
+                    time.sleep(0.02)
+
+                self.assertFalse(
+                    pathlib.Path(f"/proc/{helper}").exists(),
+                    "the helper outlived the worker's deadline",
+                )
+            finally:
+                if pathlib.Path(f"/proc/{helper}").exists():
+                    os.kill(helper, signal.SIGKILL)
 
     def test_resolution_without_a_deadline_stays_in_process(self):
         with TemporaryDirectory() as temporary:
