@@ -46,7 +46,8 @@ def _table_rows_with_a_piped_code_span(path):
     fenced = _line_numbers(document, MARKDOWN, ("fence", "code_block"))
     rows = _line_numbers(document, GFM, ("table_open",))
     for number, line in enumerate(document.splitlines(), 1):
-        if number in fenced or number not in rows:
+        # A pipe in a header breaks the cell count, so GFM emits no table to find the row in.
+        if number in fenced or (number not in rows and not line.lstrip().startswith("|")):
             continue
         for span in _code_spans(line):
             if UNESCAPED_PIPE.search(span):
@@ -108,6 +109,10 @@ class MarkdownTableRenderingTest(SimpleTestCase):
 
     def test_a_table_row_without_a_leading_pipe_is_scanned(self):
         self.assertEqual(self._offender_lines("V | Other\n--- | ---\n`left|right` | x\n"), [3])
+
+    def test_a_header_whose_pipe_breaks_the_table_is_still_scanned(self):
+        """GFM counts two header cells against one delimiter and emits no table at all."""
+        self.assertEqual(self._offender_lines("| `left|right` |\n| --- |\n| value |\n"), [1])
 
     def test_a_code_span_outside_a_table_is_not_an_offender(self):
         self.assertEqual(self._offender_lines("Some `left|right` in prose.\n"), [])
