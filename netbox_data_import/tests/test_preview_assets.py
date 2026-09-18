@@ -122,8 +122,8 @@ class SyncPendingWritesReachTheModalTest(SimpleTestCase):
         """A new write category must be projected and summarized in the same change."""
         server_source = (Path(__file__).resolve().parents[1] / "target_modules.py").read_text()
         server_flags = set(re.findall(r'"(pending_write_[a-z_]+)"\s*:', server_source))
-        if not server_flags:
-            return
+        # A scan that matches nothing would pass this guard while the feature is renamed away.
+        self.assertTrue(server_flags, "target_modules must name the pending writes it plans")
 
         template = (TEMPLATE_DIR / "import_preview.html").read_text()
         projected_flags = {
