@@ -105,7 +105,7 @@ fi
 echo "🔧 Installing development dependencies..."
 apt-get update -qq
 apt-get install -y -qq net-tools git
-$PIP_CMD install pytest pytest-cov pytest-django 'pytest-xdist>=3.8,<4' ruff pre-commit playwright
+$PIP_CMD install pytest pytest-cov pytest-django 'pytest-xdist>=3.8,<4' ruff pre-commit playwright 'markdown-it-py>=3,<5'
 python -m playwright install --with-deps chromium
 
 # Install GitHub CLI

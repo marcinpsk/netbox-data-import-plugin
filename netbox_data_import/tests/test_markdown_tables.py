@@ -15,26 +15,31 @@ import re
 import tempfile
 
 from django.test import SimpleTestCase
+from markdown_it import MarkdownIt
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
+MARKDOWN = MarkdownIt("commonmark")
+
+
+def _code_block_lines(document):
+    """Number every line the Markdown parser reads as part of a code block."""
+    inside = set()
+    for token in MARKDOWN.parse(document):
+        if token.type in ("fence", "code_block") and token.map:
+            inside.update(range(token.map[0] + 1, token.map[1] + 1))
+    return inside
 
 
 def _table_rows_with_a_piped_code_span(path):
     """Yield each table row in *path* whose code span holds a cell separator."""
-    fence = ""
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        marker = re.match(r" {0,3}(`{3,}|~{3,})(.*)", line)
-        if marker:
-            # GFM closes a fence on the same character, repeated at least as many times.
-            opened, trailing = marker.groups()
-            if not fence:
-                fence = opened
-            elif opened[0] == fence[0] and len(opened) >= len(fence) and not trailing.strip(" \t"):
-                fence = ""
-        elif not fence and line.startswith("|"):
-            for span in re.findall(r"`[^`]*`", line):
-                if re.search(r"(?<!\\)(?:\\\\)*\|", span):
-                    yield f"{path.relative_to(REPOSITORY)}:{number} {span}"
+    document = path.read_text(encoding="utf-8")
+    fenced = _code_block_lines(document)
+    for number, line in enumerate(document.splitlines(), 1):
+        if number in fenced or not line.startswith("|"):
+            continue
+        for span in re.findall(r"`[^`]*`", line):
+            if re.search(r"(?<!\\)(?:\\\\)*\|", span):
+                yield f"{path.relative_to(REPOSITORY)}:{number} {span}"
 
 
 class MarkdownTableRenderingTest(SimpleTestCase):
@@ -77,6 +82,13 @@ class MarkdownTableRenderingTest(SimpleTestCase):
     def test_a_closing_fence_carrying_trailing_content_does_not_close_a_block(self):
         document = "```\n```not-a-close\n| `left|right` |\n```\n| `left|right` |\n"
         self.assertEqual(self._offender_lines(document), [5])
+
+    def test_a_fence_nested_in_a_list_item_closes_on_its_own_indentation(self):
+        document = "- item\n\n  ```\n  code\n    ```\n\n| `left|right` |\n"
+        self.assertEqual(self._offender_lines(document), [7])
+
+    def test_a_backtick_in_an_info_string_opens_no_fence(self):
+        self.assertEqual(self._offender_lines("```bad`info\n\n| `left|right` |\n"), [3])
 
     def test_an_escaped_pipe_in_a_code_span_is_accepted(self):
         self.assertEqual(self._offenders_for(r"left\|right"), [])

@@ -77,6 +77,19 @@ class NetBoxMainWorkflowTest(TestCase):
         ):
             self.assertIn("pytest-xdist>=3.8,<4", (root / relative_path).read_text(encoding="utf-8"), relative_path)
 
+    def test_test_environments_install_the_markdown_parser_the_guard_reads(self):
+        """`markdown_it` reaches NetBox only through rich, so the table guard must not rely on that."""
+        root = Path(__file__).resolve().parents[2]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+
+        self.assertIn("markdown-it-py>=3,<5", project["dependency-groups"]["dev"])
+        for relative_path in (
+            ".devcontainer/scripts/setup.sh",
+            ".github/workflows/test.yaml",
+            ".github/workflows/test-netbox-main.yaml",
+        ):
+            self.assertIn("markdown-it-py>=3,<5", (root / relative_path).read_text(encoding="utf-8"), relative_path)
+
     def test_javascript_workflow_does_not_persist_checkout_credentials(self):
         """Do not expose the workflow token to pull-request JavaScript."""
         workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "js-test.yaml"

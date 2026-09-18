@@ -55,6 +55,8 @@ dev = [
     "types-PyYAML",
     "types-openpyxl",
     "cryptography>=42",
+    # The Markdown table guard reads block structure from a CommonMark parser.
+    "markdown-it-py>=3,<5",
 ]
 docs = [
     "mkdocs>=1,<2",
