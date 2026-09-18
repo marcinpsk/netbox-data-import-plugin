@@ -185,8 +185,35 @@ class OriginReparseTest(SimpleTestCase):
                 self.assertEqual(parts.port, port)
 
 
+class DnsWorkerScriptTest(SimpleTestCase):
+    """Run the worker as the transport runs it: the real script, in its own interpreter."""
+
+    @staticmethod
+    def _run_script(request):
+        return subprocess.run(
+            [sys.executable, *inference_trust.DNS_WORKER_COMMAND],
+            input=request,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    def test_a_resolvable_host_answers_with_the_same_addresses_as_the_in_process_path(self):
+        answer = self._run_script(json.dumps(("localhost", 80, 30)))
+
+        self.assertEqual(answer.returncode, 0, answer.stderr)
+        self.assertEqual(json.loads(answer.stdout), list(resolve_addresses("http://localhost:80")))
+
+    def test_an_unusable_request_exits_nonzero_with_one_generic_failure(self):
+        answer = self._run_script(json.dumps(["only-one-value"]))
+
+        self.assertEqual(answer.returncode, 1)
+        self.assertEqual(json.loads(answer.stdout), {"error": "Name resolution failed."})
+
+
 class DnsWorkerTest(SimpleTestCase):
-    """The child entry point answers on stdout, arms its own alarm, and never raises out of main."""
+    """Call main() in this process, which is the only way coverage can measure a child-only module."""
 
     @staticmethod
     def _run_worker(request):
@@ -200,15 +227,10 @@ class DnsWorkerTest(SimpleTestCase):
                 signal.setitimer(signal.ITIMER_REAL, 0)
         return status, stdout.getvalue(), armed
 
-    def test_a_resolvable_host_answers_with_the_same_addresses_as_the_in_process_path(self):
-        status, output, _armed = self._run_worker(json.dumps(("localhost", 80, 30)))
+    def test_the_worker_arms_its_own_alarm_before_it_resolves(self):
+        status, _output, armed = self._run_worker(json.dumps(("localhost", 80, 30)))
 
         self.assertEqual(status, 0)
-        self.assertEqual(json.loads(output), list(resolve_addresses("http://localhost:80")))
-
-    def test_the_worker_arms_its_own_alarm_before_it_resolves(self):
-        _status, _output, armed = self._run_worker(json.dumps(("localhost", 80, 30)))
-
         self.assertGreater(armed, 0)
         self.assertLessEqual(armed, 30)
 
