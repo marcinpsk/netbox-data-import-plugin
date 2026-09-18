@@ -60,5 +60,26 @@ class ReviewNormalizationTest(SimpleTestCase):
         """`192.0.2.1/24` and its stored form have to compare equal."""
         from netbox_data_import.device_field_review import _ip_normalize
 
-        self.assertEqual(_ip_normalize("192.0.2.1/24"), "192.0.2.1/24")
-        self.assertEqual(_ip_normalize(" 192.0.2.1/24 "), "192.0.2.1/24")
+        self.assertEqual(_ip_normalize("192.0.2.1/24"), "192.0.2.1")
+        self.assertEqual(_ip_normalize(" 192.0.2.1/24 "), _ip_normalize("192.0.2.1/24"))
+
+    def test_a_bare_address_the_device_already_holds_is_not_a_difference(self):
+        """The writer keeps the held row, so a mask-only diff promises a write it will not make."""
+        from netbox_data_import.device_field_review import _ip_normalize
+
+        # A workbook states the host; NetBox holds the same host inside its real subnet.
+        self.assertEqual(_ip_normalize("198.18.0.10"), _ip_normalize("198.18.0.10/24"))
+
+    def test_the_preview_normalizes_an_address_the_way_the_writer_matches_it(self):
+        """One definition of "the same address", so the two sides cannot drift apart."""
+        from netbox_data_import import ip_assignment
+        from netbox_data_import.device_field_review import _ip_normalize
+
+        for value in ("198.18.0.10", "198.18.0.10/24", "198.18.0.10/32", "2001:db8::1/64"):
+            self.assertEqual(_ip_normalize(value), ip_assignment.host_key(value), value)
+
+    def test_a_different_host_is_still_a_difference(self):
+        """Host-only comparison must not hide a real address change."""
+        from netbox_data_import.device_field_review import _ip_normalize
+
+        self.assertNotEqual(_ip_normalize("198.18.0.10/24"), _ip_normalize("198.18.0.11/24"))

@@ -108,13 +108,14 @@ def _device_ip_value(target_field: str):
 
 def _ip_normalize(value: Any) -> str:
     """Return an address in the one spelling both sides compare on."""
-    import ipaddress
+    from . import ip_assignment
 
     text = _text(value)
     if not text:
         return ""
     try:
-        return str(ipaddress.ip_interface(text))
+        # The writer matches a held address on its host and keeps the mask NetBox already has.
+        return ip_assignment.host_key(text)
     except ValueError:
         return text
 
