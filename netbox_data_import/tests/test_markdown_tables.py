@@ -12,6 +12,7 @@ instead of a table cell.
 
 import pathlib
 import re
+import tempfile
 
 from django.test import SimpleTestCase
 
@@ -26,12 +27,25 @@ def _table_rows_with_a_piped_code_span(path):
             inside_fence = not inside_fence
         elif not inside_fence and line.startswith("|"):
             for span in re.findall(r"`[^`]*`", line):
-                if "|" in span:
+                if re.search(r"(?<!\\)(?:\\\\)*\|", span):
                     yield f"{path.relative_to(REPOSITORY)}:{number} {span}"
 
 
 class MarkdownTableRenderingTest(SimpleTestCase):
     """Every Markdown table renders the same on GitHub and in the MkDocs site."""
+
+    def _offenders_for(self, code_span):
+        """Run the repository guard over one explicit temporary table row."""
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            path = pathlib.Path(directory) / "table.md"
+            path.write_text(f"| Value |\n| --- |\n| `{code_span}` |\n")
+            return list(_table_rows_with_a_piped_code_span(path))
+
+    def test_an_escaped_pipe_in_a_code_span_is_accepted(self):
+        self.assertEqual(self._offenders_for(r"left\|right"), [])
+
+    def test_an_unescaped_pipe_in_a_code_span_is_rejected(self):
+        self.assertEqual(len(self._offenders_for("left|right")), 1)
 
     def test_no_table_cell_hides_a_cell_separator_in_a_code_span(self):
         offenders = [
