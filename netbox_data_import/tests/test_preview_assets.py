@@ -288,6 +288,113 @@ class PendingContactWritePreviewTest(BaseViewTestCase):
         self.assertIn('data-pending-write-provenance="false"', trigger)
 
 
+class CreatedDevicePendingWritePreviewTest(BaseViewTestCase):
+    """A created Device writes its Contact and its provenance, so the trigger must say so."""
+
+    def test_a_created_device_carries_both_pending_writes(self):
+        """Plan and render a create: nothing is stored yet, so both writes are still pending."""
+        from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
+        from tenancy.models import ContactRole
+
+        from netbox_data_import.import_engine import ImportEngine
+        from netbox_data_import.models import ColumnMapping
+        from netbox_data_import.plan import Disposition
+        from netbox_data_import.preview_row_actions import start_new_preview
+        from netbox_data_import.tests.helpers import store_workbook_document
+        from netbox_data_import.tests.test_views import _make_profile
+
+        site = Site.objects.create(name="Created Pending Site", slug="created-pending-site")
+        rack = Rack.objects.create(name="Created Pending Rack", site=site, u_height=42)
+        manufacturer = Manufacturer.objects.create(name="Created Pending Vendor", slug="created-pending-vendor")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer,
+            model="Created Pending Model",
+            slug="created-pending-vendor-created-pending-model",
+            u_height=1,
+        )
+        DeviceRole.objects.create(name="Created Pending Server", slug="server")
+        contact_role = ContactRole.objects.create(name="Created Pending Primary", slug="created-pending-primary")
+        profile = _make_profile("Created Pending Profile")
+        profile.adapter_config = {
+            **profile.adapter_config,
+            "primary_contact_role": contact_role.name,
+            "primary_contact_lookup_field": "email",
+        }
+        profile.save(update_fields=["adapter_config"])
+        ColumnMapping.objects.create(profile=profile, source_column="Primary Contact", target_field="primary_contact")
+        headers = [
+            "Id",
+            "Rack",
+            "Name",
+            "Class",
+            "Make",
+            "Model",
+            "UHeight",
+            "UPosition",
+            "Side",
+            "Airflow",
+            "Serial Number",
+            "Asset Tag",
+            "Status",
+            "Primary Contact",
+        ]
+        source_id = "created-pending-1"
+        document = store_workbook_document(
+            profile,
+            headers,
+            [
+                [
+                    source_id,
+                    rack.name,
+                    "created-pending-device",
+                    "Server",
+                    manufacturer.name,
+                    device_type.model,
+                    "1",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "active",
+                    "owner@example.invalid",
+                ]
+            ],
+            self.user,
+            "created-pending.xlsx",
+        )
+        planning_context = {"site_id": site.pk, "location_id": None, "tenant_id": None}
+
+        plan = ImportEngine.plan(profile, document, self.user, planning_context)
+        session = self.client.session
+        start_new_preview(session, plan)
+        session["import_context"] = {
+            "profile_id": profile.pk,
+            "site_id": site.pk,
+            "location_id": None,
+            "tenant_id": None,
+            "filename": document.filename,
+            "source_document_id": document.pk,
+        }
+        session["import_preview_pending"] = True
+        session.save()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        unit = next(unit for unit in response.context["result"].units if unit.identity == f"device:source:{source_id}")
+        self.assertEqual(unit.disposition, Disposition.ACTIONABLE)
+        self.assertTrue(unit.extra_data["pending_write_contact"])
+        self.assertTrue(unit.extra_data["pending_write_provenance"])
+        trigger = next(
+            button
+            for button in re.findall(r'<button[^>]*class="[^"]*ndi-sync-row-btn[^"]*"[^>]*>', response.content.decode())
+            if f'data-source-id="{source_id}"' in button
+        )
+        self.assertIn('data-pending-write-contact="true"', trigger)
+        self.assertIn('data-pending-write-provenance="true"', trigger)
+
+
 class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
     """The class editor resets its fields on open, so a trigger that states nothing opens empty."""
 

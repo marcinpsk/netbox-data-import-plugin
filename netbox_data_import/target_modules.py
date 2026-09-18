@@ -1852,6 +1852,15 @@ class DeviceModule:
                 dependencies.changes,
                 batch.profile,
             )
+            display = {
+                **display,
+                "extra_data": {
+                    **display["extra_data"],
+                    "pending_write_contact": not _contact_writes_nothing(contact),
+                    # A create stores its provenance record, so there is never a current one to reuse.
+                    "pending_write_provenance": True,
+                },
+            }
             return SynchronizationUnit(
                 identity=identity,
                 disposition=Disposition.ACTIONABLE,
