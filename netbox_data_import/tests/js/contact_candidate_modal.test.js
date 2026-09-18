@@ -183,6 +183,30 @@ describe("contact candidate modal", () => {
     expect(options["62"]).toBeUndefined();
   });
 
+  it("ignores a held answer for another row that shares its source ID", async () => {
+    let answer;
+    const held = new Promise((resolve) => { answer = resolve; });
+    const fetchMock = vi.fn().mockResolvedValue({ json: () => held });
+    vi.stubGlobal("fetch", fetchMock);
+    addPreviewFixture({}, { suggestionUrl: "/contact-suggestion/" });
+
+    // The device row holds no contact, so it asks the server and the answer is held in flight.
+    openRow("first-row", "shared-source", "device");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // A save for that same source lands, so the next row opens with a contact already selected.
+    window.EXISTING_RESOLUTIONS["shared-source"] = {
+      "candidate:contact": { resolved_fields: { contact_id: "41" } },
+    };
+    openRow("first-row", "shared-source", "rack");
+
+    answer({ suggestion: { id: 62, name: "Other Row Contact", email: "other@example.invalid", phone: "" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The answer belongs to device:first-row, not to the rack row now on screen.
+    expect(document.getElementById("contactCandidateExisting").tomselect.options["62"]).toBeUndefined();
+  });
+
   it("deletes a stale suggestion under the composite row key", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ json: () => Promise.resolve({ suggestion: null }) });
     vi.stubGlobal("fetch", fetchMock);

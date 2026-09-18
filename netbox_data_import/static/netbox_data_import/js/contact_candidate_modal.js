@@ -428,6 +428,8 @@
         if (!data || asked !== latestRefresh) return;
         // The modal is shared, so a late answer must not write over the row now on screen.
         if (!stillShowing(sourceId)) return;
+        // Two rows can share a source ID, so only the composite key tells the rows apart.
+        if (rowKey !== shownRowKey) return;
         var instance = picker();
         var offered = contactSuggestions[rowKey];
         if (!data.suggestion) {
