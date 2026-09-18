@@ -180,16 +180,20 @@ def _row_key(unit) -> str:
 NO_RACK_FILTER_VALUE = "__no_rack__"
 
 
-def _rack_filter_options(units) -> list[dict[str, str]]:
-    """Return the racks the preview names, so the flat view can filter by them.
+def _rack_filter_options(units) -> tuple[list[dict[str, str]], str]:
+    """Return the racks the preview names and the value that stands for no rack.
 
     Rows that name no rack are offered as their own option, matching the rack view's group.
     """
     named = {unit.rack_name for unit in units if unit.rack_name}
     options = [{"value": rack, "label": rack} for rack in sorted(named, key=identity_text)]
+    no_rack_value = NO_RACK_FILTER_VALUE
+    # A rack may legally carry the sentinel's name, and two options cannot share one value.
+    while no_rack_value in named:
+        no_rack_value += "_"
     if any(unit.object_type == "device" and not unit.rack_name for unit in units):
-        options.append({"value": NO_RACK_FILTER_VALUE, "label": "(No rack)"})
-    return options
+        options.append({"value": no_rack_value, "label": "(No rack)"})
+    return options, no_rack_value
 
 
 def _sync_change_preview_by_row(units, labels):
@@ -1304,7 +1308,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
             if r.extra_data.get("extra_columns")
         }
         sync_change_preview_by_row = _sync_change_preview_by_row(result.units, target_field_labels)
-        rack_filter_options = _rack_filter_options(result.units)
+        rack_filter_options, no_rack_filter_value = _rack_filter_options(result.units)
         split_field_values_by_source_id = {
             r.source_id: {
                 "device_name": r.name or "",
@@ -1363,7 +1367,7 @@ class ImportPreviewView(PermissionRequiredMixin, View):
                 "extra_columns_by_row": extra_columns_by_row,
                 "sync_change_preview_by_row": sync_change_preview_by_row,
                 "rack_filter_options": rack_filter_options,
-                "no_rack_filter_value": NO_RACK_FILTER_VALUE,
+                "no_rack_filter_value": no_rack_filter_value,
                 "split_field_values_by_source_id": split_field_values_by_source_id,
                 "non_card_error_rows": non_card_error_rows,
                 "preview_revision": current_preview_revision(request.session),

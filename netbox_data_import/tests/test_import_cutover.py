@@ -35,6 +35,7 @@ from netbox_data_import.preview_row_actions import (
     retire_preview_revision,
 )
 from netbox_data_import.tests.helpers import run_on_separate_connection, user_with_object_permission, workbook_bytes
+from netbox_data_import.views import NO_RACK_FILTER_VALUE
 from netbox_data_import.tests.mixins import IsolatedRQQueueTestMixin
 
 
@@ -164,6 +165,33 @@ class ImportCutoverHttpTest(IsolatedRQQueueTestMixin, TransactionTestCase):
         self.assertEqual(response.context["rack_filter_options"], [{"value": "rack-a", "label": "rack-a"}])
         self.assertIn(b'data-rack-name="rack-a"', response.content)
         self.assertIn(b'id="previewRackFilter"', response.content)
+
+    def test_the_no_rack_option_cannot_collide_with_a_rack_of_that_name(self):
+        """A rack may legally carry the sentinel's own name, so the sentinel has to move aside."""
+        upload = SimpleUploadedFile(
+            "collide.xlsx",
+            workbook_bytes(
+                ["Source ID", "Class", "Name", "Rack", "Make", "Model"],
+                [
+                    ["R-1", "Cabinet", "", NO_RACK_FILTER_VALUE, "", ""],
+                    ["D-1", "Server", "server-a", "", "Example", "Model"],
+                ],
+            ),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.client.post(
+            reverse("plugins:netbox_data_import:import_setup"),
+            {"profile": self.profile.pk, "site": self.site.pk, "excel_file": upload},
+        )
+
+        response = self.client.get(reverse("plugins:netbox_data_import:import_preview"))
+
+        self.assertEqual(response.status_code, 200)
+        options = response.context["rack_filter_options"]
+        named = [option["value"] for option in options if option["label"] != "(No rack)"]
+        self.assertIn(NO_RACK_FILTER_VALUE, named, "the workbook has to name a rack after the sentinel")
+        self.assertNotIn(response.context["no_rack_filter_value"], named)
+        self.assertEqual(len(options), len({option["value"] for option in options}))
 
     def test_a_rack_row_carries_its_own_name_as_its_rack(self):
         """A Rack row filters with its own rack, so selecting that rack cannot hide it."""
