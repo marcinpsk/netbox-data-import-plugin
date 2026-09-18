@@ -34,10 +34,7 @@ from .inference_transport import (
     is_preconnect_failure,
     request_to_resolved_address,
 )
-from .inference_trust import InvalidInferenceConfiguration, resolve_addresses
-
-# The deployment owns the token; the plugin never stores one.
-VAULT_TOKEN_ENVIRONMENT_VARIABLE = "VAULT_TOKEN"  # noqa: S105 - This names an environment variable, not a token.
+from .inference_trust import InvalidInferenceConfiguration, VAULT_TOKEN_ENVIRONMENT_VARIABLE, resolve_addresses
 
 TRANSPORT_LOGGER = "urllib3.connectionpool"
 _reading_vault = threading.local()
@@ -238,11 +235,7 @@ class VaultKvV2CredentialBackend:
             self._settings.get("read_timeout", DEFAULT_READ_TIMEOUT),
         )
         try:
-            resolved_addresses = (
-                resolve_addresses(address, setting="vault.address")
-                if self._deadline is None
-                else self._deadline.run(resolve_addresses, address, setting="vault.address")
-            )
+            resolved_addresses = resolve_addresses(address, setting="vault.address", deadline=self._deadline)
         except WallClockDeadlineExceeded:
             raise
         except InvalidInferenceConfiguration as exc:

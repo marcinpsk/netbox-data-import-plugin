@@ -307,11 +307,7 @@ class OpenAICompatibleAdapter:
         """Return all approved addresses, rechecking the destination at request time."""
         try:
             validate_api_root(self.api_root, self.allowlist, self.authentication)
-            addresses = (
-                resolve_addresses(self.api_root)
-                if self._deadline is None
-                else self._deadline.run(resolve_addresses, self.api_root)
-            )
+            addresses = resolve_addresses(self.api_root, deadline=self._deadline)
             assert_resolved_address_allowed(self.api_root, self.allowlist, addresses)
         except WallClockDeadlineExceeded:
             raise BackendTimeout("The connection test exceeded its overall time limit.") from None

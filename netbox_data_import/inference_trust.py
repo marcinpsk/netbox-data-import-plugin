@@ -17,12 +17,23 @@ network, not only loopback. This residual risk is an accepted deployment choice.
 """
 
 import ipaddress
+import json
+import os
 import socket
+import subprocess
+import sys
 
 from collections.abc import Iterable, Sequence
+from contextlib import suppress
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from .inference_transport import WallClockDeadline, WallClockDeadlineExceeded
+
 SUPPORTED_SCHEMES = ("https", "http")
+DNS_WORKER_COMMAND = ("-I", "-S", str(Path(__file__).with_name("_dns_worker.py")))
+# The deployment owns the token; the plugin never stores one.
+VAULT_TOKEN_ENVIRONMENT_VARIABLE = "VAULT_TOKEN"  # noqa: S105 - This is an environment variable name.
 
 # Link-local already covers 169.254.0.0/16, so these name the destinations worth their own message.
 CLOUD_METADATA_ADDRESSES = frozenset(
@@ -206,14 +217,104 @@ def assert_resolved_address_allowed(
             )
 
 
-def resolve_addresses(api_root: str, setting: str = "api_root") -> tuple[str, ...]:
+def _resolution_failure(setting: str, host: str) -> InvalidInferenceConfiguration:
+    """Return the public failure for a host that did not produce usable addresses."""
+    return InvalidInferenceConfiguration(f"'{setting}' host '{host}' could not be resolved.")
+
+
+def _worker_addresses(stdout: str) -> tuple[str, ...] | None:
+    """Return validated worker output, or None when the child did not produce addresses."""
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, list) or not all(isinstance(address, str) for address in payload):
+        return None
+    try:
+        for address in payload:
+            ipaddress.ip_address(address)
+    except ValueError:
+        return None
+    return tuple(payload)
+
+
+def _kill_and_reap(process: subprocess.Popen[str]) -> None:
+    """Stop and reap a DNS worker without replacing the caller's result or failure."""
+    with suppress(OSError):
+        process.kill()
+    with suppress(OSError, subprocess.SubprocessError):
+        process.wait()
+
+
+def _communicate_before_deadline(
+    process: subprocess.Popen[str],
+    request: str,
+    deadline: WallClockDeadline,
+    setting: str,
+    host: str,
+) -> str:
+    """Exchange one worker request within the deadline and keep failures typed."""
+    timeout = deadline.remaining()
+    try:
+        stdout, _stderr = process.communicate(input=request, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise WallClockDeadlineExceeded("The operation exceeded its overall time limit.") from None
+    except Exception as exc:
+        raise _resolution_failure(setting, host) from exc
+    return stdout
+
+
+def _resolve_addresses_before_deadline(
+    host: str,
+    port: int,
+    setting: str,
+    deadline: WallClockDeadline,
+) -> tuple[str, ...]:
+    """Resolve one host in a child that the parent can terminate and reap."""
+    child_timeout = deadline.remaining()
+    if not sys.executable:
+        raise InvalidInferenceConfiguration(
+            f"'{setting}' cannot be resolved before its deadline because the Python executable is unavailable."
+        )
+    environment = os.environ.copy()
+    environment.pop(VAULT_TOKEN_ENVIRONMENT_VARIABLE, None)
+    try:
+        process = subprocess.Popen(  # noqa: S603 - the executable and arguments are module-owned
+            (sys.executable, *DNS_WORKER_COMMAND),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=environment,
+        )
+    except Exception as exc:
+        raise _resolution_failure(setting, host) from exc
+    try:
+        request = json.dumps((host, port, child_timeout))
+        stdout = _communicate_before_deadline(process, request, deadline, setting, host)
+        addresses = _worker_addresses(stdout)
+        deadline.remaining()
+    finally:
+        _kill_and_reap(process)
+    if process.returncode != 0 or addresses is None:
+        raise _resolution_failure(setting, host)
+    return addresses
+
+
+def resolve_addresses(
+    api_root: str,
+    setting: str = "api_root",
+    deadline: WallClockDeadline | None = None,
+) -> tuple[str, ...]:
     """Return every address the API root's host answers with."""
     parts = split_url(api_root, setting)
     port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+    if deadline is not None:
+        return _resolve_addresses_before_deadline(parts.hostname, port, setting, deadline)
     try:
         answers = socket.getaddrinfo(parts.hostname, port, proto=socket.IPPROTO_TCP)
     except OSError as exc:
-        raise InvalidInferenceConfiguration(f"'{setting}' host '{parts.hostname}' could not be resolved.") from exc
+        raise _resolution_failure(setting, parts.hostname) from exc
     return tuple(dict.fromkeys(str(answer[4][0]) for answer in answers))
 
 
