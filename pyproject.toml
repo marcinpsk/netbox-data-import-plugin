@@ -40,23 +40,29 @@ include = ["netbox_data_import*"]
 netbox_data_import = ["templates/**/*.html", "tests/fixtures/*.xlsx", "static/**/*.js"]
 
 [dependency-groups]
+# Every test runner installs this group, so no runner restates a package or a version.
+test = [
+    "pytest",
+    "pytest-cov>=7.1.0",
+    "pytest-django",
+    "pytest-xdist>=3.8,<4",
+    "tblib",
+    # The Markdown table guard reads block structure from a CommonMark parser.
+    "markdown-it-py>=3,<5",
+]
 dev = [
+    {include-group = "test"},
     "build",
     "mypy",
     "reuse",
     "ruff",
     "pre-commit",
-    "pytest",
-    "pytest-cov>=7.1.0",
-    "pytest-django",
-    "pytest-xdist>=3.8,<4",
+    "playwright",
     "python-semantic-release",
     # openpyxl and PyYAML ship no py.typed. strawberry-django and django-rq do, so they need none.
     "types-PyYAML",
     "types-openpyxl",
     "cryptography>=42",
-    # The Markdown table guard reads block structure from a CommonMark parser.
-    "markdown-it-py>=3,<5",
 ]
 docs = [
     "mkdocs>=1,<2",

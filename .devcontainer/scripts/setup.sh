@@ -97,7 +97,7 @@ source /opt/netbox/venv/bin/activate
 
 # Choose installer (uv if available, else pip)
 if command -v uv >/dev/null 2>&1; then
-  PIP_CMD="uv --native-tls pip"
+  PIP_CMD="uv --system-certs pip"
 else
   PIP_CMD="pip"
 fi
@@ -105,7 +105,7 @@ fi
 echo "🔧 Installing development dependencies..."
 apt-get update -qq
 apt-get install -y -qq net-tools git
-$PIP_CMD install pytest pytest-cov pytest-django 'pytest-xdist>=3.8,<4' ruff pre-commit playwright 'markdown-it-py>=3,<5'
+$PIP_CMD install --group dev
 python -m playwright install --with-deps chromium
 
 # Install GitHub CLI
