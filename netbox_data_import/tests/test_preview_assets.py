@@ -845,6 +845,28 @@ class ConfiguredClassRowIsMarkedTest(PreviewSessionMixin, BaseViewTestCase):
         self.assertIn("Configure class", unresolved)
 
 
+class ContactPickerMatchesItsEndpointTest(SimpleTestCase):
+    """The picker and the suggestion endpoint must agree on which rows carry a Contact."""
+
+    def test_the_contact_picker_is_offered_only_on_a_row_type_the_endpoint_serves(self):
+        """A picker on a row the endpoint filters out answers the operator with a 400."""
+        template = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
+        offered = set(
+            re.findall(
+                r"row\.object_type == '(\w+)' and row\.extra_data\.candidate_values\.contact",
+                template,
+            )
+        )
+        self.assertTrue(offered, "the Contact picker must stay gated on a row object type")
+
+        views = (Path(__file__).resolve().parents[1] / "views.py").read_text(encoding="utf-8")
+        context = re.search(r"def _contact_candidate_context\(.*?(?=\ndef |\nclass )", views, re.DOTALL)
+        self.assertIsNotNone(context, "views must define _contact_candidate_context")
+        served = set(re.findall(r'row\.object_type == "(\w+)"', context.group(0)))
+
+        self.assertEqual(offered, served, "the Contact picker is offered on a row its endpoint refuses")
+
+
 class ConflictJumpTargetsOneRowTest(SimpleTestCase):
     """The conflict jump has to name the row it means, not a row number several rows share."""
 
