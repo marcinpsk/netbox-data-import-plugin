@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """The `api_root` trust boundary: allowlist, scheme rules, resolution and redirects (specification 8.3)."""
 
+import io
+import json
 import os
 import pathlib
 import signal
@@ -16,7 +18,7 @@ from urllib.parse import urlsplit
 from django.test import SimpleTestCase
 
 from netbox_data_import.inference_transport import WallClockDeadline
-from netbox_data_import import inference_trust
+from netbox_data_import import _dns_worker, inference_trust
 from netbox_data_import.inference_trust import (
     InvalidInferenceConfiguration,
     assert_resolved_address_allowed,
@@ -181,6 +183,40 @@ class OriginReparseTest(SimpleTestCase):
                 parts = urlsplit(validate_origin(entry, setting="x"))
                 self.assertEqual(parts.hostname, host)
                 self.assertEqual(parts.port, port)
+
+
+class DnsWorkerTest(SimpleTestCase):
+    """The child entry point answers on stdout, arms its own alarm, and never raises out of main."""
+
+    @staticmethod
+    def _run_worker(request):
+        stdin, stdout = io.StringIO(request), io.StringIO()
+        with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout):
+            try:
+                status = _dns_worker.main()
+                armed = signal.getitimer(signal.ITIMER_REAL)[0]
+            finally:
+                # main() leaves the alarm running for a child that exits, so this process disarms it.
+                signal.setitimer(signal.ITIMER_REAL, 0)
+        return status, stdout.getvalue(), armed
+
+    def test_a_resolvable_host_answers_with_the_same_addresses_as_the_in_process_path(self):
+        status, output, _armed = self._run_worker(json.dumps(("localhost", 80, 30)))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(output), list(resolve_addresses("http://localhost:80")))
+
+    def test_the_worker_arms_its_own_alarm_before_it_resolves(self):
+        _status, _output, armed = self._run_worker(json.dumps(("localhost", 80, 30)))
+
+        self.assertGreater(armed, 0)
+        self.assertLessEqual(armed, 30)
+
+    def test_an_unusable_request_answers_with_one_generic_failure(self):
+        status, output, _armed = self._run_worker(json.dumps(["only-one-value"]))
+
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(output), {"error": "Name resolution failed."})
 
 
 class ResolvedAddressTest(SimpleTestCase):
