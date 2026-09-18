@@ -22,7 +22,7 @@ REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
 def _table_rows_with_a_piped_code_span(path):
     """Yield each table row in *path* whose code span holds a cell separator."""
     inside_fence = False
-    for number, line in enumerate(path.read_text().splitlines(), 1):
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if line.lstrip().startswith("```"):
             inside_fence = not inside_fence
         elif not inside_fence and line.startswith("|"):
@@ -38,7 +38,7 @@ class MarkdownTableRenderingTest(SimpleTestCase):
         """Run the repository guard over one explicit temporary table row."""
         with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
             path = pathlib.Path(directory) / "table.md"
-            path.write_text(f"| Value |\n| --- |\n| `{code_span}` |\n")
+            path.write_text(f"| Value |\n| --- |\n| `{code_span}` |\n", encoding="utf-8")
             return list(_table_rows_with_a_piped_code_span(path))
 
     def test_an_escaped_pipe_in_a_code_span_is_accepted(self):

@@ -247,7 +247,7 @@ class AtomicExitScannerTest(SimpleTestCase):
         return unaudited_atomic_exits(source, audited=self.AUDITED)
 
     def test_one_walker_owns_atomic_exit_discovery(self):
-        tree = ast.parse(pathlib.Path(__file__).read_text())
+        tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
         callers = {
             function.name
             for function in tree.body
@@ -436,7 +436,7 @@ class PackageAtomicExitsTest(SimpleTestCase):
         """A new early return inside a transaction has to be reviewed before it can land."""
         offenders = []
         for path in self._modules():
-            for qualified, line, marker in unaudited_atomic_exits(path.read_text()):
+            for qualified, line, marker in unaudited_atomic_exits(path.read_text(encoding="utf-8")):
                 seen = f" (marker {marker!r} is not in AUDITED_EXITS)" if marker else " (no marker)"
                 offenders.append(f"{path.relative_to(PACKAGE)}:{line} in {qualified}{seen}")
         self.assertEqual(
@@ -449,5 +449,5 @@ class PackageAtomicExitsTest(SimpleTestCase):
         """A marker removed from the source must not leave its reason behind."""
         used = set()
         for path in self._modules():
-            used |= used_markers(path.read_text())
+            used |= used_markers(path.read_text(encoding="utf-8"))
         self.assertEqual(sorted(set(AUDITED_EXITS) - used), [])

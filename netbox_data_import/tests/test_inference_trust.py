@@ -348,7 +348,7 @@ class ResolvedAddressTest(SimpleTestCase):
                     break
                 time.sleep(0.02)
             self.assertTrue(pid_file.exists(), "the child did not enter the blocking resolver")
-            pid = int(pid_file.read_text())
+            pid = int(pid_file.read_text(encoding="utf-8"))
             self.assertTrue(pathlib.Path(f"/proc/{pid}").exists())
             for _ in range(150):
                 if not pathlib.Path(f"/proc/{pid}").exists():

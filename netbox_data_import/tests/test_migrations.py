@@ -33,7 +33,7 @@ def _migrations_with_dependency_comments():
     migrations = Path(__file__).parents[1] / "migrations"
     found = set()
     for path in migrations.glob("[0-9]*.py"):
-        source = path.read_text()
+        source = path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         migration_class = next(
             node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Migration"

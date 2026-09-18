@@ -29,7 +29,7 @@ class HeadBlockCarriesNoPageAssetsTest(SimpleTestCase):
         """One offending template silently loses its styling and its behavior after a boost."""
         offenders = []
         for template in sorted(TEMPLATE_DIR.glob("*.html")):
-            for block in HEAD_BLOCK.findall(template.read_text()):
+            for block in HEAD_BLOCK.findall(template.read_text(encoding="utf-8")):
                 for tag in ("<script", "<style"):
                     if tag in block:
                         offenders.append(f"{template.name}: {tag}")
@@ -49,7 +49,7 @@ class DeferredFormsReadTheirActionAttributeTest(SimpleTestCase):
         offenders = [
             f"{source.name}:{number}"
             for source in sources
-            for number, line in enumerate(source.read_text().splitlines(), start=1)
+            for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1)
             if re.search(r"\bform\.action\b", line)
         ]
         self.assertEqual(offenders, [], "Read the posted URL with form.getAttribute('action').")
@@ -60,7 +60,7 @@ class PreviewFilterStateIsRememberedTest(SimpleTestCase):
 
     def test_every_applied_filter_is_stored_in_the_view_payload(self):
         """A new filter must extend the recalculation payload in the same change."""
-        source = (STATIC_JS_DIR / "preview_row_controls.js").read_text()
+        source = (STATIC_JS_DIR / "preview_row_controls.js").read_text(encoding="utf-8")
 
         def function_body(name):
             start = source.index(f"function {name}(")
@@ -102,7 +102,7 @@ class SyncStateLabelsMatchTheServerTest(SimpleTestCase):
 
     def test_every_server_sync_state_has_a_modal_label(self):
         """A missing label makes the browser call an unknown write state unchanged."""
-        source = (STATIC_JS_DIR / "sync_row_modal.js").read_text()
+        source = (STATIC_JS_DIR / "sync_row_modal.js").read_text(encoding="utf-8")
         labels_match = re.search(r"var STATE_LABELS = \{(.*?)\n    \};", source, re.DOTALL)
         self.assertIsNotNone(labels_match, "the sync modal must declare STATE_LABELS")
         label_keys = set(re.findall(r"^\s+([a-z_]+):", labels_match.group(1), re.MULTILINE))
@@ -120,17 +120,17 @@ class SyncPendingWritesReachTheModalTest(SimpleTestCase):
 
     def test_every_server_pending_write_flag_reaches_the_summary_builder(self):
         """A new write category must be projected and summarized in the same change."""
-        server_source = (Path(__file__).resolve().parents[1] / "target_modules.py").read_text()
+        server_source = (Path(__file__).resolve().parents[1] / "target_modules.py").read_text(encoding="utf-8")
         server_flags = set(re.findall(r'"(pending_write_[a-z_]+)"\s*:', server_source))
         # A scan that matches nothing would pass this guard while the feature is renamed away.
         self.assertTrue(server_flags, "target_modules must name the pending writes it plans")
 
-        template = (TEMPLATE_DIR / "import_preview.html").read_text()
+        template = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
         projected_flags = {
             attribute.replace("-", "_") for attribute in re.findall(r"data-(pending-write-[a-z-]+)=", template)
         }
 
-        modal_source = (STATIC_JS_DIR / "sync_row_modal.js").read_text()
+        modal_source = (STATIC_JS_DIR / "sync_row_modal.js").read_text(encoding="utf-8")
         start = modal_source.index("function pendingWriteSummary(")
         opening = modal_source.index("{", start)
         depth = 1
@@ -400,7 +400,7 @@ class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
 
     def test_every_class_mapping_trigger_declares_its_initial_action(self):
         """Without it the editor reopens on Ignore and a save discards the stored role."""
-        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+        html = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
         triggers = re.findall(r'<button[^>]*data-ndi-modal="#classMappingModal"[^>]*>', html)
 
         self.assertTrue(triggers, "the preview must offer the class editor")
@@ -409,7 +409,7 @@ class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
 
     def test_the_device_class_trigger_carries_the_stored_role_slug(self):
         """The handler reads this attribute, so losing it silently reopens the editor with no role."""
-        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+        html = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
         triggers = re.findall(r'<button[^>]*data-ndi-modal="#classMappingModal"[^>]*>', html)
         device_triggers = [trigger for trigger in triggers if 'data-initial-action="rack"' not in trigger]
 
@@ -419,7 +419,7 @@ class ClassEditorTriggersCarryTheStoredPolicyTest(SimpleTestCase):
 
     def test_the_class_editor_restores_the_role_slug_it_is_given(self):
         """A handler that clears the field instead would pass the trigger checks above."""
-        html = (TEMPLATE_DIR / "import_preview.html").read_text()
+        html = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
 
         self.assertIn("document.getElementById('cm_role_slug').value = btn.dataset.currentRoleSlug", html)
 
@@ -657,7 +657,7 @@ class SplitModalMarkupMatchesItsScriptTest(PreviewSessionMixin, BaseViewTestCase
 
     def _script_source(self):
         """Return the shipped split-modal asset."""
-        return (STATIC_JS_DIR / "split_name_modal.js").read_text()
+        return (STATIC_JS_DIR / "split_name_modal.js").read_text(encoding="utf-8")
 
     def test_the_preview_loads_the_split_modal_script(self):
         """The rendered modal needs the script that controls it."""
@@ -852,7 +852,7 @@ class ConflictJumpTargetsOneRowTest(SimpleTestCase):
 
     def test_the_jump_control_carries_the_object_type_with_the_row_number(self):
         """`getElementById('row-N')` returned the first match, which was often the rack row."""
-        source = self.TEMPLATE.read_text()
+        source = self.TEMPLATE.read_text(encoding="utf-8")
         jump = re.search(r"<button[^>]*ndi-jump-to-row.*?</button>", source, re.DOTALL)
         self.assertIsNotNone(jump, "the preview must render the conflict jump control")
         self.assertIn("data-target-row=", jump.group(0))
@@ -860,7 +860,7 @@ class ConflictJumpTargetsOneRowTest(SimpleTestCase):
 
     def test_the_jump_handler_matches_on_both_attributes(self):
         """A handler that still resolves an id would reintroduce the wrong-row jump."""
-        source = self.TEMPLATE.read_text()
+        source = self.TEMPLATE.read_text(encoding="utf-8")
         self.assertNotIn("getElementById('row-' + ", source)
         self.assertIn('tr[data-object-type="', source)
 
@@ -874,7 +874,7 @@ class FieldRowIdsFollowTheDetailRowTest(SimpleTestCase):
 
     def test_both_field_id_families_use_the_detail_row_index(self):
         """`ignored-field-*` used the source row number, which is a different number entirely."""
-        source = (TEMPLATE_DIR / "import_preview.html").read_text()
+        source = (TEMPLATE_DIR / "import_preview.html").read_text(encoding="utf-8")
         for family in ("diff-field", "ignored-field"):
             match = re.search(rf'id="{family}-{{{{ ([^}}]+) }}}}-', source)
             self.assertIsNotNone(match, f"the preview must render the {family} rows")
@@ -1081,7 +1081,7 @@ class SplitNameSkipsAnIgnoredRowTest(SimpleTestCase):
 
     def test_the_split_control_still_excludes_an_ignored_row(self):
         """Widening this condition to reach matched rows must not also reach ignored ones."""
-        source = self.TEMPLATE.read_text()
+        source = self.TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("#splitNameModal", source, "the preview must render the split control")
         # The guard is the last `{% if %}` before the control, whatever else the markup grows.
         head = source[: source.index("#splitNameModal")]

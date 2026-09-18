@@ -43,7 +43,7 @@ PERMISSION_CONSTRAINT_INTERNALS = frozenset({"qs_filter_from_constraints", "_obj
 
 def _import_engine_calls(path: pathlib.Path) -> set[str]:
     """Return attributes referenced directly on `ImportEngine` in one module."""
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     return {
         node.attr
         for node in ast.walk(tree)
@@ -60,7 +60,7 @@ def _import_root(name: str) -> str:
 def _imported_roots(path: pathlib.Path) -> set[str]:
     """Return the module of every import in one file, including imports inside a function."""
     roots: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             roots.update(_import_root(name.name) for name in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -75,7 +75,7 @@ def _imported_roots(path: pathlib.Path) -> set[str]:
 def _referenced_names(path: pathlib.Path) -> set[str]:
     """Return every name one module imports or reads, ignoring comments and docstrings."""
     names: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             names.update(alias.name.rpartition(".")[2] for alias in node.names)
         elif isinstance(node, ast.Name):
@@ -99,7 +99,7 @@ def _constraint_offenders(root: pathlib.Path) -> dict[str, list[str]]:
 
 def _imports_target_modules(path: pathlib.Path) -> bool:
     """Return whether a caller bypasses the coordinator for a Target Module."""
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.module in {"target_modules", "netbox_data_import.target_modules"}:
@@ -131,7 +131,11 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
 
     def test_the_architecture_guidance_names_the_public_coordinator(self):
         guidance = PACKAGE.parent / "AGENTS.md"
-        architecture = guidance.read_text().partition("## Architecture")[2].partition("## Development environment")[0]
+        architecture = (
+            guidance.read_text(encoding="utf-8")
+            .partition("## Architecture")[2]
+            .partition("## Development environment")[0]
+        )
 
         self.assertIn("`import_engine.py`", architecture)
         self.assertNotIn("`engine.py`", architecture)
@@ -146,7 +150,10 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         """The boundary rejects private access even when it is not a call."""
         with TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "caller.py"
-            path.write_text("ImportEngine.plan()\nImportEngine.execute()\ncallback = ImportEngine._private_helper\n")
+            path.write_text(
+                "ImportEngine.plan()\nImportEngine.execute()\ncallback = ImportEngine._private_helper\n",
+                encoding="utf-8",
+            )
 
             self.assertIn("_private_helper", _import_engine_calls(path))
 
@@ -157,7 +164,7 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         """The boundary guard recognizes ``from . import target_modules``."""
         with TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "caller.py"
-            path.write_text("from . import target_modules\n")
+            path.write_text("from . import target_modules\n", encoding="utf-8")
 
             self.assertTrue(_imports_target_modules(path))
 
@@ -165,7 +172,7 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         """The boundary guard recognizes imports from the absolute package."""
         with TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "caller.py"
-            path.write_text("from netbox_data_import import target_modules\n")
+            path.write_text("from netbox_data_import import target_modules\n", encoding="utf-8")
 
             self.assertTrue(_imports_target_modules(path))
 
@@ -210,7 +217,7 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         """A lazy import inside a function must not escape the boundary guard."""
         with TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "interpreter.py"
-            path.write_text("def parse():\n    from dcim.models import Device\n    return Device\n")
+            path.write_text("def parse():\n    from dcim.models import Device\n    return Device\n", encoding="utf-8")
 
             self.assertEqual(_imported_roots(path) & FORBIDDEN_INTERPRETER_IMPORTS, {"dcim"})
 
@@ -229,12 +236,12 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         with TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "object_permissions.py").write_text(
-                "from utilities.permissions import qs_filter_from_constraints\n"
+                "from utilities.permissions import qs_filter_from_constraints\n", encoding="utf-8"
             )
             nested = root / "nested"
             nested.mkdir()
             (nested / "object_permissions.py").write_text(
-                "from utilities.permissions import qs_filter_from_constraints\n"
+                "from utilities.permissions import qs_filter_from_constraints\n", encoding="utf-8"
             )
 
             self.assertEqual(
@@ -246,7 +253,8 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         with TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "permission_reader.py"
             path.write_text(
-                "from utilities.permissions import qs_filter_from_constraints\nconstraints = actor._object_perm_cache\n"
+                "from utilities.permissions import qs_filter_from_constraints\nconstraints = actor._object_perm_cache\n",
+                encoding="utf-8",
             )
 
             self.assertEqual(_referenced_names(path) & PERMISSION_CONSTRAINT_INTERNALS, PERMISSION_CONSTRAINT_INTERNALS)
@@ -264,7 +272,7 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         """The guard reads code, so the rule can still be stated in prose."""
         with TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "writer.py"
-            path.write_text('"""Never touch CablePath."""\nfrom dcim.models import CablePath\n')
+            path.write_text('"""Never touch CablePath."""\nfrom dcim.models import CablePath\n', encoding="utf-8")
 
             self.assertIn("CablePath", _referenced_names(path))
 
@@ -273,7 +281,8 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         with TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "attribute_writer.py"
             path.write_text(
-                '"""Reach it through the module."""\nfrom dcim import models\n\nmodels.CablePath.objects.all()\n'
+                '"""Reach it through the module."""\nfrom dcim import models\n\nmodels.CablePath.objects.all()\n',
+                encoding="utf-8",
             )
 
             self.assertIn("CablePath", _referenced_names(path))
@@ -282,7 +291,7 @@ class TargetNeutralCallerBoundaryTest(SimpleTestCase):
         """`from netbox_data_import import models` names the module in the imported names."""
         with TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "interpreter.py"
-            path.write_text("from netbox_data_import import models, target_modules\n")
+            path.write_text("from netbox_data_import import models, target_modules\n", encoding="utf-8")
 
             self.assertEqual(
                 _imported_roots(path) & FORBIDDEN_INTERPRETER_IMPORTS,

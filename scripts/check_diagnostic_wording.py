@@ -26,7 +26,7 @@ def emitted_codes() -> set[str]:
     for name in EMITTING_MODULES:
         codes.update(
             node.value
-            for node in ast.walk(ast.parse((PACKAGE / name).read_text()))
+            for node in ast.walk(ast.parse((PACKAGE / name).read_text(encoding="utf-8")))
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and CODE.fullmatch(node.value)
         )
     return codes
@@ -34,7 +34,7 @@ def emitted_codes() -> set[str]:
 
 def answered_codes(source: pathlib.Path) -> set[str]:
     """Return the literal keys of the wording table, so prose naming a code cannot answer for it."""
-    for node in ast.walk(ast.parse(source.read_text())):
+    for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
         if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
             continue
         if not any(isinstance(t, ast.Name) and t.id == TABLE for t in node.targets):

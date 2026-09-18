@@ -659,7 +659,7 @@ class AdapterIsolationTest(SimpleTestCase):
 
     def test_the_adapter_module_imports_nothing_from_the_application(self):
         package = pathlib.Path(__file__).resolve().parents[1]
-        source = (package / "inference_adapter.py").read_text()
+        source = (package / "inference_adapter.py").read_text(encoding="utf-8")
         roots = set()
         for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.Import):

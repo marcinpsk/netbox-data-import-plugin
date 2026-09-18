@@ -111,7 +111,7 @@ class TraceFieldKeyTest(SimpleTestCase):
 
     def test_shared_field_keys_import_no_netbox_or_runtime_implementation(self):
         """Both source and target sides can import the shared module without crossing a boundary."""
-        tree = ast.parse(pathlib.Path(field_keys.__file__).read_text())
+        tree = ast.parse(pathlib.Path(field_keys.__file__).read_text(encoding="utf-8"))
         roots = {
             node.module.partition(".")[0]
             for node in ast.walk(tree)

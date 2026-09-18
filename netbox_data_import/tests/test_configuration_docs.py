@@ -32,7 +32,7 @@ def _string_expression(node, names):
 
 def _custom_link_recipe():
     """Return the custom field name and every Link URL template the Custom Link recipe documents."""
-    guide = CONFIGURATION_GUIDE.read_text()
+    guide = CONFIGURATION_GUIDE.read_text(encoding="utf-8")
     recipe = guide.partition("## Linking to the source system")[2].partition("## Source Adapter")[0]
     link_urls = re.findall(r"^\*\*Link URL\*\*:\n\n```jinja\n(.+)\n```$", recipe, re.MULTILINE)
 
@@ -57,7 +57,7 @@ class VaultTransportGuidanceTest(SimpleTestCase):
     """The Vault examples keep secrets encrypted without requiring a public CA."""
 
     def test_the_vault_proxy_example_uses_tls_and_supports_a_private_ca(self):
-        guide = CONFIGURATION_GUIDE.read_text()
+        guide = CONFIGURATION_GUIDE.read_text(encoding="utf-8")
         vault_guide = guide.partition("## Inference backend credentials")[2].partition("## Native primary contacts")[0]
 
         self.assertIn('"address": "https://', vault_guide)
@@ -86,7 +86,7 @@ class VaultTransportGuidanceTest(SimpleTestCase):
     def test_the_research_note_requires_the_same_protected_proxy_hop(self):
         """The research note informs the operator guide, so it must not offer a weaker hop."""
         # The note is hard-wrapped, so each claim is matched against its unwrapped text.
-        research = " ".join(VAULT_RESEARCH.read_text().split())
+        research = " ".join(VAULT_RESEARCH.read_text(encoding="utf-8").split())
 
         self.assertIn("The NetBox-to-Proxy hop carries the resolved inference key", research)
         self.assertIn("HTTPS listener with certificate verification", research)

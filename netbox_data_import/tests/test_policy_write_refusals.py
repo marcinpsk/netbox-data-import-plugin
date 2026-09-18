@@ -91,7 +91,7 @@ class PolicyWriteRefusalTest(SimpleTestCase):
     """A deleted import profile is an answered refusal at every policy write."""
 
     def test_every_policy_write_answers_a_deleted_profile(self):
-        unanswered = _unanswered_policy_writes(ast.parse(VIEWS.read_text()))
+        unanswered = _unanswered_policy_writes(ast.parse(VIEWS.read_text(encoding="utf-8")))
 
         self.assertEqual(unanswered, [], "these policy writes would return HTTP 500 for a deleted profile")
 

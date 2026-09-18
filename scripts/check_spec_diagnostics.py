@@ -28,7 +28,7 @@ def emitted_codes() -> set[str]:
     """Return every Cable and trace diagnostic code the planner names as a string constant."""
     codes: set[str] = set()
     for name in EMITTING_MODULES:
-        for node in ast.walk(ast.parse((PACKAGE / name).read_text())):
+        for node in ast.walk(ast.parse((PACKAGE / name).read_text(encoding="utf-8"))):
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and CODE.fullmatch(node.value):
                 codes.add(node.value)
     return codes
@@ -38,7 +38,7 @@ def documented_codes() -> set[str]:
     """Return the codes the normative diagnostics tables list, ignoring codes named in prose."""
     codes: set[str] = set()
     in_table = False
-    for line in SPEC.read_text().splitlines():
+    for line in SPEC.read_text(encoding="utf-8").splitlines():
         if TABLE_HEADER.match(line):
             in_table = True
             continue

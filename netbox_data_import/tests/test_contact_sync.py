@@ -162,7 +162,7 @@ class LocalExamplePrivacyTest(SimpleTestCase):
                 continue
             path = repository_root / relative_path
             try:
-                lines = path.read_text().splitlines()
+                lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeDecodeError):
                 continue
             for line_number, line in enumerate(lines, 1):
