@@ -2,17 +2,25 @@
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
 """Profile-owned Device resolution for Source Traces."""
 
+import json
 import re
+
 from io import BytesIO
 
 from dcim.models import Device, Interface, Location, Rack
 from django.core.exceptions import ValidationError
 from django.db import connection
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 
 from netbox_data_import.cable_target import ELIGIBLE_TERMINATION_LIMIT
-from netbox_data_import.field_keys import SELECT_TERMINATION_TASK, termination_field_key
+from netbox_data_import.field_keys import (
+    INTERFACE_KIND,
+    SELECT_TERMINATION_TASK,
+    TERMINATION_ROLE,
+    parse_termination_field_key,
+    termination_field_key,
+)
 from netbox_data_import.models import ImportProfile, SourceDocument, TerminationResolution, TraceDeviceResolution
 from netbox_data_import.netbox_reader import NetBoxReader
 from netbox_data_import.object_permissions import ObjectPermissionDenied, clear_user_permission_caches
@@ -25,6 +33,7 @@ from netbox_data_import.trace_device_resolution import (
     UNRESOLVED,
     eligible_trace_devices,
     resolve_trace_devices,
+    source_device_key,
 )
 from netbox_data_import.tests.test_cable_module import CableTopologyMixin, direct_path
 from netbox_data_import.tests.helpers import trace_termination, trace_workbook_bytes, user_with_object_permission
@@ -68,6 +77,35 @@ class DeviceEvidenceSerializationTest(TestCase):
             with self.subTest(field=field, value=value):
                 with self.assertRaisesMessage(TypeError, f"Device evidence {field} must be a list or tuple of strings"):
                     DeviceEvidence.from_dict({**self.evidence, field: value})
+
+
+class TerminationKeyCarriesTheDeviceKeyTest(SimpleTestCase):
+    """The workspace reads a resolved Device out of a map keyed by `source_device_key`."""
+
+    def test_a_canonical_termination_key_already_holds_the_source_device_key(self):
+        """A lookup by the parsed device needs no second normalization step."""
+        label = "Source Alias"
+        key = termination_field_key(device=label, cards="Card  One", port="Eth 1", kind=INTERFACE_KIND)
+
+        self.assertEqual(parse_termination_field_key(key)["device"], source_device_key(label))
+
+    def test_a_key_holding_an_unnormalized_device_is_not_canonical(self):
+        """An unnormalized device can never reach a lookup, because parsing refuses the key."""
+        raw = json.dumps(
+            {
+                "cards": source_device_key("Card One"),
+                "device": "Source Alias",
+                "kind": INTERFACE_KIND,
+                "port": source_device_key("Eth 1"),
+                "role": TERMINATION_ROLE,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        with self.assertRaises(ValueError):
+            parse_termination_field_key(raw)
 
 
 class TraceDeviceResolutionModelTest(CableTopologyMixin, TestCase):
