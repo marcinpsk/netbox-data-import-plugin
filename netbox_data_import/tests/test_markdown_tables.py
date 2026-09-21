@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Marcin Zieba <marcinpsk@gmail.com>
-r"""Reject an unescaped `|` inside a code span in a Markdown table row.
-
-GitHub Flavored Markdown reads `|` as a cell separator even inside backticks, so the rest of the
-value becomes an extra cell and disappears from the rendered table. Python-Markdown, which builds
-the MkDocs site, keeps it. A reader who copies the value from GitHub gets a truncated one.
-
-The repository renders every page in both, so a value that holds an unescaped `|` belongs in a
-fenced block instead of a table cell. An escaped `\|` renders as a pipe in both, so it may stay.
-"""
+"""Reject an unescaped `|` in a table code span: GitHub ends the cell there, Python-Markdown does not."""
 
 import pathlib
 import re
