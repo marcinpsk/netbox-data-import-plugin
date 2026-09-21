@@ -2,6 +2,139 @@
 
 <!-- version list -->
 
+## v2.5.0 (2026-09-21)
+
+### Bug Fixes
+
+- Allow escaped pipes in markdown table guard
+  ([`61ab250`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/61ab2500cd70ec5209e820ca3baae1857cf75968))
+
+- Describe pending writes in sync summary
+  ([`d8281f8`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d8281f8b19e1da1eb284bd050458b3d14b1a1712))
+
+- **contact**: Ignore a suggestion answer meant for another row
+  ([`1f816f0`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1f816f0aa371496d0d1fad7fd8c80511d2c8339a))
+
+- **inference**: Bound DNS resolution instead of cancelling its future
+  ([`355b8bc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/355b8bc0bb2075ce4f426577bff24fdd99dc3cf4))
+
+- **inference**: Let the DNS worker fail loudly when it cannot arm its alarm
+  ([`5c1f275`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/5c1f27532af0b6f5f472e5d62cd3aa639b2fc142))
+
+- **inference**: Stop the DNS worker's descendants at its deadline
+  ([`50d549a`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/50d549ae707f9f464368535b83ce93b64825a770))
+
+- **opengrep**: Let the alarm rule accept an explicit SIG_DFL
+  ([`1e54daf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1e54daf58b0066abcbccd8f2390463c759bf11fe))
+
+- **preview**: Compare an IP the way the writer matches it
+  ([`c1f84b1`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/c1f84b16aa36cc1f4b6adb960d4f87369515c9de))
+
+- **preview**: Keep the no-rack filter value out of the rack names
+  ([`3476d58`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3476d5883a628b0aed158bd61e7d1c7bea53f9dd))
+
+- **preview**: Preserve rack filter across recalculation
+  ([`07e6c26`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/07e6c263eb16ca3aa2641b26a7fd5910e85c9252))
+
+- **preview**: Report pending writes on a created Device
+  ([`9bbf76f`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9bbf76f6f90db6074867be525b9cc9948cb8ea8f))
+
+- **preview**: Say that a rack row update writes
+  ([`db2eb61`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/db2eb611272ed8cc50972d25c46e044b2ba9bbec))
+
+- **sync**: Name pending writes in every row summary
+  ([`f0b07dc`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/f0b07dcffe84f7c53f453b8a8241bc4f6f126d73))
+
+### Build System
+
+- Install the test dependency group instead of restating it
+  ([`38622a3`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/38622a362d38e9028e0d944e53013c4c0f0000ec))
+
+- Use uv --system-certs instead of the deprecated --native-tls
+  ([`d23d8c7`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/d23d8c7fc62cf7501f773f1d40554b22203f4e79))
+
+### Chores
+
+- **opengrep**: Refuse a patched interpreter stream and a Python SIGALRM handler
+  ([`cf510ab`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/cf510ab155ddbee35d23af9f4acacb00cddb8a66))
+
+### Code Style
+
+- Reduce the encoding guard docstring to its one non-obvious reason
+  ([`3a52d3d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/3a52d3d8d7a6e4ece27aaa99596b7c574af24d1f))
+
+- Reduce the Markdown table guard docstring to its one non-obvious reason
+  ([`2689c05`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/2689c050cfad20c17da4354ec8318c8d1ac99cd9))
+
+### Documentation
+
+- Correct supported source format
+  ([`b67e498`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/b67e498ef9e7135809a4c8e617e6836d51c1ba7d))
+
+- Name the PATCH procedure the permission belongs to
+  ([`e95c0ed`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e95c0ed764964c84b1ebea1eafee9dae93f61736))
+
+### Refactoring
+
+- **inference**: Drop the DNS worker failure payload nothing reads
+  ([`4bb2ed9`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/4bb2ed98e71037f2bac4d0874cad521b6db1c494))
+
+- **inference**: Give the DNS worker its streams instead of patching sys
+  ([`aa74dc6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/aa74dc6460140a8030a39721e79d063a206e1d2c))
+
+### Revert
+
+- **preview**: Restore the host and prefix canonical for an IP field
+  ([`64b9aa5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/64b9aa512285d338ed1841cae39d2272bca02a45))
+
+### Testing
+
+- Apply the GFM fence rules in the Markdown table guard
+  ([`bad83f6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/bad83f60ae45694c95eed7dcdc9bbbf34295c48b))
+
+- Close two silent holes in the repository guards
+  ([`58c7811`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/58c7811d87e81999daf3bac9520bf80dd7963ee8))
+
+- Decide a positional encoding by the value, not by the receiver's name
+  ([`e698e40`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e698e401e2da0ab9cdb0198597e6007942dbf27e))
+
+- Fail the pending-write guard when its scan finds nothing
+  ([`6f39839`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/6f398398baaa787c6099993e6b845bac7dc92e87))
+
+- Keep scanning a table row whose pipe breaks the table
+  ([`e7216c5`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/e7216c539858c2dd20ea49ef910572aa471762a6))
+
+- Name the encoding on every text read and write
+  ([`19b3840`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/19b3840fe13748c9c1314a9ecd680971015bec0d))
+
+- Read Markdown block structure from markdown-it-py
+  ([`21245cf`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/21245cf0ae70b10fa216304e0e03b94d75c871e7))
+
+- Read the encoding argument position from pathlib
+  ([`7f69797`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/7f69797c5ad1d71abf59c0247a3dbcabb2b1377c))
+
+- Recognize tilde fences in the Markdown table guard
+  ([`00af557`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/00af5579f456883731244c333bc8955ce394a089))
+
+- Widen the resolver startup budget and drop host-specific assertions
+  ([`14aab92`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/14aab92b707b7db08d5f0747f378ce05ea5e633a))
+
+- **inference**: Cover the DNS worker entry point in process
+  ([`dca96ce`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/dca96ceffb3773fa7d415de636eabffff8fdb068))
+
+- **inference**: Drop the racy liveness check on the orphaned DNS worker
+  ([`bf0386b`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/bf0386bf0c8597f0e796fb8682657f689dab5b2b))
+
+- **inference**: Run the DNS worker as a real child process
+  ([`50f506d`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/50f506d7ab90a5ca45eadf885487bccb9179c509))
+
+- **preview**: Lock the Contact picker to the row type its endpoint serves
+  ([`1c8a9a6`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/1c8a9a6082a145c7a33dc68d8baebb3c8d7d748d))
+
+- **trace**: Lock the device normalization a termination key carries
+  ([`9d92a88`](https://github.com/marcinpsk/netbox-data-import-plugin/commit/9d92a880284b25e0501d01d2c4f9a6e47dbbd5a0))
+
+
 ## v2.4.0 (2026-09-17)
 
 ### Bug Fixes
