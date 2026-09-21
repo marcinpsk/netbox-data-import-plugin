@@ -416,6 +416,56 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#linking-to-the-source-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Linking to the source system
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Linking to the source system">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#link-from-the-per-profile-custom-field" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Link from the per-profile custom field
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#create-the-link-for-every-object-type-the-field-covers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Create the link for every object type the field covers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#link-without-a-custom-field" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Link without a custom field
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#source-adapter" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -555,6 +605,56 @@
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#linking-to-the-source-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Linking to the source system
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Linking to the source system">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#link-from-the-per-profile-custom-field" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Link from the per-profile custom field
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#create-the-link-for-every-object-type-the-field-covers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Create the link for every object type the field covers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#link-without-a-custom-field" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Link without a custom field
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -729,8 +829,108 @@ field. The Device page shows this record in the <strong>Import Data</strong> car
 upgrade migration copies every payload into the new table, clears the key from Devices and Racks,
 and deletes the custom field. The migration does not reverse. A payload that names a deleted import
 profile is dropped, and the migration logs how many.</p>
-<p>The per-profile custom field (<strong>Custom field name</strong> in the Import Profile's adapter configuration,
-for example <code>cans_id</code>) is separate. The plugin still writes the source ID to it and never deletes it.</p>
+<p>The per-profile custom field (<strong>Custom field name</strong> in the Import Profile's adapter
+configuration, for example <code>external_id</code>) is separate. The plugin still writes the source ID to
+it and never deletes it. See <a href="#linking-to-the-source-system">Linking to the source system</a> to
+turn that ID into a button on the object page.</p>
+<h2 id="linking-to-the-source-system">Linking to the source system</h2>
+<p>NetBox's native <strong>Custom Links</strong> turn the source ID into a button on the object page. The plugin
+needs no setting for this.</p>
+<h3 id="link-from-the-per-profile-custom-field">Link from the per-profile custom field</h3>
+<p>Set <strong>Custom field name</strong> in the Import Profile's adapter configuration, for example
+<code>external_id</code>. The plugin writes the source ID of each imported row into that custom field, on
+Devices and on Racks. Assign the custom field to both object types.</p>
+<p>Add the link under <strong>Customization &gt; Custom Links</strong>. Set <strong>Object types</strong> to <code>DCIM &gt; device</code>
+and <code>DCIM &gt; rack</code>.</p>
+<p><strong>Link text</strong>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="cp">{%</span> <span class="k">if</span> <span class="nv">object.cf.external_id</span> <span class="cp">%}</span><span class="x">Locate asset in the source system</span><span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span>
+</code></pre></div>
+<p><strong>Link URL</strong>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="x">https://assets.example.invalid/search?q=</span><span class="cp">{{</span> <span class="nv">object.cf.external_id</span> <span class="o">|</span> <span class="nf">urlencode</span> <span class="cp">}}</span>
+</code></pre></div>
+<p>To find the URL, search for one ID in the source system and replace the search value with
+<code>{{ object.cf.external_id | urlencode }}</code>.</p>
+<p>Keep the <code>urlencode</code> filter. NetBox leaves <code>&amp;</code> and <code>#</code> unchanged when it sanitizes a rendered Custom
+Link, so a source ID that holds one of them starts a second query parameter or a fragment. Many
+source systems also read a <code>+</code> in a query value as a space. The filter escapes all three and keeps
+the ID one value.</p>
+<p>An empty link text hides the button, so an object that no import touched shows nothing.</p>
+<p>NetBox renders both templates in a sandbox. It refuses a URL scheme that <code>ALLOWED_URL_SCHEMES</code> does
+not list.</p>
+<h3 id="create-the-link-for-every-object-type-the-field-covers">Create the link for every object type the field covers</h3>
+<p>The script below reads which object types the custom field covers, then creates one Custom Link for
+all of them. It skips an object type that supports custom fields but not custom links. Four NetBox
+types are in that group: <code>circuits.circuitgroupassignment</code>, <code>extras.eventrule</code>, <code>extras.webhook</code>,
+and <code>tenancy.contactassignment</code>.</p>
+<p>The API token needs <code>extras.view_customfield</code>, <code>core.view_objecttype</code>, and
+<code>extras.add_customlink</code>. Updating an existing link with <code>PATCH</code> also needs
+<code>extras.change_customlink</code>, because NetBox maps <code>PATCH</code> to the change action.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">NETBOX</span> <span class="o">=</span> <span class="s2">"https://netbox.example.invalid"</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">TOKEN</span> <span class="o">=</span> <span class="s2">"0123456789abcdef0123456789abcdef01234567"</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="n">CUSTOM_FIELD</span> <span class="o">=</span> <span class="s2">"external_id"</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="n">LINK_NAME</span> <span class="o">=</span> <span class="s2">"Locate asset in the source system"</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="n">SEARCH_URL</span> <span class="o">=</span> <span class="s2">"https://assets.example.invalid/search?q="</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="n">session</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">Session</span><span class="p">()</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="n">session</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="s2">"Authorization"</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"Token </span><span class="si">{</span><span class="n">TOKEN</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="s2">"Accept"</span><span class="p">:</span> <span class="s2">"application/json"</span><span class="p">})</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="k">def</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="o">**</span><span class="n">params</span><span class="p">):</span>
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="w">    </span><span class="sd">"""Return the result list of one API endpoint."""</span>
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a>    <span class="n">response</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">NETBOX</span><span class="si">}</span><span class="s2">/api/</span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">"</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="n">params</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">)</span>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>    <span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a>    <span class="k">return</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()[</span><span class="s2">"results"</span><span class="p">]</span>
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a>
+<a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a>
+<a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a><span class="n">fields</span> <span class="o">=</span> <span class="n">get</span><span class="p">(</span><span class="s2">"extras/custom-fields/"</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="n">CUSTOM_FIELD</span><span class="p">)</span>
+<a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a><span class="k">if</span> <span class="ow">not</span> <span class="n">fields</span><span class="p">:</span>
+<a id="__codelineno-6-22" name="__codelineno-6-22" href="#__codelineno-6-22"></a>    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="sa">f</span><span class="s2">"NetBox has no custom field named </span><span class="si">{</span><span class="n">CUSTOM_FIELD</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+<a id="__codelineno-6-23" name="__codelineno-6-23" href="#__codelineno-6-23"></a><span class="n">covered</span> <span class="o">=</span> <span class="nb">set</span><span class="p">(</span><span class="n">fields</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="s2">"object_types"</span><span class="p">])</span>
+<a id="__codelineno-6-24" name="__codelineno-6-24" href="#__codelineno-6-24"></a>
+<a id="__codelineno-6-25" name="__codelineno-6-25" href="#__codelineno-6-25"></a><span class="n">linkable</span> <span class="o">=</span> <span class="p">{</span>
+<a id="__codelineno-6-26" name="__codelineno-6-26" href="#__codelineno-6-26"></a>    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">entry</span><span class="p">[</span><span class="s1">'app_label'</span><span class="p">]</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">entry</span><span class="p">[</span><span class="s1">'model'</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span>
+<a id="__codelineno-6-27" name="__codelineno-6-27" href="#__codelineno-6-27"></a>    <span class="k">for</span> <span class="n">entry</span> <span class="ow">in</span> <span class="n">get</span><span class="p">(</span><span class="s2">"core/object-types/"</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+<a id="__codelineno-6-28" name="__codelineno-6-28" href="#__codelineno-6-28"></a>    <span class="k">if</span> <span class="s2">"custom_links"</span> <span class="ow">in</span> <span class="n">entry</span><span class="p">[</span><span class="s2">"features"</span><span class="p">]</span>
+<a id="__codelineno-6-29" name="__codelineno-6-29" href="#__codelineno-6-29"></a><span class="p">}</span>
+<a id="__codelineno-6-30" name="__codelineno-6-30" href="#__codelineno-6-30"></a><span class="n">targets</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">covered</span> <span class="o">&amp;</span> <span class="n">linkable</span><span class="p">)</span>
+<a id="__codelineno-6-31" name="__codelineno-6-31" href="#__codelineno-6-31"></a><span class="k">for</span> <span class="n">skipped</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">covered</span> <span class="o">-</span> <span class="n">linkable</span><span class="p">):</span>
+<a id="__codelineno-6-32" name="__codelineno-6-32" href="#__codelineno-6-32"></a>    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Skipping </span><span class="si">{</span><span class="n">skipped</span><span class="si">}</span><span class="s2">: it supports custom fields but not custom links"</span><span class="p">)</span>
+<a id="__codelineno-6-33" name="__codelineno-6-33" href="#__codelineno-6-33"></a><span class="k">if</span> <span class="ow">not</span> <span class="n">targets</span><span class="p">:</span>
+<a id="__codelineno-6-34" name="__codelineno-6-34" href="#__codelineno-6-34"></a>    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="s2">"No object type that the custom field covers supports custom links"</span><span class="p">)</span>
+<a id="__codelineno-6-35" name="__codelineno-6-35" href="#__codelineno-6-35"></a>
+<a id="__codelineno-6-36" name="__codelineno-6-36" href="#__codelineno-6-36"></a><span class="n">response</span> <span class="o">=</span> <span class="n">session</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+<a id="__codelineno-6-37" name="__codelineno-6-37" href="#__codelineno-6-37"></a>    <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">NETBOX</span><span class="si">}</span><span class="s2">/api/extras/custom-links/"</span><span class="p">,</span>
+<a id="__codelineno-6-38" name="__codelineno-6-38" href="#__codelineno-6-38"></a>    <span class="n">json</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-6-39" name="__codelineno-6-39" href="#__codelineno-6-39"></a>        <span class="s2">"name"</span><span class="p">:</span> <span class="n">LINK_NAME</span><span class="p">,</span>
+<a id="__codelineno-6-40" name="__codelineno-6-40" href="#__codelineno-6-40"></a>        <span class="s2">"object_types"</span><span class="p">:</span> <span class="n">targets</span><span class="p">,</span>
+<a id="__codelineno-6-41" name="__codelineno-6-41" href="#__codelineno-6-41"></a>        <span class="s2">"enabled"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-6-42" name="__codelineno-6-42" href="#__codelineno-6-42"></a>        <span class="s2">"link_text"</span><span class="p">:</span> <span class="s2">"{</span><span class="si">% i</span><span class="s2">f object.cf."</span> <span class="o">+</span> <span class="n">CUSTOM_FIELD</span> <span class="o">+</span> <span class="s2">" %}"</span> <span class="o">+</span> <span class="n">LINK_NAME</span> <span class="o">+</span> <span class="s2">"{</span><span class="si">% e</span><span class="s2">ndif %}"</span><span class="p">,</span>
+<a id="__codelineno-6-43" name="__codelineno-6-43" href="#__codelineno-6-43"></a>        <span class="s2">"link_url"</span><span class="p">:</span> <span class="n">SEARCH_URL</span> <span class="o">+</span> <span class="s2">"{{ object.cf."</span> <span class="o">+</span> <span class="n">CUSTOM_FIELD</span> <span class="o">+</span> <span class="s2">" | urlencode }}"</span><span class="p">,</span>
+<a id="__codelineno-6-44" name="__codelineno-6-44" href="#__codelineno-6-44"></a>        <span class="s2">"new_window"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-6-45" name="__codelineno-6-45" href="#__codelineno-6-45"></a>    <span class="p">},</span>
+<a id="__codelineno-6-46" name="__codelineno-6-46" href="#__codelineno-6-46"></a>    <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span>
+<a id="__codelineno-6-47" name="__codelineno-6-47" href="#__codelineno-6-47"></a><span class="p">)</span>
+<a id="__codelineno-6-48" name="__codelineno-6-48" href="#__codelineno-6-48"></a><span class="n">response</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+<a id="__codelineno-6-49" name="__codelineno-6-49" href="#__codelineno-6-49"></a><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"Created custom link </span><span class="si">{</span><span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()[</span><span class="s1">'id'</span><span class="p">]</span><span class="si">}</span><span class="s2"> for </span><span class="si">{</span><span class="s1">', '</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">targets</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+</code></pre></div>
+<p>The script creates the link. To change an existing link, send <code>PATCH</code> to
+<code>/api/extras/custom-links/{id}/</code> with the same body.</p>
+<h3 id="link-without-a-custom-field">Link without a custom field</h3>
+<p>A profile that names no custom field still records the source ID in the Device import record. A
+Custom Link can read that record. The plugin keeps no equivalent record for a Rack, so this variant
+covers Devices only.</p>
+<p>Set <strong>Object types</strong> to <code>DCIM &gt; device</code>.</p>
+<p><strong>Link text</strong>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="cp">{%</span> <span class="k">if</span> <span class="nv">object.data_import_source</span> <span class="k">and</span> <span class="nv">object.data_import_source.source_id</span> <span class="cp">%}</span><span class="x">Locate asset in the source system</span><span class="cp">{%</span> <span class="k">endif</span> <span class="cp">%}</span>
+</code></pre></div>
+<p><strong>Link URL</strong>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="x">https://assets.example.invalid/search?q=</span><span class="cp">{{</span> <span class="nv">object.data_import_source.source_id</span> <span class="o">|</span> <span class="nf">urlencode</span> <span class="cp">}}</span>
+</code></pre></div>
+<p>Keep both tests in the link text. A Device that the plugin never imported has no
+<code>data_import_source</code>. A link text that reads <code>object.data_import_source.source_id</code> without the first
+test raises, and NetBox then shows a disabled warning button on every such Device.</p>
 <h2 id="source-adapter">Source Adapter</h2>
 <p>An Import Profile selects a <strong>Source Adapter</strong>: the source format it reads. The adapter is required
 and cannot change after the profile is created, because every mapping and policy row on the profile
@@ -760,13 +960,13 @@ different NetBox instance.</p>
 stamps the flat workbook adapter on every existing profile, copies each column into the adapter
 configuration, and drops the columns.</p>
 <p>The exported profile YAML carries the adapter and its configuration:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">profile</span><span class="p">:</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Profile</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="nt">source_adapter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">flat_workbook</span>
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span><span class="nt">adapter_config</span><span class="p">:</span>
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">    </span><span class="nt">sheet_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Data</span>
-<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">source_id_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Id</span>
-<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">    </span><span class="nt">primary_contact_role</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Primary Contact</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="nt">profile</span><span class="p">:</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">My Profile</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span><span class="nt">source_adapter</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">flat_workbook</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">  </span><span class="nt">adapter_config</span><span class="p">:</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">    </span><span class="nt">sheet_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Data</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">    </span><span class="nt">source_id_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Id</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="w">    </span><span class="nt">primary_contact_role</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Primary Contact</span>
 </code></pre></div>
 <p>When imported, <code>adapter_config</code> replaces the profile's stored adapter configuration. It is not
 merged. A setting that is absent from the mapping resets to the adapter's declared default. Include
