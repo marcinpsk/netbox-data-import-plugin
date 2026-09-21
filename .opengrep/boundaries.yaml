@@ -53,3 +53,37 @@ rules:
           - pattern-not: request_to_resolved_address($SESSION, $METHOD, $URL, $ADDRESS, $LIMIT, ...)
       - pattern: request_to_resolved_address(..., response_body_limit=None, ...)
       - pattern: request_to_resolved_address($SESSION, $METHOD, $URL, $ADDRESS, None, ...)
+
+  - id: nbdi-no-interpreter-stream-patch
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Pass the stream to the callee instead of patching `sys`. A replaced `sys.stdin` or `sys.stdout`
+      rewires this interpreter; it does not stand in for a boundary the suite cannot run locally.
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: patch.object(sys, "$STREAM", ...)
+              - pattern: mock.patch.object(sys, "$STREAM", ...)
+          - metavariable-regex:
+              metavariable: $STREAM
+              regex: '^(stdin|stdout|stderr)$'
+      # A dotted target is one string, and a bound string metavariable keeps its quotes.
+      - patterns:
+          - pattern-either:
+              - pattern: patch($TARGET, ...)
+              - pattern: mock.patch($TARGET, ...)
+          - metavariable-regex:
+              metavariable: $TARGET
+              regex: '^[''"]sys\.(stdin|stdout|stderr)[''"]$'
+
+  - id: nbdi-deadline-alarm-keeps-its-default-action
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Leave SIGALRM at its default action. A Python-level handler runs only once the interpreter
+      regains control, so a worker blocked in getaddrinfo outlives its deadline (measured 20.04s
+      against a 1.00s alarm); the default action terminates it at the alarm.
+    pattern-either:
+      - pattern: signal.signal(signal.SIGALRM, ...)
+      - pattern: signal.signal(SIGALRM, ...)
