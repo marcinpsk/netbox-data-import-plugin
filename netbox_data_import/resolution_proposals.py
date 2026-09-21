@@ -25,6 +25,7 @@ __all__ = [
     "complete_proposal",
     "decide_proposal",
     "fail_proposal",
+    "record_proposal_job",
     "request_proposal",
 ]
 
@@ -70,6 +71,11 @@ def request_proposal(
             raise
         raise ActiveProposalExists("This field already has an active Resolution Proposal.") from exc
     return proposal
+
+
+def record_proposal_job(proposal_id, job) -> None:
+    """Bind the enqueued Job to its attempt. A blind UPDATE, so a worker already running wins."""
+    ResolutionProposal.objects.filter(pk=proposal_id).update(job=job)
 
 
 def _transition(proposal_id, *, allowed_from, **values) -> bool:

@@ -229,6 +229,64 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertEqual(queued.kwargs, {"job": job, "proposal_id": proposal.pk})
         self.assertEqual(job.user_id, proposal.requested_by_id)
 
+    def test_the_request_records_the_background_job_on_the_attempt(self):
+        """Nothing else links the two, so an unrecorded job leaves the card unable to say anything."""
+        self.operator()
+
+        proposal = self.request_proposal()
+
+        self.assertEqual(proposal.job_id, Job.objects.get(name=ResolutionProposalJob.Meta.name).pk)
+
+    def card(self):
+        """Return the card the workspace polls for, as the logged-in operator reads it."""
+        response = self.call("proposal", field_key=self.field_key)
+        self.assertEqual(response.status_code, 200, response.content)
+        return response.json()["presentation"]
+
+    def test_a_queued_card_reports_where_its_background_job_is(self):
+        """A job no worker has taken reads exactly like one that started, which is the whole bug."""
+        self.operator()
+        self.request_proposal()
+
+        card = self.card()
+
+        self.assertIn("Pending", card["job_status"])
+        self.assertIn("requested", card["job_status"])
+        self.assertEqual(card["job_note"], "")
+
+    def test_a_card_names_a_background_job_that_ended_without_a_result(self):
+        """A worker killed mid-run leaves the attempt active forever, with nothing else to show it."""
+        self.operator()
+        proposal = self.request_proposal()
+        self.assertTrue(claim_proposal(proposal.pk))
+        Job.objects.filter(pk=proposal.job_id).update(status=JobStatusChoices.STATUS_ERRORED)
+
+        card = self.card()
+
+        self.assertIn("Errored", card["job_status"])
+        self.assertIn("ended without recording a result", card["job_note"])
+
+    def test_a_card_says_when_no_background_job_is_recorded(self):
+        """The job row can go, and a queued attempt with no job is never going to run."""
+        self.operator()
+        proposal = self.request_proposal()
+        Job.objects.filter(pk=proposal.job_id).delete()
+
+        card = self.card()
+
+        self.assertIn("none recorded", card["job_status"])
+        self.assertIn("No background job is recorded", card["job_note"])
+
+    def test_a_settled_card_reports_no_background_job(self):
+        """Once the attempt has its answer the job is spent, so the line would only be noise."""
+        self.operator()
+        self.completed()
+
+        card = self.card()
+
+        self.assertEqual(card["job_status"], "")
+        self.assertEqual(card["job_note"], "")
+
     def test_request_keeps_the_resolved_device_and_candidates_from_one_inventory_read(self):
         from django.db import connection
 
@@ -1296,6 +1354,20 @@ class ProposalWorkspaceTest(IsolatedRQQueueTestMixin, CableTopologyMixin, TestCa
         self.assertRegex(html, r'<script src="[^"]*/trace_proposals.js[^"]*"></script>')
         script = re.search(r'<script id="traceProposalFields" type="application/json">(.*?)</script>', html)
         self.assertEqual(json.loads(script.group(1))[self.field_key]["proposal"]["id"], proposal.pk)
+
+    def test_a_queued_card_renders_the_background_job_line(self):
+        """The operator reads the page, not the JSON, so the first render has to carry the line."""
+        import re
+
+        self.request_proposal()
+
+        response = self.client.get(reverse("plugins:netbox_data_import:trace_workspace"))
+
+        html = re.sub(r"<template\b.*?</template>", "", response.content.decode(), flags=re.DOTALL)
+        line = re.search(r"<div\b(?![^>]*\bhidden\b)[^>]*data-proposal-job[^-][^>]*>([^<]*)</div>", html)
+        self.assertIsNotNone(line, html[html.index("data-proposal-field") :][:2000])
+        self.assertIn("Background job: Pending", line.group(1))
+        self.assertRegex(html, r"<div\b[^>]*data-proposal-job-note[^>]*\bhidden\b")
 
     def test_no_proposal_has_only_field_actions_and_no_history(self):
         import re

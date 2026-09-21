@@ -4334,7 +4334,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         from .proposal_jobs import PROMPT_VERSION
         from .proposal_response import RESPONSE_SCHEMA_VERSION
         from .proposal_tasks import proposal_task
-        from .resolution_proposals import fail_proposal, request_proposal
+        from .resolution_proposals import fail_proposal, record_proposal_job, request_proposal
 
         profile, document, workspace, planning_context, reader = self.proposal_context(request)
         reason = self.unregistered_adapter_reason(profile)
@@ -4397,6 +4397,7 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
         except Exception:
             fail_proposal(proposal.pk, reason=ProposalFailureReason.QUEUE_UNAVAILABLE)
             raise
+        record_proposal_job(proposal.pk, job)
         return JsonResponse({"ok": True, "proposal_id": proposal.pk, "status": proposal.status, "job_id": job.pk})
 
 

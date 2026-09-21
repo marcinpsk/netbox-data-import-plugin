@@ -200,3 +200,29 @@ test('a first request adds the card and history while field actions stay outside
   await expect(action(page, 'cancel')).toBeEnabled();
   await expect(slot(page, 'history').locator('li')).toHaveCount(1);
 });
+
+test('the job line follows the background job and warns when it ended with no result', async ({page}) => {
+  await page.clock.install({time: new Date("2026-09-11T08:00:00Z")});
+  await page.clock.pauseAt(new Date("2026-09-11T08:00:01Z"));
+  await mount(page);
+  await expect(slot(page, 'job')).toHaveText('Background job: Pending, requested 0 minutes ago');
+  // An empty slot reads as hidden to a visibility check, so the attribute is what has to be asserted.
+  expect(await slot(page, 'job-note').evaluate(el => el.hidden)).toBe(true);
+
+  // The worker was killed mid-run, so the attempt stays active and only the job says so.
+  await serve(page, payload({
+    job_status: 'Background job: Errored, requested 2 hours ago',
+    job_note: 'The background job ended without recording a result. Cancel this proposal and ask again.',
+  }));
+  await page.clock.runFor(3000);
+
+  await expect(slot(page, 'job')).toHaveText('Background job: Errored, requested 2 hours ago');
+  await expect(slot(page, 'job-note')).toBeVisible();
+});
+
+test('a settled card carries no job line', async ({page}) => {
+  await mount(page, completed());
+
+  expect(await slot(page, 'job').evaluate(el => el.hidden)).toBe(true);
+  expect(await slot(page, 'job-note').evaluate(el => el.hidden)).toBe(true);
+});

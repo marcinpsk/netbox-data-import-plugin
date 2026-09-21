@@ -4,10 +4,12 @@
 
 from urllib.parse import urlencode
 
+from core.choices import JobStatusChoices
 from django.core.exceptions import ValidationError
 from django.db.models import F, Window
 from django.db.models.functions import RowNumber
 from django.urls import reverse
+from django.utils.timesince import timesince
 
 from .field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, parse_termination_field_key
 from .inference_backend import NoActiveInferenceBackend, proposal_candidate_limit, resolve_active_backend
@@ -101,7 +103,7 @@ class ProposalPresentation:
         current = {
             proposal.pk: proposal
             for proposal in ResolutionProposal.objects.filter(pk__in=current_ids).select_related(
-                "profile", "resolved_device_type", "selected_object_type", "written_resolution"
+                "profile", "resolved_device_type", "selected_object_type", "written_resolution", "job"
             )
         }
         return {
@@ -239,8 +241,27 @@ class ProposalPresentation:
                 if key != "attempts" and isinstance(value, (str, int, float))
             ],
             "attempt_count": len(metadata.get("attempts", [])),
+            "job_status": self.job_status(proposal) if pending else "",
+            "job_note": self.job_note(proposal) if pending else "",
             "actions": actions,
         }
+
+    @staticmethod
+    def job_status(proposal):
+        """Say where the background job stands, which a card waiting on one cannot otherwise show."""
+        job = proposal.job
+        state = job.get_status_display() if job is not None else "none recorded"
+        return f"Background job: {state}, requested {timesince(proposal.created)} ago"
+
+    @staticmethod
+    def job_note(proposal):
+        """Name the two states in which an active attempt is never going to get an answer."""
+        job = proposal.job
+        if job is None:
+            return "No background job is recorded. Cancel this proposal and ask again."
+        if job.status in JobStatusChoices.TERMINAL_STATE_CHOICES:
+            return "The background job ended without recording a result. Cancel this proposal and ask again."
+        return ""
 
     @staticmethod
     def selected_candidate(proposal):

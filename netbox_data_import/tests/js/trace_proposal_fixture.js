@@ -8,6 +8,7 @@ export function payload(overrides = {}) {
     presentation: {
       pending: true, field_state: 'proposed', state_style: 'proposed', badge: 'Queued', candidate: '', explanation: '',
       failure: '', failure_code: '', attempt_count: 0, metadata: [],
+      job_status: 'Background job: Pending, requested 0 minutes ago', job_note: '',
       actions: [
         {key: 'request', label: 'Ask AI', reason: 'An active proposal exists.', url: '/request/'},
         {key: 'cancel', label: 'Cancel', reason: '', url: '/cancel/'},
@@ -27,6 +28,7 @@ export function completed(overrides = {}) {
     pending: false, field_state: 'proposed', state_style: 'proposed', badge: 'Proposal - not applied',
     candidate: 'eth0 (Interface)', explanation: 'The labels name the same port.',
     attempt_count: 2, metadata: [{label: 'backend model', value: 'fixture-model'}],
+    job_status: '', job_note: '',
     actions: [
       {key: 'request', label: 'Ask AI', reason: '', url: '/request/'},
       {key: 'cancel', label: 'Cancel', reason: 'There is no active proposal.', url: '/cancel/'},
@@ -44,6 +46,7 @@ export function fixture(initial = payload()) {
   const proposal = `
     <div data-proposal-display>
       <span data-proposal-badge></span><span data-proposal-progress hidden>Waiting for the backend...</span>
+      <div data-proposal-job hidden></div><div data-proposal-job-note hidden></div>
       <div data-proposal-candidate></div><div data-proposal-explanation></div><div data-proposal-failure></div>
       <div data-proposal-attempts></div><ul data-proposal-metadata></ul>
       ${actions(initial.presentation.actions.slice(2))}
