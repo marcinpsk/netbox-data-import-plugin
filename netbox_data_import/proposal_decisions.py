@@ -5,7 +5,7 @@
 from django.db import transaction
 from utilities.permissions import get_permission_for_model
 
-from .inference_backend import proposal_candidate_limit
+from .inference_backend import proposal_eligible_set_limit
 from .models import (
     ImportProfile,
     ProposalDecision,
@@ -28,7 +28,7 @@ def proposal_staleness(proposal, *, netbox_reader=None, inventory=None):
             profile=proposal.profile,
             field_key=proposal.field_key,
             netbox_reader=netbox_reader,
-            limit=proposal_candidate_limit(),
+            limit=proposal_eligible_set_limit(),
         )
     return proposal_inventory_staleness(proposal, inventory)
 
@@ -61,7 +61,7 @@ def accept_proposal(proposal_id, *, operator, netbox_reader) -> bool:
             entry=entry,
             actor=operator,
             netbox_reader=netbox_reader,
-            limit=proposal_candidate_limit(),
+            limit=proposal_eligible_set_limit(),
         )
         if receipt is None:
             # atomic-exit-safe: proposal-refused-before-write

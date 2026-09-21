@@ -6,7 +6,7 @@ This is the seam that keeps termination specifics out of the lifecycle. A later 
 shape and a candidate retrieval, and changes nothing here.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .proposal_response import candidate_id_for, validate_candidate_ids
 
@@ -64,28 +64,68 @@ class CandidateSnapshotEntry:
 
 @dataclass(frozen=True)
 class CandidateSnapshot:
-    """The immutable candidate set one request was built from."""
+    """The immutable candidate set one request was built from, and the page it offered.
+
+    The set establishes freshness; the page is only what the prompt carried. Keeping them apart is
+    what lets a dense Device be searched in turns without a truncated read freezing the evidence.
+    """
 
     entries: tuple[CandidateSnapshotEntry, ...]
     total: int
+    page_offset: int = 0
+    page_size: int | None = None
 
     @property
     def candidate_ids(self) -> tuple[str, ...]:
-        """Return the opaque identifiers this request offered, in order."""
+        """Return the opaque identifiers this snapshot holds, in order."""
         return tuple(entry.candidate_id for entry in self.entries)
+
+    @property
+    def page(self) -> tuple[CandidateSnapshotEntry, ...]:
+        """Return the entries this request offered the backend."""
+        size = len(self.entries) if self.page_size is None else self.page_size
+        return self.entries[self.page_offset : self.page_offset + size]
+
+    @property
+    def page_end(self) -> int:
+        """Return the offset one past this page, which is where the next page starts."""
+        return self.page_offset + len(self.page)
+
+    @property
+    def has_next_page(self) -> bool:
+        """Return whether the set holds candidates this request never offered."""
+        return self.page_end < self.total
+
+    def with_page(self, *, offset: int, size: int) -> "CandidateSnapshot":
+        """Return the same set, recording the page one request is about to offer."""
+        return replace(self, page_offset=offset, page_size=size)
 
     def as_json(self) -> dict:
         """Return the stored form of the whole snapshot."""
-        return {"total": self.total, "candidates": [entry.as_json() for entry in self.entries]}
+        return {
+            "total": self.total,
+            "candidates": [entry.as_json() for entry in self.entries],
+            "page_offset": self.page_offset,
+            "page_size": self.page_size,
+        }
 
     @classmethod
     def from_json(cls, stored) -> "CandidateSnapshot":
         """Rebuild a stored snapshot so a read-time comparison works on the same shape."""
         entries = tuple(CandidateSnapshotEntry(**entry) for entry in stored["candidates"])
-        return cls(entries=entries, total=stored["total"])
+        return cls(
+            entries=entries,
+            total=stored["total"],
+            # A row written before paging offered every candidate it held.
+            page_offset=stored.get("page_offset", 0),
+            page_size=stored.get("page_size"),
+        )
 
     def matches(self, other) -> bool:
-        """Compare the whole set, display names included: a rename changed the evidence."""
+        """Compare the whole set, display names included: a rename changed the evidence.
+
+        The page is deliberately excluded: two pages of one set describe the same world.
+        """
         return self.total == other.total and self.entries == other.entries
 
 

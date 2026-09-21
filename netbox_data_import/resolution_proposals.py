@@ -16,15 +16,19 @@ from .models import (
     ProposalStatus,
     ResolutionProposal,
 )
-from .proposal_tasks import CandidateSnapshot
+from .proposal_tasks import CandidateSnapshot, proposal_inventory_staleness
 
 __all__ = [
     "ActiveProposalExists",
+    "active_proposal_exists",
     "cancel_proposal",
     "claim_proposal",
     "complete_proposal",
     "decide_proposal",
     "fail_proposal",
+    "latest_proposal",
+    "next_page_offset",
+    "page_exhausted",
     "record_proposal_job",
     "request_proposal",
 ]
@@ -71,6 +75,56 @@ def request_proposal(
             raise
         raise ActiveProposalExists("This field already has an active Resolution Proposal.") from exc
     return proposal
+
+
+def active_proposal_exists(*, profile, task_type, field_key) -> bool:
+    """Return whether this field already has a queued or running attempt.
+
+    The partial unique index refuses two active rows, but it reads the world at insert time. A
+    worker that settles between the page read and the insert would let the next request repeat a
+    page, so the request refuses on what it observed.
+    """
+    return ResolutionProposal.objects.filter(
+        profile=profile,
+        task_type=task_type,
+        field_key=field_key,
+        status__in=ProposalStatus.ACTIVE,
+    ).exists()
+
+
+def page_exhausted(proposal) -> bool:
+    """Return whether one settled attempt used up the page it offered.
+
+    A `no_match` found nothing there, and a rejected candidate was the wrong answer from there.
+    Both leave the rest of the eligible set unsearched.
+    """
+    return proposal.outcome == ProposalOutcome.NO_MATCH or proposal.decision == ProposalDecision.REJECTED
+
+
+def latest_proposal(*, profile, task_type, field_key):
+    """Return the most recent attempt for one field, or None."""
+    return (
+        ResolutionProposal.objects.filter(profile=profile, task_type=task_type, field_key=field_key)
+        .order_by("-created", "-pk")
+        .first()
+    )
+
+
+def next_page_offset(*, profile, task_type, field_key, inventory) -> int:
+    """Return where the next request starts: after the last page that used itself up.
+
+    Any other last attempt, evidence that has moved since, or a page that already reached the end,
+    starts the search again at the first candidate. Freshness is the same read the card shows, so
+    the offer and the request cannot disagree: a replaced Device renumbers every page just as a
+    changed candidate set does, even when the ports themselves moved across unchanged.
+    """
+    previous = latest_proposal(profile=profile, task_type=task_type, field_key=field_key)
+    if previous is None or not page_exhausted(previous):
+        return 0
+    if proposal_inventory_staleness(previous, inventory).is_stale:
+        return 0
+    offered = CandidateSnapshot.from_json(previous.candidate_snapshot)
+    return offered.page_end if offered.has_next_page else 0
 
 
 def record_proposal_job(proposal_id, job) -> None:

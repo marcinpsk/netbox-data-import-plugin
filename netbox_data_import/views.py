@@ -4328,13 +4328,20 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
 
         from .cable_target import UNRESOLVED
         from .field_keys import parse_termination_field_key
-        from .inference_backend import proposal_candidate_limit
+        from .inference_backend import proposal_candidate_limit, proposal_eligible_set_limit
         from .jobs import ResolutionProposalJob
         from .models import ProposalFailureReason
         from .proposal_jobs import PROMPT_VERSION
         from .proposal_response import RESPONSE_SCHEMA_VERSION
         from .proposal_tasks import proposal_task
-        from .resolution_proposals import fail_proposal, record_proposal_job, request_proposal
+        from .resolution_proposals import (
+            ActiveProposalExists,
+            active_proposal_exists,
+            fail_proposal,
+            next_page_offset,
+            record_proposal_job,
+            request_proposal,
+        )
 
         profile, document, workspace, planning_context, reader = self.proposal_context(request)
         reason = self.unregistered_adapter_reason(profile)
@@ -4360,8 +4367,11 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
                 raise InvalidProposalTarget("This field is no longer in the preview.")
             if field["state"] != UNRESOLVED:
                 raise PreviewActionInvalid("This termination is already resolved.")
+            # Refuse on the observed predecessor, not on the index: see active_proposal_exists.
+            if active_proposal_exists(profile=profile, task_type=SELECT_TERMINATION_TASK, field_key=field_key):
+                raise ActiveProposalExists("This field already has an active Resolution Proposal.")
             inventory = task.inventory(
-                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_candidate_limit()
+                profile=profile, field_key=field_key, netbox_reader=reader, limit=proposal_eligible_set_limit()
             )
             device = inventory.resolved_device
             if device is None:
@@ -4371,6 +4381,16 @@ class TraceRequestProposalView(_TraceProposalMixin, PermissionRequiredMixin, Vie
             snapshot = inventory.candidate_snapshot
             if snapshot is None:
                 raise PreviewActionInvalid("The eligible candidates are no longer available.")
+            # A dense Device is searched in turns, from after the last page that used itself up.
+            snapshot = snapshot.with_page(
+                offset=next_page_offset(
+                    profile=profile,
+                    task_type=SELECT_TERMINATION_TASK,
+                    field_key=field_key,
+                    inventory=inventory,
+                ),
+                size=proposal_candidate_limit(),
+            )
             proposal = request_proposal(
                 profile=profile,
                 task_type=SELECT_TERMINATION_TASK,

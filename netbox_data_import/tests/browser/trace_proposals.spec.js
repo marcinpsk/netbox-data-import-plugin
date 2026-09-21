@@ -226,3 +226,21 @@ test('a settled card carries no job line', async ({page}) => {
   expect(await slot(page, 'job').evaluate(el => el.hidden)).toBe(true);
   expect(await slot(page, 'job-note').evaluate(el => el.hidden)).toBe(true);
 });
+
+test('a no_match that searched one page says so and offers the next', async ({page}) => {
+  await mount(page, completed({
+    badge: 'Proposal - not applied', candidate: '', explanation: 'No candidate in this page names the port.',
+    page_status: 'Searched candidates 1-64 of 120.',
+    actions: [
+      {key: 'request', label: 'Ask AI: next 56', reason: '', url: '/request/'},
+      {key: 'cancel', label: 'Cancel', reason: 'There is no active proposal.', url: '/cancel/'},
+      {key: 'accept', label: 'Accept', reason: 'No match in candidates 1-64 of 120. Ask AI for the next 56.',
+       url: '/accept/'},
+      {key: 'reject', label: 'Reject', reason: '', url: '/reject/'},
+    ],
+  }));
+
+  await expect(slot(page, 'page')).toHaveText('Searched candidates 1-64 of 120.');
+  await expect(action(page, 'request')).toHaveText('Ask AI: next 56');
+  await expect(action(page, 'accept')).toBeDisabled();
+});

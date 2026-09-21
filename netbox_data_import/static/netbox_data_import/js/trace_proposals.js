@@ -69,7 +69,9 @@
       node(card, name).textContent = display[name];
     });
     node(card, 'progress').hidden = !display.pending;
-    [['job', display.job_status], ['job-note', display.job_note]].forEach(function (slot) {
+    [
+      ['job', display.job_status], ['job-note', display.job_note], ['page', display.page_status],
+    ].forEach(function (slot) {
       var target = node(card, slot[0]);
       target.textContent = slot[1];
       target.hidden = !slot[1];

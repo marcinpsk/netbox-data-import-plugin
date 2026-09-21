@@ -12,10 +12,16 @@ from django.urls import reverse
 from django.utils.timesince import timesince
 
 from .field_keys import SELECT_TERMINATION_TASK, TERMINATION_ROLE, parse_termination_field_key
-from .inference_backend import NoActiveInferenceBackend, proposal_candidate_limit, resolve_active_backend
+from .inference_backend import (
+    NoActiveInferenceBackend,
+    proposal_candidate_limit,
+    proposal_eligible_set_limit,
+    resolve_active_backend,
+)
 from .inference_trust import InvalidInferenceConfiguration
 from .models import ImportProfile, ProposalDecision, ProposalOutcome, ProposalStatus, ResolutionProposal
 from .proposal_decisions import proposal_staleness
+from .resolution_proposals import page_exhausted
 from .proposal_tasks import CandidateSnapshot, proposal_task
 from .cable_target import AUTOMATICALLY_RESOLVED, MANUALLY_RESOLVED, UNRESOLVED
 
@@ -166,7 +172,7 @@ class ProposalPresentation:
                 profile=self.profile,
                 field_key=field["field_key"],
                 netbox_reader=self.reader,
-                limit=proposal_candidate_limit(),
+                limit=proposal_eligible_set_limit(),
             )
         return self._inventory[key]
 
@@ -211,7 +217,17 @@ class ProposalPresentation:
         if missing:
             # Acceptance refuses this row, so the card must not offer an action the writer declines.
             stale_reason = "The selected candidate is no longer in the request snapshot. Request a new proposal."
-        actions = self.actions(field, proposal, state, pending, completed, stale_reason, selected_entry, inventory)
+        actions = self.actions(
+            field,
+            proposal,
+            state,
+            pending,
+            completed,
+            stale_reason,
+            selected_entry,
+            inventory,
+            self.offered_page(proposal),
+        )
         badge = proposal.get_status_display() if proposal is not None else "No proposal"
         if completed:
             badge = "Proposal - stale, not applied" if stale_reason else "Proposal - not applied"
@@ -225,6 +241,7 @@ class ProposalPresentation:
             if proposal.status == ProposalStatus.FAILED:
                 state = ProposalStatus.FAILED
         metadata = (proposal.backend_metadata or {}) if proposal is not None else {}
+        offered = self.offered_page(proposal)
         return {
             "has_proposal": proposal is not None,
             "pending": pending,
@@ -243,8 +260,24 @@ class ProposalPresentation:
             "attempt_count": len(metadata.get("attempts", [])),
             "job_status": self.job_status(proposal) if pending else "",
             "job_note": self.job_note(proposal) if pending else "",
+            "page_status": self.page_status(offered),
             "actions": actions,
         }
+
+    @staticmethod
+    def offered_page(proposal):
+        """Return the page one attempt offered, or None when it offered the whole eligible set."""
+        if proposal is None:
+            return None
+        snapshot = CandidateSnapshot.from_json(proposal.candidate_snapshot)
+        return snapshot if snapshot.total > len(snapshot.page) else None
+
+    @staticmethod
+    def page_status(offered):
+        """Name the candidates one attempt searched, which is what a no_match is bounded by."""
+        if offered is None:
+            return ""
+        return f"Searched candidates {offered.page_offset + 1}-{offered.page_end} of {offered.total}."
 
     @staticmethod
     def job_status(proposal):
@@ -277,7 +310,7 @@ class ProposalPresentation:
             return "", True, None
         return f"{entry.display_name} ({str(proposal.selected_object_type.name).capitalize()})", False, entry
 
-    def actions(self, field, proposal, state, pending, completed, stale_reason, selected_entry, inventory):
+    def actions(self, field, proposal, state, pending, completed, stale_reason, selected_entry, inventory, offered):
         """Return every command with its current permission and lifecycle refusal."""
         permission_reason = self.action_permission_reason(field, inventory)
         request_reason = self.request_permission_reason(field, inventory)
@@ -297,7 +330,16 @@ class ProposalPresentation:
             decision_reason = "This preview asked no question about that termination."
         accept_reason = decision_reason
         if not accept_reason and proposal.outcome == ProposalOutcome.NO_MATCH:
-            accept_reason = "The backend found no match. There is no candidate to accept."
+            # A changed set restarts the search, so a stale card must promise no continuation.
+            offering = 0 if stale_reason else self.next_page_size(offered)
+            accept_reason = (
+                f"No match in candidates {offered.page_offset + 1}-{offered.page_end} of {offered.total}. "
+                f"Ask AI for the next {offering}."
+                if offering
+                else ""
+                if stale_reason
+                else "The backend found no match. There is no candidate to accept."
+            )
         accept_reason = accept_reason or stale_reason
         if not self.preview_allowed:
             accept_reason = "You do not have permission to save a termination resolution."
@@ -326,13 +368,27 @@ class ProposalPresentation:
         if proposal is not None and proposal.decision:
             accept_reason = reject_reason = "This proposal already has a decision."
         actions = [
-            _action(
-                "request",
-                "Ask AI again" if proposal is not None and proposal.status == ProposalStatus.FAILED else "Ask AI",
-                request_reason,
-            ),
+            _action("request", self.request_label(proposal, offered, stale_reason), request_reason),
             _action("cancel", "Cancel", permission_reason or ("" if pending else "There is no active proposal.")),
             _action("accept", "Accept", accept_reason),
             _action("reject", "Reject", reject_reason),
         ]
         return [{**action, "reason": self.view_reason or action["reason"]} for action in actions]
+
+    @staticmethod
+    def next_page_size(offered) -> int:
+        """Return how many candidates the next request offers, which is one page, not the rest."""
+        if offered is None or not offered.has_next_page:
+            return 0
+        return min(offered.total - offered.page_end, proposal_candidate_limit())
+
+    @classmethod
+    def request_label(cls, proposal, offered, stale_reason) -> str:
+        """Name what the next request does: retry, continue the search, or start one."""
+        if proposal is not None and proposal.status == ProposalStatus.FAILED:
+            return "Ask AI again"
+        if proposal is None or stale_reason or not page_exhausted(proposal):
+            return "Ask AI"
+        if offering := cls.next_page_size(offered):
+            return f"Ask AI: next {offering}"
+        return "Ask AI"
