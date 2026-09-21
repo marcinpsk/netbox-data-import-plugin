@@ -4,7 +4,7 @@ from typing import Any
 
 from netbox.plugins import PluginConfig
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 
 class NetBoxDataImportConfig(PluginConfig):
